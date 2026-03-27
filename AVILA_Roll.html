@@ -5300,24 +5300,28 @@ function simulate(elements, connections, horizon, includeProposed=false){
       }
 
       // ── RULE: product_switch_window ───────────────────
-      // Only allow product switches on specified days of week
-      // Day-of-week: 0=Sun, 1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Sat, 6=Sat
+      // Only allow product switches on specified days of week.
+      // Uses the last product actually run (from history) as the lock baseline.
       const swRules=getRules(mill.id,'product_switch_window',day);
-      if(swRules.length&&s.currentProduct){
+      if(swRules.length){
         const allowedDow=swRules[0].structured.params?.allowed_dow||[];
         if(allowedDow.length){
           const dayDate=new Date(ruleSimStart.getTime()+(day-1)*864e5);
-          const dow=dayDate.getDay(); // 0=Sun ... 6=Sat
-          if(!allowedDow.includes(dow)){
-            // Not an allowed switch day — lock to current product if it's still a candidate
-            const sameProductCandidates=filteredCandidates.filter(c=>c.prodId===s.currentProduct);
+          const dow=dayDate.getDay(); // 0=Sun,1=Mon,2=Tue,3=Wed,4=Thu,5=Sat,6=Sat
+          // Find last product actually run (from history, looking backwards)
+          const hist=r.millProductHistory[mill.id]||[];
+          const lastProd=hist.slice().reverse().find(p=>p!=null)||s.currentProduct||null;
+          if(!allowedDow.includes(dow)&&lastProd){
+            // Not a switch day — restrict to same product if available
+            const sameProductCandidates=filteredCandidates.filter(c=>c.prodId===lastProd);
             if(sameProductCandidates.length) filteredCandidates=sameProductCandidates;
-            // else: current product can't run (starved/full) — allow switch as emergency
+            // else: current product unavailable (starved/full) — allow emergency switch
           }
         }
       }
 
       // Critical pre-pass: if any silo will empty within 1 day, force that product
+      // Note: critical emergencies override switch-window rules intentionally
       const critCandidates=filteredCandidates.filter(c=>isCritical(c.bestSilo.id,mill.id));
       const pool=critCandidates.length?critCandidates:filteredCandidates;
 
