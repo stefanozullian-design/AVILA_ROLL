@@ -339,6 +339,7 @@ select.pi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
 .cell-low{color:var(--amber)!important;}
 .cell-crit{color:var(--red)!important;}
 .cell-zero{color:var(--text-dim)!important;}
+.cell-maint{background:rgba(255,184,48,.06);text-align:center!important;}
 .cell-stop{background:rgba(255,61,90,.08)!important;}
 .results-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:12px;font-family:var(--mono);font-size:11px;color:var(--text-dim);text-align:center;}
 .col-group-hdr{padding:4px 10px;font-family:var(--mono);font-size:8px;letter-spacing:2px;text-transform:uppercase;position:sticky;top:0;z-index:3;}
@@ -3209,11 +3210,7 @@ function saveDemandValues(){
 // ═══════════════════════════════════════════════════════
 function renderSupplyView(){
   const wrap=document.getElementById('supply-table-wrap'); if(!wrap) return;
-  try{ _renderSupplyViewInner(wrap); }
-  catch(err){
-    wrap.innerHTML=`<div style="font-family:var(--mono);font-size:10px;color:var(--red);padding:30px">Supply view error: ${err.message}<br><pre style="font-size:8px;margin-top:10px;opacity:.6">${err.stack?.split('\n').slice(0,4).join('\n')}</pre></div>`;
-    console.error('renderSupplyView error:',err);
-  }
+  _renderSupplyViewInner(wrap);
 }
 function _renderSupplyViewInner(wrap){
   if(!S.simCfg.start_date){
@@ -6042,6 +6039,37 @@ function renderResultsTable(){
   const showInv=resultsFilter==='all'||resultsFilter==='inventory';
   const showProd=resultsFilter==='all'||resultsFilter==='production';
 
+  // Maintenance lookup — returns event_id if element is in maintenance on dateStr, else null
+  const _maintEvCache={};
+  const getMaintEventId=(elId, dateStr)=>{
+    if(!_maintEvCache[elId]){
+      const m=new Map();
+      DB.element_maintenance_events.filter(ev=>ev.element_id===elId).forEach(ev=>{
+        const sd=new Date((ev.start_date||'')+'T00:00:00');
+        const dur=parseInt(ev.duration_days)||1;
+        const freq=parseInt(ev.frequency_days)||0;
+        const addOcc=(occStart)=>{
+          for(let d=0;d<dur;d++){
+            const dt=new Date(occStart.getTime()+d*864e5);
+            m.set(dt.toISOString().split('T')[0], ev.id);
+          }
+        };
+        addOcc(sd);
+        if(ev.type==='recurring'&&freq>0){
+          const recEnd=ev.recurrence_end_date
+            ?new Date(ev.recurrence_end_date+'T00:00:00')
+            :new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(S.simCfg.horizon||365)*864e5);
+          let next=new Date(sd.getTime()+freq*864e5);
+          while(next<=recEnd){ addOcc(next); next=new Date(next.getTime()+freq*864e5); }
+        }
+      });
+      _maintEvCache[elId]=m;
+    }
+    return _maintEvCache[elId].get(dateStr)||null;
+  };
+  const maintBadge=(evId)=>
+    `<span style="font-size:7px;font-family:var(--mono);color:var(--amber);letter-spacing:.5px;cursor:pointer;font-weight:700;opacity:.9" onclick="openMaintenanceEventById('${evId}')">MAINT</span>`;
+
   // Transport events for this facility
   const railEvsByDay={};
   const vesselEvsByDay={};
@@ -6131,8 +6159,10 @@ function renderResultsTable(){
         const min=parseFloat(el.props.min_level)||0;
         const pct=val/max*100;
         const minPct=min/max*100;
-        const cls=val<=min?'cell-crit':pct<(minPct+10)?'cell-low':pct>95?'cell-ok':'';
-        h+=`<td class="${cls}">${Number(val).toLocaleString()}</td>`;
+        const maintEvId=getMaintEventId(el.id, dateStr);
+        const cls=maintEvId?'cell-maint':val<=min?'cell-crit':pct<(minPct+10)?'cell-low':pct>95?'cell-ok':'';
+        const display=maintEvId?maintBadge(maintEvId):Number(val).toLocaleString();
+        h+=`<td class="${cls}">${display}</td>`;
       });
     }
 
@@ -6159,8 +6189,11 @@ function renderResultsTable(){
             rate=caps.length?caps.reduce((a,c)=>a+(c.capacity_tpd||0),0):parseFloat(el.props.rated_capacity_tpd)||0;
           }
         }
-        const cls=rate===0?'cell-zero':state==='rampup'?'cell-low':'';
-        h+=`<td class="${cls}" style="${rate>0?`color:${cellColor}`:'opacity:.4'}" title="${cellTitle}">${rate>0?Number(rate).toLocaleString():'-'}</td>`;
+        const isMaint=state==='maintenance';
+        const maintEvId=isMaint?getMaintEventId(el.id, dateStr):null;
+        const cls=maintEvId?'cell-maint':rate===0?'cell-zero':state==='rampup'?'cell-low':'';
+        const display=maintEvId?maintBadge(maintEvId):(rate>0?Number(rate).toLocaleString():'-');
+        h+=`<td class="${cls}" style="${rate>0?`color:${cellColor}`:'opacity:.4'}" title="${cellTitle}">${display}</td>`;
       });
     }
 
