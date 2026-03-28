@@ -5561,10 +5561,11 @@ function simulate(elements, connections, horizon, includeProposed=false){
         csCemRail.composition[chosen.prodId]=(csCemRail.composition[chosen.prodId]||0)+tonnesToRail;
 
         // Route remainder to best regular silo (same product, not RAIL)
+        let regBest=null;
+        let toRegActual=0;
         if(tonnesToRegular>=1){
           const regularSilos=(millProductSiloMap[mill.id]||{})[chosen.prodId]||[];
-          // Pick the most urgent regular silo with space
-          let regBest=null, regBestUrgency=-1;
+          let regBestUrgency=-1;
           regularSilos.forEach(si=>{
             if(state[si.id]?.inventory>=(state[si.id]?.maxCap||0)*0.98) return;
             const u=urgency(si.id,mill.id);
@@ -5572,20 +5573,19 @@ function simulate(elements, connections, horizon, includeProposed=false){
           });
           if(regBest){
             const regSpace=Math.max(0,(state[regBest.id]?.maxCap||0)-(state[regBest.id]?.inventory||0));
-            const toReg=Math.min(tonnesToRegular,regSpace);
-            if(toReg>=1){
-              siloInflow[regBest.id]=(siloInflow[regBest.id]||0)+toReg;
+            toRegActual=Math.min(tonnesToRegular,regSpace);
+            if(toRegActual>=1){
+              siloInflow[regBest.id]=(siloInflow[regBest.id]||0)+toRegActual;
               if(!siloSourceTracker[regBest.id]) siloSourceTracker[regBest.id]=new Set();
               siloSourceTracker[regBest.id].add(mill.id);
               const csCemReg=state[regBest.id];
-              csCemReg.composition[chosen.prodId]=(csCemReg.composition[chosen.prodId]||0)+toReg;
+              csCemReg.composition[chosen.prodId]=(csCemReg.composition[chosen.prodId]||0)+toRegActual;
             }
           }
         }
 
         // Clinker consumption based on total cement produced (RAIL + regular)
-        const totalProduced=tonnesToRail+Math.min(tonnesToRegular,
-          regBest?(Math.max(0,(state[regBest?.id]?.maxCap||0)-(state[regBest?.id]?.inventory||0))):0);
+        const totalProduced=tonnesToRail+toRegActual;
         if(chosen.clkSilo&&chosen.clkPct>0){
           const consumed=totalProduced*chosen.clkPct;
           siloOutflow[chosen.clkSilo.id]=(siloOutflow[chosen.clkSilo.id]||0)+consumed;
