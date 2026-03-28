@@ -5121,6 +5121,54 @@ function simulate(elements, connections, horizon, includeProposed=false){
     });
   };
 
+  // ── PRE-COMPUTE RAIL STATIC DATA ─────────────────────────
+  // Everything that doesn't change day-to-day is computed once here.
+  const SAFETY_DAYS=3;
+
+  // For each rail dispatch point: static descriptor of rail silo, switch days, destinations
+  const railDispatchInfo=elements
+    .filter(e=>e.type==='dispatch_point'&&e.props.dispatch_type==='Rail')
+    .map(dp=>{
+      const upRailSilos=(up[dp.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='bulk_silo');
+      const railSilo=upRailSilos[0]||null;
+      const switchDaysMon=dp.props.switch_days||[];
+      const destinations=(dp.props.destinations||[]).map(dest=>{
+        const berthInfo=(railDestBerthMap[dp.id]||{})[dest.facility_id];
+        if(!berthInfo) return null;
+        const termSilos=(railTerminalSiloMap[dp.id]||{})[dest.facility_id]||[];
+        return {facId:dest.facility_id, transitDays:berthInfo.transitDays, termSilos};
+      }).filter(Boolean);
+      return {dp, railSilo, switchDaysMon, destinations};
+    }).filter(x=>x.railSilo&&x.destinations.length);
+
+  // Pre-compute terminal silo → demand point list (only done once)
+  const termSiloDemandPoints={};
+  railDispatchInfo.forEach(({destinations})=>{
+    destinations.forEach(({termSilos})=>{
+      termSilos.forEach(termSilo=>{
+        if(termSiloDemandPoints[termSilo.id]) return;
+        termSiloDemandPoints[termSilo.id]=demandPoints.filter(dp2=>{
+          const silos=demandSiloMap[dp2.id]||new Set();
+          return silos.has(termSilo.id);
+        });
+      });
+    });
+  });
+
+  // Pre-compute nextRailSwitchDay[dpId][day] = next switch day index strictly after day
+  const nextRailSwitchDay={};
+  railDispatchInfo.forEach(({dp,switchDaysMon})=>{
+    const arr=new Array(horizon+2).fill(null);
+    // For each day, find the nearest switch day strictly after it (within 14 days)
+    for(let d=1;d<=horizon;d++){
+      for(let s=d+1;s<=Math.min(d+14,horizon);s++){
+        const dowMon=(new Date(simStartDate.getTime()+(s-1)*864e5).getDay()+6)%7;
+        if(switchDaysMon.includes(dowMon)){arr[d]=s;break;}
+      }
+    }
+    nextRailSwitchDay[dp.id]=arr;
+  });
+
   for(let day=1;day<=horizon;day++){
 
     // Per-day flow accumulators
@@ -5256,68 +5304,42 @@ function simulate(elements, connections, horizon, includeProposed=false){
     });
 
     // ── PRE-STEP 4: RAIL ACCUMULATION SIGNAL ─────────────
-    // For each rail dispatch point, check if any terminal silo needs resupply.
-    // If days-of-cover at terminal < transit_days + 3, signal RAIL silo to accumulate.
-    // Mills will route to RAIL only when this signal is active.
-    const SAFETY_DAYS=3;
+    // Uses pre-computed railDispatchInfo and nextRailSwitchDay for O(1) lookups.
     const railAccumNeeded={}; // railSiloId → {tonnes, urgency}
-    elements.filter(e=>e.type==='dispatch_point'&&e.props.dispatch_type==='Rail').forEach(dp=>{
-      const upRailSilos=(up[dp.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='bulk_silo');
-      const railSilo=upRailSilos[0]; if(!railSilo) return;
-      const switchDays=dp.props.switch_days||[];
-
-      // Find next switch day STRICTLY after today (accumulate before dispatch)
-      let nextSwitchDay=null;
-      for(let d=day+1;d<=Math.min(day+14,horizon);d++){
-        const dt=new Date(simStartDate.getTime()+(d-1)*864e5);
-        const dowMon=(dt.getDay()+6)%7; // 0=Mon..6=Sun
-        if(switchDays.includes(dowMon)){nextSwitchDay=d;break;}
-      }
-      if(!nextSwitchDay) return;
-
+    railDispatchInfo.forEach(({dp,railSilo,destinations})=>{
+      if(!nextRailSwitchDay[dp.id]?.[day]) return; // no upcoming switch — skip
       let totalTonnesNeeded=0;
       let maxUrgency=0;
 
-      (dp.props.destinations||[]).forEach(dest=>{
-        const berthInfo=(railDestBerthMap[dp.id]||{})[dest.facility_id];
-        if(!berthInfo) return;
-        const transitDays=berthInfo.transitDays;
-        const termSilos=railTerminalSiloMap[dp.id]?.[dest.facility_id]||[];
-
+      destinations.forEach(({transitDays,termSilos})=>{
         termSilos.forEach(termSilo=>{
           const ts=state[termSilo.id]; if(!ts) return;
           const termInv=ts.inventory||0;
-          const termMax=ts.maxCap||1;
-          // Use rolling demand rate if available, else demand_values lookup
-          const termDemand=siloRate(termSilo.id)||
-            demandPoints.filter(dp2=>{
-              const silos=demandSiloMap[dp2.id]||new Set();
-              return silos.has(termSilo.id);
-            }).reduce((s,dp2)=>s+(dp2.dailyRates[day-1]||0),0);
+          // Fast demand lookup: rolling avg if available, else sum demand points
+          let termDemand=siloRate(termSilo.id);
+          if(!termDemand){
+            const dps=termSiloDemandPoints[termSilo.id]||[];
+            termDemand=dps.reduce((s,dp2)=>s+(dp2.dailyRates[day-1]||0),0);
+          }
           if(termDemand<=0) return;
 
           const daysOfCover=termInv/termDemand;
-          if(daysOfCover>=(transitDays+SAFETY_DAYS)) return; // well stocked — no signal
+          if(daysOfCover>=(transitDays+SAFETY_DAYS)) return;
 
-          // Calculate load quantity based on terminal's inventory_objective
           const targetTermInv=siloTarget(termSilo);
-          const loadQty=Math.min(Math.max(0,targetTermInv-termInv), state[railSilo.id]?.maxCap||0);
+          const railMax=state[railSilo.id]?.maxCap||0;
+          const loadQty=Math.min(Math.max(0,targetTermInv-termInv), railMax);
           if(loadQty<=0) return;
 
-          // How much RAIL still needs (net of what's already there)
           const alreadyInRail=state[railSilo.id]?.inventory||0;
-          const stillNeeded=Math.max(0,loadQty-alreadyInRail);
-          totalTonnesNeeded+=stillNeeded;
-
-          // Urgency: how overdue is the trigger (0 = just triggered, higher = more critical)
-          const overdue=Math.max(0,(transitDays+SAFETY_DAYS)-daysOfCover);
-          maxUrgency=Math.max(maxUrgency, overdue);
+          totalTonnesNeeded+=Math.max(0,loadQty-alreadyInRail);
+          maxUrgency=Math.max(maxUrgency,
+            Math.max(0,(transitDays+SAFETY_DAYS)-daysOfCover));
         });
       });
 
-      if(totalTonnesNeeded>0){
+      if(totalTonnesNeeded>0)
         railAccumNeeded[railSilo.id]={tonnes:totalTonnesNeeded, urgency:maxUrgency};
-      }
     });
 
     // ── STEP 4: FINISH MILLS ──────────────────────────
