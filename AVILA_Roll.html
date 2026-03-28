@@ -2683,6 +2683,12 @@ function editMaintEvent(id){
   },60);
 }
 
+// Called from clickable MAINT badge in supply view
+function openMaintenanceEventById(id){
+  if(!id) return;
+  editMaintEvent(id);
+}
+
 function updateMaintEvent(){
   const ev=DB.element_maintenance_events.find(m=>m.id===S._editMaintId); if(!ev) return;
   const vals=getMeFormValues();
@@ -3251,13 +3257,32 @@ function renderSupplyView(){
 
   const maintSetFor=(elId)=>{
     const evts=DB.element_maintenance_events.filter(m=>m.element_id===elId);
-    const days=new Set();
+    // Returns a Map: dateString -> event_id (for clickable MAINT badge)
+    const days=new Map();
+    const start=new Date(S.simCfg.start_date+'T00:00:00');
+    const horizon=S.simCfg.horizon||365;
     evts.forEach(ev=>{
       const sd=new Date((ev.start_date||'')+'T00:00:00');
       const dur=parseInt(ev.duration_days)||1;
-      for(let d=0;d<dur;d++){
-        const dt=new Date(sd.getTime()+d*864e5);
-        days.add(dt.toISOString().split('T')[0]);
+      const freq=parseInt(ev.frequency_days)||0;
+      // Add all days for one occurrence starting at 'occStart'
+      const addOccurrence=(occStart)=>{
+        for(let d=0;d<dur;d++){
+          const dt=new Date(occStart.getTime()+d*864e5);
+          days.set(dt.toISOString().split('T')[0], ev.id);
+        }
+      };
+      addOccurrence(sd);
+      // Expand recurring occurrences
+      if(ev.type==='recurring'&&freq>0){
+        const recEnd=ev.recurrence_end_date
+          ?new Date(ev.recurrence_end_date+'T00:00:00')
+          :new Date(start.getTime()+horizon*864e5);
+        let next=new Date(sd.getTime()+freq*864e5);
+        while(next<=recEnd){
+          addOccurrence(next);
+          next=new Date(next.getTime()+freq*864e5);
+        }
       }
     });
     return days;
@@ -3492,7 +3517,7 @@ function renderSupplyView(){
                 const res=resolveProduction(el,ds,dayIdx,maintDays);
                 const v=res.capacity_tpd;
                 const prod=DB.products.find(p=>p.id===res.product_id);
-                h+=`<td class="sup-day-${mon.ym}" title="${prod?.name||''}" style="font-size:9px;color:${v>0?clkColor:'rgba(255,61,90,.4)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():maintDays.has(ds)?'✕':''}</td>`;
+                h+=`<td class="sup-day-${mon.ym}" title="${prod?.name||''}" style="font-size:9px;color:${v>0?clkColor:'rgba(255,61,90,.4)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():maintDays.has(ds)?`<span style="font-size:7px;font-family:var(--mono);color:var(--amber);letter-spacing:.5px;cursor:pointer;font-weight:700;opacity:.9" onclick="openMaintenanceEventById('${maintDays.get(ds)}')">MAINT</span>`:''}</td>`;
               });
             });
             h+=`</tr>`;
@@ -3538,7 +3563,7 @@ function renderSupplyView(){
                 const v=res.capacity_tpd;
                 const prod=DB.products.find(p=>p.id===res.product_id);
                 const pColor=prod?PRODUCT_CAT_COLORS[prod.category||'']||cemColor:cemColor;
-                h+=`<td class="sup-day-${mon.ym}" title="${prod?.name||''}" style="font-size:9px;color:${v>0?pColor:'rgba(255,61,90,.4)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():maintDays.has(ds)?'✕':''}</td>`;
+                h+=`<td class="sup-day-${mon.ym}" title="${prod?.name||''}" style="font-size:9px;color:${v>0?pColor:'rgba(255,61,90,.4)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():maintDays.has(ds)?`<span style="font-size:7px;font-family:var(--mono);color:var(--amber);letter-spacing:.5px;cursor:pointer;font-weight:700;opacity:.9" onclick="openMaintenanceEventById('${maintDays.get(ds)}')">MAINT</span>`:''}</td>`;
               });
             });
             h+=`</tr>`;
