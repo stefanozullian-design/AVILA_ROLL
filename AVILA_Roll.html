@@ -5390,20 +5390,32 @@ function simulate(elements, connections, horizon, includeProposed=false){
         const ratedTPD=parseFloat(cap.capacity_tpd);
         const rampFactor=s.status==='rampup'?s._rampPct||1:1;
 
-        // Clinker availability
+        // Safety check: if any regular silo that ONLY this mill can fill is critical,
+        // skip the RAIL override and serve that silo instead via normal routing.
+        // This prevents SPEC (FM01-exclusive) from running dry while FM01 fills RAIL.
+        const hasExclusiveCritical=caps.some(cap2=>{
+          const silos=(millProductSiloMap[mill.id]||{})[cap2.product_id]||[];
+          return silos.some(si=>{
+            if(!isCritical(si.id, mill.id)) return false;
+            const otherMills=elements.filter(e=>e.type==='finish_mill'&&e.id!==mill.id);
+            const canOthersFill=otherMills.some(om=>
+              (dn[om.id]||[]).includes(si.id)&&
+              (capMap[om.id]||[]).some(c=>getSiloProducts(si).includes(c.product_id)&&parseFloat(c.capacity_tpd)>0));
+            return !canOthersFill;
+          });
+        });
+
+        // Clinker availability check
         const clkSilo=(millProductClinkerMap[mill.id]||{})[prodId]||null;
         let clkAvail=Infinity;
         if(clkSilo) clkAvail=Math.max(0,state[clkSilo.id]?.inventory||0);
         const recipe=recipeMap[prodId]||[];
         const clkIng=recipe.find(ri=>prodMap[ri.material_id]?.category==='clinker'||ri.material_id==='clinker');
         const clkPct=clkIng?clkIng.pct/100:0;
-        if(clkPct>0&&clkAvail<1){ // no clinker — fall through to normal routing below
-          // fall through handled by NOT returning here
-          goto_normal_routing:
-          {
-            // This label-goto pattern doesn't exist in JS — use a flag instead
-          }
-        } else {
+        const noCliker=clkPct>0&&clkAvail<1;
+
+        if(!hasExclusiveCritical&&!noCliker){
+          // ── RAIL OVERRIDE ACTIVE ────────────────────────
           s.status=s.status==='rampup'?'rampup':'running';
           s.currentProduct=prodId;
           s.runDays++;
@@ -5417,14 +5429,12 @@ function simulate(elements, connections, horizon, includeProposed=false){
           const hoursRemaining=Math.max(0,24-hoursForRail-3);
           const tonnesToRegular=hourlyRate*hoursRemaining;
 
-          // Route to RAIL
           siloInflow[railSilo.id]=(siloInflow[railSilo.id]||0)+tonnesToRail;
           if(!siloSourceTracker[railSilo.id]) siloSourceTracker[railSilo.id]=new Set();
           siloSourceTracker[railSilo.id].add(mill.id);
           state[railSilo.id].composition[prodId]=(state[railSilo.id].composition[prodId]||0)+tonnesToRail;
           totProd+=tonnesToRail;
 
-          // Route remainder to best regular silo
           let toRegActual=0;
           if(tonnesToRegular>=1){
             const regularSilos=(millProductSiloMap[mill.id]||{})[prodId]||[];
@@ -5447,7 +5457,6 @@ function simulate(elements, connections, horizon, includeProposed=false){
             }
           }
 
-          // Clinker consumption
           if(clkSilo&&clkPct>0){
             const consumed=(tonnesToRail+toRegActual)*clkPct;
             siloOutflow[clkSilo.id]=(siloOutflow[clkSilo.id]||0)+consumed;
@@ -5459,7 +5468,10 @@ function simulate(elements, connections, horizon, includeProposed=false){
 
           return; // done — skip normal routing
         }
+        // else: exclusive critical or no clinker → fall through to normal routing
       }
+
+
 
       // ── NORMAL ROUTING (no RAIL override) ────────────────
       // Build candidate for each product this mill can make
