@@ -5306,22 +5306,23 @@ function simulate(elements, connections, horizon, includeProposed=false){
 
     // ── PRE-STEP 4: RAIL ACCUMULATION SIGNAL ─────────────
     // Uses pre-computed railDispatchInfo and nextRailSwitchDay for O(1) lookups.
-    const railAccumNeeded={}; // railSiloId → {tonnes, urgency}
+    const railAccumNeeded={}; // railSiloId → {tonnes, urgency, requiredProducts}
     railDispatchInfo.forEach(({dp,railSilo,destinations})=>{
       if(!nextRailSwitchDay[dp.id]?.[day]) return; // no upcoming switch — skip
       let totalTonnesNeeded=0;
       let maxUrgency=0;
+      const requiredProducts=new Set(); // products destinations actually need
 
-      destinations.forEach(({transitDays,termSilos})=>{
+      destinations.forEach(({facId,transitDays,termSilos})=>{
+        // Get accepted products for this destination from dispatch config
+        const destCfg=(dp.props.destinations||[]).find(d=>d.facility_id===facId);
+        const destAccepted=destCfg?.accepted_products||[];
+
         termSilos.forEach(termSilo=>{
           const ts=state[termSilo.id]; if(!ts) return;
           const termInv=ts.inventory||0;
-          // Use topology-correct demand only (termSiloDemandPoints built from demandSiloMap)
-          // Never use siloRate here — it can pick up demand from other facilities that
-          // share the same product, giving false positives for terminal silos with 0 demand
           const dps=termSiloDemandPoints[termSilo.id]||[];
           let termDemand=dps.reduce((s,dp2)=>s+(dp2.dailyRates[day-1]||0),0);
-          // Fall back to rolling average only if topology demand is non-zero
           if(!termDemand&&ts.outflowHistory?.length>=3)
             termDemand=ts.outflowHistory.slice(-10).reduce((a,b)=>a+b,0)/Math.min(10,ts.outflowHistory.length);
           if(termDemand<=0) return;
@@ -5337,15 +5338,14 @@ function simulate(elements, connections, horizon, includeProposed=false){
           const alreadyInRail=state[railSilo.id]?.inventory||0;
           totalTonnesNeeded+=Math.max(0,loadQty-alreadyInRail);
           const overdue=Math.max(0,(transitDays+SAFETY_DAYS)-daysOfCover);
-          // Urgency uses transit_days as a floor to ensure RAIL beats maximize-objective
-          // silos (which have urgency ≈ (target-inv)/netDepletion, typically 10-25).
-          // transit_days (10) + overdue (0-13) gives 10-23, enough to win when signal fires.
           maxUrgency=Math.max(maxUrgency, transitDays + overdue);
+          // Track which products this destination needs
+          destAccepted.forEach(pid=>requiredProducts.add(pid));
         });
       });
 
       if(totalTonnesNeeded>0)
-        railAccumNeeded[railSilo.id]={tonnes:totalTonnesNeeded, urgency:maxUrgency};
+        railAccumNeeded[railSilo.id]={tonnes:totalTonnesNeeded, urgency:maxUrgency, requiredProducts};
     });
 
     // ── STEP 4: FINISH MILLS ──────────────────────────
@@ -5369,9 +5369,11 @@ function simulate(elements, connections, horizon, includeProposed=false){
           const railSilo=elMap[railSiloId]; if(!railSilo) continue;
           // Check this mill has a downstream connection to this rail silo
           if(!(dn[mill.id]||[]).includes(railSiloId)) continue;
-          // Check this mill can make a product accepted by the rail silo
+          // Check this mill can make a product that destinations actually need
+          // (not just any product the RAIL silo accepts)
+          const needed=railAccumNeeded[railSiloId]?.requiredProducts||new Set();
           const matchingCap=caps.find(cap=>
-            getSiloProducts(railSilo).includes(cap.product_id)&&
+            needed.has(cap.product_id)&&
             parseFloat(cap.capacity_tpd)>0);
           if(!matchingCap) continue;
           // Check rail silo has space
