@@ -4629,6 +4629,13 @@ async function runSimulation(){
     else if(result.total>0) statMsg(`Rules could not be interpreted (API unavailable) — running without them…`);
   }
 
+  // Warn if rules exist but couldn't be interpreted (API unavailable on GitHub Pages)
+  const uninterpreted=(DB.simulation_rules||[]).filter(r=>r.status==='active'&&!r.structured);
+  if(uninterpreted.length){
+    const names=uninterpreted.map(r=>`"${r.name}"`).join(', ');
+    statMsg(`⚠ ${uninterpreted.length} rule(s) not interpreted and will be skipped: ${names}. Export JSON and upload to claude.ai to interpret them.`);
+  }
+
   statMsg('Running simulation…');
   document.getElementById('mode-lbl').textContent='Running';
   setTimeout(()=>{
@@ -4695,6 +4702,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
     r.elementStates[el.id]=[];
     r.inventoryHistory[el.id]=[];
     if(el.type==='finish_mill') r.millProductHistory[el.id]=[];
+    if(el.type==='kiln') state[el.id]._blockedHighInv=false; // tracks restart_threshold rule
     if(el.type==='dispatch_point'&&el.props.dispatch_type==='Rail'){
       r.railHistory[el.id]=[];
       state[el.id].yardByProduct={}; // {productId: cars} — accumulated in yard since last switch
@@ -5133,8 +5141,44 @@ function simulate(elements, connections, horizon, includeProposed=false){
 
       if(allFull){
         s.status='blocked';
+        s._blockedHighInv=true; // remember this was a high-inventory block
         logStop(el.id,el.name,day,'blocked','Clinker silo full');
         return;
+      }
+
+      // ── RULE: restart_threshold ────────────────────────
+      // If kiln was previously blocked due to high clinker inventory,
+      // hold it idle until downstream silo(s) drop to the threshold level.
+      if(s._blockedHighInv){
+        const rtRules=getRules(el.id,'restart_threshold',day);
+        if(rtRules.length){
+          const rule=rtRules[0];
+          const metric=rule.structured.params?.metric||'inventory_pct';
+          const threshold=parseFloat(rule.structured.params?.threshold)||30;
+          const stillAbove=downClk.some(cs=>{
+            const inv=state[cs.id]?.inventory||0;
+            const maxCap=state[cs.id]?.maxCap||1;
+            if(metric==='inventory_pct') return (inv/maxCap*100)>threshold;
+            if(metric==='inventory_days'){
+              const avgOut=Math.max(1,(state[cs.id]?.outflowHistory||[]).slice(-3).reduce((a,b)=>a+b,0)/3);
+              return (inv/avgOut)>threshold;
+            }
+            if(metric==='inventory_t') return inv>threshold;
+            return false;
+          });
+          if(stillAbove){
+            const cs=downClk[0];
+            const pct=cs?Math.round((state[cs.id]?.inventory||0)/(state[cs.id]?.maxCap||1)*100):0;
+            s.status='blocked';
+            logStop(el.id,el.name,day,'blocked',
+              `Rule "${rule.name}": waiting for clinker silo to drop to ${threshold}${metric==='inventory_pct'?'%':metric==='inventory_days'?' days':' t'} (currently ${pct}%)`);
+            return;
+          } else {
+            s._blockedHighInv=false; // threshold met — allow restart
+          }
+        } else {
+          s._blockedHighInv=false; // no rule — normal restart
+        }
       }
 
       s.status=s.status==='rampup'?'rampup':'running';
@@ -8373,6 +8417,7 @@ function _renderRulesList(){
           <span style="margin-left:8px;font-family:var(--mono);font-size:8px;padding:2px 6px;border:1px solid ${statusColor};color:${statusColor}">${rule.status||'active'}</span>
         </div>
         <div style="display:flex;gap:8px">
+          <span class="tbl-act" onclick="_editRule(${i})">Edit</span>
           <span class="tbl-act" onclick="_toggleRule(${i})">${rule.status==='disabled'?'Enable':'Disable'}</span>
           <span class="tbl-act del" onclick="_deleteRule(${i})">Del</span>
         </div>
@@ -8413,7 +8458,109 @@ function _deleteRule(i){
   if(!confirm('Delete this rule?')) return;
   DB.simulation_rules.splice(i,1);
   autoSave();
-  showModal('sim-cfg-modal'); // re-render
+  showModal('sim-cfg-modal');
+  _cfgTab('rules');
+}
+
+function _editRule(i){
+  const rule=DB.simulation_rules[i]; if(!rule) return;
+  const pi='background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:10px;padding:5px 7px;outline:none;width:100%';
+  const pl='font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-bottom:3px;letter-spacing:.5px;text-transform:uppercase';
+  const facOpts=DB.facilities.map(f=>`<option value="${f.id}" ${(rule.facility_ids||[]).includes(f.id)?'selected':''}>${f.name} (${f.type})</option>`).join('');
+
+  showModalContent(`
+    <div class="modal-hdr">
+      <div>
+        <span class="modal-title">Edit Rule</span>
+        <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-top:3px">Editing will reset the interpretation — rule will be re-interpreted on next simulation run</div>
+      </div>
+      <span class="modal-close" onclick="closeModal()">✕</span>
+    </div>
+    <div style="padding:16px;display:flex;flex-direction:column;gap:14px;min-width:520px">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div style="display:flex;flex-direction:column;gap:3px">
+          <div style="${pl}">Facility</div>
+          <select style="${pi}" id="nr-facility" onchange="_nrLoadEquipment()">
+            <option value="">— Select facility —</option>
+            ${facOpts}
+          </select>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:3px">
+          <div style="${pl}">Rule Name</div>
+          <input style="${pi}" id="nr-name" value="${rule.name||''}">
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:3px">
+        <div style="${pl}">Equipment <span style="color:var(--text-dim);font-style:italic">(hold Ctrl / ⌘ to select multiple)</span></div>
+        <select style="${pi};height:90px" id="nr-elements" multiple>
+          <option disabled>— Select a facility first —</option>
+        </select>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div style="display:flex;flex-direction:column;gap:3px">
+          <div style="${pl}">Valid From</div>
+          <input style="${pi}" type="date" id="nr-date-from" value="${rule.date_from||S.simCfg.start_date}">
+        </div>
+        <div style="display:flex;flex-direction:column;gap:3px">
+          <div style="${pl}">Valid Until</div>
+          <input style="${pi}" type="date" id="nr-date-to" value="${rule.date_to||''}">
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:3px">
+        <div style="${pl}">Rule — write in plain language</div>
+        <textarea style="${pi};height:100px;resize:vertical;line-height:1.5" id="nr-text">${rule.natural_text||''}</textarea>
+      </div>
+      ${rule.structured?`<div style="font-family:var(--mono);font-size:8px;padding:8px;background:var(--green-faint);border:1px solid var(--green);color:var(--green)">
+        ✓ Currently interpreted as: ${_ruleStructuredSummary(rule.structured)}<br>
+        <span style="color:var(--text-dim)">Saving changes will clear this and trigger re-interpretation on next sim run.</span>
+      </div>`:''}
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn-sec" onclick="showModal('sim-cfg-modal');_cfgTab('rules')">Cancel</button>
+        <button class="tb-btn amber" onclick="_nrSaveEdit(${i})">✓ Save Changes</button>
+      </div>
+    </div>`);
+
+  // Pre-load equipment for the current facility
+  const facId=(rule.facility_ids||[])[0];
+  if(facId){
+    document.getElementById('nr-facility').value=facId;
+    _nrLoadEquipment();
+    // Pre-select elements
+    setTimeout(()=>{
+      const sel=document.getElementById('nr-elements');
+      if(sel) [...sel.options].forEach(o=>{
+        o.selected=(rule.element_ids||[]).includes(o.value);
+      });
+    },50);
+  }
+}
+
+function _nrSaveEdit(i){
+  const rule=DB.simulation_rules[i]; if(!rule) return;
+  const facId=document.getElementById('nr-facility')?.value;
+  const elSel=document.getElementById('nr-elements');
+  const elIds=[...elSel.selectedOptions].map(o=>o.value);
+  const text=document.getElementById('nr-text')?.value?.trim();
+  const name=document.getElementById('nr-name')?.value?.trim();
+
+  if(!text){alert('Please write a rule description.');return;}
+  if(!elIds.length){alert('Please select at least one piece of equipment.');return;}
+
+  const textChanged=text!==rule.natural_text;
+  rule.name=name||rule.name;
+  rule.facility_ids=facId?[facId]:[];
+  rule.element_ids=elIds;
+  rule.natural_text=text;
+  rule.date_from=document.getElementById('nr-date-from')?.value||null;
+  rule.date_to=document.getElementById('nr-date-to')?.value||null;
+  if(textChanged){
+    rule.structured=null; // reset — will be re-interpreted on next sim run
+    delete rule._interpreted_at;
+    rule._interpret_error=null;
+  }
+  autoSave();
+  statMsg(`Rule "${rule.name}" updated${textChanged?' — will be re-interpreted on next run':''}`);
+  showModal('sim-cfg-modal');
   _cfgTab('rules');
 }
 
