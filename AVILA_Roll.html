@@ -6125,7 +6125,8 @@ function renderResultsTable(){
     if(showInv && invCols.length){
       invCols.forEach(el=>{
         const hist=r.inventoryHistory[el.id]||[];
-        const val=hist[day-1]??0;
+        const startInv=parseFloat(el.props?.start_inventory)||0;
+        const val=day>1?(hist[day-2]??0):startInv;
         const max=parseFloat(el.props.max_capacity)||1000;
         const min=parseFloat(el.props.min_level)||0;
         const pct=val/max*100;
@@ -6537,10 +6538,15 @@ function renderDtree(r){
   const days=[];
   for(let d=startDay;d<=endDay;d++) days.push(d);
 
-  // Helper: get inventory on a specific day for an element
+  // Helper: get BOD inventory for a specific day for an element
+  // BOD day N = EOD day N-1 = hist[N-2]; day 1 BOD = start_inventory
   const inv=(elId,day)=>{
     const hist=r.inventoryHistory[elId]||[];
-    return hist[day-1]??null;
+    if(day<=1){
+      const el=getEl(elId);
+      return parseFloat(el?.props?.start_inventory)||0;
+    }
+    return hist[day-2]??null;
   };
 
   // Helper: get production rate for a transform element on a day
@@ -6688,7 +6694,8 @@ function renderDtree(r){
       days: days.map(d=>{
         if(!upSiloEl) return null;
         const hist=r.inventoryHistory[upSiloEl.id]||[];
-        return hist[d-1]??null;
+        if(d<=1) return parseFloat(upSiloEl?.props?.start_inventory)||0;
+        return hist[d-2]??null;
       }),
       color:'var(--green)', isRate:false, isSectionHeader:true
     });
