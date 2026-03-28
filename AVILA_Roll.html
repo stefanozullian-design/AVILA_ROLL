@@ -4880,18 +4880,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
     });
   });
 
-  // railTerminalSiloMap: dpId → {facId → [siloEl,...]}
-  // Maps each rail destination to its terminal silo(s) (downstream of arrival berth)
-  const railTerminalSiloMap={};
-  elements.filter(e=>e.type==='dispatch_point'&&e.props.dispatch_type==='Rail').forEach(dp=>{
-    railTerminalSiloMap[dp.id]={};
-    (dp.props.destinations||[]).forEach(dest=>{
-      const berthInfo=(railDestBerthMap[dp.id]||{})[dest.facility_id];
-      if(!berthInfo) return;
-      const termSilos=(dn[berthInfo.berthId]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='bulk_silo');
-      railTerminalSiloMap[dp.id][dest.facility_id]=termSilos;
-    });
-  });
+
 
   const simStartDate=new Date(S.simCfg.start_date+'T00:00:00');
 
@@ -5122,53 +5111,6 @@ function simulate(elements, connections, horizon, includeProposed=false){
     });
   };
 
-  // ── PRE-COMPUTE RAIL STATIC DATA ─────────────────────────
-  // Everything that doesn't change day-to-day is computed once here.
-  const SAFETY_DAYS=3;
-
-  // For each rail dispatch point: static descriptor of rail silo, switch days, destinations
-  const railDispatchInfo=elements
-    .filter(e=>e.type==='dispatch_point'&&e.props.dispatch_type==='Rail')
-    .map(dp=>{
-      const upRailSilos=(up[dp.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='bulk_silo');
-      const railSilo=upRailSilos[0]||null;
-      const switchDaysMon=dp.props.switch_days||[];
-      const destinations=(dp.props.destinations||[]).map(dest=>{
-        const berthInfo=(railDestBerthMap[dp.id]||{})[dest.facility_id];
-        if(!berthInfo) return null;
-        const termSilos=(railTerminalSiloMap[dp.id]||{})[dest.facility_id]||[];
-        return {facId:dest.facility_id, transitDays:berthInfo.transitDays, termSilos};
-      }).filter(Boolean);
-      return {dp, railSilo, switchDaysMon, destinations};
-    }).filter(x=>x.railSilo&&x.destinations.length);
-
-  // Pre-compute terminal silo → demand point list (only done once)
-  const termSiloDemandPoints={};
-  railDispatchInfo.forEach(({destinations})=>{
-    destinations.forEach(({termSilos})=>{
-      termSilos.forEach(termSilo=>{
-        if(termSiloDemandPoints[termSilo.id]) return;
-        termSiloDemandPoints[termSilo.id]=demandPoints.filter(dp2=>{
-          const silos=demandSiloMap[dp2.id]||new Set();
-          return silos.has(termSilo.id);
-        });
-      });
-    });
-  });
-
-  // Pre-compute nextRailSwitchDay[dpId][day] = next switch day index strictly after day
-  const nextRailSwitchDay={};
-  railDispatchInfo.forEach(({dp,switchDaysMon})=>{
-    const arr=new Array(horizon+2).fill(null);
-    // For each day, find the nearest switch day strictly after it (within 14 days)
-    for(let d=1;d<=horizon;d++){
-      for(let s=d+1;s<=Math.min(d+14,horizon);s++){
-        const dowMon=(new Date(simStartDate.getTime()+(s-1)*864e5).getDay()+6)%7;
-        if(switchDaysMon.includes(dowMon)){arr[d]=s;break;}
-      }
-    }
-    nextRailSwitchDay[dp.id]=arr;
-  });
 
   for(let day=1;day<=horizon;day++){
 
@@ -5304,50 +5246,6 @@ function simulate(elements, connections, horizon, includeProposed=false){
         .forEach(hs=>{ siloInflow[hs.id]=(siloInflow[hs.id]||0)+rate; });
     });
 
-    // ── PRE-STEP 4: RAIL ACCUMULATION SIGNAL ─────────────
-    // Uses pre-computed railDispatchInfo and nextRailSwitchDay for O(1) lookups.
-    const railAccumNeeded={}; // railSiloId → {tonnes, urgency, requiredProducts}
-    railDispatchInfo.forEach(({dp,railSilo,destinations})=>{
-      if(!nextRailSwitchDay[dp.id]?.[day]) return; // no upcoming switch — skip
-      let totalTonnesNeeded=0;
-      let maxUrgency=0;
-      const requiredProducts=new Set(); // products destinations actually need
-
-      destinations.forEach(({facId,transitDays,termSilos})=>{
-        // Get accepted products for this destination from dispatch config
-        const destCfg=(dp.props.destinations||[]).find(d=>d.facility_id===facId);
-        const destAccepted=destCfg?.accepted_products||[];
-
-        termSilos.forEach(termSilo=>{
-          const ts=state[termSilo.id]; if(!ts) return;
-          const termInv=ts.inventory||0;
-          const dps=termSiloDemandPoints[termSilo.id]||[];
-          let termDemand=dps.reduce((s,dp2)=>s+(dp2.dailyRates[day-1]||0),0);
-          if(!termDemand&&ts.outflowHistory?.length>=3)
-            termDemand=ts.outflowHistory.slice(-10).reduce((a,b)=>a+b,0)/Math.min(10,ts.outflowHistory.length);
-          if(termDemand<=0) return;
-
-          const daysOfCover=termInv/termDemand;
-          if(daysOfCover>=(transitDays+SAFETY_DAYS)) return;
-
-          const targetTermInv=siloTarget(termSilo);
-          const railMax=state[railSilo.id]?.maxCap||0;
-          const loadQty=Math.min(Math.max(0,targetTermInv-termInv), railMax);
-          if(loadQty<=0) return;
-
-          const alreadyInRail=state[railSilo.id]?.inventory||0;
-          totalTonnesNeeded+=Math.max(0,loadQty-alreadyInRail);
-          const overdue=Math.max(0,(transitDays+SAFETY_DAYS)-daysOfCover);
-          maxUrgency=Math.max(maxUrgency, transitDays + overdue);
-          // Track which products this destination needs
-          destAccepted.forEach(pid=>requiredProducts.add(pid));
-        });
-      });
-
-      if(totalTonnesNeeded>0)
-        railAccumNeeded[railSilo.id]={tonnes:totalTonnesNeeded, urgency:maxUrgency, requiredProducts};
-    });
-
     // ── STEP 4: FINISH MILLS ──────────────────────────
     // Each mill produces exactly one product per day.
     // Product selected by urgency of receiving silo, with clinker availability
@@ -5359,121 +5257,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
       const caps=capMap[mill.id]||[];
       if(!caps.length){ s.status='idle'; r.millProductHistory[mill.id].push(null); return; }
 
-      // ── RAIL HARD OVERRIDE ───────────────────────────────
-      // When an active rail accumulation signal exists for a downstream RAIL silo
-      // that this mill can fill, skip the urgency competition entirely and route
-      // directly to RAIL. This ensures RAIL filling is never beaten by a regular
-      // silo's urgency (which would otherwise always win for maximize-objective silos).
-      const railOverrideSilo=(() => {
-        for(const railSiloId of Object.keys(railAccumNeeded)){
-          const railSilo=elMap[railSiloId]; if(!railSilo) continue;
-          // Check this mill has a downstream connection to this rail silo
-          if(!(dn[mill.id]||[]).includes(railSiloId)) continue;
-          // Check this mill can make a product that destinations actually need
-          // (not just any product the RAIL silo accepts)
-          const needed=railAccumNeeded[railSiloId]?.requiredProducts||new Set();
-          const matchingCap=caps.find(cap=>
-            needed.has(cap.product_id)&&
-            parseFloat(cap.capacity_tpd)>0);
-          if(!matchingCap) continue;
-          // Check rail silo has space
-          const rs=state[railSiloId];
-          if(!rs||rs.inventory>=(rs.maxCap||0)*0.98) continue;
-          return {railSilo, cap:matchingCap};
-        }
-        return null;
-      })();
-
-      if(railOverrideSilo){
-        const {railSilo, cap} = railOverrideSilo;
-        const prodId=cap.product_id;
-        const ratedTPD=parseFloat(cap.capacity_tpd);
-        const rampFactor=s.status==='rampup'?s._rampPct||1:1;
-
-        // Safety check: if any regular silo that ONLY this mill can fill is critical,
-        // skip the RAIL override and serve that silo instead via normal routing.
-        // This prevents SPEC (FM01-exclusive) from running dry while FM01 fills RAIL.
-        const hasExclusiveCritical=caps.some(cap2=>{
-          const silos=(millProductSiloMap[mill.id]||{})[cap2.product_id]||[];
-          return silos.some(si=>{
-            if(!isCritical(si.id, mill.id)) return false;
-            const otherMills=elements.filter(e=>e.type==='finish_mill'&&e.id!==mill.id);
-            const canOthersFill=otherMills.some(om=>
-              (dn[om.id]||[]).includes(si.id)&&
-              (capMap[om.id]||[]).some(c=>getSiloProducts(si).includes(c.product_id)&&parseFloat(c.capacity_tpd)>0));
-            return !canOthersFill;
-          });
-        });
-
-        // Clinker availability check
-        const clkSilo=(millProductClinkerMap[mill.id]||{})[prodId]||null;
-        let clkAvail=Infinity;
-        if(clkSilo) clkAvail=Math.max(0,state[clkSilo.id]?.inventory||0);
-        const recipe=recipeMap[prodId]||[];
-        const clkIng=recipe.find(ri=>prodMap[ri.material_id]?.category==='clinker'||ri.material_id==='clinker');
-        const clkPct=clkIng?clkIng.pct/100:0;
-        const noCliker=clkPct>0&&clkAvail<1;
-
-        if(!hasExclusiveCritical&&!noCliker){
-          // ── RAIL OVERRIDE ACTIVE ────────────────────────
-          s.status=s.status==='rampup'?'rampup':'running';
-          s.currentProduct=prodId;
-          s.runDays++;
-          r.millProductHistory[mill.id].push(prodId);
-
-          // Split logic: fill RAIL, then send remainder to regular silo
-          const hourlyRate=ratedTPD*rampFactor/24;
-          const railSpace=Math.max(0,(state[railSilo.id]?.maxCap||0)-(state[railSilo.id]?.inventory||0));
-          const hoursForRail=Math.min(24, railSpace/Math.max(0.001,hourlyRate));
-          const tonnesToRail=hourlyRate*hoursForRail;
-          const hoursRemaining=Math.max(0,24-hoursForRail-3);
-          const tonnesToRegular=hourlyRate*hoursRemaining;
-
-          siloInflow[railSilo.id]=(siloInflow[railSilo.id]||0)+tonnesToRail;
-          if(!siloSourceTracker[railSilo.id]) siloSourceTracker[railSilo.id]=new Set();
-          siloSourceTracker[railSilo.id].add(mill.id);
-          state[railSilo.id].composition[prodId]=(state[railSilo.id].composition[prodId]||0)+tonnesToRail;
-          totProd+=tonnesToRail;
-
-          let toRegActual=0;
-          if(tonnesToRegular>=1){
-            const regularSilos=(millProductSiloMap[mill.id]||{})[prodId]||[];
-            let regBest=null, regBestU=-1;
-            regularSilos.forEach(si=>{
-              if(state[si.id]?.inventory>=(state[si.id]?.maxCap||0)*0.98) return;
-              const u=urgency(si.id,mill.id);
-              if(u>regBestU){regBestU=u;regBest=si;}
-            });
-            if(regBest){
-              const regSpace=Math.max(0,(state[regBest.id]?.maxCap||0)-(state[regBest.id]?.inventory||0));
-              toRegActual=Math.min(tonnesToRegular,regSpace);
-              if(toRegActual>=1){
-                siloInflow[regBest.id]=(siloInflow[regBest.id]||0)+toRegActual;
-                if(!siloSourceTracker[regBest.id]) siloSourceTracker[regBest.id]=new Set();
-                siloSourceTracker[regBest.id].add(mill.id);
-                state[regBest.id].composition[prodId]=(state[regBest.id].composition[prodId]||0)+toRegActual;
-                totProd+=toRegActual;
-              }
-            }
-          }
-
-          if(clkSilo&&clkPct>0){
-            const consumed=(tonnesToRail+toRegActual)*clkPct;
-            siloOutflow[clkSilo.id]=(siloOutflow[clkSilo.id]||0)+consumed;
-            const clkProdId=getSiloProducts(clkSilo)[0]||'';
-            const cs=state[clkSilo.id];
-            if(clkProdId&&cs.composition[clkProdId]!==undefined)
-              cs.composition[clkProdId]=Math.max(0,(cs.composition[clkProdId]||0)-consumed);
-          }
-
-          return; // done — skip normal routing
-        }
-        // else: exclusive critical or no clinker → fall through to normal routing
-      }
-
-
-
-      // ── NORMAL ROUTING (no RAIL override) ────────────────
+      // ── MILL ROUTING ─────────────────────────────────────
       // Build candidate for each product this mill can make
       const candidates=[];
       caps.forEach(cap=>{
