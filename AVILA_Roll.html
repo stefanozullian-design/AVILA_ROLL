@@ -663,14 +663,7 @@ select.fi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
 
     <!-- DASHBOARD VIEW -->
     <div id="dashboard-view" class="view-panel" style="overflow-y:auto;background:var(--bg)">
-      <div id="alerts-area"></div>
       <div class="dash-inner">
-        <div class="kpi-grid">
-          <div class="kpi-card"><div class="kpi-lbl">Avg Daily Production</div><div class="kpi-val" id="kpi-prod">—</div><div class="kpi-sub">tonnes cement / day</div></div>
-          <div class="kpi-card"><div class="kpi-lbl">Avg Daily Dispatch</div><div class="kpi-val" id="kpi-disp">—</div><div class="kpi-sub">tonnes dispatched / day</div></div>
-          <div class="kpi-card" id="kpi-ful-card"><div class="kpi-lbl">Demand Fulfillment</div><div class="kpi-val" id="kpi-ful">—</div><div class="kpi-sub">of demand met</div></div>
-          <div class="kpi-card" id="kpi-stop-card"><div class="kpi-lbl">Stop Events</div><div class="kpi-val" id="kpi-stops">—</div><div class="kpi-sub">total in horizon</div></div>
-        </div>
         <!-- DATA TREE TABLE -->
         <div class="dash-sec">
           <div class="dash-sec-hdr">Daily Results — Data Tree</div>
@@ -678,11 +671,24 @@ select.fi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
             <div style="font-family:var(--mono);font-size:9px;color:var(--text-dim);padding:14px">Run simulation to see data tree</div>
           </div>
         </div>
-        <!-- ELEMENT STATE TIMELINE -->
+        <!-- CLINKER CHART (collapsible) -->
         <div class="dash-sec">
-          <div class="dash-sec-hdr">Element State Timeline</div>
-          <div class="gantt-wrap" id="gantt-wrap">
-            <div style="font-family:var(--mono);font-size:9px;color:var(--text-dim);padding:14px">Run simulation to see timeline</div>
+          <div class="dash-sec-hdr" style="cursor:pointer;user-select:none" onclick="_dashToggle('dash-clk-body',this)">
+            <span id="dash-clk-arrow">▼</span> Clinker Production &amp; Inventory
+            <div class="chart-ctrls" id="dash-clk-legend" style="margin-left:auto;display:flex;flex-wrap:wrap;gap:4px;font-weight:400"></div>
+          </div>
+          <div id="dash-clk-body">
+            <canvas id="dash-clk-chart" style="width:100%;height:220px;display:block"></canvas>
+          </div>
+        </div>
+        <!-- CEMENT CHART (collapsible) -->
+        <div class="dash-sec">
+          <div class="dash-sec-hdr" style="cursor:pointer;user-select:none" onclick="_dashToggle('dash-cem-body',this)">
+            <span id="dash-cem-arrow">▼</span> Cement Production vs Demand
+            <div class="chart-ctrls" id="dash-cem-legend" style="margin-left:auto;display:flex;flex-wrap:wrap;gap:4px;font-weight:400"></div>
+          </div>
+          <div id="dash-cem-body">
+            <canvas id="dash-cem-chart" style="width:100%;height:200px;display:block"></canvas>
           </div>
         </div>
       </div>
@@ -6009,7 +6015,7 @@ function dateToDayOffset(dateStr,startStr){
 // ═══════════════════════════════════════════════════════
 // RESULTS RENDERING
 // ═══════════════════════════════════════════════════════
-function renderResults(r){ renderKPIs(r);renderDtree(r);renderGantt(r);renderCharts(r);renderEvLog(r);renderAlerts(r);renderResultsTable();updateFacFilterBar(); }
+function renderResults(r){ renderDtree(r);renderDashCharts(r);renderCharts(r);renderEvLog(r);renderResultsTable();updateFacFilterBar(); }
 
 // ═══════════════════════════════════════════════════════
 // DAILY RESULTS TABLE
@@ -6432,7 +6438,7 @@ function setFacFilter(facId){
   updateFacFilterBar();
   if(S.simResults){
     renderDtree(S.simResults);
-    renderGantt(S.simResults);
+    renderDashCharts(S.simResults);
     renderCharts(S.simResults);
     renderEvLog(S.simResults);
     renderResultsTable();
@@ -6519,7 +6525,6 @@ function applyCustomWindow(){
   updateViewRangeLabel();
   if(S.simResults){
     renderDtree(S.simResults);
-    renderGantt(S.simResults);
     renderCharts(S.simResults);
     renderResultsTable();
   }
@@ -6539,6 +6544,25 @@ function dayToDate(day){
   const d=new Date(S.simCfg.start_date+'T00:00:00');
   d.setDate(d.getDate()+day-1);
   return d.toISOString().split('T')[0];
+}
+
+function _dashToggle(bodyId, hdrEl){
+  const body=document.getElementById(bodyId); if(!body) return;
+  const collapsed=body.style.display==='none';
+  body.style.display=collapsed?'':'none';
+  const arrow=hdrEl.querySelector('span[id$="-arrow"]');
+  if(arrow) arrow.textContent=collapsed?'▼':'▶';
+  // Redraw chart after expand (canvas needs dimensions)
+  if(collapsed&&bodyId==='dash-clk-body'&&S.simResults) _drawClinkerChart('dash-clk-chart',S.simResults);
+  if(collapsed&&bodyId==='dash-cem-body'&&S.simResults) _drawProdBarChart('dash-cem-chart',S.simResults,'cement');
+}
+
+function renderDashCharts(r){
+  if(!r) return;
+  const clkBody=document.getElementById('dash-clk-body');
+  const cemBody=document.getElementById('dash-cem-body');
+  if(clkBody&&clkBody.style.display!=='none') _drawClinkerChart('dash-clk-chart',r);
+  if(cemBody&&cemBody.style.display!=='none') _drawProdBarChart('dash-cem-chart',r,'cement');
 }
 
 function renderAlerts(r){
