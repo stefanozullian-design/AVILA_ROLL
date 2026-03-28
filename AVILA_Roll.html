@@ -5359,6 +5359,107 @@ function simulate(elements, connections, horizon, includeProposed=false){
       const caps=capMap[mill.id]||[];
       if(!caps.length){ s.status='idle'; r.millProductHistory[mill.id].push(null); return; }
 
+      // ── RAIL HARD OVERRIDE ───────────────────────────────
+      // When an active rail accumulation signal exists for a downstream RAIL silo
+      // that this mill can fill, skip the urgency competition entirely and route
+      // directly to RAIL. This ensures RAIL filling is never beaten by a regular
+      // silo's urgency (which would otherwise always win for maximize-objective silos).
+      const railOverrideSilo=(() => {
+        for(const railSiloId of Object.keys(railAccumNeeded)){
+          const railSilo=elMap[railSiloId]; if(!railSilo) continue;
+          // Check this mill has a downstream connection to this rail silo
+          if(!(dn[mill.id]||[]).includes(railSiloId)) continue;
+          // Check this mill can make a product accepted by the rail silo
+          const matchingCap=caps.find(cap=>
+            getSiloProducts(railSilo).includes(cap.product_id)&&
+            parseFloat(cap.capacity_tpd)>0);
+          if(!matchingCap) continue;
+          // Check rail silo has space
+          const rs=state[railSiloId];
+          if(!rs||rs.inventory>=(rs.maxCap||0)*0.98) continue;
+          return {railSilo, cap:matchingCap};
+        }
+        return null;
+      })();
+
+      if(railOverrideSilo){
+        const {railSilo, cap} = railOverrideSilo;
+        const prodId=cap.product_id;
+        const ratedTPD=parseFloat(cap.capacity_tpd);
+        const rampFactor=s.status==='rampup'?s._rampPct||1:1;
+
+        // Clinker availability
+        const clkSilo=(millProductClinkerMap[mill.id]||{})[prodId]||null;
+        let clkAvail=Infinity;
+        if(clkSilo) clkAvail=Math.max(0,state[clkSilo.id]?.inventory||0);
+        const recipe=recipeMap[prodId]||[];
+        const clkIng=recipe.find(ri=>prodMap[ri.material_id]?.category==='clinker'||ri.material_id==='clinker');
+        const clkPct=clkIng?clkIng.pct/100:0;
+        if(clkPct>0&&clkAvail<1){ // no clinker — fall through to normal routing below
+          // fall through handled by NOT returning here
+          goto_normal_routing:
+          {
+            // This label-goto pattern doesn't exist in JS — use a flag instead
+          }
+        } else {
+          s.status=s.status==='rampup'?'rampup':'running';
+          s.currentProduct=prodId;
+          s.runDays++;
+          r.millProductHistory[mill.id].push(prodId);
+
+          // Split logic: fill RAIL, then send remainder to regular silo
+          const hourlyRate=ratedTPD*rampFactor/24;
+          const railSpace=Math.max(0,(state[railSilo.id]?.maxCap||0)-(state[railSilo.id]?.inventory||0));
+          const hoursForRail=Math.min(24, railSpace/Math.max(0.001,hourlyRate));
+          const tonnesToRail=hourlyRate*hoursForRail;
+          const hoursRemaining=Math.max(0,24-hoursForRail-3);
+          const tonnesToRegular=hourlyRate*hoursRemaining;
+
+          // Route to RAIL
+          siloInflow[railSilo.id]=(siloInflow[railSilo.id]||0)+tonnesToRail;
+          if(!siloSourceTracker[railSilo.id]) siloSourceTracker[railSilo.id]=new Set();
+          siloSourceTracker[railSilo.id].add(mill.id);
+          state[railSilo.id].composition[prodId]=(state[railSilo.id].composition[prodId]||0)+tonnesToRail;
+          totProd+=tonnesToRail;
+
+          // Route remainder to best regular silo
+          let toRegActual=0;
+          if(tonnesToRegular>=1){
+            const regularSilos=(millProductSiloMap[mill.id]||{})[prodId]||[];
+            let regBest=null, regBestU=-1;
+            regularSilos.forEach(si=>{
+              if(state[si.id]?.inventory>=(state[si.id]?.maxCap||0)*0.98) return;
+              const u=urgency(si.id,mill.id);
+              if(u>regBestU){regBestU=u;regBest=si;}
+            });
+            if(regBest){
+              const regSpace=Math.max(0,(state[regBest.id]?.maxCap||0)-(state[regBest.id]?.inventory||0));
+              toRegActual=Math.min(tonnesToRegular,regSpace);
+              if(toRegActual>=1){
+                siloInflow[regBest.id]=(siloInflow[regBest.id]||0)+toRegActual;
+                if(!siloSourceTracker[regBest.id]) siloSourceTracker[regBest.id]=new Set();
+                siloSourceTracker[regBest.id].add(mill.id);
+                state[regBest.id].composition[prodId]=(state[regBest.id].composition[prodId]||0)+toRegActual;
+                totProd+=toRegActual;
+              }
+            }
+          }
+
+          // Clinker consumption
+          if(clkSilo&&clkPct>0){
+            const consumed=(tonnesToRail+toRegActual)*clkPct;
+            siloOutflow[clkSilo.id]=(siloOutflow[clkSilo.id]||0)+consumed;
+            const clkProdId=getSiloProducts(clkSilo)[0]||'';
+            const cs=state[clkSilo.id];
+            if(clkProdId&&cs.composition[clkProdId]!==undefined)
+              cs.composition[clkProdId]=Math.max(0,(cs.composition[clkProdId]||0)-consumed);
+          }
+
+          return; // done — skip normal routing
+        }
+      }
+
+      // ── NORMAL ROUTING (no RAIL override) ────────────────
       // Build candidate for each product this mill can make
       const candidates=[];
       caps.forEach(cap=>{
@@ -5367,13 +5468,8 @@ function simulate(elements, connections, horizon, includeProposed=false){
         if(!ratedTPD) return;
 
         // Receiving silos: downstream, cement type, accepts this product, not full
-        // Rail transfer silos are excluded by default (millProductSiloMap) but
-        // added back here if the rail accumulation signal is active for this silo.
-        const baseRecvSilos=(millProductSiloMap[mill.id]||{})[prodId]||[];
-        const railRecvSilos=(dn[mill.id]||[]).map(id=>elMap[id]).filter(e=>
-          e&&isCementSilo(e)&&getSiloProducts(e).includes(prodId)&&
-          railTransferSiloIds.has(e.id)&&railAccumNeeded[e.id]);
-        const recvSilos=[...baseRecvSilos,...railRecvSilos];
+        // Rail transfer silos are always excluded from normal routing
+        const recvSilos=(millProductSiloMap[mill.id]||{})[prodId]||[];
         const availSilos=recvSilos.filter(si=>{
           if(state[si.id]?.inventory>=(state[si.id]?.maxCap||0)*0.98) return false;
           // Concurrent source check: count distinct mills already contributing to this silo today
@@ -5394,8 +5490,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
         // Best receiving silo = highest urgency (considering other mills still running)
         let bestSilo=null, bestUrgency=-1;
         availSilos.forEach(si=>{
-          // Rail silos use terminal-derived urgency; regular silos use normal urgency()
-          const u=railAccumNeeded[si.id]?railAccumNeeded[si.id].urgency:urgency(si.id, mill.id);
+          const u=urgency(si.id, mill.id);
           if(u>bestUrgency){ bestUrgency=u; bestSilo=si; }
         });
         // If all above stop level but space exists, still consider (tiny urgency)
@@ -5537,87 +5632,25 @@ function simulate(elements, connections, horizon, includeProposed=false){
       r.millProductHistory[mill.id].push(chosen.prodId);
       totProd+=actualRate;
 
-      // ── RAIL SPLIT LOGIC ──────────────────────────────
-      // When chosen silo is a rail transfer silo, the mill fills RAIL for part of the day
-      // then switches to the regular silo for the remaining hours (minus 3hr switchover loss).
-      // hourly_rate = ratedTPD / 24
-      // hours_for_rail = min(24, rail_space / hourly_rate)
-      // hours_remaining = max(0, 24 - hours_for_rail - 3)
-      // tonnes_to_regular = hourly_rate * hours_remaining
-      if(railTransferSiloIds.has(chosen.bestSilo.id)){
-        const hourlyRate=chosen.ratedTPD/24;
-        const railSpace=Math.max(0,(state[chosen.bestSilo.id]?.maxCap||0)-
-                                   (state[chosen.bestSilo.id]?.inventory||0));
-        const hoursForRail=Math.min(24, railSpace/hourlyRate);
-        const tonnesToRail=hourlyRate*hoursForRail;
-        const hoursRemaining=Math.max(0, 24-hoursForRail-3);
-        const tonnesToRegular=hourlyRate*hoursRemaining;
+      // ── NORMAL ROUTING (non-RAIL) ─────────────────────
+      // Record cement silo inflow
+      siloInflow[chosen.bestSilo.id]=(siloInflow[chosen.bestSilo.id]||0)+actualRate;
+      if(!siloSourceTracker[chosen.bestSilo.id]) siloSourceTracker[chosen.bestSilo.id]=new Set();
+      siloSourceTracker[chosen.bestSilo.id].add(mill.id);
 
-        // Route to RAIL
-        siloInflow[chosen.bestSilo.id]=(siloInflow[chosen.bestSilo.id]||0)+tonnesToRail;
-        if(!siloSourceTracker[chosen.bestSilo.id]) siloSourceTracker[chosen.bestSilo.id]=new Set();
-        siloSourceTracker[chosen.bestSilo.id].add(mill.id);
-        const csCemRail=state[chosen.bestSilo.id];
-        csCemRail.composition[chosen.prodId]=(csCemRail.composition[chosen.prodId]||0)+tonnesToRail;
-
-        // Route remainder to best regular silo (same product, not RAIL)
-        let regBest=null;
-        let toRegActual=0;
-        if(tonnesToRegular>=1){
-          const regularSilos=(millProductSiloMap[mill.id]||{})[chosen.prodId]||[];
-          let regBestUrgency=-1;
-          regularSilos.forEach(si=>{
-            if(state[si.id]?.inventory>=(state[si.id]?.maxCap||0)*0.98) return;
-            const u=urgency(si.id,mill.id);
-            if(u>regBestUrgency){regBestUrgency=u;regBest=si;}
-          });
-          if(regBest){
-            const regSpace=Math.max(0,(state[regBest.id]?.maxCap||0)-(state[regBest.id]?.inventory||0));
-            toRegActual=Math.min(tonnesToRegular,regSpace);
-            if(toRegActual>=1){
-              siloInflow[regBest.id]=(siloInflow[regBest.id]||0)+toRegActual;
-              if(!siloSourceTracker[regBest.id]) siloSourceTracker[regBest.id]=new Set();
-              siloSourceTracker[regBest.id].add(mill.id);
-              const csCemReg=state[regBest.id];
-              csCemReg.composition[chosen.prodId]=(csCemReg.composition[chosen.prodId]||0)+toRegActual;
-            }
-          }
-        }
-
-        // Clinker consumption based on total cement produced (RAIL + regular)
-        const totalProduced=tonnesToRail+toRegActual;
-        if(chosen.clkSilo&&chosen.clkPct>0){
-          const consumed=totalProduced*chosen.clkPct;
-          siloOutflow[chosen.clkSilo.id]=(siloOutflow[chosen.clkSilo.id]||0)+consumed;
-          const clkProdId=getSiloProducts(chosen.clkSilo)[0]||'';
-          const cs=state[chosen.clkSilo.id];
-          if(clkProdId&&cs.composition[clkProdId]!==undefined)
-            cs.composition[clkProdId]=Math.max(0,(cs.composition[clkProdId]||0)-consumed);
-        }
-
-      } else {
-        // ── NORMAL ROUTING (non-RAIL) ─────────────────────
-        // Record cement silo inflow
-        siloInflow[chosen.bestSilo.id]=(siloInflow[chosen.bestSilo.id]||0)+actualRate;
-        // Track this mill as a source for the chosen silo today (for concurrent source limit)
-        if(!siloSourceTracker[chosen.bestSilo.id]) siloSourceTracker[chosen.bestSilo.id]=new Set();
-        siloSourceTracker[chosen.bestSilo.id].add(mill.id);
-
-        // Record clinker outflow
-        if(chosen.clkSilo&&chosen.clkPct>0){
-          const consumed=actualRate*chosen.clkPct;
-          siloOutflow[chosen.clkSilo.id]=(siloOutflow[chosen.clkSilo.id]||0)+consumed;
-          // Update clinker silo composition
-          const clkProdId=getSiloProducts(chosen.clkSilo)[0]||'';
-          const cs=state[chosen.clkSilo.id];
-          if(clkProdId&&cs.composition[clkProdId]!==undefined)
-            cs.composition[clkProdId]=Math.max(0,(cs.composition[clkProdId]||0)-consumed);
-        }
-
-        // Update cement silo composition
-        const csCem=state[chosen.bestSilo.id];
-        csCem.composition[chosen.prodId]=(csCem.composition[chosen.prodId]||0)+actualRate;
+      // Record clinker outflow
+      if(chosen.clkSilo&&chosen.clkPct>0){
+        const consumed=actualRate*chosen.clkPct;
+        siloOutflow[chosen.clkSilo.id]=(siloOutflow[chosen.clkSilo.id]||0)+consumed;
+        const clkProdId=getSiloProducts(chosen.clkSilo)[0]||'';
+        const cs=state[chosen.clkSilo.id];
+        if(clkProdId&&cs.composition[clkProdId]!==undefined)
+          cs.composition[clkProdId]=Math.max(0,(cs.composition[clkProdId]||0)-consumed);
       }
+
+      // Update cement silo composition
+      const csCem=state[chosen.bestSilo.id];
+      csCem.composition[chosen.prodId]=(csCem.composition[chosen.prodId]||0)+actualRate;
     });
 
     // ── STEP 5: PACKING PLANTS ────────────────────────
