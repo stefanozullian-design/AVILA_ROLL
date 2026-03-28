@@ -5316,12 +5316,14 @@ function simulate(elements, connections, horizon, includeProposed=false){
         termSilos.forEach(termSilo=>{
           const ts=state[termSilo.id]; if(!ts) return;
           const termInv=ts.inventory||0;
-          // Fast demand lookup: rolling avg if available, else sum demand points
-          let termDemand=siloRate(termSilo.id);
-          if(!termDemand){
-            const dps=termSiloDemandPoints[termSilo.id]||[];
-            termDemand=dps.reduce((s,dp2)=>s+(dp2.dailyRates[day-1]||0),0);
-          }
+          // Use topology-correct demand only (termSiloDemandPoints built from demandSiloMap)
+          // Never use siloRate here — it can pick up demand from other facilities that
+          // share the same product, giving false positives for terminal silos with 0 demand
+          const dps=termSiloDemandPoints[termSilo.id]||[];
+          let termDemand=dps.reduce((s,dp2)=>s+(dp2.dailyRates[day-1]||0),0);
+          // Fall back to rolling average only if topology demand is non-zero
+          if(!termDemand&&ts.outflowHistory?.length>=3)
+            termDemand=ts.outflowHistory.slice(-10).reduce((a,b)=>a+b,0)/Math.min(10,ts.outflowHistory.length);
           if(termDemand<=0) return;
 
           const daysOfCover=termInv/termDemand;
