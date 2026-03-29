@@ -7637,14 +7637,157 @@ function _drawProdBarChart(id,r,type){
       }
       barSeries.push({label:prod?.name||pid,data,col:cols[pi%cols.length]});
     });
-    // Demand lines per product
+    // Demand lines per product (from demand_values, not fixed daily_tonnage)
     DB.demand_points.filter(dp=>dp.facility_id===S.facility_id).forEach((dp,di)=>{
+      const dpEl=DB.elements.find(e=>e.id===dp.element_id);
       dp.products.forEach((pp,pi)=>{
         const prod=DB.products.find(p=>p.id===pp.product_id);
-        const daily=parseFloat(dp.daily_tonnage)||0;
-        lineSeries.push({label:`Demand: ${prod?.name||pp.product_id}`,val:daily,data:Array(days).fill(daily),col:cols[(di*2+pi+3)%cols.length]});
+        const data=[];
+        for(let d=startDay;d<=endDay;d++){
+          const dt=new Date(S.simCfg.start_date+'T00:00:00');
+          dt.setDate(dt.getDate()+d-1);
+          data.push(dpEl?_demandRate(dpEl.id,dt.toISOString().split('T')[0]):(parseFloat(dp.daily_tonnage)||0));
+        }
+        lineSeries.push({label:`Dem: ${prod?.name||pp.product_id}`,data,col:cols[(di*2+pi+3)%cols.length]});
       });
     });
+
+    // ── CEMENT INVENTORY AREAS (right axis) ────────────────
+    const invCols=['rgba(77,166,255,0.18)','rgba(204,122,255,0.18)','rgba(255,140,66,0.18)','rgba(255,184,48,0.18)'];
+    const invStroke=['rgba(77,166,255,0.7)','rgba(204,122,255,0.7)','rgba(255,140,66,0.7)','rgba(255,184,48,0.7)'];
+    const cemSilos=fac.filter(e=>e.type==='bulk_silo'&&isCementSilo(e));
+    const invSeries=[];
+    cemSilos.forEach((silo,si)=>{
+      const hist=[];
+      for(let d=startDay;d<=endDay;d++){
+        const h=r.inventoryHistory[silo.id]||[];
+        const startInv=parseFloat(silo.props?.start_inventory)||0;
+        hist.push(d>1?(h[d-2]??0):startInv);
+      }
+      if(hist.some(v=>v>0))
+        invSeries.push({label:`${silo.name} inv`,data:hist,fill:invCols[si%invCols.length],stroke:invStroke[si%invStroke.length]});
+    });
+
+    // ── ARRIVALS (vessel + rail) ────────────────────────────
+    // Vessel arrivals into cement silos at this facility
+    const vesselArrData=new Array(days).fill(0);
+    cemSilos.forEach(silo=>{
+      const vh=r.vesselArrivalHistory?.[silo.id]||[];
+      for(let d=startDay;d<=endDay;d++){
+        vesselArrData[d-startDay]+=(vh[d-1]||0);
+      }
+    });
+    // Rail arrivals into cement silos (transit queue arrivals)
+    const railArrData=new Array(days).fill(0);
+    cemSilos.forEach(silo=>{
+      const th=r.siloUnloadHistory?.[silo.id]||[];
+      for(let d=startDay;d<=endDay;d++){
+        railArrData[d-startDay]+=(th[d-1]||0);
+      }
+    });
+    const hasVessel=vesselArrData.some(v=>v>0);
+    const hasRail=railArrData.some(v=>v>0);
+
+    // Compute dual-axis scale: left = production/demand, right = inventory
+    const allBar=barSeries.flatMap(s=>s.data).filter(v=>v>0);
+    const allLine=lineSeries.flatMap(s=>s.data||[]).filter(v=>v>0);
+    const allArr=vesselArrData.concat(railArrData).filter(v=>v>0);
+    const maxLeft=Math.max(...allBar,...allLine,...allArr,1)*1.15;
+    const allInv=invSeries.flatMap(s=>s.data).filter(v=>v>0);
+    const maxRight=allInv.length?Math.max(...allInv)*1.1:1;
+
+    // Draw inventory areas (right axis, scaled)
+    invSeries.forEach(inv=>{
+      ctx.beginPath();
+      inv.data.forEach((v,i)=>{
+        const x=P.l+i*cW/(days-1||1);
+        const y=P.t+cH-(v/maxRight)*cH;
+        i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+      });
+      const lastX=P.l+(inv.data.length-1)*cW/(days-1||1);
+      ctx.lineTo(lastX,P.t+cH);ctx.lineTo(P.l,P.t+cH);ctx.closePath();
+      ctx.fillStyle=inv.fill; ctx.fill();
+      // Stroke line
+      ctx.beginPath();
+      inv.data.forEach((v,i)=>{
+        const x=P.l+i*cW/(days-1||1);
+        const y=P.t+cH-(v/maxRight)*cH;
+        i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+      });
+      ctx.strokeStyle=inv.stroke;ctx.lineWidth=1.5;ctx.setLineDash([]);ctx.stroke();
+    });
+
+    // Draw arrival bars (above production bars, distinct colors)
+    const slotW2=cW/days;
+    if(hasVessel){
+      vesselArrData.forEach((v,i)=>{
+        if(!v) return;
+        const x=P.l+i*slotW2;
+        const bH=(v/maxLeft)*cH;
+        ctx.fillStyle='rgba(56,189,248,0.85)';
+        ctx.fillRect(x+slotW2*0.05,P.t+cH-bH,slotW2*0.4,bH);
+      });
+    }
+    if(hasRail){
+      railArrData.forEach((v,i)=>{
+        if(!v) return;
+        const x=P.l+i*slotW2;
+        const bH=(v/maxLeft)*cH;
+        ctx.fillStyle='rgba(251,146,60,0.85)';
+        ctx.fillRect(x+slotW2*0.5,P.t+cH-bH,slotW2*0.4,bH);
+      });
+    }
+
+    // Draw production bars on top
+    const nSeries2=barSeries.length||1;
+    const groupW2=Math.max(1,slotW2*0.75);
+    const bW2=Math.max(0.5,groupW2/nSeries2);
+    barSeries.forEach((s,si)=>{
+      ctx.fillStyle=s.col;
+      s.data.forEach((v,i)=>{
+        if(!v) return;
+        const x=P.l+i*slotW2+(slotW2-groupW2)/2+si*bW2;
+        const bH=(v/maxLeft)*cH;
+        ctx.globalAlpha=0.75;
+        ctx.fillRect(x,P.t+cH-bH,Math.max(0.5,bW2-0.5),bH);
+        ctx.globalAlpha=1;
+      });
+    });
+
+    // Demand lines
+    lineSeries.forEach(s=>{
+      const data=s.data||[];
+      ctx.strokeStyle=s.col;ctx.lineWidth=1.5;
+      ctx.setLineDash([5,3]);ctx.shadowBlur=4;ctx.shadowColor=s.col;
+      ctx.beginPath();
+      data.forEach((v,i)=>{
+        const x=P.l+(i/(data.length-1||1))*cW;
+        const y=P.t+cH-(Math.min(v,maxLeft)/maxLeft)*cH;
+        i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+      });
+      ctx.stroke();ctx.shadowBlur=0;ctx.setLineDash([]);
+    });
+
+    // Right axis for inventory
+    if(invSeries.length){
+      ctx.fillStyle='rgba(77,166,255,0.5)';ctx.font='7px Space Mono';ctx.textAlign='left';
+      const nTicks=4;
+      for(let t=0;t<=nTicks;t++){
+        const v=maxRight*t/nTicks;
+        const y=P.t+cH-(t/nTicks)*cH;
+        ctx.fillText(v>=1000?`${(v/1000).toFixed(0)}k`:`${Math.round(v)}`,P.l+cW+2,y+3);
+      }
+    }
+
+    _drawXAxis(ctx,P,W,H,cW,cH,days,startDay);
+    _drawYAxis(ctx,P,cH,maxLeft,0);
+
+    // Build combined legend
+    const allSeries=[...barSeries,...(hasVessel?[{label:'Vessel Arrival',col:'rgba(56,189,248,0.85)'}]:[]),...(hasRail?[{label:'Rail Arrival',col:'rgba(251,146,60,0.85)'}]:[]),...invSeries.map(s=>({label:s.label,col:s.stroke}))];
+    const legendId2=id==='prod-chart'?'prod-chart-legend':id==='dash-cem-chart'?'dash-cem-legend':'prod-chart-legend';
+    _drawLegend(legendId2,allSeries,lineSeries);
+    _chartMeta[id]={series:barSeries,lines:lineSeries,days,startDay,P};
+    return; // skip the generic draw below
   }
 
   if(!barSeries.length&&!lineSeries.length){
