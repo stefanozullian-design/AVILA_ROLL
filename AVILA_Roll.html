@@ -6553,16 +6553,22 @@ function _dashToggle(bodyId, hdrEl){
   const arrow=hdrEl.querySelector('span[id$="-arrow"]');
   if(arrow) arrow.textContent=collapsed?'▼':'▶';
   // Redraw chart after expand (canvas needs dimensions)
-  if(collapsed&&bodyId==='dash-clk-body'&&S.simResults) _drawClinkerChart('dash-clk-chart',S.simResults);
-  if(collapsed&&bodyId==='dash-cem-body'&&S.simResults) _drawProdBarChart('dash-cem-chart',S.simResults,'cement');
+  if(collapsed&&bodyId==='dash-clk-body'&&S.simResults){ _drawClinkerChart('dash-clk-chart',S.simResults); _attachTooltip('dash-clk-chart'); }
+  if(collapsed&&bodyId==='dash-cem-body'&&S.simResults){ _drawProdBarChart('dash-cem-chart',S.simResults,'cement'); _attachTooltip('dash-cem-chart'); }
 }
 
 function renderDashCharts(r){
   if(!r) return;
   const clkBody=document.getElementById('dash-clk-body');
   const cemBody=document.getElementById('dash-cem-body');
-  if(clkBody&&clkBody.style.display!=='none') _drawClinkerChart('dash-clk-chart',r);
-  if(cemBody&&cemBody.style.display!=='none') _drawProdBarChart('dash-cem-chart',r,'cement');
+  if(clkBody&&clkBody.style.display!=='none'){
+    _drawClinkerChart('dash-clk-chart',r);
+    _attachTooltip('dash-clk-chart');
+  }
+  if(cemBody&&cemBody.style.display!=='none'){
+    _drawProdBarChart('dash-cem-chart',r,'cement');
+    _attachTooltip('dash-cem-chart');
+  }
 }
 
 function renderAlerts(r){
@@ -7197,28 +7203,46 @@ function _attachTooltip(canvasId){
 
     let html=`<div style="color:#8e9ab8;margin-bottom:3px;border-bottom:1px solid #1e2738;padding-bottom:3px">${dateStr} · Day ${startDay+idx}</div>`;
 
-    // Bar series (left axis for dual, only axis for others)
+    // Production bars
     (meta.series||[]).forEach(s=>{
-      const v=s.data[idx]; if(v==null) return;
+      const v=s.data[idx]; if(!v&&v!==0) return;
       const disp=v>=1000?(v/1000).toFixed(1)+'k t':v>0?Math.round(v)+' t':'—';
-      html+=`<div><span style="color:${s.col}">■</span> ${s.label}: <span style="color:${s.col}">${disp}</span></div>`;
+      if(v>0) html+=`<div><span style="color:${s.col}">▪</span> ${s.label}: <span style="color:${s.col};font-weight:600">${disp}</span></div>`;
     });
-    // Requirement/demand lines (left axis)
+    // Demand bars
+    (meta.demandSeries||[]).forEach(s=>{
+      const v=s.data[idx]; if(!v) return;
+      const disp=v>=1000?(v/1000).toFixed(1)+'k t':Math.round(v)+' t';
+      html+=`<div><span style="color:${s.col}">□</span> ${s.label}: <span style="color:${s.col}">${disp}</span></div>`;
+    });
+    // Legacy line series (requirement/demand lines for clinker chart)
     (meta.lines||[]).forEach(s=>{
       const v=Array.isArray(s.data)?s.data[idx]:s.val;
       if(v==null) return;
       const disp=v>=1000?(v/1000).toFixed(1)+'k t':Math.round(v)+' t';
       html+=`<div><span style="color:${s.col}">╌</span> ${s.label}: <span style="color:${s.col}">${disp}</span></div>`;
     });
-    // Inventory lines (right axis — dual-axis charts only)
+    // Vessel arrivals
+    (meta.vesselArr||[]).forEach(s=>{
+      const v=s.data[idx]; if(!v) return;
+      const disp=v>=1000?(v/1000).toFixed(1)+'k t':Math.round(v)+' t';
+      html+=`<div><span style="color:${s.col}">⬛</span> ${s.label}: <span style="color:${s.col}">${disp}</span></div>`;
+    });
+    // Rail arrivals/loaded
+    (meta.railArr||[]).forEach(s=>{
+      const v=s.data[idx]; if(!v) return;
+      const disp=v>=1000?(v/1000).toFixed(1)+'k t':Math.round(v)+' t';
+      html+=`<div><span style="color:${s.col}">⬛</span> ${s.label}: <span style="color:${s.col}">${disp}</span></div>`;
+    });
+    // Inventory areas (right axis)
     if(meta.dualAxis){
       (meta.invLines||[]).forEach(s=>{
         const v=s.data[idx]; if(v==null) return;
         const disp=v>=1000?(v/1000).toFixed(1)+'k t':Math.round(v)+' t';
-        html+=`<div><span style="color:${s.col}">—</span> ${s.label}: <span style="color:${s.col}">${disp}</span></div>`;
+        html+=`<div><span style="color:${s.col}">◆</span> ${s.label}: <span style="color:${s.col}">${disp}</span> <span style="color:#4a5568;font-size:8px">inv</span></div>`;
       });
     }
-    // Rail mode: negative dispatch bars
+    // Rail mode: dispatch bars
     if(meta.railMode){
       (meta.dispSeries||[]).forEach(s=>{
         const v=s.data[idx]; if(!v) return;
@@ -7617,7 +7641,7 @@ function _drawProdBarChart(id,r,type){
     });
 
   } else { // cement production
-    // One bar series per product across all FMs
+    // ── PRODUCTION BARS ──────────────────────────────────
     const prodIds=new Set();
     fac.filter(e=>e.type==='finish_mill').forEach(mill=>{
       DB.element_product_capacities.filter(c=>c.element_id===mill.id).forEach(c=>prodIds.add(c.product_id));
@@ -7628,166 +7652,187 @@ function _drawProdBarChart(id,r,type){
       for(let d=startDay;d<=endDay;d++){
         let total=0;
         fac.filter(e=>e.type==='finish_mill').forEach(mill=>{
-          const activeProd=(r.millProductHistory?.[mill.id]||[])[d-1];
-          if(activeProd!==pid) return;
+          if((r.millProductHistory?.[mill.id]||[])[d-1]!==pid) return;
           const cap=DB.element_product_capacities.find(c=>c.element_id===mill.id&&c.product_id===pid);
           total+=parseFloat(cap?.capacity_tpd)||0;
         });
         data.push(total);
       }
-      barSeries.push({label:prod?.name||pid,data,col:cols[pi%cols.length]});
+      barSeries.push({label:prod?.name||pid,data,col:cols[pi%cols.length],type:'production'});
     });
-    // Demand lines per product (from demand_values, not fixed daily_tonnage)
+
+    // ── DEMAND BARS (outline style, same axis as production) ──
+    const demandSeries=[];
+    const simBase=new Date(S.simCfg.start_date+'T00:00:00');
     DB.demand_points.filter(dp=>dp.facility_id===S.facility_id).forEach((dp,di)=>{
       const dpEl=DB.elements.find(e=>e.id===dp.element_id);
+      if(!dpEl) return;
       dp.products.forEach((pp,pi)=>{
         const prod=DB.products.find(p=>p.id===pp.product_id);
         const data=[];
         for(let d=startDay;d<=endDay;d++){
-          const dt=new Date(S.simCfg.start_date+'T00:00:00');
-          dt.setDate(dt.getDate()+d-1);
-          data.push(dpEl?_demandRate(dpEl.id,dt.toISOString().split('T')[0]):(parseFloat(dp.daily_tonnage)||0));
+          const dt=new Date(simBase.getTime()+(d-1)*864e5);
+          data.push(_demandRate(dpEl.id,dt.toISOString().split('T')[0]));
         }
-        lineSeries.push({label:`Dem: ${prod?.name||pp.product_id}`,data,col:cols[(di*2+pi+3)%cols.length]});
+        const col=cols[(di*2+pi+3)%cols.length];
+        demandSeries.push({label:`Dem: ${prod?.name||pp.product_id}`,data,col,type:'demand'});
       });
     });
 
-    // ── CEMENT INVENTORY AREAS (right axis) ────────────────
-    const invCols=['rgba(77,166,255,0.18)','rgba(204,122,255,0.18)','rgba(255,140,66,0.18)','rgba(255,184,48,0.18)'];
-    const invStroke=['rgba(77,166,255,0.7)','rgba(204,122,255,0.7)','rgba(255,140,66,0.7)','rgba(255,184,48,0.7)'];
+    // ── VESSEL ARRIVALS (unloading into cement silos) ─────
     const cemSilos=fac.filter(e=>e.type==='bulk_silo'&&isCementSilo(e));
-    const invSeries=[];
-    cemSilos.forEach((silo,si)=>{
-      const hist=[];
-      for(let d=startDay;d<=endDay;d++){
-        const h=r.inventoryHistory[silo.id]||[];
-        const startInv=parseFloat(silo.props?.start_inventory)||0;
-        hist.push(d>1?(h[d-2]??0):startInv);
-      }
-      if(hist.some(v=>v>0))
-        invSeries.push({label:`${silo.name} inv`,data:hist,fill:invCols[si%invCols.length],stroke:invStroke[si%invStroke.length]});
-    });
-
-    // ── ARRIVALS (vessel + rail) ────────────────────────────
-    // Vessel arrivals into cement silos at this facility
     const vesselArrData=new Array(days).fill(0);
     cemSilos.forEach(silo=>{
-      const vh=r.vesselArrivalHistory?.[silo.id]||[];
-      for(let d=startDay;d<=endDay;d++){
-        vesselArrData[d-startDay]+=(vh[d-1]||0);
-      }
+      (r.siloUnloadHistory?.[silo.id]||[]).forEach((v,i)=>{
+        if(i>=startDay-1&&i<endDay) vesselArrData[i-(startDay-1)]+=v||0;
+      });
     });
-    // Rail arrivals into cement silos (transit queue arrivals)
+    // ── RAIL ARRIVALS (loaded to yard on dispatch days) ────
     const railArrData=new Array(days).fill(0);
-    cemSilos.forEach(silo=>{
-      const th=r.siloUnloadHistory?.[silo.id]||[];
+    fac.filter(e=>e.type==='dispatch_point'&&e.props.dispatch_type==='Rail').forEach(dp=>{
+      const rh=r.railHistory?.[dp.id]||[];
       for(let d=startDay;d<=endDay;d++){
-        railArrData[d-startDay]+=(th[d-1]||0);
+        const entry=rh[d-1]||{};
+        const cars=Object.values(entry.carsLoadedByProduct||{}).reduce((a,b)=>a+b,0);
+        const carCap=parseFloat(dp.props?.car_capacity_t)||112;
+        railArrData[d-startDay]+=cars*carCap;
       }
     });
     const hasVessel=vesselArrData.some(v=>v>0);
     const hasRail=railArrData.some(v=>v>0);
 
-    // Compute dual-axis scale: left = production/demand, right = inventory
-    const allBar=barSeries.flatMap(s=>s.data).filter(v=>v>0);
-    const allLine=lineSeries.flatMap(s=>s.data||[]).filter(v=>v>0);
-    const allArr=vesselArrData.concat(railArrData).filter(v=>v>0);
-    const maxLeft=Math.max(...allBar,...allLine,...allArr,1)*1.15;
-    const allInv=invSeries.flatMap(s=>s.data).filter(v=>v>0);
-    const maxRight=allInv.length?Math.max(...allInv)*1.1:1;
+    // ── INVENTORY AREAS (right axis) ──────────────────────
+    const invCols=['rgba(77,166,255,0.15)','rgba(204,122,255,0.15)','rgba(255,140,66,0.15)','rgba(255,184,48,0.15)'];
+    const invStroke=['rgba(77,166,255,0.7)','rgba(204,122,255,0.7)','rgba(255,140,66,0.7)','rgba(255,184,48,0.7)'];
+    const invSeries=[];
+    cemSilos.forEach((silo,si)=>{
+      const hist=[];
+      for(let d=startDay;d<=endDay;d++){
+        const h=r.inventoryHistory?.[silo.id]||[];
+        hist.push(d>1?(h[d-2]??0):parseFloat(silo.props?.start_inventory)||0);
+      }
+      if(hist.some(v=>v>0))
+        invSeries.push({label:`${silo.name}`,data:hist,fill:invCols[si%invCols.length],stroke:invStroke[si%invStroke.length],col:invStroke[si%invStroke.length]});
+    });
 
-    // Draw inventory areas (right axis, scaled)
+    // ── SCALES ────────────────────────────────────────────
+    const allLeft=[
+      ...barSeries.flatMap(s=>s.data),
+      ...demandSeries.flatMap(s=>s.data),
+      ...(hasVessel?vesselArrData:[]),
+      ...(hasRail?railArrData:[])
+    ].filter(v=>v>0);
+    const maxLeft=Math.max(...allLeft,1)*1.15;
+    const allRight=invSeries.flatMap(s=>s.data).filter(v=>v>0);
+    const maxRight=allRight.length?Math.max(...allRight)*1.1:1;
+    const hasInv=invSeries.length>0;
+
+    // Use wider right padding if we have a right axis
+    const PR=hasInv?48:P.r;
+    const cWadj=W-P.l-PR;
+
+    // ── DRAW: inventory areas first (background) ──────────
+    const daySlotW=cWadj/days;
     invSeries.forEach(inv=>{
       ctx.beginPath();
       inv.data.forEach((v,i)=>{
-        const x=P.l+i*cW/(days-1||1);
-        const y=P.t+cH-(v/maxRight)*cH;
+        const x=P.l+i*cWadj/(days-1||1);
+        const y=P.t+(1-v/maxRight)*cH;
         i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
       });
-      const lastX=P.l+(inv.data.length-1)*cW/(days-1||1);
-      ctx.lineTo(lastX,P.t+cH);ctx.lineTo(P.l,P.t+cH);ctx.closePath();
-      ctx.fillStyle=inv.fill; ctx.fill();
-      // Stroke line
+      ctx.lineTo(P.l+(inv.data.length-1)*cWadj/(days-1||1),P.t+cH);
+      ctx.lineTo(P.l,P.t+cH);
+      ctx.closePath();
+      ctx.fillStyle=inv.fill;ctx.fill();
       ctx.beginPath();
       inv.data.forEach((v,i)=>{
-        const x=P.l+i*cW/(days-1||1);
-        const y=P.t+cH-(v/maxRight)*cH;
+        const x=P.l+i*cWadj/(days-1||1);
+        const y=P.t+(1-v/maxRight)*cH;
         i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
       });
-      ctx.strokeStyle=inv.stroke;ctx.lineWidth=1.5;ctx.setLineDash([]);ctx.stroke();
+      ctx.strokeStyle=inv.stroke;ctx.lineWidth=1.5;ctx.setLineDash([]);ctx.shadowBlur=0;ctx.stroke();
     });
 
-    // Draw arrival bars (above production bars, distinct colors)
-    const slotW2=cW/days;
-    if(hasVessel){
-      vesselArrData.forEach((v,i)=>{
-        if(!v) return;
-        const x=P.l+i*slotW2;
-        const bH=(v/maxLeft)*cH;
-        ctx.fillStyle='rgba(56,189,248,0.85)';
-        ctx.fillRect(x+slotW2*0.05,P.t+cH-bH,slotW2*0.4,bH);
-      });
-    }
-    if(hasRail){
-      railArrData.forEach((v,i)=>{
-        if(!v) return;
-        const x=P.l+i*slotW2;
-        const bH=(v/maxLeft)*cH;
-        ctx.fillStyle='rgba(251,146,60,0.85)';
-        ctx.fillRect(x+slotW2*0.5,P.t+cH-bH,slotW2*0.4,bH);
-      });
-    }
+    // ── DRAW: arrival bars (vessel left half, rail right half of slot) ──
+    if(hasVessel) vesselArrData.forEach((v,i)=>{
+      if(!v) return;
+      const bH=(v/maxLeft)*cH;
+      ctx.fillStyle='rgba(56,189,248,0.85)';ctx.globalAlpha=0.9;
+      ctx.fillRect(P.l+i*daySlotW+daySlotW*0.03,P.t+cH-bH,daySlotW*0.38,bH);
+      ctx.globalAlpha=1;
+    });
+    if(hasRail) railArrData.forEach((v,i)=>{
+      if(!v) return;
+      const bH=(v/maxLeft)*cH;
+      ctx.fillStyle='rgba(251,146,60,0.85)';ctx.globalAlpha=0.9;
+      ctx.fillRect(P.l+i*daySlotW+daySlotW*0.52,P.t+cH-bH,daySlotW*0.38,bH);
+      ctx.globalAlpha=1;
+    });
 
-    // Draw production bars on top
-    const nSeries2=barSeries.length||1;
-    const groupW2=Math.max(1,slotW2*0.75);
-    const bW2=Math.max(0.5,groupW2/nSeries2);
+    // ── DRAW: production bars (grouped, solid) ────────────
+    const nProd=barSeries.length||1;
+    const prodGroupW=Math.max(1,daySlotW*0.7);
+    const prodBW=Math.max(0.5,prodGroupW/nProd);
     barSeries.forEach((s,si)=>{
       ctx.fillStyle=s.col;
       s.data.forEach((v,i)=>{
         if(!v) return;
-        const x=P.l+i*slotW2+(slotW2-groupW2)/2+si*bW2;
+        const x=P.l+i*daySlotW+(daySlotW-prodGroupW)/2+si*prodBW;
         const bH=(v/maxLeft)*cH;
-        ctx.globalAlpha=0.75;
-        ctx.fillRect(x,P.t+cH-bH,Math.max(0.5,bW2-0.5),bH);
+        ctx.globalAlpha=0.8;
+        ctx.fillRect(x,P.t+cH-bH,Math.max(0.5,prodBW-0.5),bH);
         ctx.globalAlpha=1;
       });
     });
 
-    // Demand lines
-    lineSeries.forEach(s=>{
-      const data=s.data||[];
-      ctx.strokeStyle=s.col;ctx.lineWidth=1.5;
-      ctx.setLineDash([5,3]);ctx.shadowBlur=4;ctx.shadowColor=s.col;
-      ctx.beginPath();
-      data.forEach((v,i)=>{
-        const x=P.l+(i/(data.length-1||1))*cW;
-        const y=P.t+cH-(Math.min(v,maxLeft)/maxLeft)*cH;
-        i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+    // ── DRAW: demand bars (outline/dashed stroke, same slot) ──
+    demandSeries.forEach((s,si)=>{
+      ctx.strokeStyle=s.col;ctx.lineWidth=1.2;ctx.setLineDash([3,2]);
+      s.data.forEach((v,i)=>{
+        if(!v) return;
+        const x=P.l+i*daySlotW+daySlotW*0.1;
+        const bH=(v/maxLeft)*cH;
+        ctx.strokeRect(x,P.t+cH-bH,daySlotW*0.8,bH);
       });
-      ctx.stroke();ctx.shadowBlur=0;ctx.setLineDash([]);
+      ctx.setLineDash([]);
     });
 
-    // Right axis for inventory
-    if(invSeries.length){
-      ctx.fillStyle='rgba(77,166,255,0.5)';ctx.font='7px Space Mono';ctx.textAlign='left';
-      const nTicks=4;
-      for(let t=0;t<=nTicks;t++){
-        const v=maxRight*t/nTicks;
-        const y=P.t+cH-(t/nTicks)*cH;
-        ctx.fillText(v>=1000?`${(v/1000).toFixed(0)}k`:`${Math.round(v)}`,P.l+cW+2,y+3);
+    // ── DRAW: axes ────────────────────────────────────────
+    _drawXAxis(ctx,P,W,H,cWadj,cH,days,startDay);
+    _drawYAxis(ctx,P,cH,maxLeft,0);
+    // Right axis labels (inventory)
+    if(hasInv){
+      ctx.fillStyle='rgba(77,166,255,0.55)';ctx.font='7px Space Mono';ctx.textAlign='left';
+      for(let t=0;t<=4;t++){
+        const v=maxRight*t/4;
+        const y=P.t+cH-(t/4)*cH;
+        ctx.fillText(v>=1000?`${(v/1000).toFixed(0)}k`:`${Math.round(v)}`,P.l+cWadj+3,y+3);
       }
     }
 
-    _drawXAxis(ctx,P,W,H,cW,cH,days,startDay);
-    _drawYAxis(ctx,P,cH,maxLeft,0);
-
-    // Build combined legend
-    const allSeries=[...barSeries,...(hasVessel?[{label:'Vessel Arrival',col:'rgba(56,189,248,0.85)'}]:[]),...(hasRail?[{label:'Rail Arrival',col:'rgba(251,146,60,0.85)'}]:[]),...invSeries.map(s=>({label:s.label,col:s.stroke}))];
+    // ── LEGEND ───────────────────────────────────────────
+    const legendSeries=[
+      ...barSeries,
+      ...demandSeries.map(s=>({...s,label:s.label,_outline:true})),
+      ...(hasVessel?[{label:'Vessel Unload',col:'rgba(56,189,248,0.9)'}]:[]),
+      ...(hasRail?[{label:'Rail Loaded',col:'rgba(251,146,60,0.9)'}]:[]),
+      ...invSeries
+    ];
     const legendId2=id==='prod-chart'?'prod-chart-legend':id==='dash-cem-chart'?'dash-cem-legend':'prod-chart-legend';
-    _drawLegend(legendId2,allSeries,lineSeries);
-    _chartMeta[id]={series:barSeries,lines:lineSeries,days,startDay,P};
-    return; // skip the generic draw below
+    _drawLegend(legendId2,legendSeries,[]);
+
+    // ── CHART META for tooltip ────────────────────────────
+    _chartMeta[id]={
+      series:barSeries,
+      demandSeries,
+      lines:[],
+      invLines:invSeries,
+      vesselArr:hasVessel?[{label:'Vessel Unload',data:vesselArrData,col:'rgba(56,189,248,0.9)'}]:[],
+      railArr:hasRail?[{label:'Rail Loaded',data:railArrData,col:'rgba(251,146,60,0.9)'}]:[],
+      dualAxis:hasInv,maxLeft,maxRight,
+      days,startDay,P:{...P,r:PR}
+    };
+    return;
   }
 
   if(!barSeries.length&&!lineSeries.length){
