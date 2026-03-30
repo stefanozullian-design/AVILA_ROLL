@@ -288,6 +288,48 @@ select.pi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
 /* ── SCHEDULES ── */
 #schedules-view{overflow-y:auto;background:var(--bg);}
 .sched-inner{padding:16px;display:flex;flex-direction:column;gap:14px;}
+/* ── Transport Planner ───────────────────────────────────── */
+.tp-header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--border2);}
+.tp-header-left{display:flex;align-items:center;gap:4px;flex-wrap:wrap;}
+.tp-header-right{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+.tp-dest-chip{padding:3px 10px;font-family:var(--mono);font-size:9px;cursor:pointer;border:1px solid var(--border2);color:var(--text-dim);background:var(--surface2);transition:all .15s;white-space:nowrap;user-select:none;}
+.tp-dest-chip.active{border-color:var(--blue);color:var(--blue);background:rgba(77,166,255,.1);}
+.tp-section-hdr{font-family:var(--mono);font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim);padding:4px 0 6px;border-bottom:1px solid var(--border2);margin-bottom:0;}
+.tp-table-wrap{overflow-x:auto;max-width:100%;}
+.tp-table{border-collapse:collapse;font-family:var(--mono);font-size:10px;white-space:nowrap;}
+.tp-table th{padding:5px 8px;border-bottom:1px solid var(--border2);color:var(--text-dim);font-weight:400;text-align:right;position:sticky;top:0;background:var(--surface);}
+.tp-table th:first-child{text-align:left;min-width:200px;position:sticky;left:0;z-index:2;background:var(--surface);}
+.tp-table td{padding:3px 8px;border-bottom:0.5px solid var(--border2);text-align:right;color:var(--text-dim);}
+.tp-table td:first-child{text-align:left;position:sticky;left:0;background:var(--surface);z-index:1;}
+.tp-table tr:hover td{background:var(--surface2);}
+.tp-table tr:hover td:first-child{background:var(--surface2);}
+.tp-row-dest td:first-child{color:#38bdf8;font-weight:500;}
+.tp-row-inv td:first-child{color:#ff9433;}
+.tp-row-dem td:first-child{color:#a78bfa;}
+.tp-row-arrival td:first-child{color:#00d68f;font-weight:500;}
+.tp-row-orig-inv td:first-child{color:#ff9433;}
+.tp-row-rail-silo td:first-child{color:#38bdf8;}
+.tp-row-loading td:first-child{color:#4da6ff;}
+.tp-row-dispatch td:first-child{color:#ff9433;}
+.tp-cell-clickable{cursor:pointer;transition:background .1s;}
+.tp-cell-clickable:hover{background:rgba(0,214,143,.12)!important;color:#00d68f!important;}
+.tp-cell-planned{background:rgba(255,184,48,.15)!important;color:var(--amber)!important;}
+.tp-cell-confirmed{background:rgba(0,229,160,.1)!important;color:var(--green)!important;}
+.tp-cell-dim{color:var(--border2);}
+/* weekend column highlight */
+.tp-col-sat{border-left:2px solid rgba(255,80,80,0.5)!important;background:rgba(255,80,80,0.04)!important;}
+.tp-col-sun{border-right:2px solid rgba(255,80,80,0.5)!important;background:rgba(255,80,80,0.04)!important;}
+/* switch day highlight */
+.tp-col-switch{background:rgba(77,166,255,0.06)!important;}
+/* transport planner modal */
+.tp-modal{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:9999;}
+.tp-modal-box{background:var(--surface);border:1px solid var(--border2);padding:20px;min-width:320px;max-width:440px;width:90%;}
+.tp-modal-title{font-family:var(--mono);font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text);margin-bottom:16px;}
+.tp-modal-field{margin-bottom:12px;}
+.tp-modal-label{font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-bottom:4px;display:block;}
+.tp-modal-hint{font-family:var(--mono);font-size:8px;color:var(--blue);margin-top:4px;}
+.tp-modal-warn{font-family:var(--mono);font-size:8px;color:var(--amber);margin-top:4px;}
+.tp-modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px;}
 .sched-tab{padding:5px 13px;font-family:var(--mono);font-size:9px;color:var(--text-dim);background:var(--surface2);border:1px solid var(--border2);cursor:pointer;transition:all .15s;text-transform:uppercase;letter-spacing:1px;}
 .sched-tab.active{color:var(--amber);border-color:var(--amber);background:rgba(255,184,48,.05);}
 .sched-content{display:none;}
@@ -769,24 +811,104 @@ select.fi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
           <div class="sched-tab" onclick="setSchedTab('maintenance',this)">Maintenance Calendar</div>
         </div>
         <div id="sched-vessels" class="sched-content active">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-            <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">table: vessel_calls &nbsp;·&nbsp; <span style="color:var(--amber)">External supply — no source inventory deducted. Arrives and unloads progressively.</span></div>
-            <button class="tb-btn amber" onclick="showModal('vessel-modal')">+ Vessel Call</button>
+          <!-- ── VESSEL TRANSPORT PLANNER ──────────────────────── -->
+          <div id="vessel-planner-wrap">
+            <div class="tp-header">
+              <div class="tp-header-left">
+                <span class="vw-label">View</span>
+                <button class="vw-btn active" onclick="vpSetView('sim',this)">Full Simulation</button>
+                <button class="vw-btn"         onclick="vpSetView('15d',this)">Next 15d</button>
+                <button class="vw-btn"         onclick="vpSetView('eom',this)">Rest of Month</button>
+                <button class="vw-btn"         onclick="vpSetView('3m',this)">Next 3 Months</button>
+                <button class="vw-btn"         onclick="vpSetView('eoy',this)">Rest of Year</button>
+                <span class="vw-range-lbl" id="vp-range-lbl"></span>
+              </div>
+              <div class="tp-header-right">
+                <span class="vw-label">Destination</span>
+                <div id="vp-dest-filter" style="display:flex;gap:3px;flex-wrap:wrap"></div>
+              </div>
+            </div>
+            <div id="vp-dest-section">
+              <div class="tp-section-hdr">DESTINATION</div>
+              <div class="tp-table-wrap" id="vp-dest-table-wrap">
+                <table class="tp-table" id="vp-dest-table"><thead><tr id="vp-dest-thead-row"></tr></thead><tbody id="vp-dest-tbody"></tbody></table>
+              </div>
+            </div>
+            <div id="vp-orig-section" style="margin-top:12px">
+              <div class="tp-section-hdr">ORIGIN</div>
+              <div class="tp-table-wrap" id="vp-orig-table-wrap">
+                <table class="tp-table" id="vp-orig-table"><thead><tr id="vp-orig-thead-row"></tr></thead><tbody id="vp-orig-tbody"></tbody></table>
+              </div>
+            </div>
           </div>
-          <table class="sched-table"><thead><tr>
-            <th>Vessel</th><th>Arrival Date</th><th>Cargo Type</th><th>Quantity (t)</th>
-            <th>Unload Rate (t/h)</th><th>Transit Days</th><th>Destination Berth</th><th>Status</th><th></th>
-          </tr></thead><tbody id="vessel-tbody"></tbody></table>
+          <div style="margin-top:12px;border-top:1px solid var(--border2);padding-top:8px">
+            <div style="display:flex;align-items:center;justify-content:space-between">
+              <span style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">Vessel call records (DB.vessel_calls)</span>
+              <div style="display:flex;gap:6px">
+                <button class="tb-btn amber" onclick="showModal('vessel-modal')">+ Manual Entry</button>
+                <button class="tb-btn sec" style="font-size:8px" onclick="_vpToggleLegacy()">▼ Show Records</button>
+              </div>
+            </div>
+            <div id="vp-legacy-wrap" style="display:none;margin-top:8px">
+              <table class="sched-table"><thead><tr>
+                <th>Vessel</th><th>Arrival Date</th><th>Cargo Type</th><th>Quantity (t)</th>
+                <th>Unload Rate (t/h)</th><th>Transit Days</th><th>Destination Berth</th><th>Status</th><th></th>
+              </tr></thead><tbody id="vessel-tbody"></tbody></table>
+            </div>
+          </div>
         </div>
         <div id="sched-rail" class="sched-content">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-            <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">table: rail_movements &nbsp;·&nbsp; <span style="color:var(--blue)">Mass balance — deducted from source on departure, added to destination on arrival after transit.</span></div>
-            <button class="tb-btn blue" onclick="showModal('rail-modal')">+ Rail Movement</button>
+          <!-- ── RAIL TRANSPORT PLANNER ─────────────────────────── -->
+          <div id="rail-planner-wrap">
+            <!-- Header row: view controls + destination filter -->
+            <div class="tp-header">
+              <div class="tp-header-left">
+                <span class="vw-label">View</span>
+                <button class="vw-btn active" id="rp-vw-sim"    onclick="rpSetView('sim',this)">Full Simulation</button>
+                <button class="vw-btn"         id="rp-vw-15d"    onclick="rpSetView('15d',this)">Next 15d</button>
+                <button class="vw-btn"         id="rp-vw-eom"    onclick="rpSetView('eom',this)">Rest of Month</button>
+                <button class="vw-btn"         id="rp-vw-3m"     onclick="rpSetView('3m',this)">Next 3 Months</button>
+                <button class="vw-btn"         id="rp-vw-eoy"    onclick="rpSetView('eoy',this)">Rest of Year</button>
+                <span class="vw-range-lbl" id="rp-range-lbl"></span>
+              </div>
+              <div class="tp-header-right">
+                <span class="vw-label">Destination</span>
+                <div id="rp-dest-filter" style="display:flex;gap:3px;flex-wrap:wrap"></div>
+              </div>
+            </div>
+            <!-- Two stacked planner tables -->
+            <div id="rp-dest-section">
+              <div class="tp-section-hdr">DESTINATION</div>
+              <div class="tp-table-wrap" id="rp-dest-table-wrap">
+                <table class="tp-table" id="rp-dest-table"><thead><tr id="rp-dest-thead-row"></tr></thead><tbody id="rp-dest-tbody"></tbody></table>
+              </div>
+            </div>
+            <div id="rp-orig-section" style="margin-top:12px">
+              <div class="tp-section-hdr">ORIGIN</div>
+              <div class="tp-table-wrap" id="rp-orig-table-wrap">
+                <table class="tp-table" id="rp-orig-table"><thead><tr id="rp-orig-thead-row"></tr></thead><tbody id="rp-orig-tbody"></tbody></table>
+              </div>
+            </div>
+            <div id="rp-empty" style="font-family:var(--mono);font-size:9px;color:var(--text-dim);padding:24px;text-align:center;display:none">
+              Select a destination above to plan rail shipments
+            </div>
           </div>
-          <table class="sched-table"><thead><tr>
-            <th>Reference</th><th>Departure Date</th><th>From Facility</th><th>To Facility</th>
-            <th>Wagons</th><th>Total (t)</th><th>Product</th><th>Transit Days</th><th>Min Load %</th><th>Status</th><th></th>
-          </tr></thead><tbody id="rail-tbody"></tbody></table>
+          <!-- Legacy table (collapsed, accessible via link) -->
+          <div style="margin-top:12px;border-top:1px solid var(--border2);padding-top:8px">
+            <div style="display:flex;align-items:center;justify-content:space-between">
+              <span style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">Rail movement records (DB.rail_movements)</span>
+              <div style="display:flex;gap:6px">
+                <button class="tb-btn blue" onclick="showModal('rail-modal')">+ Manual Entry</button>
+                <button class="tb-btn sec" style="font-size:8px" onclick="_rpToggleLegacy()">▼ Show Records</button>
+              </div>
+            </div>
+            <div id="rp-legacy-wrap" style="display:none;margin-top:8px">
+              <table class="sched-table"><thead><tr>
+                <th>Reference</th><th>Departure Date</th><th>From</th><th>To</th>
+                <th>Wagons</th><th>Total (t)</th><th>Product</th><th>Transit Days</th><th>Status</th><th></th>
+              </tr></thead><tbody id="rail-tbody"></tbody></table>
+            </div>
+          </div>
         </div>
         <div id="sched-truck" class="sched-content">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
@@ -4036,8 +4158,8 @@ function setSchedTab(tab,el){
   document.querySelectorAll('.sched-content').forEach(c=>c.classList.remove('active'));
   document.getElementById(`sched-${tab}`)?.classList.add('active');
   if(tab==='maintenance') renderMaintenanceCalendar();
-  if(tab==='vessel') renderVesselTable?.();
-  if(tab==='rail') renderRailTable?.();
+  if(tab==='vessel'){renderVesselTable?.();vpRender();}
+  if(tab==='rail'){renderRailTable?.();rpRender();}
   if(tab==='truck') renderTruckTable?.();
 }
 
@@ -4192,6 +4314,777 @@ function advanceLegStatus(vesselId, legIdx){
   const leg=v.legs[legIdx]; if(!leg) return;
   const next=_tsNext(leg.status||v.status||'Planned'); if(!next) return;
   leg.status=next; autoSave(); renderVesselTable();
+}
+
+// ══════════════════════════════════════════════════════════════════
+// TRANSPORT PLANNER — Rail Schedule
+// ══════════════════════════════════════════════════════════════════
+const _rp={
+  view:'sim',        // current view preset
+  dests:[],          // selected destination facility IDs (multi)
+};
+
+// ── Topology helpers ─────────────────────────────────────────────
+// Get all facilities that have a Rail berth on the current canvas
+function rpGetRailDestinations(){
+  return getFacElements()
+    .filter(e=>e.type==='berth'&&(e.props?.berth_type||'').toLowerCase().includes('rail'))
+    .map(e=>DB.facilities.find(f=>f.id===(e.assigned_facility_id||e.facility_id)))
+    .filter(Boolean)
+    .filter((f,i,a)=>a.findIndex(x=>x.id===f.id)===i); // unique
+}
+
+// Get rail dispatch points on BRS canvas that can reach a destination
+function rpGetOriginsForDest(destFacId){
+  const allEls=getFacElements();
+  const allConns=DB.connections.filter(c=>c.facility_id===S.facility_id);
+  const results=[];
+  allEls.filter(e=>e.type==='dispatch_point'&&e.props?.dispatch_type==='Rail').forEach(dp=>{
+    // Check if any destination config matches destFacId
+    const destCfg=(dp.props?.destinations||[]).find(d=>d.facility_id===destFacId);
+    if(!destCfg) return;
+    // Find the berth connected downstream
+    const downBerths=(allConns.filter(c=>c.from_element_id===dp.id))
+      .map(c=>allEls.find(e=>e.id===c.to_element_id))
+      .filter(e=>e?.type==='berth'&&(e.assigned_facility_id||e.facility_id)===destFacId);
+    if(!downBerths.length) return;
+    // Find upstream RAIL silo
+    const upRailSilo=(allConns.filter(c=>c.to_element_id===dp.id))
+      .map(c=>allEls.find(e=>e.id===c.from_element_id))
+      .find(e=>e?.type==='bulk_silo');
+    // Origin facility
+    const origFac=DB.facilities.find(f=>f.id===dp.facility_id)||DB.facilities.find(f=>f.id===S.facility_id);
+    results.push({dp, destCfg, berth:downBerths[0], railSilo:upRailSilo, origFac});
+  });
+  return results;
+}
+
+// Get main production silos at origin that feed the RAIL silo (for inventory display)
+function rpGetOriginProdSilos(dpEl){
+  const allEls=getFacElements();
+  const allConns=DB.connections.filter(c=>c.facility_id===S.facility_id);
+  // Find RAIL silo upstream of dp
+  const railSiloId=(allConns.filter(c=>c.to_element_id===dpEl.id))
+    .map(c=>c.from_element_id)
+    .find(id=>allEls.find(e=>e.id===id&&e.type==='bulk_silo'));
+  if(!railSiloId) return [];
+  // Find mills that feed the RAIL silo
+  const mills=(allConns.filter(c=>c.to_element_id===railSiloId))
+    .map(c=>allEls.find(e=>e.id===c.from_element_id))
+    .filter(e=>e?.type==='finish_mill');
+  // Collect other cement silos these mills also feed
+  const siloIds=new Set();
+  mills.forEach(mill=>{
+    allConns.filter(c=>c.from_element_id===mill.id).forEach(c=>{
+      const el=allEls.find(e=>e.id===c.to_element_id);
+      if(el?.type==='bulk_silo'&&el.id!==railSiloId) siloIds.add(el.id);
+    });
+  });
+  return [...siloIds].map(id=>allEls.find(e=>e.id===id)).filter(Boolean);
+}
+
+// Get destination silo for a berth
+function rpGetDestSilo(berthEl){
+  const allEls=getFacElements();
+  const allConns=DB.connections.filter(c=>c.facility_id===S.facility_id);
+  return (allConns.filter(c=>c.from_element_id===berthEl.id))
+    .map(c=>allEls.find(e=>e.id===c.to_element_id))
+    .find(e=>e?.type==='bulk_silo')||null;
+}
+
+// Get demand element for a destination facility
+function rpGetDestDemEls(destFacId){
+  return getFacElements().filter(e=>e.type==='demand_point'&&
+    (e.assigned_facility_id||e.facility_id)===destFacId);
+}
+
+// ── View range ────────────────────────────────────────────────────
+function rpSetView(preset,btn){
+  _rp.view=preset;
+  document.querySelectorAll('#rail-planner-wrap .vw-btn').forEach(b=>b.classList.remove('active'));
+  if(btn) btn.classList.add('active');
+  rpRender();
+}
+
+function rpGetRange(){
+  const horizon=S.simCfg.horizon||90;
+  const simStart=new Date(S.simCfg.start_date+'T00:00:00');
+  const today=new Date();
+  const todayOff=Math.max(1,Math.round((today-simStart)/864e5)+1);
+  const preset=_rp.view;
+  if(preset==='sim') return {startDay:1,endDay:horizon};
+  if(preset==='15d') return {startDay:todayOff,endDay:Math.min(horizon,todayOff+14)};
+  if(preset==='eom'){const e=new Date(today.getFullYear(),today.getMonth()+1,0);return {startDay:todayOff,endDay:Math.min(horizon,Math.round((e-simStart)/864e5)+1)};}
+  if(preset==='3m'){const e=new Date(today.getFullYear(),today.getMonth()+4,0);return {startDay:todayOff,endDay:Math.min(horizon,Math.round((e-simStart)/864e5)+1)};}
+  if(preset==='eoy'){const e=new Date(today.getFullYear(),11,31);return {startDay:todayOff,endDay:Math.min(horizon,Math.round((e-simStart)/864e5)+1)};}
+  return {startDay:1,endDay:horizon};
+}
+
+function rpDayDate(d){
+  const dt=new Date(S.simCfg.start_date+'T00:00:00');
+  dt.setDate(dt.getDate()+d-1);
+  return dt.toISOString().split('T')[0];
+}
+function rpDayDOW(d){return new Date(S.simCfg.start_date+'T00:00:00').getDay()==0?0:((new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5).getDay()+6)%7);}
+function rpIsSat(d){return new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5).getDay()===6;}
+function rpIsSun(d){return new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5).getDay()===0;}
+function rpIsSwitch(d,switchDays){const dow=(new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5).getDay()+6)%7;return switchDays.includes(dow);}
+
+// ── Destination filter ────────────────────────────────────────────
+function rpBuildDestFilter(){
+  const bar=document.getElementById('rp-dest-filter'); if(!bar) return;
+  const dests=rpGetRailDestinations();
+  bar.innerHTML=dests.map(f=>`
+    <div class="tp-dest-chip ${_rp.dests.includes(f.id)?'active':''}"
+         onclick="rpToggleDest('${f.id}',event)">${f.name}</div>
+  `).join('');
+  if(!dests.length) bar.innerHTML='<span style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">No rail destinations in topology</span>';
+}
+
+function rpToggleDest(facId,ev){
+  if(ev?.ctrlKey||ev?.metaKey){
+    // multi-select
+    const idx=_rp.dests.indexOf(facId);
+    if(idx>=0) _rp.dests.splice(idx,1); else _rp.dests.push(facId);
+  } else {
+    // single select — if already only this one, deselect
+    _rp.dests=_rp.dests.length===1&&_rp.dests[0]===facId?[]:[facId];
+  }
+  rpBuildDestFilter();
+  rpRender();
+}
+
+// ── Demand rate helper ────────────────────────────────────────────
+function rpDemand(elId,d){
+  const dt=new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5);
+  return _demandRate(elId,dt.toISOString().split('T')[0]);
+}
+
+// ── Inventory snapshot from simulation results ────────────────────
+function rpInv(elId,d){
+  if(!S.simResults) return null;
+  const hist=S.simResults.inventoryHistory[elId]||[];
+  if(d<=1){
+    const el=getEl(elId);
+    return parseFloat(el?.props?.start_inventory)||0;
+  }
+  return hist[d-2]??null;
+}
+
+// ── Planned arrivals from DB.rail_movements ───────────────────────
+function rpPlannedArrivalsForDest(destFacId,berthId){
+  // Returns {day: tonnes} for all Planned/Confirmed movements
+  const map={};
+  DB.rail_movements
+    .filter(rm=>rm.to_facility_id===destFacId&&['Planned','Confirmed','In Transit'].includes(rm.status||''))
+    .forEach(rm=>{
+      const depDay=(function(){
+        if(!rm.departure_date||!S.simCfg.start_date) return null;
+        return Math.round((new Date(rm.departure_date)-new Date(S.simCfg.start_date+'T00:00:00'))/864e5)+1;
+      })();
+      if(!depDay) return;
+      const transit=parseInt(rm.transit_days)||1;
+      const arrDay=depDay+transit;
+      map[arrDay]=(map[arrDay]||0)+(rm.total_capacity_t||0);
+    });
+  return map;
+}
+
+// Planned loading at origin per day
+function rpPlannedLoadingForDest(destFacId){
+  const map={};
+  DB.rail_movements
+    .filter(rm=>rm.from_facility_id===S.facility_id&&rm.to_facility_id===destFacId
+      &&['Planned','Confirmed'].includes(rm.status||''))
+    .forEach(rm=>{
+      const sw=rm.switch_day; const ls=rm.load_start_day;
+      if(!sw||!ls) return;
+      const carCap=parseFloat(rm.wagon_capacity_t)||112;
+      const cars=parseInt(rm.wagon_count)||0;
+      for(let d=ls;d<sw;d++){
+        map[d]=(map[d]||0)+Math.min(cars, parseInt(rm._carsPerDay||0)||cars);
+      }
+      // Dispatch on switch day
+      if(!map[`sw_${sw}`]) map[`sw_${sw}`]=0;
+      map[`sw_${sw}`]+=cars;
+    });
+  return map;
+}
+
+// ── Main render ───────────────────────────────────────────────────
+function rpRender(){
+  if(!S.simCfg.start_date){
+    document.getElementById('rp-dest-section').style.display='none';
+    document.getElementById('rp-orig-section').style.display='none';
+    return;
+  }
+  rpBuildDestFilter();
+  const {startDay,endDay}=rpGetRange();
+  const days=[];
+  for(let d=startDay;d<=endDay;d++) days.push(d);
+
+  // Update range label
+  const lbl=document.getElementById('rp-range-lbl');
+  if(lbl) lbl.textContent=`${rpDayDate(startDay).slice(5)} → ${rpDayDate(endDay).slice(5)} (${days.length}d)`;
+
+  const hasDests=_rp.dests.length>0;
+  document.getElementById('rp-dest-section').style.display=hasDests?'':'none';
+  document.getElementById('rp-orig-section').style.display=hasDests?'':'none';
+  document.getElementById('rp-empty').style.display=hasDests?'none':'block';
+  if(!hasDests) return;
+
+  // ── Build column headers ──
+  const thHtml=`<th>Element</th>`+days.map(d=>{
+    const ds=rpDayDate(d).slice(5);
+    let cls='';
+    if(rpIsSat(d)) cls=' class="tp-col-sat"';
+    else if(rpIsSun(d)) cls=' class="tp-col-sun"';
+    return `<th${cls} title="Day ${d}">${ds}</th>`;
+  }).join('');
+  document.getElementById('rp-dest-thead-row').innerHTML=thHtml;
+  document.getElementById('rp-orig-thead-row').innerHTML=thHtml;
+
+  // ── DESTINATION TABLE ─────────────────────────────────────────
+  const destRows=[];
+  _rp.dests.forEach(destFacId=>{
+    const destFac=DB.facilities.find(f=>f.id===destFacId);
+    const origins=rpGetOriginsForDest(destFacId);
+    if(!origins.length) return;
+    const {berth}=origins[0]; // primary rail berth
+    const destSilo=rpGetDestSilo(berth);
+    const demEls=rpGetDestDemEls(destFacId);
+    const arrivals=rpPlannedArrivalsForDest(destFacId,berth?.id);
+
+    // TRANSF/ARRIVAL row — clickable
+    const arrCells=days.map(d=>{
+      const tonnes=arrivals[d]||0;
+      const ds=rpDayDate(d);
+      let cls='tp-cell-clickable';
+      let val='—';
+      if(tonnes>0){cls+=' tp-cell-planned';val=`${Number(tonnes).toLocaleString()}t`;}
+      return `<td class="${cls}" onclick="rpOpenArrivalDialog('${destFacId}','${d}','${ds}')" title="Click to add/edit arrival">${val}</td>`;
+    }).join('');
+    destRows.push(`<tr class="tp-row-arrival"><td>${destFac?.name||destFacId}/TRANSF/ARRIVAL</td>${arrCells}</tr>`);
+
+    // INVENTORY row
+    if(destSilo){
+      const invCells=days.map(d=>{
+        const v=rpInv(destSilo.id,d);
+        const max=parseFloat(destSilo.props?.max_capacity)||0;
+        const floor=(parseFloat(destSilo.props?.critical_floor_pct)||0)/100*max;
+        let style='';
+        if(v!==null&&v<=floor&&floor>0) style=' style="color:var(--red)"';
+        return `<td${style}>${v!==null?Number(v).toLocaleString():'—'}</td>`;
+      }).join('');
+      destRows.push(`<tr class="tp-row-inv"><td style="padding-left:14px">${destSilo.name}</td>${invCells}</tr>`);
+    }
+
+    // DEMAND rows
+    demEls.forEach(el=>{
+      const demCells=days.map(d=>{
+        const v=rpDemand(el.id,d);
+        return `<td style="color:var(--amber)">${v>0?Number(v).toLocaleString():'—'}</td>`;
+      }).join('');
+      destRows.push(`<tr class="tp-row-dem"><td style="padding-left:14px">${el.name}</td>${demCells}</tr>`);
+    });
+  });
+  document.getElementById('rp-dest-tbody').innerHTML=destRows.join('');
+
+  // ── ORIGIN TABLE ──────────────────────────────────────────────
+  const origRows=[];
+  // Collect all unique origins that serve any selected destination
+  const seenDp=new Set();
+  _rp.dests.forEach(destFacId=>{
+    const origins=rpGetOriginsForDest(destFacId);
+    origins.forEach(({dp,destCfg,railSilo,origFac})=>{
+      if(seenDp.has(dp.id)) return;
+      seenDp.add(dp.id);
+
+      const switchDays=dp.props?.switch_days||[];
+      const carCap=parseFloat(dp.props?.car_capacity_t)||112;
+      const carsPerDay=(parseFloat(dp.props?.std_loading_cars_shift||dp.props?.std_loading_cars_day)||10)
+                       *(parseFloat(dp.props?.shifts_per_day)||1);
+
+      // Get all selected destinations this dp serves
+      const myDests=_rp.dests.filter(fid=>(dp.props?.destinations||[]).find(d=>d.facility_id===fid));
+
+      // Production inventory silos (main cement silos)
+      const prodSilos=rpGetOriginProdSilos(dp);
+      prodSilos.forEach(silo=>{
+        const invCells=days.map(d=>{
+          const v=rpInv(silo.id,d);
+          return `<td>${v!==null?Number(v).toLocaleString():'—'}</td>`;
+        }).join('');
+        origRows.push(`<tr class="tp-row-orig-inv"><td style="color:#ff9433">${silo.name}</td>${invCells}</tr>`);
+      });
+
+      // RAIL transfer silo inventory
+      if(railSilo){
+        const railCells=days.map(d=>{
+          const v=rpInv(railSilo.id,d);
+          return `<td style="color:#38bdf8">${v!==null?Number(v).toLocaleString():'—'}</td>`;
+        }).join('');
+        origRows.push(`<tr class="tp-row-rail-silo"><td style="color:#38bdf8">${railSilo.name}</td>${railCells}</tr>`);
+      }
+
+      // Loading per day (from planned rail movements)
+      const loadMap={}; const dispMap={};
+      myDests.forEach(destFacId=>{
+        const dCfg=(dp.props?.destinations||[]).find(d=>d.facility_id===destFacId);
+        DB.rail_movements
+          .filter(rm=>rm.from_facility_id===S.facility_id&&rm.to_facility_id===destFacId
+            &&['Planned','Confirmed'].includes(rm.status||''))
+          .forEach(rm=>{
+            const sw=rm.switch_day; const ls=rm.load_start_day;
+            if(!sw||!ls) return;
+            const cars=parseInt(rm.wagon_count)||0;
+            const daysLoad=sw-ls||1;
+            const cpd=Math.ceil(cars/daysLoad);
+            for(let d=ls;d<sw;d++) loadMap[d]=(loadMap[d]||0)+cpd;
+            dispMap[sw]=(dispMap[sw]||0)+cars;
+          });
+      });
+
+      const loadCells=days.map(d=>{
+        const cars=loadMap[d]||0;
+        let cls=rpIsSwitch(d,switchDays)?' class="tp-col-switch"':'';
+        return `<td${cls}>${cars>0?`${cars} cars`:'—'}</td>`;
+      }).join('');
+      origRows.push(`<tr class="tp-row-loading"><td style="color:#4da6ff">  ↑ Loading (cars/d)</td>${loadCells}</tr>`);
+
+      // Dispatch on switch days
+      const dispCells=days.map(d=>{
+        const cars=dispMap[d]||0;
+        let cls=rpIsSwitch(d,switchDays)?` class="tp-col-switch"`:'';
+        return `<td${cls}>${cars>0?`<span style="color:var(--amber)">${cars} cars</span>`:'—'}</td>`;
+      }).join('');
+      origRows.push(`<tr class="tp-row-dispatch"><td style="color:#ff9433">  ⇒ Dispatch (switch day)</td>${dispCells}</tr>`);
+    });
+  });
+  document.getElementById('rp-orig-tbody').innerHTML=origRows.join('');
+}
+
+// ── Arrival dialog ─────────────────────────────────────────────────
+function rpOpenArrivalDialog(destFacId,dayNum,arrDateStr){
+  if(!S.simCfg.start_date) return;
+  const origins=rpGetOriginsForDest(destFacId);
+  if(!origins.length){alert('No rail dispatch point connected to this destination in the topology.');return;}
+
+  // Check if there's already a planned movement for this arrival date
+  const existing=DB.rail_movements.find(rm=>
+    rm.to_facility_id===destFacId&&rm.status==='Planned'&&
+    (function(){
+      const dep=rm.departure_date;
+      if(!dep) return false;
+      const depDay=Math.round((new Date(dep)-new Date(S.simCfg.start_date+'T00:00:00'))/864e5)+1;
+      return (depDay+parseInt(rm.transit_days||1))===parseInt(dayNum);
+    })()
+  );
+
+  const destFac=DB.facilities.find(f=>f.id===destFacId);
+
+  // Build origin options
+  const origOpts=origins.map((o,i)=>`<option value="${i}">${o.origFac?.name||'BRS'} via ${o.dp.name}</option>`).join('');
+
+  // Build product options from first origin
+  const firstOrig=origins[0];
+  const acceptedProds=firstOrig.destCfg?.accepted_products||[];
+  const prodOpts=acceptedProds.map(pid=>{
+    const p=DB.products.find(x=>x.id===pid);
+    return `<option value="${pid}">${p?.name||pid}</option>`;
+  }).join('')||'<option value="">— any —</option>';
+
+  // Build modal
+  const modal=document.createElement('div');
+  modal.className='tp-modal';
+  modal.id='tp-arrival-modal';
+  modal.innerHTML=`
+    <div class="tp-modal-box">
+      <div class="tp-modal-title">Rail Arrival — ${destFac?.name||destFacId} · ${arrDateStr}</div>
+      <div class="tp-modal-field">
+        <label class="tp-modal-label">Origin</label>
+        <select class="fi" id="tp-orig-sel" onchange="rpUpdateDepCalc()">${origOpts}</select>
+      </div>
+      <div class="tp-modal-field">
+        <label class="tp-modal-label">Product</label>
+        <select class="fi" id="tp-prod-sel">${prodOpts}</select>
+      </div>
+      <div class="tp-modal-field">
+        <label class="tp-modal-label">Number of railcars</label>
+        <input class="fi" type="number" id="tp-cars-inp" min="1" value="${existing?.wagon_count||10}" oninput="rpUpdateDepCalc()">
+        <div class="tp-modal-hint" id="tp-cars-hint"></div>
+      </div>
+      <div class="tp-modal-field" style="background:var(--surface2);padding:8px;font-family:var(--mono);font-size:8px">
+        <div style="color:var(--text-dim);margin-bottom:4px">CALCULATED SCHEDULE</div>
+        <div id="tp-dep-calc" style="line-height:1.8;color:var(--text)">—</div>
+      </div>
+      <div class="tp-modal-warn" id="tp-dep-warn"></div>
+      <div class="tp-modal-actions">
+        ${existing?`<button class="tb-btn sec" onclick="rpDeleteArrival('${existing.id}')">Delete</button>`:''}
+        <button class="tb-btn sec" onclick="document.getElementById('tp-arrival-modal').remove()">Cancel</button>
+        <button class="tb-btn blue" onclick="rpSaveArrival('${destFacId}','${dayNum}','${arrDateStr}')">Accept</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  // Store context
+  modal._destFacId=destFacId;
+  modal._arrDay=parseInt(dayNum);
+  modal._arrDate=arrDateStr;
+  modal._origins=origins;
+  rpUpdateDepCalc();
+}
+
+function rpUpdateDepCalc(){
+  const modal=document.getElementById('tp-arrival-modal');
+  if(!modal) return;
+  const origIdx=parseInt(document.getElementById('tp-orig-sel')?.value)||0;
+  const cars=parseInt(document.getElementById('tp-cars-inp')?.value)||0;
+  const orig=modal._origins[origIdx];
+  if(!orig){document.getElementById('tp-dep-calc').textContent='—';return;}
+
+  const carCap=parseFloat(orig.dp.props?.car_capacity_t)||112;
+  const carsPerDay=(parseFloat(orig.dp.props?.std_loading_cars_shift||orig.dp.props?.std_loading_cars_day)||10)
+                   *(parseFloat(orig.dp.props?.shifts_per_day)||1);
+  const transit=parseInt(orig.destCfg.transit_days)||1;
+  const switchDays=orig.dp.props?.switch_days||[];
+  const arrDay=modal._arrDay;
+  const tonnes=cars*carCap;
+
+  // Required departure = arrival - transit
+  const requiredDepDay=arrDay-transit;
+
+  // Find latest switch day <= requiredDepDay
+  let switchDay=null;
+  for(let d=requiredDepDay;d>=1;d--){
+    const dow=(new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5).getDay()+6)%7;
+    if(switchDays.includes(dow)){switchDay=d;break;}
+  }
+
+  // If no switch day found before requiredDepDay, push to next switch AFTER
+  let pushed=false;
+  if(!switchDay){
+    for(let d=requiredDepDay+1;d<=requiredDepDay+14;d++){
+      const dow=(new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5).getDay()+6)%7;
+      if(switchDays.includes(dow)){switchDay=d;pushed=true;break;}
+    }
+  }
+
+  if(!switchDay){
+    document.getElementById('tp-dep-calc').textContent='No valid switch day found in range.';
+    return;
+  }
+
+  // Actual arrival = switchDay + transit
+  const actualArrDay=switchDay+transit;
+  const actualArrDate=rpDayDate(actualArrDay);
+
+  // Loading window
+  const loadDays=Math.max(1,Math.ceil(cars/carsPerDay));
+  const loadStart=switchDay-loadDays;
+
+  document.getElementById('tp-dep-calc').innerHTML=
+    `Departs: <b>${rpDayDate(switchDay)}</b> (Day ${switchDay}) &nbsp;·&nbsp; Switch: ${['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][(new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(switchDay-1)*864e5).getDay()+6)%7]}<br>`+
+    `Arrival: <b>${actualArrDate}</b> (Day ${actualArrDay})${pushed?` <span style="color:var(--amber)">[pushed — actual arrival: ${actualArrDate}]</span>`:''}<br>`+
+    `Transit: ${transit} days &nbsp;·&nbsp; Total: ${Number(tonnes).toLocaleString()} t<br>`+
+    `Loading: ${rpDayDate(loadStart)} → ${rpDayDate(switchDay-1)} (${loadDays}d @ ${carsPerDay} cars/d)`;
+
+  document.getElementById('tp-dep-warn').textContent=pushed?
+    `⚠ No switch day before required departure — pushed to ${rpDayDate(switchDay)}, arrival shifts to ${actualArrDate}`:'';
+
+  // Store for save
+  modal._switchDay=switchDay;
+  modal._loadStart=loadStart;
+  modal._transit=transit;
+  modal._carsPerDay=carsPerDay;
+  modal._carCap=carCap;
+  modal._origIdx=origIdx;
+}
+
+function rpSaveArrival(destFacId,dayNum,arrDateStr){
+  const modal=document.getElementById('tp-arrival-modal');
+  if(!modal) return;
+  const origIdx=modal._origIdx??0;
+  const orig=modal._origins[origIdx];
+  const cars=parseInt(document.getElementById('tp-cars-inp')?.value)||0;
+  const prodId=document.getElementById('tp-prod-sel')?.value||'';
+  const switchDay=modal._switchDay;
+  const loadStart=modal._loadStart;
+  const transit=modal._transit;
+  const carCap=modal._carCap;
+  const carsPerDay=modal._carsPerDay;
+
+  if(!switchDay||!orig||cars<=0) return;
+
+  const depDate=rpDayDate(switchDay);
+  const destFac=DB.facilities.find(f=>f.id===destFacId);
+  const origFac=orig.origFac;
+
+  // Remove existing planned movement for same arrival date if any
+  DB.rail_movements=DB.rail_movements.filter(rm=>{
+    if(rm.to_facility_id!==destFacId||rm.status!=='Planned') return true;
+    const dep=rm.departure_date; if(!dep) return true;
+    const depDay=Math.round((new Date(dep)-new Date(S.simCfg.start_date+'T00:00:00'))/864e5)+1;
+    return (depDay+parseInt(rm.transit_days||1))!==parseInt(dayNum);
+  });
+
+  DB.rail_movements.push({
+    id:`rm_plan_${Date.now()}`,
+    from_facility_id:S.facility_id,
+    to_facility_id:destFacId,
+    from_dispatch_id:orig.dp.id,
+    to_berth_id:orig.berth?.id||'',
+    to_silo_id:rpGetDestSilo(orig.berth)?.id||'',
+    reference:`PLAN-${depDate}-${destFac?.name||destFacId}`,
+    departure_date:depDate,
+    wagon_count:cars,
+    wagon_capacity_t:carCap,
+    total_capacity_t:Math.round(cars*carCap),
+    product_id:prodId,
+    transit_days:transit,
+    switch_day:switchDay,
+    load_start_day:loadStart,
+    _carsPerDay:carsPerDay,
+    min_load_pct:80,
+    notes:`Planned arrival ${arrDateStr}`,
+    status:'Planned'
+  });
+
+  autoSave();
+  modal.remove();
+  rpRender();
+  renderRailTable();
+  statMsg(`Rail movement planned: ${cars} cars → ${destFac?.name||destFacId} arriving ${rpDayDate(switchDay+transit)}`);
+}
+
+function rpDeleteArrival(rmId){
+  DB.rail_movements=DB.rail_movements.filter(rm=>rm.id!==rmId);
+  autoSave();
+  document.getElementById('tp-arrival-modal')?.remove();
+  rpRender();
+  renderRailTable();
+  statMsg('Rail movement deleted');
+}
+
+function _rpToggleLegacy(){
+  const w=document.getElementById('rp-legacy-wrap');
+  if(!w) return;
+  const shown=w.style.display!=='none';
+  w.style.display=shown?'none':'block';
+  const btn=document.querySelector('[onclick="_rpToggleLegacy()"]');
+  if(btn) btn.textContent=shown?'▼ Show Records':'▲ Hide Records';
+  if(!shown) renderRailTable();
+}
+
+// ══════════════════════════════════════════════════════════════════
+// TRANSPORT PLANNER — Vessel Schedule
+// ══════════════════════════════════════════════════════════════════
+const _vp={view:'sim',dests:[]};
+
+function vpGetVesselDestinations(){
+  return getFacElements()
+    .filter(e=>e.type==='berth'&&!(e.props?.berth_type||'').toLowerCase().includes('rail'))
+    .map(e=>DB.facilities.find(f=>f.id===(e.assigned_facility_id||e.facility_id)))
+    .filter(Boolean)
+    .filter((f,i,a)=>a.findIndex(x=>x.id===f.id)===i);
+}
+
+function vpSetView(preset,btn){
+  _vp.view=preset;
+  document.querySelectorAll('#vessel-planner-wrap .vw-btn').forEach(b=>b.classList.remove('active'));
+  if(btn) btn.classList.add('active');
+  vpRender();
+}
+
+function vpGetRange(){
+  const horizon=S.simCfg.horizon||90;
+  const simStart=new Date(S.simCfg.start_date+'T00:00:00');
+  const today=new Date();
+  const todayOff=Math.max(1,Math.round((today-simStart)/864e5)+1);
+  const preset=_vp.view;
+  if(preset==='sim') return {startDay:1,endDay:horizon};
+  if(preset==='15d') return {startDay:todayOff,endDay:Math.min(horizon,todayOff+14)};
+  if(preset==='eom'){const e=new Date(today.getFullYear(),today.getMonth()+1,0);return {startDay:todayOff,endDay:Math.min(horizon,Math.round((e-simStart)/864e5)+1)};}
+  if(preset==='3m'){const e=new Date(today.getFullYear(),today.getMonth()+4,0);return {startDay:todayOff,endDay:Math.min(horizon,Math.round((e-simStart)/864e5)+1)};}
+  if(preset==='eoy'){const e=new Date(today.getFullYear(),11,31);return {startDay:todayOff,endDay:Math.min(horizon,Math.round((e-simStart)/864e5)+1)};}
+  return {startDay:1,endDay:horizon};
+}
+
+function vpDayDate(d){
+  const dt=new Date(S.simCfg.start_date+'T00:00:00');
+  dt.setDate(dt.getDate()+d-1);
+  return dt.toISOString().split('T')[0];
+}
+
+function vpBuildDestFilter(){
+  const bar=document.getElementById('vp-dest-filter'); if(!bar) return;
+  const dests=vpGetVesselDestinations();
+  bar.innerHTML=dests.map(f=>`
+    <div class="tp-dest-chip ${_vp.dests.includes(f.id)?'active':''}"
+         onclick="vpToggleDest('${f.id}',event)">${f.name}</div>
+  `).join('');
+  if(!dests.length) bar.innerHTML='<span style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">No vessel destinations in topology</span>';
+}
+
+function vpToggleDest(facId,ev){
+  if(ev?.ctrlKey||ev?.metaKey){
+    const idx=_vp.dests.indexOf(facId);
+    if(idx>=0) _vp.dests.splice(idx,1); else _vp.dests.push(facId);
+  } else {
+    _vp.dests=_vp.dests.length===1&&_vp.dests[0]===facId?[]:[facId];
+  }
+  vpBuildDestFilter();
+  vpRender();
+}
+
+function vpRender(){
+  if(!S.simCfg.start_date) return;
+  vpBuildDestFilter();
+  const {startDay,endDay}=vpGetRange();
+  const days=[];
+  for(let d=startDay;d<=endDay;d++) days.push(d);
+
+  const lbl=document.getElementById('vp-range-lbl');
+  if(lbl) lbl.textContent=`${vpDayDate(startDay).slice(5)} → ${vpDayDate(endDay).slice(5)} (${days.length}d)`;
+
+  const hasDests=_vp.dests.length>0;
+  document.getElementById('vp-dest-section').style.display=hasDests?'':'none';
+  document.getElementById('vp-orig-section').style.display=hasDests?'':'none';
+  if(!hasDests) return;
+
+  const thHtml=`<th>Element</th>`+days.map(d=>{
+    const ds=vpDayDate(d).slice(5);
+    let cls='';
+    if(new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5).getDay()===6) cls=' class="tp-col-sat"';
+    else if(new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5).getDay()===0) cls=' class="tp-col-sun"';
+    return `<th${cls}>${ds}</th>`;
+  }).join('');
+  document.getElementById('vp-dest-thead-row').innerHTML=thHtml;
+  document.getElementById('vp-orig-thead-row').innerHTML=thHtml;
+
+  const destRows=[];
+  _vp.dests.forEach(destFacId=>{
+    const destFac=DB.facilities.find(f=>f.id===destFacId);
+    const berths=getFacElements().filter(e=>e.type==='berth'&&
+      (e.assigned_facility_id||e.facility_id)===destFacId&&
+      !(e.props?.berth_type||'').toLowerCase().includes('rail'));
+    berths.forEach(berth=>{
+      const destSilo=rpGetDestSilo(berth);
+      const demEls=rpGetDestDemEls(destFacId);
+
+      // Planned vessel arrivals for this berth
+      const arrMap={};
+      DB.vessel_calls.filter(vc=>vc.berth_element_id===berth.id&&
+        ['Planned','Confirmed','In Transit','Unloading'].includes(vc.status||'Planned'))
+        .forEach(vc=>{
+          const arrDay=Math.round((new Date(vc.arrival_date)-new Date(S.simCfg.start_date+'T00:00:00'))/864e5)+1;
+          arrMap[arrDay]=(arrMap[arrDay]||0)+(parseFloat(vc.quantity_t)||0);
+        });
+
+      // VESSEL/ARRIVAL row — clickable
+      const arrCells=days.map(d=>{
+        const tonnes=arrMap[d]||0;
+        let cls='tp-cell-clickable';
+        let val='—';
+        if(tonnes>0){cls+=' tp-cell-planned';val=`${Number(tonnes).toLocaleString()}t`;}
+        return `<td class="${cls}" onclick="vpOpenArrivalDialog('${destFacId}','${berth.id}','${d}','${vpDayDate(d)}')" title="Click to add vessel arrival">${val}</td>`;
+      }).join('');
+      destRows.push(`<tr class="tp-row-arrival"><td>${destFac?.name||destFacId}/VESSEL/ARRIVAL</td>${arrCells}</tr>`);
+
+      if(destSilo){
+        const invCells=days.map(d=>{
+          const v=rpInv(destSilo.id,d);
+          const max=parseFloat(destSilo.props?.max_capacity)||0;
+          const floor=(parseFloat(destSilo.props?.critical_floor_pct)||0)/100*max;
+          let style='';
+          if(v!==null&&v<=floor&&floor>0) style=' style="color:var(--red)"';
+          return `<td${style}>${v!==null?Number(v).toLocaleString():'—'}</td>`;
+        }).join('');
+        destRows.push(`<tr class="tp-row-inv"><td style="padding-left:14px">${destSilo.name}</td>${invCells}</tr>`);
+      }
+      demEls.forEach(el=>{
+        const demCells=days.map(d=>{const v=rpDemand(el.id,d);return `<td style="color:var(--amber)">${v>0?Number(v).toLocaleString():'—'}</td>`;}).join('');
+        destRows.push(`<tr class="tp-row-dem"><td style="padding-left:14px">${el.name}</td>${demCells}</tr>`);
+      });
+    });
+  });
+  document.getElementById('vp-dest-tbody').innerHTML=destRows.join('');
+  document.getElementById('vp-orig-tbody').innerHTML=
+    `<tr><td colspan="999" style="color:var(--text-dim);font-size:9px;padding:10px">Vessels are external supply — no origin inventory deducted</td></tr>`;
+}
+
+function vpOpenArrivalDialog(destFacId,berthId,dayNum,arrDateStr){
+  const destFac=DB.facilities.find(f=>f.id===destFacId);
+  const berthEl=getEl(berthId);
+  // Find connected silo
+  const destSilo=rpGetDestSilo(berthEl);
+  // Products from silo
+  const prodOpts=(destSilo?getSiloProducts(destSilo):[]).map(pid=>{
+    const p=DB.products.find(x=>x.id===pid);
+    return `<option value="${pid}">${p?.name||pid}</option>`;
+  }).join('')||'<option value="">— select —</option>';
+
+  const modal=document.createElement('div');
+  modal.className='tp-modal';
+  modal.id='tp-vessel-modal';
+  modal.innerHTML=`
+    <div class="tp-modal-box">
+      <div class="tp-modal-title">Vessel Arrival — ${destFac?.name||destFacId} · ${arrDateStr}</div>
+      <div class="tp-modal-field">
+        <label class="tp-modal-label">Berth</label>
+        <div style="font-family:var(--mono);font-size:9px;color:var(--blue)">${berthEl?.name||berthId}</div>
+      </div>
+      <div class="tp-modal-field">
+        <label class="tp-modal-label">Product</label>
+        <select class="fi" id="vp-prod-sel">${prodOpts}</select>
+      </div>
+      <div class="tp-modal-field">
+        <label class="tp-modal-label">Quantity (t)</label>
+        <input class="fi" type="number" id="vp-qty-inp" min="1" value="5000">
+      </div>
+      <div class="tp-modal-field">
+        <label class="tp-modal-label">Unload Rate (t/h)</label>
+        <input class="fi" type="number" id="vp-rate-inp" min="1" value="${berthEl?.props?.default_unload_rate_tph||200}">
+      </div>
+      <div class="tp-modal-actions">
+        <button class="tb-btn sec" onclick="document.getElementById('tp-vessel-modal').remove()">Cancel</button>
+        <button class="tb-btn amber" onclick="vpSaveArrival('${destFacId}','${berthId}','${dayNum}','${arrDateStr}')">Accept</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+function vpSaveArrival(destFacId,berthId,dayNum,arrDateStr){
+  const qty=parseFloat(document.getElementById('vp-qty-inp')?.value)||0;
+  const rate=parseFloat(document.getElementById('vp-rate-inp')?.value)||200;
+  const prodId=document.getElementById('vp-prod-sel')?.value||'';
+  const destFac=DB.facilities.find(f=>f.id===destFacId);
+  if(qty<=0) return;
+  DB.vessel_calls.push({
+    id:`vc_plan_${Date.now()}`,
+    name:`VESSEL-${arrDateStr}-${destFac?.name||destFacId}`,
+    berth_element_id:berthId,
+    arrival_date:arrDateStr,
+    quantity_t:qty,
+    unload_rate_tph:rate,
+    product_id:prodId,
+    transit_days:0,
+    status:'Planned'
+  });
+  autoSave();
+  document.getElementById('tp-vessel-modal')?.remove();
+  vpRender();
+  renderVesselTable();
+  statMsg(`Vessel arrival planned: ${Number(qty).toLocaleString()}t → ${destFac?.name||destFacId} on ${arrDateStr}`);
+}
+
+function _vpToggleLegacy(){
+  const w=document.getElementById('vp-legacy-wrap');
+  if(!w) return;
+  const shown=w.style.display!=='none';
+  w.style.display=shown?'none':'block';
+  const btn=document.querySelector('[onclick="_vpToggleLegacy()"]');
+  if(btn) btn.textContent=shown?'▼ Show Records':'▲ Hide Records';
+  if(!shown) renderVesselTable();
 }
 
 function renderRailTable(){
