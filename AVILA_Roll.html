@@ -6722,84 +6722,104 @@ function renderDtree(r){
 
   // ── 1. CEM DEMAND ────────────────────────────────────
   const allDemEls=fac.filter(e=>e.type==='demand_point');
-  const demGroup=buildDemandGroup(allDemEls,'demand_total');
-  if(demGroup) groups.push(demGroup);
+  // Group demand elements by facility
+  const demByFac={};
+  allDemEls.forEach(el=>{
+    const facId=el.assigned_facility_id||S.facility_id;
+    if(!demByFac[facId]) demByFac[facId]=[];
+    demByFac[facId].push(el);
+  });
+  if(Object.keys(demByFac).length){
+    const facGroups=Object.entries(demByFac).map(([facId,els])=>{
+      const facName=DB.facilities.find(f=>f.id===facId)?.name||facId;
+      const children=els.map(el=>{
+        const dp=DB.demand_points.find(d=>d.element_id===el.id||d.id===`dp_el_${el.id}`);
+        const firstProd=(dp?.products||[])[0];
+        const prodName=firstProd?DB.products.find(p=>p.id===firstProd.product_id)?.name||firstProd.product_id:el.name;
+        return {id:`dem_el_${el.id}`,label:prodName,days:days.map(d=>{
+          const dt=new Date(S.simCfg.start_date+'T00:00:00');dt.setDate(dt.getDate()+(d-1));
+          return _demandRate(el.id,dt.toISOString().split('T')[0]);
+        }),color:C_L2,isRate:true};
+      });
+      const subtotals=days.map((_,i)=>children.reduce((s,c)=>s+(c.days[i]||0),0));
+      return {id:`dem_fac_${facId}`,label:facName,color:C_L1,children,totals:subtotals,isFacHeader:true};
+    });
+    const grandTotals=days.map((_,i)=>facGroups.reduce((s,g)=>s+g.totals[i],0));
+    groups.push({id:'demand_total',label:'CEM Demand / Total',color:C_L0,facGroups,totals:grandTotals});
+  }
+
+  // Helper: group elements by facility and build facGroups structure
+  function buildFacGroups(els, childFn, groupId, groupLabel){
+    const byFac={};
+    els.forEach(el=>{
+      const facId=el.assigned_facility_id||S.facility_id;
+      if(!byFac[facId]) byFac[facId]=[];
+      byFac[facId].push(el);
+    });
+    if(!Object.keys(byFac).length) return null;
+    const facGroups=Object.entries(byFac).map(([facId,facEls])=>{
+      const facName=DB.facilities.find(f=>f.id===facId)?.name||facId;
+      const children=facEls.map(el=>childFn(el));
+      const subtotals=days.map((_,i)=>children.reduce((s,c)=>s+(c.days[i]??0),0));
+      return {id:`${groupId}_fac_${facId}`,label:facName,color:C_L1,children,totals:subtotals,isFacHeader:true};
+    });
+    const grandTotals=days.map((_,i)=>facGroups.reduce((s,g)=>s+g.totals[i],0));
+    if(!grandTotals.some(v=>v>0)) return null;
+    return {id:groupId,label:groupLabel,color:C_L0,facGroups,totals:grandTotals};
+  }
 
   // ── 2. CLK DEMAND ────────────────────────────────────
   if(fms.length){
-    const children=fms.map(fm=>({
-      id:`clk_req_${fm.id}`, label:`CLK Required → ${fm.name}`,
+    const clkReqGroup=buildFacGroups(fms, fm=>({
+      id:`clk_req_${fm.id}`,label:`CLK Req → ${fm.name}`,color:C_L2,isRate:true,
       days:days.map(d=>{
-        const rate=prod(fm.id,d);
-        if(!rate) return 0;
-        const activeProd=r.millProductHistory?.[fm.id]?.[d-1]||null;
-        if(!activeProd) return 0;
+        const rate=prod(fm.id,d); if(!rate) return 0;
+        const activeProd=r.millProductHistory?.[fm.id]?.[d-1]||null; if(!activeProd) return 0;
         const recipe=DB.recipes.filter(ri=>ri.product_id===activeProd&&parseFloat(ri.pct)>0);
         const clkIng=recipe.find(ri=>DB.products.find(p=>p.id===ri.material_id)?.category==='clinker'||ri.material_id==='clinker');
-        const clkPct=clkIng?clkIng.pct/100:0;
-        return Math.round(rate*clkPct);
-      }),
-      color:C_L1, isRate:true
-    }));
-    const totals=days.map((_,i)=>children.reduce((s,c)=>s+c.days[i],0));
-    if(totals.some(v=>v>0))
-      groups.push({id:'clk_req',label:'CLK Demand / Total',color:C_L0,children,totals});
+        return Math.round(rate*(clkIng?clkIng.pct/100:0));
+      })
+    }),'clk_req','CLK Demand / Total');
+    if(clkReqGroup) groups.push(clkReqGroup);
   }
 
   // ── 3. CLK INVENTORY ─────────────────────────────────
   if(clinkerSilos.length){
-    const children=clinkerSilos.map(el=>({
-      id:`clk_inv_${el.id}`, label:el.name,
-      days:days.map(d=>inv(el.id,d)),
-      color:C_L1, isRate:false
-    }));
-    const totals=days.map((_,i)=>children.reduce((s,c)=>s+(c.days[i]??0),0));
-    if(totals.some(v=>v>0))
-      groups.push({id:'clk_inv',label:'CLK Inventory',color:C_L0,children,totals});
+    const clkInvGroup=buildFacGroups(clinkerSilos,
+      el=>({id:`clk_inv_${el.id}`,label:el.name,color:C_L2,isRate:false,days:days.map(d=>inv(el.id,d))}),
+      'clk_inv','CLK Inventory');
+    if(clkInvGroup) groups.push(clkInvGroup);
   }
 
   // ── 4. CLK PRODUCTION ────────────────────────────────
   if(kilns.length){
-    const children=kilns.map(el=>({
-      id:`clk_prod_${el.id}`, label:el.name,
-      days:days.map(d=>prod(el.id,d)),
-      color:C_L1, isRate:true
-    }));
-    const totals=days.map((_,i)=>children.reduce((s,c)=>s+c.days[i],0));
-    if(totals.some(v=>v>0))
-      groups.push({id:'clk_prod',label:'CLK Production / Total',color:C_L0,children,totals});
+    const clkProdGroup=buildFacGroups(kilns,
+      el=>({id:`clk_prod_${el.id}`,label:el.name,color:C_L2,isRate:true,days:days.map(d=>prod(el.id,d))}),
+      'clk_prod','CLK Production / Total');
+    if(clkProdGroup) groups.push(clkProdGroup);
   }
 
   // ── 5. CEM INVENTORY ─────────────────────────────────
   if(cementSilos.length){
-    const children=cementSilos.map(el=>({
-      id:`cem_inv_${el.id}`, label:el.name,
-      days:days.map(d=>inv(el.id,d)),
-      color:C_L1, isRate:false
-    }));
-    const totals=days.map((_,i)=>children.reduce((s,c)=>s+(c.days[i]??0),0));
-    if(totals.some(v=>v>0))
-      groups.push({id:'cem_inv',label:'CEM Inventory / Total',color:C_L0,children,totals});
+    const cemInvGroup=buildFacGroups(cementSilos,
+      el=>({id:`cem_inv_${el.id}`,label:el.name,color:C_L2,isRate:false,days:days.map(d=>inv(el.id,d))}),
+      'cem_inv','CEM Inventory / Total');
+    if(cemInvGroup) groups.push(cemInvGroup);
   }
 
   // ── 6. CEM PRODUCTION ────────────────────────────────
   if(fms.length){
     const productColors={};
-    const palColors=[C_L1,'var(--amber)','var(--blue)','#cc7aff','#ff8c42'];
+    const palColors=[C_L2,'var(--amber)','var(--blue)','#cc7aff','#ff8c42'];
     let palIdx=0;
     DB.products.forEach(p=>{ productColors[p.id]=palColors[palIdx++%palColors.length]; });
-    const children=fms.map(el=>({
-      id:`cem_prod_${el.id}`, label:el.name,
+    const cemProdGroup=buildFacGroups(fms, el=>({
+      id:`cem_prod_${el.id}`,label:el.name,color:C_L2,isRate:true,
       days:days.map(d=>prod(el.id,d)),
-      dayProducts:days.map(d=>{
-        const ph=r.millProductHistory?.[el.id];
-        return ph?ph[d-1]||null:null;
-      }),
-      productColors, color:C_L1, isRate:true
-    }));
-    const totals=days.map((_,i)=>children.reduce((s,c)=>s+c.days[i],0));
-    if(totals.some(v=>v>0))
-      groups.push({id:'cem_prod',label:'CEM Production / Total',color:C_L0,children,totals});
+      dayProducts:days.map(d=>{const ph=r.millProductHistory?.[el.id];return ph?ph[d-1]||null:null;}),
+      productColors
+    }),'cem_prod','CEM Production / Total');
+    if(cemProdGroup) groups.push(cemProdGroup);
   }
 
   // ── 7. CEM TRANSFERS / IMPORTS ───────────────────────
@@ -6959,62 +6979,72 @@ function renderDtree(r){
 
   groups.forEach(g=>{
     const collapsed=_dtreeCollapsed[g.id];
-    // Group header row — Level 0 (green)
     h+=`<tr class="dtree-row-group" onclick="toggleDtreeGroup('${g.id}')">
       <td class="td-label" style="color:${C_L0}">
         <span class="dtree-expand ${collapsed?'':'open'}" id="dtx-${g.id}">▶</span>
         ${g.label}
       </td>
       ${g.totals&&g.totals.some(v=>v!==null&&v!==undefined)
-        ? shownDays.map(d=>{
-            const i=days.indexOf(d);
-            const v=g.totals[i]??null;
-            const wk=wkendTdStyle(d);
+        ? shownDays.map(d=>{const i=days.indexOf(d);const v=g.totals[i]??null;const wk=wkendTdStyle(d);
             return `<td style="color:${C_L0};font-weight:500;${wk}">${v!==null&&v>0?Number(v).toLocaleString():'—'}</td>`;
           }).join('')
-        : `<td colspan="${shownDays.length}" style="color:var(--text-dim);font-size:8px"></td>`}
+        : `<td colspan="${shownDays.length}"></td>`}
     </tr>`;
-    // Child rows
-    g.children.forEach(c=>{
+
+    // Groups with facGroups: L0 → L1(facility, blue) → L2(element, orange)
+    if(g.facGroups){
+      g.facGroups.forEach(fg=>{
+        const facCollapsed=_dtreeCollapsed[fg.id];
+        h+=`<tr class="dtree-row-child ${collapsed?'hidden':''}" id="dtc-${g.id}"
+              style="cursor:pointer" onclick="event.stopPropagation();toggleDtreeGroup('${fg.id}')">
+          <td class="td-label" style="color:${C_L1};padding-left:18px">
+            <span class="dtree-expand ${facCollapsed?'':'open'}" id="dtx-${fg.id}" style="font-size:8px">▶</span>
+            ${fg.label}
+          </td>
+          ${shownDays.map(d=>{const i=days.indexOf(d);const v=fg.totals[i]??null;const wk=wkendTdStyle(d);
+            return `<td style="color:${C_L1};${wk}">${v!==null&&v>0?Number(v).toLocaleString():'—'}</td>`;
+          }).join('')}
+        </tr>`;
+        (fg.children||[]).forEach(c=>{
+          h+=`<tr class="dtree-row-child ${collapsed||facCollapsed?'hidden':''}" id="dtc-${fg.id}">
+            <td class="td-label" style="color:${C_L2};padding-left:36px">${c.label}</td>
+            ${shownDays.map((d,si)=>fmtVal(c.days[days.indexOf(d)],c.isRate,c.unit,days.indexOf(d),c,d)).join('')}
+          </tr>`;
+        });
+      });
+      return;
+    }
+
+    // Groups with flat children (transfers/imports)
+    (g.children||[]).forEach(c=>{
       if(c.isGroup){
-        // Sub-group header — Level 1 (orange)
         const subCollapsed=_dtreeCollapsed[c.id];
         h+=`<tr class="dtree-row-child ${collapsed?'hidden':''}" id="dtc-${g.id}"
               style="cursor:pointer" onclick="toggleDtreeGroup('${c.id}')">
-          <td class="td-label" style="color:${C_L1};padding-left:22px">
+          <td class="td-label" style="color:${C_L1};padding-left:18px">
             <span class="dtree-expand ${subCollapsed?'':'open'}" id="dtx-${c.id}" style="font-size:8px">▶</span>
             ${c.label}
           </td>
           ${c.totals
-            ? shownDays.map(d=>{
-                const i=days.indexOf(d);
-                const v=c.totals[i]??0;
-                return `<td style="color:${C_L1}">${v>0?Number(v).toLocaleString():'—'}</td>`;
-              }).join('')
+            ? shownDays.map(d=>{const i=days.indexOf(d);const v=c.totals[i]??0;return `<td style="color:${C_L1}">${v>0?Number(v).toLocaleString():'—'}</td>`;}).join('')
             : `<td colspan="${shownDays.length}"></td>`}
         </tr>`;
-        // Sub-group children — Level 2 (purple)
         (c.children||[]).forEach(sc=>{
           h+=`<tr class="dtree-row-child ${collapsed||subCollapsed?'hidden':''}" id="dtc-${c.id}">
-            <td class="td-label" style="color:${C_L2};padding-left:40px">${sc.label}</td>
+            <td class="td-label" style="color:${C_L2};padding-left:36px">${sc.label}</td>
             ${shownDays.map((d,si)=>fmtVal(sc.days[days.indexOf(d)],sc.isRate,sc.unit,days.indexOf(d),sc,d)).join('')}
           </tr>`;
         });
       } else if(c.isSectionHeader){
-        // Section header inside a group — Level 1 (orange), indented
-        h+=`<tr class="dtree-row-child ${collapsed?'hidden':''}" id="dtc-${g.id}"
-              style="border-top:1px solid var(--border2)">
-          <td class="td-label" style="color:${C_L1};font-weight:500;padding-left:22px">${c.label}</td>
-          ${shownDays.map(d=>{
-            const v=c.days[days.indexOf(d)];
-            const wk=wkendTdStyle(d);
+        h+=`<tr class="dtree-row-child ${collapsed?'hidden':''}" id="dtc-${g.id}" style="border-top:1px solid var(--border2)">
+          <td class="td-label" style="color:${C_L1};font-weight:500;padding-left:18px">${c.label}</td>
+          ${shownDays.map(d=>{const v=c.days[days.indexOf(d)];const wk=wkendTdStyle(d);
             return `<td style="color:${C_L1};font-weight:500;${wk}">${v!==null&&v!==undefined&&v>0?Number(v).toLocaleString()+(c.unit?' '+c.unit:''):'—'}</td>`;
           }).join('')}
         </tr>`;
       } else {
-        // Direct child row — Level 1 (orange) or explicit color for Level 2 items
         const rowColor=c.color===C_L2?C_L2:C_L1;
-        const rowPad=c.color===C_L2?'padding-left:40px':'padding-left:22px';
+        const rowPad=c.color===C_L2?'padding-left:36px':'padding-left:18px';
         h+=`<tr class="dtree-row-child ${collapsed?'hidden':''}" id="dtc-${g.id}">
           <td class="td-label" style="color:${rowColor};${rowPad}">${c.label}</td>
           ${shownDays.map((d,si)=>fmtVal(c.days[days.indexOf(d)],c.isRate,c.unit,days.indexOf(d),c,d)).join('')}
@@ -7595,7 +7625,9 @@ function _drawProdBarChart(id,r,type){
           data.push(_demandRate(dpEl.id,dt.toISOString().split('T')[0]));
         }
         const col=cols[(di*2+pi+3)%cols.length];
-        demandSeries.push({label:`Dem: ${prod?.name||pp.product_id}`,data,col,type:'demand'});
+        const facName=DB.facilities.find(f=>f.id===(dpEl.assigned_facility_id||S.facility_id))?.name||'';
+        const facPrefix=!S.facFilter&&facName?`${facName} — `:'';
+        demandSeries.push({label:`Dem: ${facPrefix}${prod?.name||pp.product_id}`,data,col,type:'demand'});
       });
     });
 
