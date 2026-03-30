@@ -6949,111 +6949,99 @@ function renderDtree(r){
       groups.push({id:'cem_transfers',label:'CEM Transfers / Imports',color:C_L0,children:transferChildren,totals:days.map(()=>null)});
   }
 
-  // ── DESTINATION TERMINAL GROUPS (only when showing All or specific terminal) ──
-  const allCanvasEls=getFacElements();
-  const allConns=DB.connections;
-  const assignedFacIds=[...new Set(
-    allCanvasEls.map(el=>el.assigned_facility_id).filter(id=>id&&id!==S.facility_id)
-  )];
+  // ── UNIVERSAL SCHEMA: same 7 groups for ALL facilities ──
+  // fac = getResultElements() — already filtered to active facFilter
+  // For terminals (JAX/ORL/etc), fac contains their silos, berths, demand points
+  // Groups with no data are simply not added
 
-  // Walk downstream from a node to find demand points
-  function findDownstreamDemands(startId){
-    const results=[];const visited=new Set();const queue=[startId];
-    while(queue.length){
-      const cur=queue.shift();if(visited.has(cur)) continue;visited.add(cur);
-      for(const c of allConns){
-        if(c.from_element_id!==cur) continue;
-        const toEl=allCanvasEls.find(e=>e.id===c.to_element_id);if(!toEl) continue;
-        if(toEl.type==='demand_point') results.push(toEl);
-        else if(toEl.type==='dispatch_point') queue.push(toEl.id);
-      }
-    }
-    return results;
-  }
-  function findDownstreamDemand(startId){ return findDownstreamDemands(startId)[0]||null; }
-  function findUpstreamBerth(siloId){
-    for(const c of allConns){
-      if(c.to_element_id!==siloId) continue;
-      const fromEl=allCanvasEls.find(e=>e.id===c.from_element_id);
-      if(fromEl?.type==='berth') return fromEl;
-    }
-    return null;
+  // For terminals: demand points, cement silos, berths are in `fac`
+  // (they live on BRS canvas but assigned_facility_id = terminal)
+  const termDemEls=fac.filter(e=>e.type==='demand_point'&&
+    (!e.assigned_facility_id||e.assigned_facility_id===S.facFilter||
+     (!S.facFilter&&!e.assigned_facility_id)));
+
+  // If facFilter is a terminal, use all demand_point elements in fac
+  const effectiveDemEls=S.facFilter?fac.filter(e=>e.type==='demand_point'):brsEls;
+
+  // Group 1 — CEM Demand (already added above if effectiveDemEls was brsEls)
+  // For terminals, re-build with fac demand points
+  if(S.facFilter){
+    const termDemGroup=buildDemandGroup(fac.filter(e=>e.type==='demand_point'),`dem_total_${S.facFilter}`);
+    if(termDemGroup) groups.push(termDemGroup);
   }
 
-  assignedFacIds.forEach(facId=>{
-    const facName=DB.facilities.find(f=>f.id===facId)?.name||facId;
-    const facEls=allCanvasEls.filter(el=>el.assigned_facility_id===facId);
+  // Groups 2-4 (CLK) already added above — only exist when facility has kilns/finish mills
+  // which terminals don't, so they simply won't have been added
 
-    if(S.facFilter&&S.facFilter!==facId) return;
-
-    const children=[];
-    const facSilos=facEls.filter(el=>el.type==='bulk_silo');
-
-    // ── CEM DEMAND — always first ──────────────────────
-    // Collect all demand points for this facility (via silos + direct)
-    const coveredDemIds=new Set();
-    const allFacDems=[];
-    facSilos.forEach(s=>{
-      findDownstreamDemands(s.id).forEach(d=>{
-        if(!coveredDemIds.has(d.id)){ coveredDemIds.add(d.id); allFacDems.push(d); }
-      });
-    });
-    facEls.filter(el=>el.type==='demand_point'&&!coveredDemIds.has(el.id)).forEach(el=>{
-      coveredDemIds.add(el.id); allFacDems.push(el);
-    });
-    const facDemGroup=buildDemandGroup(allFacDems,`dem_total_${facId}`);
-    if(facDemGroup){
-      children.push({id:facDemGroup.id, label:facDemGroup.label, color:facDemGroup.color,
-        days:facDemGroup.totals, isRate:true, isSectionHeader:true});
-      facDemGroup.children.forEach(c=>children.push(c));
+  // Group 5 — CEM Inventory for terminals
+  if(S.facFilter){
+    const termCemSilos=fac.filter(e=>e.type==='bulk_silo'&&isCementSilo(e));
+    if(termCemSilos.length){
+      const children=termCemSilos.map(el=>({
+        id:`cem_inv_${el.id}`, label:el.name,
+        days:days.map(d=>inv(el.id,d)),
+        color:C_L1, isRate:false
+      }));
+      const totals=days.map((_,i)=>children.reduce((s,c)=>s+(c.days[i]??0),0));
+      if(totals.some(v=>v>0))
+        groups.push({id:`cem_inv_${S.facFilter}`,label:'CEM Inventory / Total',color:C_L0,children,totals});
     }
+  }
 
-    // ── INVENTORY + ARRIVALS per silo ──────────────────
-    facSilos.forEach(silo=>{
-      const berth=findUpstreamBerth(silo.id);
+  // Group 7 — CEM Transfers / Imports for terminals
+  // (vessels and rail unloading into terminal silos)
+  if(S.facFilter){
+    const termTransferChildren=[];
+    const termBerths=fac.filter(e=>e.type==='berth');
+    termBerths.forEach(berth=>{
+      const hasArr=(r.vesselArrivalHistory?.[berth.id]||[]).some(v=>v>0)||
+                   (r.berthArrivalHistory?.[berth.id]||[]).some(v=>v>0);
+      // Downstream silos of this berth
+      const allCanvasEls2=getFacElements();
+      const allConns2=DB.connections;
+      const downSilos2=allCanvasEls2.filter(e=>e.type==='bulk_silo'&&
+        allConns2.some(c=>c.from_element_id===berth.id&&c.to_element_id===e.id));
+      const hasUnload=downSilos2.some(silo=>(r.siloUnloadHistory?.[silo.id]||[]).some(v=>v>0));
 
-      children.push({
-        id:`dinv_${silo.id}`,
-        label:`${silo.name}`,
-        days:days.map(d=>inv(silo.id,d)),
-        color:'var(--green)', isRate:false, isSectionHeader:true
+      if(!hasArr&&!hasUnload) return;
+
+      const bType=berth.props?.berth_type||'Rail Berth';
+      const isShip=bType==='Ship Berth';
+      const bLabel=isShip?`⚓ ${berth.name}`:`⇩ ${berth.name}`;
+
+      // Berth arrivals header
+      termTransferChildren.push({
+        id:`berth_hdr_${berth.id}`, label:bLabel,
+        days:days.map(d=>{
+          const v=(r.vesselArrivalHistory?.[berth.id]||[])[d-1]||
+                  (r.berthArrivalHistory?.[berth.id]||[])[d-1]||0;
+          return v>0?v:null;
+        }),
+        color:C_L1, isRate:false, isSectionHeader:true
       });
 
-      if(berth){
-        const berthType=berth.props.berth_type||'Ship Berth';
-        const arrLabel=berthType==='Ship Berth'?'  ⚓ Vessel arrivals (t)':'  ↓ Arrivals (t)';
-        const unldLabel=berthType==='Ship Berth'?'  ⇩ Ship unloading (t/d)':'  ⇩ Unloading (t/d)';
-        children.push({
-          id:`varrival_${silo.id}`,
-          label:arrLabel,
-          days:days.map(d=>{
-            const v=(r.vesselArrivalHistory?.[silo.id]||[])[d-1]||0;
-            return v>0?v:null;
-          }),
-          color:'var(--blue)', isRate:false
+      // Per-silo unloading
+      downSilos2.forEach(silo=>{
+        const unloadData=days.map(d=>{
+          const v=(r.siloUnloadHistory?.[silo.id]||[])[d-1]||0;
+          return v>0?v:null;
         });
-        children.push({
-          id:`sunload_${silo.id}`,
-          label:unldLabel,
-          days:days.map(d=>{
-            const v=(r.siloUnloadHistory?.[silo.id]||[])[d-1]||0;
-            return v>0?v:null;
-          }),
-          color:'#38bdf8', isRate:true
-        });
-      }
+        if(unloadData.some(v=>v!==null)){
+          termTransferChildren.push({
+            id:`unload_${silo.id}`, label:`  ⇩ ${silo.name} unloading (t/d)`,
+            days:unloadData, color:C_L2, isRate:true
+          });
+        }
+      });
     });
 
-    if(children.length){
-      groups.push({
-        id:`dest_${facId}`,
-        label:facName,
-        color:'var(--blue)',
-        children,
-        totals:null
-      });
-    }
-  });
+    if(termTransferChildren.length)
+      groups.push({id:`cem_transfers_${S.facFilter}`,label:'CEM Transfers / Imports',color:C_L0,
+        children:termTransferChildren,totals:days.map(()=>null)});
+  }
+
+  // (For non-filtered view, assignedFacIds are no longer rendered separately —
+  //  the user switches to a specific facility filter to see terminal detail)
 
   // ── RENDER TABLE ──
   // Date headers — one column per day, always
