@@ -6590,26 +6590,24 @@ function simulate(elements, connections, horizon){
     });
 
     // ── STEP 6B: PLANNED RAIL LOADING & DEPARTURE ────────
-    // Execute today's pre-computed loading schedule for each dispatch point.
-    // Loading days: deduct from origin silo, record carsLoaded in railHistory.
-    // Switch day: also record dispatchByDest in railHistory (cars leave yard).
+    // Two-stage inventory flow:
+    //   LOADING days: source cement silo → RAIL transfer silo (staging buffer)
+    //   SWITCH day:   RAIL transfer silo → dispatched (transit queue already populated)
     elements.filter(e=>e.type==='dispatch_point'&&e.props.dispatch_type==='Rail').forEach(dp=>{
       const todaySched=railLoadSchedule[dp.id]?.[day];
       if(!todaySched) return;
 
       const upSilos=(up[dp.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='bulk_silo');
-      const railSilo=upSilos[0]||null;
+      const railSilo=upSilos[0]||null;  // BRS/INV/RAIL — the staging buffer
 
-      // Deduct loaded tonnes from origin silos (RAIL silo first, then main silo)
-      Object.entries(todaySched.tonnesDeductByProduct||{}).forEach(([pid,tonnes])=>{
-        let remaining=tonnes;
-        if(railSilo){
-          const available=Math.max(0,(state[railSilo.id]?.inventory||0)+
-            (siloInflow[railSilo.id]||0)-(siloOutflow[railSilo.id]||0));
-          const take=Math.min(remaining,available);
-          if(take>0){siloOutflow[railSilo.id]=(siloOutflow[railSilo.id]||0)+take;remaining-=take;}
-        }
-        if(remaining>0){
+      const hasCarsToLoad=Object.values(todaySched.carsLoadedByProduct||{}).some(v=>v>0);
+      const hasDispatch=Object.keys(todaySched.dispatchByDest||{}).length>0;
+
+      // ── LOADING: move product from source silo INTO RAIL silo ──
+      if(hasCarsToLoad&&railSilo){
+        Object.entries(todaySched.tonnesDeductByProduct||{}).forEach(([pid,tonnes])=>{
+          let remaining=tonnes;
+          // Deduct from main origin cement silos (excluding RAIL silo itself)
           elements.filter(e=>e.type==='bulk_silo'&&isCementSilo(e)&&
               getSiloProducts(e).includes(pid)&&!railTransferSiloIds.has(e.id))
             .forEach(silo=>{
@@ -6617,12 +6615,46 @@ function simulate(elements, connections, horizon){
               const available=Math.max(0,(state[silo.id]?.inventory||0)+
                 (siloInflow[silo.id]||0)-(siloOutflow[silo.id]||0));
               const take=Math.min(remaining,available);
-              if(take>0){siloOutflow[silo.id]=(siloOutflow[silo.id]||0)+take;remaining-=take;}
+              if(take>0){
+                siloOutflow[silo.id]=(siloOutflow[silo.id]||0)+take;
+                remaining-=take;
+              }
             });
-        }
-      });
+          // Add loaded tonnes into RAIL silo (staging)
+          const loaded=tonnes-remaining; // what was actually deducted
+          if(loaded>0){
+            siloInflow[railSilo.id]=(siloInflow[railSilo.id]||0)+loaded;
+            // Track composition in RAIL silo state
+            if(!state[railSilo.id].composition) state[railSilo.id].composition={};
+            state[railSilo.id].composition[pid]=(state[railSilo.id].composition[pid]||0)+loaded;
+          }
+        });
+      }
 
-      // Write to railHistory (update last entry pushed by Step 6)
+      // ── DISPATCH (switch day): empty RAIL silo into transit ──
+      if(hasDispatch&&railSilo){
+        // Total tonnes dispatched today for this switch day
+        const carCap=parseFloat(dp.props.car_capacity_t)||112;
+        const totalCarsDispatched=Object.values(todaySched.dispatchByDest||{}).reduce((a,b)=>a+b,0);
+        const totalTonnesDispatched=totalCarsDispatched*carCap;
+        // Deduct from RAIL silo
+        const railAvail=Math.max(0,(state[railSilo.id]?.inventory||0)+
+          (siloInflow[railSilo.id]||0)-(siloOutflow[railSilo.id]||0));
+        const take=Math.min(totalTonnesDispatched,railAvail);
+        if(take>0){
+          siloOutflow[railSilo.id]=(siloOutflow[railSilo.id]||0)+take;
+          // Update composition
+          if(state[railSilo.id].composition){
+            const compTotal=Object.values(state[railSilo.id].composition).reduce((a,b)=>a+b,0)||1;
+            Object.keys(state[railSilo.id].composition).forEach(pid=>{
+              const share=(state[railSilo.id].composition[pid]/compTotal)*take;
+              state[railSilo.id].composition[pid]=Math.max(0,state[railSilo.id].composition[pid]-share);
+            });
+          }
+        }
+      }
+
+      // ── Write to railHistory (update last entry pushed by Step 6) ──
       if(r.railHistory[dp.id]){
         const last=r.railHistory[dp.id].length-1;
         if(last>=0){
@@ -6633,6 +6665,12 @@ function simulate(elements, connections, horizon){
           Object.entries(todaySched.dispatchByDest||{}).forEach(([fid,cars])=>{
             entry.dispatchByDest[fid]=(entry.dispatchByDest[fid]||0)+cars;
           });
+          // Record RAIL silo snapshot for composition display
+          if(railSilo&&state[railSilo.id]){
+            const inv=(state[railSilo.id].inventory||0)+
+              (siloInflow[railSilo.id]||0)-(siloOutflow[railSilo.id]||0);
+            entry.siloCompositionByProduct={...state[railSilo.id].composition};
+          }
         }
       }
     });
