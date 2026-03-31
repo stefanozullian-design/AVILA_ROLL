@@ -5289,48 +5289,70 @@ function _planRailShipments(rBase){
       };
 
       // Project inventory forward accounting for already-planned shipments this pass
-      // plannedArrivals[day] = tonnes planned to arrive on that day
+      // AND any user-entered Planned/Confirmed movements (pre-seed from DB)
       const plannedArrivals=new Array(horizon+2).fill(0);
+
+      // Pre-seed from existing Planned/Confirmed movements for this destination
+      DB.rail_movements
+        .filter(rm=>rm.to_facility_id===facId&&['Planned','Confirmed','In Transit'].includes(rm.status||''))
+        .forEach(rm=>{
+          const depDay=dateToDayOffset(rm.departure_date,S.simCfg.start_date)+1;
+          const transit=parseInt(rm.transit_days)||transitDays;
+          const arrDay=depDay+transit;
+          if(arrDay>=1&&arrDay<=horizon+10)
+            plannedArrivals[Math.min(arrDay,horizon+1)]=(plannedArrivals[Math.min(arrDay,horizon+1)]||0)
+              +(rm.total_capacity_t||0);
+        });
+
+      // Build a running projected inventory using a proper forward simulation
+      // projInvFwd[d] = projected BOD inventory on day d (1-indexed)
+      // Start from Pass 1 BOD day 1, apply demand and planned arrivals forward
+      const projInvFwd=new Array(horizon+2).fill(0);
+      projInvFwd[1]=getBOD(1);
+      for(let d=1;d<=horizon;d++){
+        let inv=projInvFwd[d]+(plannedArrivals[d]||0);
+        inv=Math.max(0,inv);
+        const dem=getDemand(d);
+        projInvFwd[d+1]=Math.max(0,inv-dem);
+      }
 
       // For each switch day, check if a shipment is needed
       allSwitchDayNums.forEach(switchDay=>{
-        // Project terminal inventory on the arrival day
-        const arrivalDay=switchDay+transitDays;
-        if(arrivalDay>horizon+10) return; // too far out
+        // Skip this switch day if a Planned/Confirmed movement already departs on it
+        const alreadyCovered=DB.rail_movements.some(rm=>
+          rm.to_facility_id===facId&&
+          ['Planned','Confirmed'].includes(rm.status||'')&&
+          rm.switch_day===switchDay);
+        if(alreadyCovered) return;
 
-        // Compute projected BOD inventory on arrival day from Pass 1 baseline
-        // plus any already-planned arrivals
-        let projInv=getBOD(Math.min(arrivalDay,horizon));
-        // Add already-planned arrivals up to arrival day
-        for(let d=1;d<=Math.min(arrivalDay,horizon+1);d++) projInv+=plannedArrivals[d]||0;
-        // Subtract demand between now and arrival (approximate from current day forward)
-        // Use Pass 1 outflow history as proxy for demand
-        const outHist=rBase.inventoryHistory[termSilo.id]||[];
-        // Simple approach: use projInv directly from Pass 1 (it already reflects demand)
-        // but add previously planned arrivals not yet in Pass 1
-        // On the arrival day: projected inv = Pass1 BOD + planned arrivals
-        let projOnArrival=getBOD(Math.min(arrivalDay,horizon));
-        for(let d=1;d<=Math.min(arrivalDay,horizon);d++) projOnArrival+=plannedArrivals[d]||0;
+        const arrivalDay=switchDay+transitDays;
+        if(arrivalDay>horizon+10) return;
+
+        // Projected inventory on arrival day (from running forward sim)
+        const projOnArrival=(projInvFwd[Math.min(arrivalDay,horizon+1)]||0)
+          +(plannedArrivals[Math.min(arrivalDay,horizon+1)]||0);
 
         // Only ship if inventory on arrival will be below critical floor
         if(projOnArrival>critFloor) return;
 
         // Calculate cars needed to bring terminal to target
         const shortage=Math.max(0,targetInv-projOnArrival);
-        if(shortage<carCapT) return; // less than one car needed — skip
+        if(shortage<carCapT) return;
         const carsNeeded=Math.ceil(shortage/carCapT);
 
-        // Loading window: how many days needed to load these cars
+        // Loading window
         const loadDays=Math.ceil(carsNeeded/stdCarsDay);
-
-        // Latest possible loading start = switchDay - loadDays
         const loadStart=switchDay-loadDays;
-        if(loadStart<1) return; // not enough days before this switch — skip (will catch next switch)
+        if(loadStart<1) return;
 
-        // Record planned arrival
-        if(arrivalDay<=horizon+transitDays){
-          plannedArrivals[Math.min(arrivalDay,horizon+1)]=(plannedArrivals[Math.min(arrivalDay,horizon+1)]||0)
-            +carsNeeded*carCapT;
+        // Record planned arrival and update forward projection
+        const tonnesArriving=carsNeeded*carCapT;
+        if(arrivalDay<=horizon+1){
+          plannedArrivals[Math.min(arrivalDay,horizon+1)]=(plannedArrivals[Math.min(arrivalDay,horizon+1)]||0)+tonnesArriving;
+          // Update projInvFwd forward from arrivalDay
+          for(let d=arrivalDay;d<=horizon;d++){
+            projInvFwd[d+1]=Math.max(0,projInvFwd[d]+(plannedArrivals[d]||0)-getDemand(d));
+          }
         }
 
         // Departure date = switchDay
@@ -5908,28 +5930,34 @@ function simulate(elements, connections, horizon, includeProposed=false){
   // ── RAIL TRANSIT PIPELINE ────────────────────────────
   // transitQueue[arrivalDay] = [{berthId, byProduct:{pid:tonnes}}]
   // Built during simulation as cars are dispatched on switch days.
-  // In Pass 2 (includeProposed=true), also pre-load planned Proposed movements.
+  // In Pass 2 (includeProposed=true), also pre-load all planned/confirmed/proposed movements.
+  // Pass 1 excludes Proposed but still includes Planned/Confirmed (user-entered, ground truth).
   const transitQueue={};
-  if(includeProposed){
-    DB.rail_movements
-      .filter(rm=>rm.status==='Proposed'&&rm.from_facility_id===S.facility_id)
-      .forEach(rm=>{
-        const arrivalDay=dateToDayOffset(rm.departure_date,S.simCfg.start_date)+1+(parseInt(rm.transit_days)||1);
-        if(arrivalDay<1||arrivalDay>horizon+10) return;
-        const berthId=rm.to_berth_id;
-        if(!berthId) return;
-        if(!transitQueue[arrivalDay]) transitQueue[arrivalDay]=[];
-        const byProduct={};
-        if(rm.product_id) byProduct[rm.product_id]=(rm.total_capacity_t||0);
-        transitQueue[arrivalDay].push({
-          berthId,
-          byProduct,
-          fromFacId:rm.from_facility_id,
-          toFacId:rm.to_facility_id,
-          fromProposedRail:true
-        });
+  DB.rail_movements
+    .filter(rm=>{
+      if(!rm.from_facility_id||rm.from_facility_id!==S.facility_id) return false;
+      const st=rm.status||'Planned';
+      if(st==='Proposed') return includeProposed; // auto-generated: only in Pass 2
+      return ['Planned','Confirmed','In Transit'].includes(st); // user-entered: always
+    })
+    .forEach(rm=>{
+      const arrivalDay=dateToDayOffset(rm.departure_date,S.simCfg.start_date)+1+(parseInt(rm.transit_days)||1);
+      if(arrivalDay<1||arrivalDay>horizon+10) return;
+      const berthId=rm.to_berth_id;
+      if(!berthId) return;
+      if(!transitQueue[arrivalDay]) transitQueue[arrivalDay]=[];
+      const byProduct={};
+      if(rm.product_id) byProduct[rm.product_id]=(rm.total_capacity_t||0);
+      else if(rm.wagon_count&&rm.wagon_capacity_t)
+        byProduct[rm.product_id||'']=(parseInt(rm.wagon_count)*parseFloat(rm.wagon_capacity_t));
+      transitQueue[arrivalDay].push({
+        berthId,
+        byProduct,
+        fromFacId:rm.from_facility_id,
+        toFacId:rm.to_facility_id,
+        fromPlannedRail:true
       });
-  }
+    });
 
   // ── VESSEL ARRIVALS PIPELINE ─────────────────────────
   // Pre-build vesselArrivalsByDay[day] = [{berthId, productId, quantity_t, rateTPH, name}]
