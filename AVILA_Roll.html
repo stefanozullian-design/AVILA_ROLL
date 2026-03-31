@@ -6509,6 +6509,82 @@ function simulate(elements, connections, horizon){
       });
     });
 
+    // ── STEP 6B: PLANNED RAIL DEPARTURES ─────────────
+    // For manually-entered Planned/Confirmed rail movements, on the departure
+    // day: deduct from origin silo and record in railHistory for the dashboard.
+    elements.filter(e=>e.type==='dispatch_point'&&e.props.dispatch_type==='Rail').forEach(dp=>{
+      const dpDayMovements=DB.rail_movements.filter(rm=>{
+        if(rm.from_dispatch_id!==dp.id&&rm.from_facility_id!==S.facility_id) return false;
+        if(!['Planned','Confirmed'].includes(rm.status||'Planned')) return false;
+        const depDay=dateToDayOffset(rm.departure_date,S.simCfg.start_date)+1;
+        return depDay===day;
+      });
+      if(!dpDayMovements.length) return;
+
+      // Find upstream silo (RAIL transfer silo)
+      const upSilos=(up[dp.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='bulk_silo');
+      const railSilo=upSilos[0]||null;
+
+      const carsLoadedByProduct={};
+      const dispatchByDest={};
+
+      dpDayMovements.forEach(rm=>{
+        const cars=parseInt(rm.wagon_count)||0;
+        const carCap=parseFloat(rm.wagon_capacity_t)||112;
+        const tonnes=cars*carCap;
+        const pid=rm.product_id||'';
+        const toFacId=rm.to_facility_id;
+        const toFacName=DB.facilities.find(f=>f.id===toFacId)?.name||toFacId;
+
+        // Deduct from RAIL silo first, then from main origin silo
+        let remaining=tonnes;
+        if(railSilo){
+          const available=Math.max(0,(state[railSilo.id]?.inventory||0)+
+            (siloInflow[railSilo.id]||0)-(siloOutflow[railSilo.id]||0));
+          const take=Math.min(remaining,available);
+          if(take>0){
+            siloOutflow[railSilo.id]=(siloOutflow[railSilo.id]||0)+take;
+            remaining-=take;
+          }
+        }
+        // If RAIL silo short, deduct remainder from origin cement silos that hold this product
+        if(remaining>0){
+          elements.filter(e=>e.type==='bulk_silo'&&isCementSilo(e)&&
+              getSiloProducts(e).includes(pid)&&
+              !railTransferSiloIds.has(e.id)).forEach(silo=>{
+            if(remaining<=0) return;
+            const available=Math.max(0,(state[silo.id]?.inventory||0)+
+              (siloInflow[silo.id]||0)-(siloOutflow[silo.id]||0));
+            const take=Math.min(remaining,available);
+            if(take>0){
+              siloOutflow[silo.id]=(siloOutflow[silo.id]||0)+take;
+              remaining-=take;
+            }
+          });
+        }
+
+        // Record in railHistory
+        carsLoadedByProduct[pid]=(carsLoadedByProduct[pid]||0)+cars;
+        dispatchByDest[toFacId]=(dispatchByDest[toFacId]||0)+cars;
+      });
+
+      // Push to railHistory for this day
+      if(r.railHistory[dp.id]){
+        // Replace the entry that was pushed by Step 6 (which would have been empty)
+        // by updating the last entry
+        const last=r.railHistory[dp.id].length-1;
+        if(last>=0){
+          const existing=r.railHistory[dp.id][last];
+          Object.entries(carsLoadedByProduct).forEach(([pid,cars])=>{
+            existing.carsLoadedByProduct[pid]=(existing.carsLoadedByProduct[pid]||0)+cars;
+          });
+          Object.entries(dispatchByDest).forEach(([fid,cars])=>{
+            existing.dispatchByDest[fid]=(existing.dispatchByDest[fid]||0)+cars;
+          });
+        }
+      }
+    });
+
     // ── STEP 7: APPLY INVENTORY CHANGES ──────────────
     // Push daily entries for vessel arrival and silo unload histories.
     // vesselArrivalHistory: full vessel qty on the day it moors — 0 on all other days.
