@@ -720,32 +720,48 @@ select.fi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
         <div class="dash-sec" id="dash-clk-sec">
           <div class="dash-sec-hdr" style="cursor:pointer;user-select:none;display:flex;align-items:center;gap:8px" onclick="_dashToggle('dash-clk-body',this)">
             <span id="dash-clk-arrow">▼</span> Clinker Production &amp; Inventory
-            <div style="margin-left:auto;display:flex;align-items:center;gap:5px;flex-wrap:wrap;font-weight:400" onclick="event.stopPropagation()">
-              <span class="chart-axis-lbl">Prod:</span>
-              <input id="dash-clk-prod-max" type="number" class="chart-axis-inp" placeholder="auto" title="Left axis max" oninput="_chartRedrawFns['dash-clk-legend']&&_chartRedrawFns['dash-clk-legend']()">
-              <span class="chart-axis-lbl">Inv:</span>
-              <input id="dash-clk-inv-max" type="number" class="chart-axis-inp" placeholder="auto" title="Right axis max" oninput="_chartRedrawFns['dash-clk-legend']&&_chartRedrawFns['dash-clk-legend']()">
-              <div class="chart-ctrls" id="dash-clk-legend" style="display:flex;flex-wrap:wrap;gap:4px"></div>
-            </div>
           </div>
           <div id="dash-clk-body">
-            <canvas id="dash-clk-chart" style="width:100%;height:220px;display:block"></canvas>
+            <div style="display:flex;gap:0;align-items:stretch" onclick="event.stopPropagation()">
+              <div style="flex:1;min-width:0">
+                <div style="display:flex;justify-content:space-between;padding-right:8px;margin-bottom:2px">
+                  <div style="display:flex;align-items:center;gap:3px">
+                    <span class="chart-axis-lbl">PROD:</span>
+                    <input id="dash-clk-prod-max" type="number" class="chart-axis-inp" placeholder="auto" title="Left axis max" oninput="_chartRedrawFns['dash-clk-legend']&&_chartRedrawFns['dash-clk-legend']()">
+                  </div>
+                  <div style="display:flex;align-items:center;gap:3px">
+                    <span class="chart-axis-lbl">INV:</span>
+                    <input id="dash-clk-inv-max" type="number" class="chart-axis-inp" placeholder="auto" title="Right axis max" oninput="_chartRedrawFns['dash-clk-legend']&&_chartRedrawFns['dash-clk-legend']()">
+                  </div>
+                </div>
+                <canvas id="dash-clk-chart" style="width:100%;height:220px;display:block"></canvas>
+              </div>
+              <div id="dash-clk-legend" style="display:flex;flex-direction:column;gap:10px;padding-left:10px;min-width:130px;border-left:1px solid var(--border2)"></div>
+            </div>
           </div>
         </div>
         <!-- CEMENT CHART (collapsible) -->
         <div class="dash-sec" id="dash-cem-sec">
           <div class="dash-sec-hdr" style="cursor:pointer;user-select:none;display:flex;align-items:center;gap:8px" onclick="_dashToggle('dash-cem-body',this)">
-            <span id="dash-cem-arrow">▼</span> Cement Production vs Demand
-            <div style="margin-left:auto;display:flex;align-items:center;gap:5px;flex-wrap:wrap;font-weight:400" onclick="event.stopPropagation()">
-              <span class="chart-axis-lbl">Left:</span>
-              <input id="dash-cem-chart-lmax" type="number" class="chart-axis-inp" placeholder="auto" title="Left axis max (t/d)" oninput="_chartRedrawFns['dash-cem-legend']&&_chartRedrawFns['dash-cem-legend']()">
-              <span class="chart-axis-lbl">Inv:</span>
-              <input id="dash-cem-chart-rmax" type="number" class="chart-axis-inp" placeholder="auto" title="Right axis max (inventory t)" oninput="_chartRedrawFns['dash-cem-legend']&&_chartRedrawFns['dash-cem-legend']()">
-              <div class="chart-ctrls" id="dash-cem-legend" style="display:flex;flex-wrap:wrap;gap:4px"></div>
-            </div>
+            <span id="dash-cem-arrow">▼</span> Cement Production &amp; Inventory
           </div>
           <div id="dash-cem-body">
-            <canvas id="dash-cem-chart" style="width:100%;height:200px;display:block"></canvas>
+            <div style="display:flex;gap:0;align-items:stretch" onclick="event.stopPropagation()">
+              <div style="flex:1;min-width:0">
+                <div style="display:flex;justify-content:space-between;padding-right:8px;margin-bottom:2px">
+                  <div style="display:flex;align-items:center;gap:3px">
+                    <span class="chart-axis-lbl">PROD:</span>
+                    <input id="dash-cem-chart-lmax" type="number" class="chart-axis-inp" placeholder="auto" title="Left axis max (t/d)" oninput="_chartRedrawFns['dash-cem-legend']&&_chartRedrawFns['dash-cem-legend']()">
+                  </div>
+                  <div style="display:flex;align-items:center;gap:3px">
+                    <span class="chart-axis-lbl">INV:</span>
+                    <input id="dash-cem-chart-rmax" type="number" class="chart-axis-inp" placeholder="auto" title="Right axis max (inventory t)" oninput="_chartRedrawFns['dash-cem-legend']&&_chartRedrawFns['dash-cem-legend']()">
+                  </div>
+                </div>
+                <canvas id="dash-cem-chart" style="width:100%;height:220px;display:block"></canvas>
+              </div>
+              <div id="dash-cem-legend" style="display:flex;flex-direction:column;gap:10px;padding-left:10px;min-width:130px;border-left:1px solid var(--border2)"></div>
+            </div>
           </div>
         </div>
       </div>
@@ -5227,8 +5243,511 @@ function _demandMonthTotal(elId, year, month){
 // their critical floor. Writes Proposed entries to DB.rail_movements.
 // Pass 2 will pre-load those into transitQueue so terminals receive
 // planned arrivals.
+function _planRailShipments(rBase){
+  DB.rail_movements=DB.rail_movements.filter(m=>m.status!=='Proposed');
 
+  const simStart=new Date(S.simCfg.start_date+'T00:00:00');
+  const horizon=S.simCfg.horizon;
+  const allEls=getFacElements();
 
+  // For each rail dispatch point, plan shipments for each destination
+  allEls.filter(e=>e.type==='dispatch_point'&&e.props.dispatch_type==='Rail').forEach(dp=>{
+    const carCapT=parseFloat(dp.props.car_capacity_t)||112;
+    const stdCarsDay=(parseFloat(dp.props.std_loading_cars_shift||dp.props.std_loading_cars_day)||10)
+                    *(parseFloat(dp.props.shifts_per_day)||1);
+    const switchDays=dp.props.switch_days||[]; // Mon=0..Sun=6
+    const dests=dp.props.destinations||[];
+
+    // Find all switch day indices in the horizon
+    const allSwitchDayNums=[];
+    for(let d=1;d<=horizon;d++){
+      const dt=new Date(simStart.getTime()+(d-1)*864e5);
+      const dow=(dt.getDay()+6)%7;
+      if(switchDays.includes(dow)) allSwitchDayNums.push(d);
+    }
+    if(!allSwitchDayNums.length) return;
+
+    // Plan each destination independently
+    dests.forEach(dest=>{
+      const facId=dest.facility_id;
+      const transitDays=parseInt(dest.transit_days)||1;
+      const acceptedProds=dest.accepted_products||[];
+
+      // Find the terminal berth and its downstream silo(s) for this destination
+      const berthEl=allEls.find(e=>e.type==='berth'&&
+        (e.assigned_facility_id||e.facility_id)===facId);
+      if(!berthEl) return;
+      const termSilos=allEls.filter(e=>e.type==='bulk_silo'&&
+        getFacConnections().some(c=>c.from_element_id===berthEl.id&&c.to_element_id===e.id));
+      const termSilo=termSilos.find(s=>getSiloProducts(s).some(p=>acceptedProds.includes(p)))
+                    ||termSilos[0];
+      if(!termSilo) return;
+
+      const siloMax=parseFloat(termSilo.props?.max_capacity)||0; if(!siloMax) return;
+      const critFloor=(parseFloat(termSilo.props?.critical_floor_pct)||10)/100*siloMax;
+      const targetInv=(parseFloat(termSilo.props?.target_pct)||75)/100*siloMax;
+
+      // Build projected inventory array for this terminal from Pass 1
+      // Using inventoryHistory (EOD), convert to BOD: BOD[d] = inv[d-2], BOD[1] = start
+      const invHist=rBase.inventoryHistory[termSilo.id]||[];
+      const getBOD=d=>d<=1
+        ?(parseFloat(termSilo.props?.start_inventory)||0)
+        :(invHist[d-2]??invHist[invHist.length-1]??0);
+
+      // Demand rate per day for this terminal
+      const termDemEls=allEls.filter(e=>e.type==='demand_point'&&
+        (e.assigned_facility_id||e.facility_id)===facId);
+
+      const getDemand=d=>{
+        const dt=new Date(simStart.getTime()+(d-1)*864e5);
+        const ds=dt.toISOString().split('T')[0];
+        return termDemEls.reduce((s,el)=>s+_demandRate(el.id,ds),0);
+      };
+
+      // Project inventory forward accounting for already-planned shipments this pass
+      // AND any user-entered Planned/Confirmed movements (pre-seed from DB)
+      const plannedArrivals=new Array(horizon+2).fill(0);
+
+      // Pre-seed from existing Planned/Confirmed movements for this destination
+      DB.rail_movements
+        .filter(rm=>rm.to_facility_id===facId&&['Planned','Confirmed','In Transit'].includes(rm.status||''))
+        .forEach(rm=>{
+          const depDay=dateToDayOffset(rm.departure_date,S.simCfg.start_date)+1;
+          const transit=parseInt(rm.transit_days)||transitDays;
+          const arrDay=depDay+transit;
+          if(arrDay>=1&&arrDay<=horizon+10)
+            plannedArrivals[Math.min(arrDay,horizon+1)]=(plannedArrivals[Math.min(arrDay,horizon+1)]||0)
+              +(rm.total_capacity_t||0);
+        });
+
+      // Build a running projected inventory using a proper forward simulation
+      // projInvFwd[d] = projected BOD inventory on day d (1-indexed)
+      // Start from Pass 1 BOD day 1, apply demand and planned arrivals forward
+      const projInvFwd=new Array(horizon+2).fill(0);
+      projInvFwd[1]=getBOD(1);
+      for(let d=1;d<=horizon;d++){
+        let inv=projInvFwd[d]+(plannedArrivals[d]||0);
+        inv=Math.max(0,inv);
+        const dem=getDemand(d);
+        projInvFwd[d+1]=Math.max(0,inv-dem);
+      }
+
+      // For each switch day, check if a shipment is needed
+      allSwitchDayNums.forEach(switchDay=>{
+        // Skip this switch day if a Planned/Confirmed movement already departs on it
+        const alreadyCovered=DB.rail_movements.some(rm=>
+          rm.to_facility_id===facId&&
+          ['Planned','Confirmed'].includes(rm.status||'')&&
+          rm.switch_day===switchDay);
+        if(alreadyCovered) return;
+
+        const arrivalDay=switchDay+transitDays;
+        if(arrivalDay>horizon+10) return;
+
+        // Projected inventory on arrival day (from running forward sim)
+        const projOnArrival=(projInvFwd[Math.min(arrivalDay,horizon+1)]||0)
+          +(plannedArrivals[Math.min(arrivalDay,horizon+1)]||0);
+
+        // Only ship if inventory on arrival will be below critical floor
+        if(projOnArrival>critFloor) return;
+
+        // Calculate cars needed to bring terminal to target
+        const shortage=Math.max(0,targetInv-projOnArrival);
+        if(shortage<carCapT) return;
+        const carsNeeded=Math.ceil(shortage/carCapT);
+
+        // Loading window
+        const loadDays=Math.ceil(carsNeeded/stdCarsDay);
+        const loadStart=switchDay-loadDays;
+        if(loadStart<1) return;
+
+        // Record planned arrival and update forward projection
+        const tonnesArriving=carsNeeded*carCapT;
+        if(arrivalDay<=horizon+1){
+          plannedArrivals[Math.min(arrivalDay,horizon+1)]=(plannedArrivals[Math.min(arrivalDay,horizon+1)]||0)+tonnesArriving;
+          // Update projInvFwd forward from arrivalDay
+          for(let d=arrivalDay;d<=horizon;d++){
+            projInvFwd[d+1]=Math.max(0,projInvFwd[d]+(plannedArrivals[d]||0)-getDemand(d));
+          }
+        }
+
+        // Departure date = switchDay
+        const departDate=new Date(simStart.getTime()+(switchDay-1)*864e5);
+        const departStr=departDate.toISOString().split('T')[0];
+        const toFac=DB.facilities.find(f=>f.id===facId);
+
+        DB.rail_movements.push({
+          id:`rm_prop_${dp.id}_sw${switchDay}_${facId}`,
+          from_facility_id:S.facility_id,
+          to_facility_id:facId,
+          from_dispatch_id:dp.id,
+          to_berth_id:berthEl.id,
+          to_silo_id:termSilo.id,
+          reference:`SIM-${departStr}-${toFac?.name||facId}`,
+          departure_date:departStr,
+          wagon_count:carsNeeded,
+          wagon_capacity_t:carCapT,
+          total_capacity_t:Math.round(carsNeeded*carCapT),
+          product_id:acceptedProds[0]||'',
+          transit_days:transitDays,
+          load_start_day:loadStart,   // day mills must start filling RAIL silo
+          switch_day:switchDay,        // day cars are dispatched
+          notes:'Auto-generated by simulation',
+          status:'Proposed'
+        });
+      });
+    });
+  });
+
+  autoSave();
+}
+
+function _writeProposedRailMovements(r){
+  // Remove all existing Proposed rail movements (sim will rewrite them).
+  // Never touch Planned / Confirmed / In Transit / Unloading / Finished.
+  DB.rail_movements=DB.rail_movements.filter(m=>m.status!=='Proposed');
+
+  const simStartDate=new Date(S.simCfg.start_date+'T00:00:00');
+  const carCapMap={};
+  getFacElements().filter(e=>e.type==='dispatch_point'&&e.props.dispatch_type==='Rail').forEach(dp=>{
+    carCapMap[dp.id]=parseFloat(dp.props.car_capacity_t)||50;
+  });
+
+  // Walk every dispatch point's railHistory and create one Proposed record per dispatch event
+  Object.entries(r.railHistory||{}).forEach(([dispElId,history])=>{
+    const dispEl=DB.elements.find(e=>e.id===dispElId); if(!dispEl) return;
+    const carCap=carCapMap[dispElId]||50;
+    const transitDays=dispEl.props.transit_days||1; // fallback
+
+    history.forEach((entry,dayIdx)=>{
+      const dispatchByDest=entry.dispatchByDest||{};
+      const byProdCars=entry.dispatchByDest||{}; // cars per dest
+      Object.entries(dispatchByDest).forEach(([toFacId,cars])=>{
+        if(!cars||cars<=0) return;
+        const departDate=new Date(simStartDate.getTime()+dayIdx*864e5);
+        const departStr=departDate.toISOString().split('T')[0];
+        // Find transit days for this destination
+        const destCfg=(dispEl.props.destinations||[]).find(d=>d.facility_id===toFacId);
+        const transit=parseInt(destCfg?.transit_days)||transitDays;
+        // Determine primary product from siloCompositionByProduct — pick largest share
+        const comp=entry.siloCompositionByProduct||{};
+        const primaryPid=Object.keys(comp).length
+          ?Object.entries(comp).sort((a,b)=>b[1]-a[1])[0][0]
+          :'';
+        const totalT=Math.round(cars*carCap);
+        const toFac=DB.facilities.find(f=>f.id===toFacId);
+        DB.rail_movements.push({
+          id:`rm_prop_${dispElId}_${dayIdx}_${toFacId}`,
+          from_facility_id:S.facility_id,
+          to_facility_id:toFacId,
+          from_dispatch_id:dispElId,
+          reference:`SIM-${departStr}-${toFac?.name||toFacId}`,
+          departure_date:departStr,
+          wagon_count:cars,
+          wagon_capacity_t:carCap,
+          total_capacity_t:totalT,
+          product_id:primaryPid,
+          transit_days:transit,
+          min_load_pct:80,
+          notes:'Auto-generated by simulation',
+          status:'Proposed'
+        });
+      });
+    });
+  });
+
+  autoSave();
+}
+
+function _writeProposedVesselCalls(r){
+  // Remove existing Proposed vessel calls — sim rewrites them each run.
+  DB.vessel_calls=DB.vessel_calls.filter(v=>v.status!=='Proposed');
+
+  const simStart=new Date(S.simCfg.start_date+'T00:00:00');
+  const horizon=S.simCfg.horizon;
+  const allEls=getFacElements();
+  const allConns=getFacConnections();
+
+  // Build downstream map
+  const dn={};
+  allConns.forEach(c=>{
+    if(!dn[c.from_element_id]) dn[c.from_element_id]=[];
+    dn[c.from_element_id].push(c.to_element_id);
+  });
+  const elMap=Object.fromEntries(allEls.map(e=>[e.id,e]));
+
+  allEls.filter(e=>e.type==='supply_source'&&(e.props.supply_mode||'Ship')==='Ship').forEach(ss=>{
+    const productId=ss.props.product_id; if(!productId) return;
+    const typicalVol=parseFloat(ss.props.typical_volume_t)||0; if(!typicalVol) return;
+    const leadDays=Math.max(1, parseInt(ss.props.lead_time_days)||1);
+    const minCoverDays=parseInt(ss.props.min_cover_days)||7;
+    const prod=DB.products.find(p=>p.id===productId);
+
+    const downBerths=(dn[ss.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='berth');
+    const berthAllocs=ss.props.berth_allocations||null;
+
+    // If berth_allocations is set and covers multiple berths → propose split vessels
+    // Otherwise → propose independent full vessels per berth (original behaviour)
+    if(berthAllocs&&Object.keys(berthAllocs).length>1){
+      // Split mode: one vessel call with legs. Use the PRIMARY berth (largest allocation)
+      // for trigger calculation; all berths share the lead time.
+      // Find the silo + demand for each allocated berth
+      const allocBerths=Object.entries(berthAllocs)
+        .map(([berthId,qty])=>({berth:elMap[berthId],qty:parseFloat(qty)||0}))
+        .filter(x=>x.berth&&x.qty>0);
+      if(allocBerths.length<2) return; // fall through to individual mode
+
+      // Use the largest allocation berth as the primary for inventory trigger
+      const primary=allocBerths.reduce((a,b)=>b.qty>a.qty?b:a);
+      const primaryBerth=primary.berth;
+      const primaryQty=primary.qty;
+      const berthRate=parseFloat(primaryBerth.props.max_unload_rate_tph)||0;
+      const unloadDays=berthRate>0?Math.ceil(primaryQty/(berthRate*24)):3;
+
+      const downSilos=(dn[primaryBerth.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='bulk_silo');
+      const targetSilo=downSilos.find(s=>(s.props.products||[]).includes(productId))||downSilos[0];
+      if(!targetSilo) return;
+
+      const siloMax=parseFloat(targetSilo.props.max_capacity)||0; if(!siloMax) return;
+      const siloStart=parseFloat(targetSilo.props.start_inventory)||0;
+
+      const demIds=[];
+      const visited=new Set([targetSilo.id]);
+      const q=[targetSilo.id];
+      while(q.length){
+        const cur=q.shift();
+        (dn[cur]||[]).forEach(tid=>{
+          if(visited.has(tid)) return; visited.add(tid);
+          const te=elMap[tid]; if(!te) return;
+          if(te.type==='demand_point') demIds.push(te.id);
+          else if(te.type==='dispatch_point') q.push(tid);
+        });
+      }
+
+      const dailyOutflow=new Array(horizon+1).fill(0);
+      for(let d=1;d<=horizon;d++){
+        const dt=new Date(simStart.getTime()+(d-1)*864e5);
+        const ds=dt.toISOString().split('T')[0];
+        dailyOutflow[d]=demIds.reduce((s,id)=>s+(_demandRate(id,ds)||0),0);
+      }
+      if(dailyOutflow.reduce((s,v)=>s+v,0)<=0) return;
+
+      const lockedCalls=DB.vessel_calls.filter(v=>
+        allocBerths.some(ab=>v.berth_element_id===ab.berth.id||
+          (v.legs||[]).some(l=>l.berth_element_id===ab.berth.id))
+        &&v.product_id===productId&&v.status!=='Proposed'
+      );
+      const lockedInflow=new Array(horizon+1).fill(0);
+      lockedCalls.forEach(v=>{
+        const arrDay=dateToDayOffset(v.arrival_date,S.simCfg.start_date)+1;
+        const ud=berthRate>0?Math.ceil(primaryQty/(berthRate*24)):unloadDays;
+        for(let d=arrDay;d<arrDay+ud&&d<=horizon;d++) lockedInflow[d]+=primaryQty/ud;
+      });
+
+      const propInflow=new Array(horizon+1).fill(0);
+      const proposedCalls=[];
+      const coverTrigger=minCoverDays+leadDays;
+
+      for(let day=1;day<=horizon;day++){
+        let proj=siloStart;
+        for(let d=1;d<=day;d++){
+          proj+=lockedInflow[d]+propInflow[d]-dailyOutflow[d];
+          proj=Math.max(0,Math.min(siloMax,proj));
+        }
+        let projAtArrival=proj;
+        for(let d=day+1;d<=day+leadDays&&d<=horizon;d++){
+          projAtArrival+=lockedInflow[d]+propInflow[d]-dailyOutflow[d];
+          projAtArrival=Math.max(0,Math.min(siloMax,projAtArrival));
+        }
+        const avgDailyOut=dailyOutflow.slice(day,day+leadDays).reduce((s,v)=>s+v,0)/Math.max(1,leadDays);
+        const coverAtArrival=avgDailyOut>0?projAtArrival/avgDailyOut:999;
+        if(coverAtArrival>minCoverDays) continue;
+
+        const idealArrival=day+leadDays;
+        if(idealArrival>horizon) continue;
+
+        const alreadyCovered=[...lockedCalls,...proposedCalls].some(v=>{
+          const ad=typeof v.arrivalDay!=='undefined'?v.arrivalDay:dateToDayOffset(v.arrival_date,S.simCfg.start_date)+1;
+          return ad>=idealArrival-unloadDays&&ad<=idealArrival+unloadDays+1;
+        });
+        if(alreadyCovered) continue;
+
+        const arrivalStr=new Date(simStart.getTime()+(idealArrival-1)*864e5).toISOString().split('T')[0];
+        const orderDate=new Date(simStart.getTime()+(day-1)*864e5).toISOString().split('T')[0];
+        proposedCalls.push({arrivalDay:idealArrival});
+        for(let d=idealArrival;d<idealArrival+unloadDays&&d<=horizon;d++) propInflow[d]+=primaryQty/unloadDays;
+
+        // Build legs with per-berth arrival dates (secondary berths add days based on transit)
+        // For now first berth arrives on idealArrival; other berths arrive +unloadDays later each
+        let legOffset=0;
+        const legs=allocBerths.map((ab,li)=>{
+          if(li>0) legOffset+=berthRate>0?Math.ceil(allocBerths[li-1].qty/(berthRate*24)):unloadDays;
+          const legArrival=new Date(simStart.getTime()+(idealArrival-1+legOffset)*864e5).toISOString().split('T')[0];
+          const legBerth=ab.berth;
+          return {
+            berth_element_id:legBerth.id,
+            arrival_date:legArrival,
+            quantity_t:ab.qty,
+            unload_rate_tph:parseFloat(legBerth.props.max_unload_rate_tph)||0,
+            status:'Proposed'  // inherits parent — advances with parent until Confirmed
+          };
+        });
+
+        const firstLegBerth=allocBerths[0].berth;
+        DB.vessel_calls.push({
+          id:`vc_prop_${ss.id}_${idealArrival}`,
+          facility_id:firstLegBerth.assigned_facility_id||firstLegBerth.facility_id||S.facility_id,
+          name:`PROP-SPLIT-${prod?.name||productId}-${arrivalStr}`,
+          product_id:productId,
+          cargo_type:prod?.name||productId,
+          total_quantity_t:typicalVol,
+          quantity_t:typicalVol,
+          berth_element_id:legs[0].berth_element_id,
+          arrival_date:legs[0].arrival_date,
+          unload_rate_tph:legs[0].unload_rate_tph,
+          legs,
+          transit_days:leadDays,
+          notes:`Auto-proposed split. Order by: ${orderDate}`,
+          status:'Proposed'
+        });
+      }
+      return; // done with this supply source — skip individual berth loop
+    }
+
+    // Individual berth mode (no allocation config or single berth)
+    downBerths.forEach(berth=>{
+      const berthRate=parseFloat(berth.props.max_unload_rate_tph)||0;
+      const unloadDays=berthRate>0?Math.ceil(typicalVol/(berthRate*24)):3;
+
+      // Target silo for this product
+      const downSilos=(dn[berth.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='bulk_silo');
+      const targetSilo=downSilos.find(s=>(s.props.products||[]).includes(productId))||downSilos[0];
+      if(!targetSilo) return;
+
+      const siloMax=parseFloat(targetSilo.props.max_capacity)||0; if(!siloMax) return;
+      const siloStart=parseFloat(targetSilo.props.start_inventory)||0;
+
+      // Find all demand points downstream of this silo (same walk as dashboard)
+      const demIds=[];
+      const visited=new Set([targetSilo.id]);
+      const q=[targetSilo.id];
+      while(q.length){
+        const cur=q.shift();
+        (dn[cur]||[]).forEach(tid=>{
+          if(visited.has(tid)) return;
+          visited.add(tid);
+          const te=elMap[tid];
+          if(!te) return;
+          if(te.type==='demand_point') demIds.push(te.id);
+          else if(te.type==='dispatch_point') q.push(tid);
+        });
+      }
+
+      // Build per-day demand outflow from actual demand_values
+      // This is the ground truth — not derived from inventory history
+      const dailyOutflow=new Array(horizon+1).fill(0);
+      for(let d=1;d<=horizon;d++){
+        const dt=new Date(simStart.getTime()+(d-1)*864e5);
+        const ds=dt.toISOString().split('T')[0];
+        dailyOutflow[d]=demIds.reduce((s,id)=>s+(_demandRate(id,ds)||0),0);
+      }
+
+      // Check there is any demand at all
+      const totalDemand=dailyOutflow.reduce((s,v)=>s+v,0);
+      if(totalDemand<=0) return;
+
+      // Locked vessel calls for this berth+product
+      const lockedCalls=DB.vessel_calls.filter(v=>
+        v.berth_element_id===berth.id&&v.product_id===productId&&v.status!=='Proposed'
+      );
+
+      // Build per-day inflow from locked vessels
+      const lockedInflow=new Array(horizon+1).fill(0);
+      lockedCalls.forEach(v=>{
+        const arrDay=dateToDayOffset(v.arrival_date,S.simCfg.start_date)+1;
+        const rate=parseFloat(v.unload_rate_tph)||berthRate;
+        const ud=rate>0?Math.ceil((v.quantity_t||0)/(rate*24)):unloadDays;
+        const dailyQty=(v.quantity_t||0)/ud;
+        for(let d=arrDay;d<arrDay+ud&&d<=horizon;d++) lockedInflow[d]+=dailyQty;
+      });
+
+      // Forward projection from silo starting inventory
+      // propInflow accumulates as we add proposed vessels
+      const propInflow=new Array(horizon+1).fill(0);
+      const proposedCalls=[];
+
+      // Trigger: order when projected stock at (day + leadDays) would be below minCoverDays of demand
+      // We look ahead leadDays to see where inventory will be when the vessel arrives
+      for(let day=1;day<=horizon;day++){
+
+        // Project inventory at end of today using running balance
+        // (recalculate from scratch each day to stay accurate)
+        let proj=siloStart;
+        for(let d=1;d<=day;d++){
+          proj+=lockedInflow[d]+propInflow[d]-dailyOutflow[d];
+          proj=Math.max(0,Math.min(siloMax,proj));
+        }
+
+        // Now project forward from today to today+leadDays to see where we land at vessel arrival
+        let projAtArrival=proj;
+        for(let d=day+1;d<=day+leadDays&&d<=horizon;d++){
+          projAtArrival+=lockedInflow[d]+propInflow[d]-dailyOutflow[d];
+          projAtArrival=Math.max(0,Math.min(siloMax,projAtArrival));
+        }
+
+        // Days of cover at arrival point
+        const avgDailyOut=dailyOutflow.slice(day,day+leadDays).reduce((s,v)=>s+v,0)/Math.max(1,leadDays);
+        const coverAtArrival=avgDailyOut>0?projAtArrival/avgDailyOut:999;
+
+        if(coverAtArrival>minCoverDays) continue; // still safe when vessel would arrive
+
+        const idealArrival=day+leadDays;
+        if(idealArrival>horizon) continue;
+
+        // Skip if a locked or proposed vessel is already coming around this time
+        const alreadyCovered=[...lockedCalls,...proposedCalls].some(v=>{
+          const ad=typeof v.arrivalDay!=='undefined'
+            ?v.arrivalDay
+            :dateToDayOffset(v.arrival_date,S.simCfg.start_date)+1;
+          return ad>=idealArrival-unloadDays&&ad<=idealArrival+unloadDays+1;
+        });
+        if(alreadyCovered) continue;
+
+        // Propose vessel
+        const arrivalDate=new Date(simStart.getTime()+(idealArrival-1)*864e5);
+        const arrivalStr=arrivalDate.toISOString().split('T')[0];
+        const orderDate=new Date(simStart.getTime()+(day-1)*864e5).toISOString().split('T')[0];
+        const facName=DB.facilities.find(f=>f.id===(berth.assigned_facility_id||berth.facility_id||S.facility_id))?.name||'';
+        // Use the berth's assigned terminal facility_id so proposals appear in the correct terminal view
+        const vesselFacId=berth.assigned_facility_id||berth.facility_id||S.facility_id;
+
+        proposedCalls.push({arrivalDay:idealArrival});
+        const dailyUnload=typicalVol/unloadDays;
+        for(let d=idealArrival;d<idealArrival+unloadDays&&d<=horizon;d++){
+          propInflow[d]+=dailyUnload;
+        }
+
+        DB.vessel_calls.push({
+          id:`vc_prop_${ss.id}_${berth.id}_${idealArrival}`,
+          facility_id:vesselFacId,
+          berth_element_id:berth.id,
+          berth_name:berth.name,
+          name:`PROP-${facName}-${prod?.name||productId}-${arrivalStr}`,
+          arrival_date:arrivalStr,
+          product_id:productId,
+          cargo_type:prod?.name||productId,
+          quantity_t:typicalVol,
+          unload_rate_tph:berthRate,
+          transit_days:leadDays,
+          notes:`Auto-proposed. Order by: ${orderDate}`,
+          status:'Proposed'
+        });
+      }
+    });
+  });
+
+  autoSave();
+}
 
 function _nrLoadEquipment(){
   const facId=document.getElementById('nr-facility')?.value;
@@ -5271,9 +5790,16 @@ async function runSimulation(){
   statMsg('Running simulation…');
   document.getElementById('mode-lbl').textContent='Running';
   setTimeout(()=>{
-    // Single pass — user manages all rail and vessel movements manually via Logistics page.
-    // Planned/Confirmed movements are always included.
-    const r=simulate(els, getFacConnections(), S.simCfg.horizon);
+    // ── Pass 1: baseline without proposed vessels/rail ──────────
+    // Generates rail and vessel proposals from clean inventory picture.
+    const rBase=simulate(els, getFacConnections(), S.simCfg.horizon, false);
+    _planRailShipments(rBase);
+    _writeProposedVesselCalls(rBase);
+
+    // ── Pass 2: full plan including proposed vessels ────────
+    // Proposed vessels are now in DB.vessel_calls — sim includes them.
+    // Dashboard, daily results and analysis show this world.
+    const r=simulate(els, getFacConnections(), S.simCfg.horizon, true);
     S.simResults=r;
 
     renderResults(r);
@@ -5289,7 +5815,7 @@ async function runSimulation(){
   },80);
 }
 
-function simulate(elements, connections, horizon){
+function simulate(elements, connections, horizon, includeProposed=false){
   const runId=`run_${Date.now()}`;
 
   // Always read fresh demand_values — clear any stale cache before computing
@@ -5424,25 +5950,30 @@ function simulate(elements, connections, horizon){
   // transitQueue[arrivalDay] = [{berthId, byProduct:{pid:tonnes}}]
   // Built during simulation as cars are dispatched on switch days.
   // In Pass 2 (includeProposed=true), also pre-load all planned/confirmed/proposed movements.
-  // Only Planned/Confirmed/In Transit rail movements — user manages these manually.
+  // Pass 1 excludes Proposed but still includes Planned/Confirmed (user-entered, ground truth).
   const transitQueue={};
   DB.rail_movements
     .filter(rm=>{
       if(!rm.from_facility_id||rm.from_facility_id!==S.facility_id) return false;
-      return ['Planned','Confirmed','In Transit'].includes(rm.status||'Planned');
+      const st=rm.status||'Planned';
+      if(st==='Proposed') return includeProposed; // auto-generated: only in Pass 2
+      return ['Planned','Confirmed','In Transit'].includes(st); // user-entered: always
     })
     .forEach(rm=>{
       const arrivalDay=dateToDayOffset(rm.departure_date,S.simCfg.start_date)+1+(parseInt(rm.transit_days)||1);
       if(arrivalDay<1||arrivalDay>horizon+10) return;
-      const berthId=rm.to_berth_id; if(!berthId) return;
+      const berthId=rm.to_berth_id;
+      if(!berthId) return;
       if(!transitQueue[arrivalDay]) transitQueue[arrivalDay]=[];
       const byProduct={};
       if(rm.product_id) byProduct[rm.product_id]=(rm.total_capacity_t||0);
       else if(rm.wagon_count&&rm.wagon_capacity_t)
         byProduct[rm.product_id||'']=(parseInt(rm.wagon_count)*parseFloat(rm.wagon_capacity_t));
       transitQueue[arrivalDay].push({
-        berthId, byProduct,
-        fromFacId:rm.from_facility_id, toFacId:rm.to_facility_id,
+        berthId,
+        byProduct,
+        fromFacId:rm.from_facility_id,
+        toFacId:rm.to_facility_id,
         fromPlannedRail:true
       });
     });
@@ -5454,11 +5985,11 @@ function simulate(elements, connections, horizon){
   // or assigned_facility_id matching a canvas element). This correctly handles terminal vessels
   // (tagged with terminal facility_id) when running the sim from the plant canvas.
   // Pass 1 (includeProposed=false): excludes Proposed — baseline for proposal generation.
-  // Only Planned/Confirmed/In Transit vessel calls are included — user manages these manually.
+  // Pass 2 (includeProposed=true): includes Proposed — shown in dashboard and results.
   const canvasBerthIds=new Set(elements.filter(e=>e.type==='berth').map(e=>e.id));
   const vesselArrivalsByDay={};
   DB.vessel_calls
-    .filter(v=>v.product_id&&['Planned','Confirmed','In Transit','Unloading'].includes(v.status||'Planned'))
+    .filter(v=>v.product_id&&(includeProposed||v.status!=='Proposed'))
     .forEach(v=>{
       // Expand into legs (split vessel) or single entry
       const entries=v.legs&&v.legs.length>0
@@ -5731,86 +6262,6 @@ function simulate(elements, connections, horizon){
   };
 
 
-  // ── PRE-BUILD PLANNED RAIL LOADING SCHEDULE ──────────
-  // For each dispatch point, for each planned switch day, spread loading
-  // backwards from the switch day respecting daily loading capacity and
-  // working day constraints. Also pre-assign which silo to deduct from.
-  // railLoadSchedule[dpId][day] = {carsLoadedByProduct:{}, tonnesDeductByProduct:{}, dispatchByDest:{}}
-  // dispatchByDest is only set on the switch day itself.
-  const railLoadSchedule={};
-  elements.filter(e=>e.type==='dispatch_point'&&e.props.dispatch_type==='Rail').forEach(dp=>{
-    railLoadSchedule[dp.id]={};
-    const carsPerShift=parseFloat(dp.props.std_loading_cars_shift||dp.props.std_loading_cars_day)||10;
-    const shiftsPerDay=parseFloat(dp.props.shifts_per_day)||1;
-    const maxCarsPerDay=carsPerShift*shiftsPerDay;
-    const carCapT=parseFloat(dp.props.car_capacity_t)||112;
-    const workDays=dp.props.working_days||'weekdays';
-
-    function isWorkingDay(d){
-      const dt=new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5);
-      const dow=dt.getDay(); // 0=Sun,6=Sat
-      if(workDays==='7_days') return true;
-      if(workDays==='mon_sat') return dow>=1&&dow<=6;
-      return dow>=1&&dow<=5; // weekdays default
-    }
-
-    // Group all planned movements by switch_day for this dispatch point
-    const bySwitchDay={};
-    DB.rail_movements
-      .filter(rm=>['Planned','Confirmed'].includes(rm.status||'Planned')&&
-        (rm.from_dispatch_id===dp.id||rm.from_facility_id===S.facility_id))
-      .forEach(rm=>{
-        const sw=rm.switch_day;
-        if(!sw) return;
-        if(!bySwitchDay[sw]) bySwitchDay[sw]=[];
-        bySwitchDay[sw].push(rm);
-      });
-
-    Object.entries(bySwitchDay).forEach(([swStr,rms])=>{
-      const switchDay=parseInt(swStr);
-      const totalCars=rms.reduce((s,rm)=>s+(parseInt(rm.wagon_count)||0),0);
-
-      // Build dispatchByDest for the switch day
-      const dispatchByDest={};
-      const dispatchTonnesByProd={};
-      rms.forEach(rm=>{
-        const cars=parseInt(rm.wagon_count)||0;
-        const pid=rm.product_id||'';
-        dispatchByDest[rm.to_facility_id]=(dispatchByDest[rm.to_facility_id]||0)+cars;
-        dispatchTonnesByProd[pid]=(dispatchTonnesByProd[pid]||0)+cars*carCapT;
-      });
-
-      // Spread loading backwards from switchDay
-      let remaining=totalCars;
-      let d=switchDay;
-      while(remaining>0&&d>=1){
-        if(isWorkingDay(d)){
-          const carsToday=Math.min(maxCarsPerDay,remaining);
-          if(!railLoadSchedule[dp.id][d]) railLoadSchedule[dp.id][d]={carsLoadedByProduct:{},tonnesDeductByProduct:{},dispatchByDest:{}};
-          // Distribute cars today proportionally by product across movements
-          let carsLeft=carsToday;
-          rms.forEach((rm,i)=>{
-            if(carsLeft<=0) return;
-            const pid=rm.product_id||'';
-            const share=i===rms.length-1
-              ?carsLeft
-              :Math.min(carsLeft,Math.round(carsToday*(parseInt(rm.wagon_count)||0)/totalCars));
-            railLoadSchedule[dp.id][d].carsLoadedByProduct[pid]=
-              (railLoadSchedule[dp.id][d].carsLoadedByProduct[pid]||0)+share;
-            railLoadSchedule[dp.id][d].tonnesDeductByProduct[pid]=
-              (railLoadSchedule[dp.id][d].tonnesDeductByProduct[pid]||0)+share*carCapT;
-            carsLeft-=share;
-          });
-          remaining-=carsToday;
-        }
-        d--;
-      }
-      // Record dispatch on the switch day
-      if(!railLoadSchedule[dp.id][switchDay]) railLoadSchedule[dp.id][switchDay]={carsLoadedByProduct:{},tonnesDeductByProduct:{},dispatchByDest:{}};
-      Object.assign(railLoadSchedule[dp.id][switchDay].dispatchByDest, dispatchByDest);
-    });
-  });
-
   for(let day=1;day<=horizon;day++){
 
     // Per-day flow accumulators
@@ -5945,6 +6396,32 @@ function simulate(elements, connections, horizon){
         .forEach(hs=>{ siloInflow[hs.id]=(siloInflow[hs.id]||0)+rate; });
     });
 
+    // ── PRE-STEP 4: RAIL FILL TRIGGER ─────────────────
+    // In Pass 2, check if any planned rail shipment requires the RAIL silo
+    // to start being filled today. If so, add a hard override entry.
+    // railFillTarget[railSiloId] = {tonnes, prodId} for this day only.
+    const railFillTarget={};
+    if(includeProposed){
+      DB.rail_movements
+        .filter(rm=>rm.status==='Proposed'&&rm.from_facility_id===S.facility_id&&rm.load_start_day)
+        .forEach(rm=>{
+          if(day<rm.load_start_day||day>=rm.switch_day) return; // not our window
+          // Find the rail dispatch point and its upstream RAIL silo
+          const dpEl=elMap[rm.from_dispatch_id]; if(!dpEl) return;
+          const railSiloId=(up[dpEl.id]||[]).find(uid=>railTransferSiloIds.has(uid));
+          if(!railSiloId) return;
+          const existing=railFillTarget[railSiloId];
+          // Accumulate target tonnes per silo (multiple shipments may overlap)
+          const tonnes=rm.total_capacity_t||0;
+          if(!existing||tonnes>existing.tonnes)
+            railFillTarget[railSiloId]={
+              tonnes,
+              prodId:rm.product_id||'',
+              switchDay:rm.switch_day
+            };
+        });
+    }
+
     // ── STEP 4: FINISH MILLS ──────────────────────────
     // Each mill produces exactly one product per day.
     // Product selected by urgency of receiving silo, with clinker availability
@@ -5955,6 +6432,99 @@ function simulate(elements, connections, horizon){
 
       const caps=capMap[mill.id]||[];
       if(!caps.length){ s.status='idle'; r.millProductHistory[mill.id].push(null); return; }
+
+      // ── RAIL FILL HARD OVERRIDE ──────────────────────────
+      // If a planned shipment requires this mill to fill the RAIL silo today,
+      // bypass urgency selection and route directly to RAIL with day-split logic.
+      const railOverride=(()=>{
+        for(const [railSiloId,target] of Object.entries(railFillTarget)){
+          const railSilo=elMap[railSiloId]; if(!railSilo) continue;
+          if(!(dn[mill.id]||[]).includes(railSiloId)) continue;
+          // Mill must produce a product that the planned shipment needs
+          const matchCap=caps.find(cap=>
+            cap.product_id===target.prodId&&parseFloat(cap.capacity_tpd)>0);
+          if(!matchCap) continue;
+          // Skip if RAIL already has enough inventory for this shipment
+          const railInv=state[railSiloId]?.inventory||0;
+          if(railInv>=(target.tonnes*0.95)) continue;
+          // Check no exclusive critical silo is being starved
+          const hasExclCrit=caps.some(cap2=>{
+            const silos=(millProductSiloMap[mill.id]||{})[cap2.product_id]||[];
+            return silos.some(si=>{
+              if(!isCritical(si.id,mill.id)) return false;
+              const otherMillsCover=elements.filter(e=>e.type==='finish_mill'&&e.id!==mill.id)
+                .some(om=>(dn[om.id]||[]).includes(si.id)&&
+                  (capMap[om.id]||[]).some(c=>getSiloProducts(si).includes(c.product_id)&&c.capacity_tpd>0));
+              return !otherMillsCover;
+            });
+          });
+          if(hasExclCrit) continue;
+          return {railSilo,cap:matchCap,target};
+        }
+        return null;
+      })();
+
+      if(railOverride){
+        const {railSilo,cap,target}=railOverride;
+        const prodId=cap.product_id;
+        const ratedTPD=parseFloat(cap.capacity_tpd);
+        const rampFactor=s.status==='rampup'?s._rampPct||1:1;
+        const clkSilo=(millProductClinkerMap[mill.id]||{})[prodId]||null;
+        const recipe=recipeMap[prodId]||[];
+        const clkIng=recipe.find(ri=>prodMap[ri.material_id]?.category==='clinker'||ri.material_id==='clinker');
+        const clkPct=clkIng?clkIng.pct/100:0;
+        if(clkPct>0){
+          const clkAvail=clkSilo?Math.max(0,state[clkSilo.id]?.inventory||0):Infinity;
+          if(clkAvail<1) { /* fall through to normal routing */ }
+          else {
+            s.status=s.status==='rampup'?'rampup':'running';
+            s.currentProduct=prodId; s.runDays++;
+            r.millProductHistory[mill.id].push(prodId);
+            // Day-split: fill RAIL first, remainder to regular silo
+            const hourlyRate=ratedTPD*rampFactor/24;
+            const railSpace=Math.max(0,(state[railSilo.id]?.maxCap||0)-(state[railSilo.id]?.inventory||0));
+            const hoursForRail=Math.min(24,railSpace/Math.max(0.001,hourlyRate));
+            const tonnesToRail=hourlyRate*hoursForRail;
+            const tonnesToReg=hourlyRate*Math.max(0,24-hoursForRail-3);
+            siloInflow[railSilo.id]=(siloInflow[railSilo.id]||0)+tonnesToRail;
+            if(!siloSourceTracker[railSilo.id]) siloSourceTracker[railSilo.id]=new Set();
+            siloSourceTracker[railSilo.id].add(mill.id);
+            state[railSilo.id].composition[prodId]=(state[railSilo.id].composition[prodId]||0)+tonnesToRail;
+            totProd+=tonnesToRail;
+            // Remainder to most urgent regular silo
+            let regBest=null; let toRegActual=0;
+            if(tonnesToReg>=1){
+              const regSilos=(millProductSiloMap[mill.id]||{})[prodId]||[];
+              let regBestU=-1;
+              regSilos.forEach(si=>{
+                if(state[si.id]?.inventory>=(state[si.id]?.maxCap||0)*0.98) return;
+                const u=urgency(si.id,mill.id);
+                if(u>regBestU){regBestU=u;regBest=si;}
+              });
+              if(regBest){
+                const regSpace=Math.max(0,(state[regBest.id]?.maxCap||0)-(state[regBest.id]?.inventory||0));
+                toRegActual=Math.min(tonnesToReg,regSpace);
+                if(toRegActual>=1){
+                  siloInflow[regBest.id]=(siloInflow[regBest.id]||0)+toRegActual;
+                  if(!siloSourceTracker[regBest.id]) siloSourceTracker[regBest.id]=new Set();
+                  siloSourceTracker[regBest.id].add(mill.id);
+                  state[regBest.id].composition[prodId]=(state[regBest.id].composition[prodId]||0)+toRegActual;
+                  totProd+=toRegActual;
+                }
+              }
+            }
+            if(clkSilo&&clkPct>0){
+              const consumed=(tonnesToRail+toRegActual)*clkPct;
+              siloOutflow[clkSilo.id]=(siloOutflow[clkSilo.id]||0)+consumed;
+              const clkProdId=getSiloProducts(clkSilo)[0]||'';
+              const cs=state[clkSilo.id];
+              if(clkProdId&&cs.composition[clkProdId]!==undefined)
+                cs.composition[clkProdId]=Math.max(0,(cs.composition[clkProdId]||0)-consumed);
+            }
+            return; // skip normal routing
+          }
+        }
+      }
 
       // ── MILL ROUTING ─────────────────────────────────────
       // Build candidate for each product this mill can make
@@ -6587,92 +7157,6 @@ function simulate(elements, connections, horizon){
           }
         });
       });
-    });
-
-    // ── STEP 6B: PLANNED RAIL LOADING & DEPARTURE ────────
-    // Two-stage inventory flow:
-    //   LOADING days: source cement silo → RAIL transfer silo (staging buffer)
-    //   SWITCH day:   RAIL transfer silo → dispatched (transit queue already populated)
-    elements.filter(e=>e.type==='dispatch_point'&&e.props.dispatch_type==='Rail').forEach(dp=>{
-      const todaySched=railLoadSchedule[dp.id]?.[day];
-      if(!todaySched) return;
-
-      const upSilos=(up[dp.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='bulk_silo');
-      const railSilo=upSilos[0]||null;  // BRS/INV/RAIL — the staging buffer
-
-      const hasCarsToLoad=Object.values(todaySched.carsLoadedByProduct||{}).some(v=>v>0);
-      const hasDispatch=Object.keys(todaySched.dispatchByDest||{}).length>0;
-
-      // ── LOADING: move product from source silo INTO RAIL silo ──
-      if(hasCarsToLoad&&railSilo){
-        Object.entries(todaySched.tonnesDeductByProduct||{}).forEach(([pid,tonnes])=>{
-          let remaining=tonnes;
-          // Deduct from main origin cement silos (excluding RAIL silo itself)
-          elements.filter(e=>e.type==='bulk_silo'&&isCementSilo(e)&&
-              getSiloProducts(e).includes(pid)&&!railTransferSiloIds.has(e.id))
-            .forEach(silo=>{
-              if(remaining<=0) return;
-              const available=Math.max(0,(state[silo.id]?.inventory||0)+
-                (siloInflow[silo.id]||0)-(siloOutflow[silo.id]||0));
-              const take=Math.min(remaining,available);
-              if(take>0){
-                siloOutflow[silo.id]=(siloOutflow[silo.id]||0)+take;
-                remaining-=take;
-              }
-            });
-          // Add loaded tonnes into RAIL silo (staging)
-          const loaded=tonnes-remaining; // what was actually deducted
-          if(loaded>0){
-            siloInflow[railSilo.id]=(siloInflow[railSilo.id]||0)+loaded;
-            // Track composition in RAIL silo state
-            if(!state[railSilo.id].composition) state[railSilo.id].composition={};
-            state[railSilo.id].composition[pid]=(state[railSilo.id].composition[pid]||0)+loaded;
-          }
-        });
-      }
-
-      // ── DISPATCH (switch day): empty RAIL silo into transit ──
-      if(hasDispatch&&railSilo){
-        // Total tonnes dispatched today for this switch day
-        const carCap=parseFloat(dp.props.car_capacity_t)||112;
-        const totalCarsDispatched=Object.values(todaySched.dispatchByDest||{}).reduce((a,b)=>a+b,0);
-        const totalTonnesDispatched=totalCarsDispatched*carCap;
-        // Deduct from RAIL silo
-        const railAvail=Math.max(0,(state[railSilo.id]?.inventory||0)+
-          (siloInflow[railSilo.id]||0)-(siloOutflow[railSilo.id]||0));
-        const take=Math.min(totalTonnesDispatched,railAvail);
-        if(take>0){
-          siloOutflow[railSilo.id]=(siloOutflow[railSilo.id]||0)+take;
-          // Update composition
-          if(state[railSilo.id].composition){
-            const compTotal=Object.values(state[railSilo.id].composition).reduce((a,b)=>a+b,0)||1;
-            Object.keys(state[railSilo.id].composition).forEach(pid=>{
-              const share=(state[railSilo.id].composition[pid]/compTotal)*take;
-              state[railSilo.id].composition[pid]=Math.max(0,state[railSilo.id].composition[pid]-share);
-            });
-          }
-        }
-      }
-
-      // ── Write to railHistory (update last entry pushed by Step 6) ──
-      if(r.railHistory[dp.id]){
-        const last=r.railHistory[dp.id].length-1;
-        if(last>=0){
-          const entry=r.railHistory[dp.id][last];
-          Object.entries(todaySched.carsLoadedByProduct||{}).forEach(([pid,cars])=>{
-            entry.carsLoadedByProduct[pid]=(entry.carsLoadedByProduct[pid]||0)+cars;
-          });
-          Object.entries(todaySched.dispatchByDest||{}).forEach(([fid,cars])=>{
-            entry.dispatchByDest[fid]=(entry.dispatchByDest[fid]||0)+cars;
-          });
-          // Record RAIL silo snapshot for composition display
-          if(railSilo&&state[railSilo.id]){
-            const inv=(state[railSilo.id].inventory||0)+
-              (siloInflow[railSilo.id]||0)-(siloOutflow[railSilo.id]||0);
-            entry.siloCompositionByProduct={...state[railSilo.id].composition};
-          }
-        }
-      }
     });
 
     // ── STEP 7: APPLY INVENTORY CHANGES ──────────────
@@ -8095,14 +8579,40 @@ function _toggleClkMaximize(){
   }
 }
 
+// ── Right-panel legend helper ──────────────────────────────────────
+function _drawLegendPanel(panelId, groups){
+  // groups = [{title, items:[{label, col, sym}]}]
+  const panel=document.getElementById(panelId); if(!panel) return;
+  panel.innerHTML=groups.map(g=>`
+    <div>
+      <div style="font-family:var(--mono);font-size:7px;letter-spacing:1.5px;text-transform:uppercase;color:var(--text-dim);margin-bottom:4px">${g.title}</div>
+      <div style="display:flex;flex-direction:column;gap:3px">
+        ${g.items.map(it=>`
+          <div style="display:flex;align-items:center;gap:5px;font-family:var(--mono);font-size:8px;color:var(--text-dim);white-space:nowrap;cursor:pointer"
+               onclick="_toggleHidden('${panelId}','${it.label}',this)"
+               data-label="${it.label}">
+            <span style="width:10px;height:10px;border-radius:1px;background:${it.col};flex-shrink:0;opacity:${_isHidden(panelId,it.label)?0.25:1}"></span>
+            <span style="opacity:${_isHidden(panelId,it.label)?0.35:1}">${it.label}</span>
+          </div>`).join('')}
+      </div>
+    </div>`).join('');
+}
+
+function _toggleHidden(legendId, label, el){
+  const key=`${legendId}::${label}`;
+  _hiddenSeries[key]=!_hiddenSeries[key];
+  // Trigger redraw
+  if(_chartRedrawFns[legendId]) _chartRedrawFns[legendId]();
+}
+
 function _drawClinkerChart(id, r){
   if(!r) return;
   const cv=document.getElementById(id); if(!cv) return;
-  // Size canvas to its rendered size
   cv.width=cv.offsetWidth||800;
   cv.height=cv.offsetHeight||220;
   const W=cv.width, H=cv.height;
-  const P={t:16, r:62, b:30, l:62}; // wide left+right for dual axis
+  const LEGEND_W=130; // reserved for right legend panel (drawn in HTML, not canvas)
+  const P={t:16, r:48, b:30, l:58};
   const cW=W-P.l-P.r, cH=H-P.t-P.b;
   const ctx=cv.getContext('2d');
   ctx.clearRect(0,0,W,H);
@@ -8110,22 +8620,27 @@ function _drawClinkerChart(id, r){
   const {startDay,endDay}=getViewRange();
   const days=endDay-startDay+1;
   const fac=getResultElements();
-  const cols=['#00ff9d','#ff8c42','#4da6ff','#ff3d5a','#cc7aff','#ffb830'];
-  const invCols=['#e879f9','#38bdf8','#a3e635','#fb923c'];
 
-  // ── Build bar series (kiln production) ──
-  const barSeries=[];
+  const prodCols=['#00ff9d','#ff3d5a','#ff8c42','#4da6ff','#cc7aff','#ffb830'];
+  const demCols =['#ffb830','#cc7aff','#4da6ff','#ff8c42'];
+  const invCols =['#38bdf8','#4da6ff','#a78bfa','#fb923c'];
+
+  const legendId=id==='dash-clk-chart'?'dash-clk-legend':'clk-chart-legend';
+
+  // ── Build production series (kilns) ──
+  const prodSeries=[];
   fac.filter(e=>e.type==='kiln').forEach((el,ki)=>{
     const caps=DB.element_product_capacities.filter(c=>c.element_id===el.id);
     if(caps.length){
       caps.forEach((cap,ci)=>{
         const prod=DB.products.find(p=>p.id===cap.product_id);
+        const label=`${el.name}${caps.length>1?' — '+(prod?.name||cap.product_id):''}`;
         const data=[];
         for(let d=startDay;d<=endDay;d++){
           const st=(r.elementStates[el.id]||[])[d-1]||'idle';
           data.push((st==='running'||st==='rampup')?(parseFloat(cap.capacity_tpd)||0):0);
         }
-        barSeries.push({label:`${el.name}${caps.length>1?' — '+(prod?.name||cap.product_id):''}`,data,col:cols[(ki*3+ci)%cols.length]});
+        prodSeries.push({label, data, col:prodCols[(ki*3+ci)%prodCols.length]});
       });
     } else {
       const data=[];
@@ -8133,12 +8648,12 @@ function _drawClinkerChart(id, r){
         const st=(r.elementStates[el.id]||[])[d-1]||'idle';
         data.push((st==='running'||st==='rampup')?(parseFloat(el.props.rated_capacity_tpd)||0):0);
       }
-      barSeries.push({label:el.name,data,col:cols[ki%cols.length]});
+      prodSeries.push({label:el.name, data, col:prodCols[ki%prodCols.length]});
     }
   });
 
-  // ── Requirement lines (left scale) ──
-  const reqLines=[];
+  // ── Build demand series (clinker requirement from finish mills) ──
+  const demSeries=[];
   const clkReqByProd={};
   fac.filter(e=>e.type==='finish_mill').forEach(mill=>{
     DB.element_product_capacities.filter(c=>c.element_id===mill.id).forEach(cap=>{
@@ -8149,119 +8664,148 @@ function _drawClinkerChart(id, r){
       });
     });
   });
-  Object.entries(clkReqByProd).forEach(([pid,daily])=>{
+  Object.entries(clkReqByProd).forEach(([pid,daily],i)=>{
     const prod=DB.products.find(p=>p.id===pid);
-    reqLines.push({label:`Req: ${prod?.name||pid}`,data:Array(days).fill(daily),col:'#ffb830',leftAxis:true});
+    demSeries.push({label:`Req: ${prod?.name||pid}`, data:Array(days).fill(daily), col:demCols[i%demCols.length]});
   });
 
-  // ── Inventory lines (right scale) ──
-  const invLines=[];
+  // ── Build inventory series (clinker silos, stacked) ──
+  const invSeries=[];
   fac.filter(e=>e.type==='bulk_silo'&&isClinkerSilo(e)).forEach((el,i)=>{
-    const hist=(r.inventoryHistory[el.id]||[]).slice(startDay-1,endDay);
-    if(hist.length) invLines.push({label:`${el.name} inv`,data:hist,col:invCols[i%invCols.length],leftAxis:false});
+    const hist=[];
+    for(let d=startDay;d<=endDay;d++){
+      const h=r.inventoryHistory[el.id]||[];
+      hist.push(d>1?(h[d-2]??0):parseFloat(el.props?.start_inventory)||0);
+    }
+    if(hist.some(v=>v>0))
+      invSeries.push({label:el.name, data:hist, col:invCols[i%invCols.length]});
   });
 
-  if(!barSeries.length&&!invLines.length){
-    ctx.fillStyle='#4a5568';ctx.font='9px Space Mono';ctx.textAlign='center';
-    ctx.fillText('No clinker data',W/2,H/2); return;
-  }
+  // ── Visibility ──
+  const visProd=prodSeries.filter(s=>!_isHidden(legendId,s.label));
+  const visDem =demSeries.filter(s=>!_isHidden(legendId,s.label));
+  const visInv =invSeries.filter(s=>!_isHidden(legendId,s.label));
 
-  const clkLid=id==='dash-clk-chart'?'dash-clk-legend':'clk-chart-legend';
+  // ── Scales ──
+  const userProdMax=parseFloat(document.getElementById(id==='dash-clk-chart'?'dash-clk-prod-max':'clk-prod-max')?.value)||0;
+  const userInvMax =parseFloat(document.getElementById(id==='dash-clk-chart'?'dash-clk-inv-max':'clk-inv-max')?.value)||0;
 
-  // ── Scale calculation ── use visible series for auto scale
-  const visBar=barSeries.filter(s=>!_isHidden(clkLid,s.label));
-  const visReq=reqLines.filter(s=>!_isHidden(clkLid,s.label));
-  const visInv=invLines.filter(s=>!_isHidden(clkLid,s.label));
+  // Left axis: stacked prod + stacked dem side by side → max = max(sumProd, sumDem) per day
+  const maxProdPerDay=Array.from({length:days},(_,i)=>visProd.reduce((s,ser)=>s+(ser.data[i]||0),0));
+  const maxDemPerDay =Array.from({length:days},(_,i)=>visDem.reduce((s,ser)=>s+(ser.data[i]||0),0));
+  const autoLeft=Math.max(...maxProdPerDay,...maxDemPerDay,1)*1.15;
+  const prodMax=userProdMax||autoLeft;
 
-  const allProd=[...visBar,...visReq].flatMap(s=>s.data).filter(v=>v>0);
-  const allInv=visInv.flatMap(s=>s.data).filter(v=>v>0);
-  const autoProdMax=(allProd.length?Math.max(...allProd):0)*1.15||100;
-  const autoInvMax=(allInv.length?Math.max(...allInv):0)*1.15||100;
-
-  const userProdMax=_getClkScale('clk-prod-max','clk-prod-max-2',id==='dash-clk-chart'?'dash-clk-prod-max':null);
-  const userInvMax=_getClkScale('clk-inv-max','clk-inv-max-2',id==='dash-clk-chart'?'dash-clk-inv-max':null);
-  const prodMax=userProdMax||autoProdMax;
-  const invMax=userInvMax||autoInvMax;
+  // Right axis: stacked inventory (cumulative top)
+  const maxInvPerDay=Array.from({length:days},(_,i)=>visInv.reduce((s,ser)=>s+(ser.data[i]||0),0));
+  const autoInv=Math.max(...maxInvPerDay,1)*1.1;
+  const invMax=userInvMax||autoInv;
 
   // ── Grid ──
   ctx.strokeStyle='rgba(255,255,255,0.04)'; ctx.lineWidth=1;
   for(let i=0;i<=4;i++){
     const y=P.t+(cH/4)*i;
-    ctx.beginPath();ctx.moveTo(P.l,y);ctx.lineTo(P.l+cW,y);ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(P.l,y); ctx.lineTo(P.l+cW,y); ctx.stroke();
   }
 
-  // ── Left Y-axis (production) ──
-  ctx.fillStyle='#6b7a96'; ctx.font='8px Space Mono'; ctx.textAlign='right';
+  // ── Left Y-axis labels ──
+  ctx.fillStyle='rgba(100,150,100,0.7)'; ctx.font='8px Space Mono'; ctx.textAlign='right';
   for(let i=0;i<=4;i++){
     const v=prodMax*(1-i/4);
-    const y=P.t+(cH/4)*i;
-    ctx.fillText(v>=1000?(v/1000).toFixed(1)+'k':Math.round(v),P.l-6,y+3);
+    ctx.fillText(v>=1000?(v/1000).toFixed(1)+'k':Math.round(v), P.l-5, P.t+(cH/4)*i+3);
   }
-  ctx.save();
-  ctx.fillStyle='rgba(100,150,100,0.5)'; ctx.font='7px Space Mono'; ctx.textAlign='center';
-  ctx.translate(10,P.t+cH/2); ctx.rotate(-Math.PI/2);
-  ctx.fillText('PROD t/d',0,0); ctx.restore();
+  ctx.save(); ctx.fillStyle='rgba(100,150,100,0.4)'; ctx.font='7px Space Mono'; ctx.textAlign='center';
+  ctx.translate(10,P.t+cH/2); ctx.rotate(-Math.PI/2); ctx.fillText('PROD t/d',0,0); ctx.restore();
 
-  // ── Right Y-axis (inventory) ──
-  ctx.fillStyle='#c084fc'; ctx.font='8px Space Mono'; ctx.textAlign='left';
+  // ── Right Y-axis labels ──
+  ctx.fillStyle='rgba(56,189,248,0.6)'; ctx.font='8px Space Mono'; ctx.textAlign='left';
   for(let i=0;i<=4;i++){
     const v=invMax*(1-i/4);
-    const y=P.t+(cH/4)*i;
-    ctx.fillText(v>=1000?(v/1000).toFixed(1)+'k':Math.round(v),P.l+cW+6,y+3);
+    ctx.fillText(v>=1000?(v/1000).toFixed(0)+'k':Math.round(v), P.l+cW+5, P.t+(cH/4)*i+3);
   }
-  ctx.save();
-  ctx.fillStyle='rgba(192,132,252,0.5)'; ctx.font='7px Space Mono'; ctx.textAlign='center';
-  ctx.translate(W-8,P.t+cH/2); ctx.rotate(Math.PI/2);
-  ctx.fillText('INV t',0,0); ctx.restore();
+  ctx.save(); ctx.fillStyle='rgba(56,189,248,0.35)'; ctx.font='7px Space Mono'; ctx.textAlign='center';
+  ctx.translate(W-8,P.t+cH/2); ctx.rotate(Math.PI/2); ctx.fillText('INV t',0,0); ctx.restore();
 
-  // ── Draw bars (production, left axis) ──
-  const nS=visBar.length||1;
+  // ── Draw: stacked inventory areas (right axis, behind bars) ──
+  if(visInv.length){
+    // Draw from largest cumulative down so areas stack visually
+    const cumData=Array(days).fill(0);
+    visInv.forEach((ser,si)=>{
+      const prevCum=[...cumData];
+      ser.data.forEach((v,i)=>{ cumData[i]+=v||0; });
+      // Draw filled area between cumData and prevCum
+      const col=ser.col;
+      ctx.beginPath();
+      for(let i=0;i<days;i++){
+        const x=P.l+(i+0.5)*(cW/days);
+        const y=P.t+cH-(Math.min(cumData[i],invMax)/invMax)*cH;
+        i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+      }
+      // Return path along previous cumulative (bottom of this band)
+      for(let i=days-1;i>=0;i--){
+        const x=P.l+(i+0.5)*(cW/days);
+        const y=P.t+cH-(Math.min(prevCum[i],invMax)/invMax)*cH;
+        ctx.lineTo(x,y);
+      }
+      ctx.closePath();
+      ctx.fillStyle=col.replace(')',',0.18)').replace('rgb(','rgba(').replace('#',()=>{
+        const r=parseInt(col.slice(1,3),16),g=parseInt(col.slice(3,5),16),b=parseInt(col.slice(5,7),16);
+        return `rgba(${r},${g},${b},0.18`;
+      });
+      // Simpler: use globalAlpha
+      ctx.globalAlpha=0.18; ctx.fillStyle=col; ctx.fill(); ctx.globalAlpha=1;
+      // Top border line
+      ctx.beginPath();
+      for(let i=0;i<days;i++){
+        const x=P.l+(i+0.5)*(cW/days);
+        const y=P.t+cH-(Math.min(cumData[i],invMax)/invMax)*cH;
+        i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+      }
+      ctx.strokeStyle=col; ctx.lineWidth=1.5; ctx.setLineDash([]); ctx.stroke();
+    });
+  }
+
+  // ── Draw: stacked production + demand bars (flush) ──
   const slotW=cW/days;
-  const groupW=Math.max(1,slotW*0.85);
-  const bW=Math.max(0.5,groupW/nS);
+  const usedW=slotW*0.72;       // total bar group width per day
+  const halfGroup=usedW/2;       // half = prod half, half = dem half
+  const barW=halfGroup;          // each sub-group width
 
-  visBar.forEach((s,si)=>{
-    ctx.fillStyle=s.col; ctx.globalAlpha=0.75;
-    s.data.forEach((v,i)=>{
-      if(!v) return;
-      const groupX=P.l+i*slotW+(slotW-groupW)/2;
-      const x=groupX+si*bW;
-      const bH=Math.min(v,prodMax)/prodMax*cH;
-      ctx.fillRect(x,P.t+cH-bH,Math.max(0.5,bW-0.5),bH);
-    });
-    ctx.globalAlpha=1;
-  });
+  for(let i=0;i<days;i++){
+    const slotCenter=P.l+(i+0.5)*slotW;
+    const prodX=slotCenter-halfGroup;
+    const demX =slotCenter;       // flush right of prod
 
-  // ── Draw requirement lines (left axis, dashed) ──
-  visReq.forEach(s=>{
-    ctx.strokeStyle=s.col; ctx.lineWidth=1.5; ctx.setLineDash([5,3]);
-    ctx.shadowBlur=4; ctx.shadowColor=s.col;
-    ctx.beginPath();
-    s.data.forEach((v,i)=>{
-      const x=P.l+(i/(s.data.length-1||1))*cW;
-      const y=P.t+cH-Math.min(v,prodMax)/prodMax*cH;
-      i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+    // Stacked production bars (left half)
+    let prodBase=0;
+    visProd.forEach(ser=>{
+      const v=ser.data[i]||0; if(!v) return;
+      const bH=(Math.min(v,prodMax)/prodMax)*cH;
+      const y=P.t+cH-(prodBase/prodMax)*cH-bH;
+      ctx.globalAlpha=0.82; ctx.fillStyle=ser.col;
+      ctx.fillRect(prodX, y, Math.max(0.5,barW-0.5), bH);
+      ctx.globalAlpha=1;
+      prodBase+=v;
     });
-    ctx.stroke(); ctx.shadowBlur=0; ctx.setLineDash([]);
-  });
 
-  // ── Draw inventory lines (right axis, solid) ──
-  visInv.forEach(s=>{
-    ctx.strokeStyle=s.col; ctx.lineWidth=2; ctx.setLineDash([]);
-    ctx.shadowBlur=6; ctx.shadowColor=s.col;
-    ctx.beginPath();
-    s.data.forEach((v,i)=>{
-      const x=P.l+(i/(s.data.length-1||1))*cW;
-      const y=P.t+cH-Math.min(v,invMax)/invMax*cH;
-      i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+    // Stacked demand bars (right half, flush)
+    let demBase=0;
+    visDem.forEach(ser=>{
+      const v=ser.data[i]||0; if(!v) return;
+      const bH=(Math.min(v,prodMax)/prodMax)*cH;
+      const y=P.t+cH-(demBase/prodMax)*cH-bH;
+      ctx.globalAlpha=0.78; ctx.fillStyle=ser.col;
+      ctx.fillRect(demX, y, Math.max(0.5,barW-0.5), bH);
+      ctx.globalAlpha=1;
+      demBase+=v;
     });
-    ctx.stroke(); ctx.shadowBlur=0;
-  });
+  }
 
   // ── Axes ──
   ctx.strokeStyle='rgba(255,255,255,0.08)'; ctx.lineWidth=1; ctx.setLineDash([]);
-  ctx.beginPath();ctx.moveTo(P.l,P.t);ctx.lineTo(P.l,P.t+cH);ctx.lineTo(P.l+cW,P.t+cH);
-  ctx.moveTo(P.l+cW,P.t);ctx.lineTo(P.l+cW,P.t+cH);
+  ctx.beginPath();
+  ctx.moveTo(P.l,P.t); ctx.lineTo(P.l,P.t+cH); ctx.lineTo(P.l+cW,P.t+cH);
+  ctx.moveTo(P.l+cW,P.t); ctx.lineTo(P.l+cW,P.t+cH);
   ctx.stroke();
 
   // ── X-axis labels ──
@@ -8270,26 +8814,20 @@ function _drawClinkerChart(id, r){
   const labelCount=Math.min(10,days);
   for(let i=0;i<=labelCount;i++){
     const dIdx=Math.round(i/labelCount*(days-1));
-    const x=P.l+(dIdx/(days-1||1))*cW;
+    const x=P.l+(dIdx+0.5)*slotW;
     const d=new Date(simStart.getTime()+(startDay-1+dIdx)*864e5);
     ctx.fillText(d.toISOString().split('T')[0].slice(5),x,H-8);
   }
 
-  // ── Store meta for tooltip ──
-  // Left-axis series: bars + req lines. Right-axis: inv lines (scale differently in tooltip)
-  _chartMeta[id]={
-    series:visBar, lines:visReq, invLines:visInv, invMax, prodMax,
-    days, startDay, P, dualAxis:true
-  };
+  // ── Store meta ──
+  _chartMeta[id]={series:visProd,demSeries:visDem,invLines:visInv,invMax,prodMax,days,startDay,P,dualAxis:true};
 
-  // ── Legend ──
-  const allForLegend=[
-    ...barSeries.map(s=>({...s,sym:'■'})),
-    ...reqLines.map(s=>({...s,sym:'╌'})),
-    ...invLines.map(s=>({...s,sym:'—'}))
-  ];
-  _drawLegend(clkLid,allForLegend,[]);
-  if(clkLid==='clk-chart-legend') _drawLegend('clk-chart-legend-2',allForLegend,[]);
+  // ── Right-panel legend ──
+  _drawLegendPanel(legendId,[
+    {title:'Inventory', items:invSeries.map(s=>({label:s.label,col:s.col}))},
+    {title:'Production',items:prodSeries.map(s=>({label:s.label,col:s.col}))},
+    {title:'Demand',    items:demSeries.map(s=>({label:s.label,col:s.col}))},
+  ]);
 }
 
 function _drawProdBarChart(id,r,type){
@@ -8348,39 +8886,35 @@ function _drawProdBarChart(id,r,type){
       lineSeries.push({label:`Req: ${prod?.name||pid}`,val:daily,data:Array(days).fill(daily),col:'#ffb830'});
     });
 
-  } else { // cement production
-    // ── PRODUCTION BARS ──────────────────────────────────
-    const prodIds=new Set();
-    fac.filter(e=>e.type==='finish_mill').forEach(mill=>{
-      DB.element_product_capacities.filter(c=>c.element_id===mill.id).forEach(c=>prodIds.add(c.product_id));
-    });
-    [...prodIds].forEach((pid,pi)=>{
-      const prod=DB.products.find(p=>p.id===pid);
-      const data=[];
-      for(let d=startDay;d<=endDay;d++){
-        let total=0;
-        fac.filter(e=>e.type==='finish_mill').forEach(mill=>{
-          if((r.millProductHistory?.[mill.id]||[])[d-1]!==pid) return;
-          const cap=DB.element_product_capacities.find(c=>c.element_id===mill.id&&c.product_id===pid);
-          total+=parseFloat(cap?.capacity_tpd)||0;
-        });
-        data.push(total);
-      }
-      barSeries.push({label:prod?.name||pid,data,col:cols[pi%cols.length],type:'production'});
+  } else { // cement
+    const legendId2=id==='dash-cem-chart'?'dash-cem-legend':id==='prod-chart'?'prod-chart-legend':'prod-chart-legend';
+
+    // ── Production: one series per finish mill per product ──
+    const prodSeries=[];
+    const prodCols=['#00ff9d','#ff3d5a','#ff8c42','#4da6ff','#cc7aff','#ffb830'];
+    fac.filter(e=>e.type==='finish_mill').forEach((mill,mi)=>{
+      const caps=DB.element_product_capacities.filter(c=>c.element_id===mill.id);
+      caps.forEach((cap,ci)=>{
+        const prod=DB.products.find(p=>p.id===cap.product_id);
+        const data=[];
+        for(let d=startDay;d<=endDay;d++){
+          const actual=(r.millProductHistory?.[mill.id]||[])[d-1]===cap.product_id;
+          data.push(actual?(parseFloat(cap.capacity_tpd)||0):0);
+        }
+        prodSeries.push({label:`${mill.name}${caps.length>1?' — '+(prod?.name||cap.product_id):''}`,data,col:prodCols[(mi*3+ci)%prodCols.length]});
+      });
     });
 
-    // ── DEMAND BARS (outline style, same axis as production) ──
-    const demandSeries=[];
+    // ── Demand: one series per demand point per product ──
+    const demSeries=[];
+    const demCols=['#ffb830','#cc7aff','#4da6ff','#ff8c42','#00ff9d','#ff3d5a'];
     const simBase=new Date(S.simCfg.start_date+'T00:00:00');
     DB.demand_points.filter(dp=>{
-      // Match facility: if facFilter active, match by assigned_facility_id; else BRS-local only
-      const dpEl=DB.elements.find(e=>e.id===dp.element_id);
-      if(!dpEl) return false;
+      const dpEl=DB.elements.find(e=>e.id===dp.element_id); if(!dpEl) return false;
       if(S.facFilter) return dpEl.assigned_facility_id===S.facFilter;
       return dp.facility_id===S.facility_id&&(!dpEl.assigned_facility_id||dpEl.assigned_facility_id===S.facility_id);
     }).forEach((dp,di)=>{
-      const dpEl=DB.elements.find(e=>e.id===dp.element_id);
-      if(!dpEl) return;
+      const dpEl=DB.elements.find(e=>e.id===dp.element_id); if(!dpEl) return;
       dp.products.forEach((pp,pi)=>{
         const prod=DB.products.find(p=>p.id===pp.product_id);
         const data=[];
@@ -8388,42 +8922,16 @@ function _drawProdBarChart(id,r,type){
           const dt=new Date(simBase.getTime()+(d-1)*864e5);
           data.push(_demandRate(dpEl.id,dt.toISOString().split('T')[0]));
         }
-        const col=cols[(di*2+pi+3)%cols.length];
         const facName=DB.facilities.find(f=>f.id===(dpEl.assigned_facility_id||S.facility_id))?.name||'';
         const facPrefix=!S.facFilter&&facName?`${facName} — `:'';
-        demandSeries.push({label:`Dem: ${facPrefix}${prod?.name||pp.product_id}`,data,col,type:'demand'});
+        demSeries.push({label:`${facPrefix}${prod?.name||pp.product_id}`,data,col:demCols[(di*2+pi)%demCols.length]});
       });
     });
 
-    // ── VESSEL ARRIVALS (unloading into cement silos) ─────
-    const cemSilos=fac.filter(e=>e.type==='bulk_silo'&&isCementSilo(e));
-    const vesselArrData=new Array(days).fill(0);
-    cemSilos.forEach(silo=>{
-      (r.siloUnloadHistory?.[silo.id]||[]).forEach((v,i)=>{
-        if(i>=startDay-1&&i<endDay) vesselArrData[i-(startDay-1)]+=v||0;
-      });
-    });
-    // ── RAIL ARRIVALS (loaded to yard on dispatch days) ────
-    const railArrData=new Array(days).fill(0);
-    fac.filter(e=>e.type==='dispatch_point'&&e.props.dispatch_type==='Rail').forEach(dp=>{
-      const rh=r.railHistory?.[dp.id]||[];
-      for(let d=startDay;d<=endDay;d++){
-        const entry=rh[d-1]||{};
-        const cars=Object.values(entry.carsLoadedByProduct||{}).reduce((a,b)=>a+b,0);
-        const carCap=parseFloat(dp.props?.car_capacity_t)||112;
-        railArrData[d-startDay]+=cars*carCap;
-      }
-    });
-    const hasVessel=vesselArrData.some(v=>v>0);
-    const hasRail=railArrData.some(v=>v>0);
-
-    // ── LEGEND IDs ────────────────────────────────────────
-    const legendId2=id==='prod-chart'?'prod-chart-legend':id==='dash-cem-chart'?'dash-cem-legend':'prod-chart-legend';
-
-    // ── INVENTORY AREAS (right axis) ──────────────────────
-    const invCols=['rgba(77,166,255,0.15)','rgba(204,122,255,0.15)','rgba(255,140,66,0.15)','rgba(255,184,48,0.15)'];
-    const invStroke=['rgba(77,166,255,0.7)','rgba(204,122,255,0.7)','rgba(255,140,66,0.7)','rgba(255,184,48,0.7)'];
+    // ── Inventory: cement silos, stacked areas ──
+    const invColsFill=['#4da6ff','#a78bfa','#fb923c','#38bdf8'];
     const invSeries=[];
+    const cemSilos=fac.filter(e=>e.type==='bulk_silo'&&isCementSilo(e));
     cemSilos.forEach((silo,si)=>{
       const hist=[];
       for(let d=startDay;d<=endDay;d++){
@@ -8431,109 +8939,126 @@ function _drawProdBarChart(id,r,type){
         hist.push(d>1?(h[d-2]??0):parseFloat(silo.props?.start_inventory)||0);
       }
       if(hist.some(v=>v>0))
-        invSeries.push({label:`${silo.name}`,data:hist,fill:invCols[si%invCols.length],stroke:invStroke[si%invStroke.length],col:invStroke[si%invStroke.length]});
+        invSeries.push({label:silo.name,data:hist,col:invColsFill[si%invColsFill.length]});
     });
 
-    // ── VISIBILITY FILTERS ───────────────────────────────
-    const visBarC=barSeries.filter(s=>!_isHidden(legendId2,s.label));
-    const visDemC=demandSeries.filter(s=>!_isHidden(legendId2,s.label));
-    const visVesselC=hasVessel&&!_isHidden(legendId2,'Vessel Unload');
-    const visRailC=hasRail&&!_isHidden(legendId2,'Rail Loaded');
-    const visInvC=invSeries.filter(s=>!_isHidden(legendId2,s.label));
+    // ── Visibility ──
+    const visProd=prodSeries.filter(s=>!_isHidden(legendId2,s.label));
+    const visDem =demSeries.filter(s=>!_isHidden(legendId2,s.label));
+    const visInv =invSeries.filter(s=>!_isHidden(legendId2,s.label));
 
-    // ── SCALES ────────────────────────────────────────────
-    const lmaxEl=document.getElementById(id+'-lmax');
-    const rmaxEl=document.getElementById(id+'-rmax');
-    const userLeft=lmaxEl&&parseFloat(lmaxEl.value)>0?parseFloat(lmaxEl.value):null;
-    const userRight=rmaxEl&&parseFloat(rmaxEl.value)>0?parseFloat(rmaxEl.value):null;
-    const allLeft=[...visBarC,...visDemC].flatMap(s=>s.data)
-      .concat(visVesselC?vesselArrData:[]).concat(visRailC?railArrData:[]).filter(v=>v>0);
-    const maxLeft=userLeft||(allLeft.length?Math.max(...allLeft)*1.15:1);
-    const allRight=visInvC.flatMap(s=>s.data).filter(v=>v>0);
-    const maxRight=userRight||(allRight.length?Math.max(...allRight)*1.1:1);
-    const hasInv=visInvC.length>0;
-
+    // ── Scales ──
+    const lmaxEl=document.getElementById(id==='dash-cem-chart'?'dash-cem-chart-lmax':id+'-lmax');
+    const rmaxEl=document.getElementById(id==='dash-cem-chart'?'dash-cem-chart-rmax':id+'-rmax');
+    const userLeft =lmaxEl&&parseFloat(lmaxEl.value)>0?parseFloat(lmaxEl.value):0;
+    const userRight=rmaxEl&&parseFloat(rmaxEl.value)>0?parseFloat(rmaxEl.value):0;
+    const maxProdPerDay=Array.from({length:days},(_,i)=>visProd.reduce((s,ser)=>s+(ser.data[i]||0),0));
+    const maxDemPerDay =Array.from({length:days},(_,i)=>visDem.reduce((s,ser)=>s+(ser.data[i]||0),0));
+    const autoLeft=Math.max(...maxProdPerDay,...maxDemPerDay,1)*1.15;
+    const prodMax=userLeft||autoLeft;
+    const maxInvPerDay=Array.from({length:days},(_,i)=>visInv.reduce((s,ser)=>s+(ser.data[i]||0),0));
+    const autoInv=Math.max(...maxInvPerDay,1)*1.1;
+    const invMax=userRight||autoInv;
+    const hasInv=visInv.length>0;
     const PR=hasInv?48:P.r;
     const cWadj=W-P.l-PR;
-    const daySlotW=cWadj/days;
 
-    // ── DRAW: inventory areas ─────────────────────────────
-    visInvC.forEach(inv=>{
-      ctx.beginPath();
-      inv.data.forEach((v,i)=>{const x=P.l+i*cWadj/(days-1||1);const y=P.t+(1-v/maxRight)*cH;i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);});
-      ctx.lineTo(P.l+(inv.data.length-1)*cWadj/(days-1||1),P.t+cH);ctx.lineTo(P.l,P.t+cH);ctx.closePath();
-      ctx.fillStyle=inv.fill;ctx.fill();
-      ctx.beginPath();
-      inv.data.forEach((v,i)=>{const x=P.l+i*cWadj/(days-1||1);const y=P.t+(1-v/maxRight)*cH;i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);});
-      ctx.strokeStyle=inv.stroke;ctx.lineWidth=1.5;ctx.setLineDash([]);ctx.shadowBlur=0;ctx.stroke();
-    });
+    // ── Grid ──
+    ctx.strokeStyle='rgba(255,255,255,0.04)'; ctx.lineWidth=1;
+    for(let i=0;i<=4;i++){
+      const y=P.t+(cH/4)*i;
+      ctx.beginPath(); ctx.moveTo(P.l,y); ctx.lineTo(P.l+cWadj,y); ctx.stroke();
+    }
 
-    // ── DRAW: vessel bars ─────────────────────────────────
-    if(visVesselC) vesselArrData.forEach((v,i)=>{
-      if(!v) return;
-      ctx.fillStyle='rgba(56,189,248,0.85)';ctx.globalAlpha=0.9;
-      ctx.fillRect(P.l+i*daySlotW+daySlotW*0.03,P.t+cH-(v/maxLeft)*cH,daySlotW*0.38,(v/maxLeft)*cH);
-      ctx.globalAlpha=1;
-    });
+    // ── Left Y-axis ──
+    _drawYAxis(ctx,P,cH,prodMax,0);
 
-    // ── DRAW: rail bars ───────────────────────────────────
-    if(visRailC) railArrData.forEach((v,i)=>{
-      if(!v) return;
-      ctx.fillStyle='rgba(251,146,60,0.85)';ctx.globalAlpha=0.9;
-      ctx.fillRect(P.l+i*daySlotW+daySlotW*0.52,P.t+cH-(v/maxLeft)*cH,daySlotW*0.38,(v/maxLeft)*cH);
-      ctx.globalAlpha=1;
-    });
-
-    // ── DRAW: production bars ─────────────────────────────
-    const nProd=visBarC.length||1;
-    const prodGroupW=Math.max(1,daySlotW*0.7);
-    const prodBW=Math.max(0.5,prodGroupW/nProd);
-    visBarC.forEach((s,si)=>{
-      ctx.fillStyle=s.col;
-      s.data.forEach((v,i)=>{
-        if(!v) return;
-        ctx.globalAlpha=0.8;
-        ctx.fillRect(P.l+i*daySlotW+(daySlotW-prodGroupW)/2+si*prodBW,P.t+cH-(v/maxLeft)*cH,Math.max(0.5,prodBW-0.5),(v/maxLeft)*cH);
-        ctx.globalAlpha=1;
-      });
-    });
-
-    // ── DRAW: demand bars (outline) ───────────────────────
-    visDemC.forEach(s=>{
-      ctx.strokeStyle=s.col;ctx.lineWidth=1.2;ctx.setLineDash([3,2]);
-      s.data.forEach((v,i)=>{
-        if(!v) return;
-        ctx.strokeRect(P.l+i*daySlotW+daySlotW*0.1,P.t+cH-(v/maxLeft)*cH,daySlotW*0.8,(v/maxLeft)*cH);
-      });
-      ctx.setLineDash([]);
-    });
-
-    _drawXAxis(ctx,P,W,H,cWadj,cH,days,startDay);
-    _drawYAxis(ctx,P,cH,maxLeft,0);
+    // ── Right Y-axis ──
     if(hasInv){
-      ctx.fillStyle='rgba(77,166,255,0.55)';ctx.font='7px Space Mono';ctx.textAlign='left';
-      for(let t=0;t<=4;t++){
-        const v=maxRight*t/4;const y=P.t+cH-(t/4)*cH;
-        ctx.fillText(v>=1000?`${(v/1000).toFixed(0)}k`:`${Math.round(v)}`,P.l+cWadj+3,y+3);
+      ctx.fillStyle='rgba(56,189,248,0.6)'; ctx.font='8px Space Mono'; ctx.textAlign='left';
+      for(let i=0;i<=4;i++){
+        const v=invMax*(1-i/4);
+        ctx.fillText(v>=1000?(v/1000).toFixed(0)+'k':Math.round(v),P.l+cWadj+5,P.t+(cH/4)*i+3);
       }
     }
 
-    // ── LEGEND ───────────────────────────────────────────
-    _drawLegend(legendId2,[
-      ...barSeries.map(s=>({...s,sym:'▪'})),
-      ...demandSeries.map(s=>({...s,sym:'□'})),
-      ...(hasVessel?[{label:'Vessel Unload',col:'rgba(56,189,248,0.9)',sym:'⬛'}]:[]),
-      ...(hasRail?[{label:'Rail Loaded',col:'rgba(251,146,60,0.9)',sym:'⬛'}]:[]),
-      ...invSeries.map(s=>({...s,sym:'◆'}))
-    ],[]);
+    // ── Draw: stacked inventory areas ──
+    if(hasInv){
+      const cumData=Array(days).fill(0);
+      visInv.forEach(ser=>{
+        const prevCum=[...cumData];
+        ser.data.forEach((v,i)=>{ cumData[i]+=v||0; });
+        ctx.beginPath();
+        for(let i=0;i<days;i++){
+          const x=P.l+(i+0.5)*(cWadj/days);
+          const y=P.t+cH-(Math.min(cumData[i],invMax)/invMax)*cH;
+          i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+        }
+        for(let i=days-1;i>=0;i--){
+          const x=P.l+(i+0.5)*(cWadj/days);
+          const y=P.t+cH-(Math.min(prevCum[i],invMax)/invMax)*cH;
+          ctx.lineTo(x,y);
+        }
+        ctx.closePath();
+        ctx.globalAlpha=0.15; ctx.fillStyle=ser.col; ctx.fill(); ctx.globalAlpha=1;
+        ctx.beginPath();
+        for(let i=0;i<days;i++){
+          const x=P.l+(i+0.5)*(cWadj/days);
+          const y=P.t+cH-(Math.min(cumData[i],invMax)/invMax)*cH;
+          i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+        }
+        ctx.strokeStyle=ser.col; ctx.lineWidth=1.5; ctx.setLineDash([]); ctx.stroke();
+      });
+    }
 
-    _chartMeta[id]={
-      series:visBarC,demandSeries:visDemC,lines:[],
-      invLines:visInvC,
-      vesselArr:visVesselC?[{label:'Vessel Unload',data:vesselArrData,col:'rgba(56,189,248,0.9)'}]:[],
-      railArr:visRailC?[{label:'Rail Loaded',data:railArrData,col:'rgba(251,146,60,0.9)'}]:[],
-      dualAxis:hasInv,maxLeft,maxRight,days,startDay,P:{...P,r:PR}
-    };
+    // ── Draw: stacked prod + demand bars (flush) ──
+    const slotW=cWadj/days;
+    const usedW=slotW*0.72;
+    const halfGroup=usedW/2;
+
+    for(let i=0;i<days;i++){
+      const slotCenter=P.l+(i+0.5)*slotW;
+      const prodX=slotCenter-halfGroup;
+      const demX =slotCenter;
+
+      let prodBase=0;
+      visProd.forEach(ser=>{
+        const v=ser.data[i]||0; if(!v) return;
+        const bH=(Math.min(v,prodMax)/prodMax)*cH;
+        const y=P.t+cH-(prodBase/prodMax)*cH-bH;
+        ctx.globalAlpha=0.82; ctx.fillStyle=ser.col;
+        ctx.fillRect(prodX,y,Math.max(0.5,halfGroup-0.5),bH);
+        ctx.globalAlpha=1; prodBase+=v;
+      });
+
+      let demBase=0;
+      visDem.forEach(ser=>{
+        const v=ser.data[i]||0; if(!v) return;
+        const bH=(Math.min(v,prodMax)/prodMax)*cH;
+        const y=P.t+cH-(demBase/prodMax)*cH-bH;
+        ctx.globalAlpha=0.78; ctx.fillStyle=ser.col;
+        ctx.fillRect(demX,y,Math.max(0.5,halfGroup-0.5),bH);
+        ctx.globalAlpha=1; demBase+=v;
+      });
+    }
+
+    // ── Axes ──
+    ctx.strokeStyle='rgba(255,255,255,0.08)'; ctx.lineWidth=1; ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(P.l,P.t); ctx.lineTo(P.l,P.t+cH); ctx.lineTo(P.l+cWadj,P.t+cH);
+    ctx.moveTo(P.l+cWadj,P.t); ctx.lineTo(P.l+cWadj,P.t+cH);
+    ctx.stroke();
+
+    _drawXAxis(ctx,P,W,H,cWadj,cH,days,startDay);
+
+    _chartMeta[id]={series:visProd,demSeries:visDem,invLines:visInv,invMax,prodMax,days,startDay,P:{...P,r:PR},dualAxis:hasInv};
+
+    // ── Right-panel legend ──
+    _drawLegendPanel(legendId2,[
+      {title:'Inventory', items:invSeries.map(s=>({label:s.label,col:s.col}))},
+      {title:'Production',items:prodSeries.map(s=>({label:s.label,col:s.col}))},
+      {title:'Demand',    items:demSeries.map(s=>({label:s.label,col:s.col}))},
+    ]);
     return;
   }
 
