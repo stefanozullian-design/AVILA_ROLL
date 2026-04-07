@@ -829,6 +829,12 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
             <option value="ALL">All Customers</option>
           </select>
           <div style="width:1px;height:20px;background:var(--border2)"></div>
+          <div class="sp-filter-label">Product</div>
+          <select class="sp-fi" id="sp-prod-sel" style="width:190px;height:26px"
+            onchange="spDispatch({product:decodeURIComponent(this.value)})">
+            <option value="ALL">All Products</option>
+          </select>
+          <div style="width:1px;height:20px;background:var(--border2)"></div>
           <div class="sp-filter-label">Type</div>
           <div class="sp-chip green active" id="sp-type-all"  onclick="spDispatch({custType:'all'})">ALL</div>
           <div class="sp-chip"             id="sp-type-ext"   onclick="spDispatch({custType:'EXT'})">EXT</div>
@@ -5457,7 +5463,7 @@ function saveSimCfg(){
 
 // ── STATE — single source of truth ──────────────────
 const SP = {
-  f: { dateFrom:'', dateTo:'', origin:'ALL', rep:'ALL', customer:'ALL', custType:'all' },
+  f: { dateFrom:'', dateTo:'', origin:'ALL', rep:'ALL', customer:'ALL', custType:'all', product:'ALL' },
   filteredRows:  [],
   scopedRows:    [],
   chartRange:   '90',
@@ -5468,6 +5474,8 @@ const SP = {
   fpEntries:    [],
   _repOptions:  [],
   _custOptions: [],
+  _prodOptions: [],
+  _userExpanded: {},  // tracks keys the user has explicitly expanded
 };
 
 // ── REQUIRED COLUMNS ─────────────────────────────────
@@ -5527,14 +5535,17 @@ function renderSalesPerfView(){
 function spDispatch(changes){
   Object.assign(SP.f, changes);
 
-  // Cascade: if origin changed, reset rep+customer
-  if('origin' in changes){ SP.f.rep='ALL'; SP.f.customer='ALL'; }
-  // If rep changed, reset customer
-  if('rep' in changes && !('origin' in changes)){ SP.f.customer='ALL'; }
+  // Cascade: narrower selections reset when a broader filter changes
+  if('origin'   in changes){ SP.f.rep='ALL'; SP.f.customer='ALL'; SP.f.product='ALL'; }
+  if('rep'      in changes && !('origin' in changes)){ SP.f.customer='ALL'; SP.f.product='ALL'; }
+  if('customer' in changes && !('rep' in changes) && !('origin' in changes)){ SP.f.product='ALL'; }
+  if('custType' in changes){ SP.f.product='ALL'; }
 
-  // Clear table scope when filters change (avoid stale selections)
+  // Clear table scope and user expansion state when filters change
   SP.selScope = null;
   SP.scopedRows = [];
+  SP.collapsed = {};
+  SP._userExpanded = {};
 
   spRebuildCascade();
   spSyncFilterUI();
@@ -5550,17 +5561,23 @@ function spRebuildCascade(){
   const repPool = SP.f.origin === 'ALL' ? all : all.filter(r=>r.origin===SP.f.origin);
   SP._repOptions = ['ALL', ...[...new Set(repPool.map(r=>r.sales_manager||'—'))].sort()];
 
-  // Level 3: customers available given current origin+rep
-  const custPool = repPool.filter(r=>SP.f.rep==='ALL'||r.sales_manager===SP.f.rep);
+  // Level 3: customers available given current origin+rep+custType
+  const custPool = repPool.filter(r=>(SP.f.rep==='ALL'||r.sales_manager===SP.f.rep)&&(SP.f.custType==='all'||r.customer_type===SP.f.custType));
   SP._custOptions = ['ALL', ...[...new Set(custPool.map(r=>r.ship_to_name||String(r.ship_to||'')))].sort()];
 
+  // Level 4: products available given origin+rep+customer+custType
+  const prodPool = custPool.filter(r=>SP.f.customer==='ALL'||r.ship_to_name===SP.f.customer);
+  SP._prodOptions = ['ALL', ...[...new Set(prodPool.map(r=>r.product||''))].filter(Boolean).sort()];
+
   // If current selections are no longer valid, reset them
-  if(!SP._repOptions.includes(SP.f.rep))  SP.f.rep='ALL';
+  if(!SP._repOptions.includes(SP.f.rep))     SP.f.rep='ALL';
   if(!SP._custOptions.includes(SP.f.customer)) SP.f.customer='ALL';
+  if(!SP._prodOptions.includes(SP.f.product))  SP.f.product='ALL';
 
   spRenderOriginChips();
   spRenderRepDropdown();
   spRenderCustDropdown();
+  spRenderProdDropdown();
 }
 
 // Push current SP.f state into the DOM filter elements
@@ -5575,15 +5592,35 @@ function spSyncFilterUI(){
     const el=document.getElementById(`sp-type-${t==='all'?'all':t.toLowerCase()}`);
     if(el) el.classList.toggle('active', SP.f.custType===t);
   });
+  // Reset date inputs if SP.f has values
+  const df2=document.getElementById('sp-date-from');
+  const dt2=document.getElementById('sp-date-to');
+  if(df2 && SP.f.dateFrom) df2.value=SP.f.dateFrom;
+  if(dt2 && SP.f.dateTo)   dt2.value=SP.f.dateTo;
 }
 
-// ── ORIGIN CHIPS ─────────────────────────────────────
+// ── ORIGIN CHIPS — only show origins present in current data ─────────────
 function spRenderOriginChips(){
   const wrap = document.getElementById('sp-origin-chips'); if(!wrap) return;
-  const origins = ['ALL', ...(DB.real_shipments_meta.origins||[])];
+  // Compute which origins are reachable given rep/customer/custType/product filters
+  // (origin itself is excluded from this pool — it filters itself)
+  const pool = DB.real_shipments_daily.filter(r=>{
+    if(SP.f.rep     !=='ALL' && (r.sales_manager||'—') !==SP.f.rep)     return false;
+    if(SP.f.customer!=='ALL' && r.ship_to_name         !==SP.f.customer)return false;
+    if(SP.f.custType!=='all' && r.customer_type        !==SP.f.custType)return false;
+    if(SP.f.product !=='ALL' && (r.product||'')        !==SP.f.product) return false;
+    return true;
+  });
+  const available = new Set(pool.map(r=>r.origin));
+  const allOrigins = DB.real_shipments_meta.origins||[];
+  const origins = ['ALL', ...allOrigins];
   wrap.innerHTML = origins.map(o => {
     const active = SP.f.origin===o;
-    return `<div class="sp-chip${active?' active':''}" onclick="spDispatch({origin:'${o}'})">${o}</div>`;
+    const disabled = o!=='ALL' && !available.has(o);
+    return `<div class="sp-chip${active?' active':''}${disabled?' sp-chip-disabled':''}"
+      style="${disabled?'opacity:.35;cursor:default':''}"
+      onclick="${disabled?'':'spDispatch({origin:''+o+''})'}">
+      ${o}</div>`;
   }).join('');
 }
 
@@ -5605,6 +5642,15 @@ function spRenderCustDropdown(){
   }).join('');
 }
 
+// ── PRODUCT DROPDOWN ──────────────────────────────────
+function spRenderProdDropdown(){
+  const sel = document.getElementById('sp-prod-sel'); if(!sel) return;
+  sel.innerHTML = SP._prodOptions.map(p=>{
+    const disp = p==='ALL'?'All Products':spShortProd(p);
+    return `<option value="${encodeURIComponent(p)}" title="${p}" ${SP.f.product===p?'selected':''}>${disp}</option>`;
+  }).join('');
+}
+
 // ── FILTER APPLICATION ────────────────────────────────
 // Reads SP.f, computes SP.filteredRows, then renders downstream
 function spApplyFilters(){
@@ -5616,10 +5662,11 @@ function spApplyFilters(){
   SP.filteredRows = DB.real_shipments_daily.filter(r=>{
     if(df && r.date < df) return false;
     if(dt && r.date > dt) return false;
-    if(SP.f.origin  !== 'ALL' && r.origin        !== SP.f.origin)  return false;
-    if(SP.f.rep     !== 'ALL' && (r.sales_manager||'—') !== SP.f.rep)    return false;
-    if(SP.f.customer!== 'ALL' && r.ship_to_name  !== SP.f.customer)return false;
-    if(SP.f.custType!== 'all' && r.customer_type !== SP.f.custType)return false;
+    if(SP.f.origin  !== 'ALL' && r.origin                !== SP.f.origin)   return false;
+    if(SP.f.rep     !== 'ALL' && (r.sales_manager||'—')  !== SP.f.rep)      return false;
+    if(SP.f.customer!== 'ALL' && r.ship_to_name          !== SP.f.customer) return false;
+    if(SP.f.custType!== 'all' && r.customer_type         !== SP.f.custType) return false;
+    if(SP.f.product !== 'ALL' && (r.product||'')         !== SP.f.product)  return false;
     return true;
   });
 
@@ -5697,7 +5744,8 @@ function spRenderChart(){
   // Determine stack dimension:
   // - If scoped to a single customer OR a specific rep → stack by product
   // - Otherwise → stack by origin
-  const useProductStack = SP.f.customer!=='ALL' || SP.f.rep!=='ALL' || SP.selScope?.type==='customer' || SP.selScope?.type==='product';
+  const useProductStack = SP.f.customer!=='ALL' || SP.f.rep!=='ALL' || SP.f.product!=='ALL'
+    || SP.selScope?.type==='customer' || SP.selScope?.type==='product' || SP.selScope?.type==='rep';
 
   const datasets = [];
 
@@ -5742,39 +5790,7 @@ function spRenderChart(){
     });
   }
 
-  // Simulated future demand (if sim run)
-  if(S.simResults && S.simCfg?.start_date){
-    const simBars={};
-    const h=S.simCfg.horizon||90;
-    const totalDP=DB.demand_points.reduce((s,dp)=>s+(parseFloat(dp.daily_tonnage)||0),0);
-    for(let i=0;i<h;i++){
-      const d=new Date(S.simCfg.start_date); d.setDate(d.getDate()+i);
-      const ds=d.toISOString().split('T')[0];
-      if(ds<=today||( cutoff && ds<cutoff)) continue;
-      simBars[ds]=totalDP;
-    }
-    const simDates=Object.keys(simBars).sort();
-    if(simDates.length){
-      // Extend labels to include sim dates
-      const allDates=[...new Set([...labels,...simDates])].sort();
-      // Rebuild all existing datasets to match extended labels
-      datasets.forEach(ds=>{
-        const oldData=ds.data; const oldLabels=labels;
-        ds.data=allDates.map(d=>{
-          const idx=oldLabels.indexOf(d);
-          return idx>=0?oldData[idx]:0;
-        });
-      });
-      datasets.push({
-        label:'Sim Demand',
-        data:allDates.map(d=>simBars[d]||null),
-        backgroundColor:'rgba(255,184,48,0.18)',
-        borderColor:'rgba(255,184,48,0.45)',
-        borderWidth:1,stack:'sim',order:3
-      });
-      labels.splice(0,labels.length,...allDates);
-    }
-  }
+  // Chart is historical actuals only — no future/simulated data shown here
 
   // Moving averages — computed on TOTAL of scoped rows per day
   const totByDate={};
@@ -5894,6 +5910,18 @@ function spRenderTable(){
   const today=new Date().toISOString().split('T')[0];
   const d30=new Date(today); d30.setDate(d30.getDate()-30); const from30=d30.toISOString().split('T')[0];
 
+  // Default state: segments and reps visible, customers collapsed (products hidden until customer expanded)
+  // We only pre-collapse if the key hasn't been explicitly toggled by the user
+  // Pre-collapse: reps visible by default, customers collapsed until user expands
+  rows.forEach(r=>{
+    const rep=r.sales_manager||'—';
+    const cust=r.ship_to_name||String(r.ship_to||'Unknown');
+    const rKey=`rep_${rep.replace(/[^\w]/g,'_')}`;
+    const cKey=`cust_${rKey}_${cust.replace(/[^\w]/g,'_')}`;
+    // Collapse customer rows by default unless user explicitly expanded them
+    if(!(cKey in SP._userExpanded)) SP.collapsed[cKey]=true;
+  });
+
   // Compute stats for any array of rows
   const spStats=(arr)=>{
     const byDate={};
@@ -5925,84 +5953,82 @@ function spRenderTable(){
 
   const fmtVsTarget=()=>`<td class="sp-cell-d">—</td>`;
 
-  // Build tree: segment → rep → customer → product
-  const tree={};
+  // Build tree: rep → customer → product (segment surfaced as badge on rep row)
+  const repTree={};
   rows.forEach(r=>{
     const seg=r.customer_type||'EXT';
     const rep=r.sales_manager||'—';
     const cust=r.ship_to_name||String(r.ship_to||'Unknown');
     const prod=r.product||r.origin;
-    if(!tree[seg]) tree[seg]={rows:[],reps:{}};
-    tree[seg].rows.push(r);
-    if(!tree[seg].reps[rep]) tree[seg].reps[rep]={rows:[],custs:{}};
-    tree[seg].reps[rep].rows.push(r);
-    if(!tree[seg].reps[rep].custs[cust]) tree[seg].reps[rep].custs[cust]={rows:[],prods:{}};
-    tree[seg].reps[rep].custs[cust].rows.push(r);
-    if(!tree[seg].reps[rep].custs[cust].prods[prod]) tree[seg].reps[rep].custs[cust].prods[prod]={rows:[]};
-    tree[seg].reps[rep].custs[cust].prods[prod].rows.push(r);
+    if(!repTree[rep]) repTree[rep]={rows:[],segs:new Set(),custs:{}};
+    repTree[rep].rows.push(r);
+    repTree[rep].segs.add(seg);
+    if(!repTree[rep].custs[cust]) repTree[rep].custs[cust]={rows:[],prods:{}};
+    repTree[rep].custs[cust].rows.push(r);
+    if(!repTree[rep].custs[cust].prods[prod]) repTree[rep].custs[cust].prods[prod]={rows:[]};
+    repTree[rep].custs[cust].prods[prod].rows.push(r);
   });
 
+  // ── Render: Rep (L0) → Customer (L1, collapsed by default) → Product (L2) ──
   let h='';
-  Object.keys(tree).sort().forEach(seg=>{
-    const sKey=`seg_${seg}`;
-    const sCol=SP.collapsed[sKey];
-    const ss=spStats(tree[seg].rows);
-    const c30=getCommit30('segment',sKey);
-    const sel=isSelRow('segment',sKey)?'sp-row-sel':'';
-    h+=`<tr class="sp-row-l0 ${sel}" onclick="spSelectScope('segment','${sKey}','${seg}','${seg}')">
-      <td class="td-lbl"><span class="sp-toggle" onclick="event.stopPropagation();spToggle('${sKey}')">${sCol?'▸':'▾'}</span>
-        ${seg} <span class="sp-badge ${seg==='EXT'?'sp-badge-ext':'sp-badge-int'}">${seg}</span></td>
-      <td class="sp-cell-g">${Number(ss.avg).toLocaleString()}</td>
-      <td class="sp-cell-a">${Number(ss.peak).toLocaleString()}</td>
-      <td>${Number(ss.last30).toLocaleString()}</td>
-      <td class="${c30!==null?'sp-cell-a':''}">${c30!==null?Number(c30).toLocaleString():'—'}</td>
-      ${fmtVsTarget()}<td class="sp-cell-d">${Number(ss.txns).toLocaleString()}</td></tr>`;
+  Object.keys(repTree).sort().forEach(rep=>{
+    const rKey=`rep_${rep}`.replace(/[^\w]/g,'_');
+    const rCol=SP.collapsed[rKey];
+    const rs=spStats(repTree[rep].rows);
+    const rc30=getCommit30('rep',rKey);
+    const rsel=isSelRow('rep',rKey)?'sp-row-sel':'';
+    const segBadges=[...repTree[rep].segs].map(s=>
+      `<span class="sp-badge ${s==='EXT'?'sp-badge-ext':'sp-badge-int'}">${s}</span>`).join(' ');
+    const repJ=JSON.stringify(rep);
+    const custCount=Object.keys(repTree[rep].custs).length;
+    h+=`<tr class="sp-row-l0 ${rsel}" onclick="spSelectScope('rep','${rKey}','${rep}','',null,${repJ})">
+      <td class="td-lbl">
+        <span class="sp-toggle" onclick="event.stopPropagation();spToggle('${rKey}')">${rCol?'▸':'▾'}</span>
+        ${rep} ${segBadges}
+        <span style="font-family:var(--mono);font-size:7px;color:var(--text-dim);margin-left:4px">${custCount} cust.</span>
+      </td>
+      <td class="sp-cell-g">${Number(rs.avg).toLocaleString()}</td>
+      <td class="sp-cell-a">${Number(rs.peak).toLocaleString()}</td>
+      <td>${Number(rs.last30).toLocaleString()}</td>
+      <td class="${rc30!==null?'sp-cell-a':''}">${rc30!==null?Number(rc30).toLocaleString():'—'}</td>
+      ${fmtVsTarget()}<td class="sp-cell-d">${Number(rs.txns).toLocaleString()}</td></tr>`;
 
-    if(!sCol){
-      Object.keys(tree[seg].reps).sort().forEach(rep=>{
-        const rKey=`rep_${seg}_${rep}`;
-        const rCol=SP.collapsed[rKey];
-        const rs=spStats(tree[seg].reps[rep].rows);
-        const rc30=getCommit30('rep',rKey);
-        const rsel=isSelRow('rep',rKey)?'sp-row-sel':'';
-        const repEnc=encodeURIComponent(rep);
-        h+=`<tr class="sp-row-l1 ${rsel}" onclick="spSelectScope('rep','${rKey}','${rep}','${seg}',null,${JSON.stringify(rep)})">
-          <td class="td-lbl"><span class="sp-toggle" onclick="event.stopPropagation();spToggle('${rKey}')">${rCol?'▸':'▾'}</span>${rep}</td>
-          <td>${Number(rs.avg).toLocaleString()}</td><td class="sp-cell-a">${Number(rs.peak).toLocaleString()}</td>
-          <td>${Number(rs.last30).toLocaleString()}</td>
-          <td class="${rc30!==null?'sp-cell-a':''}">${rc30!==null?Number(rc30).toLocaleString():'—'}</td>
-          ${fmtVsTarget()}<td class="sp-cell-d">${Number(rs.txns).toLocaleString()}</td></tr>`;
+    if(!rCol){
+      Object.keys(repTree[rep].custs).sort().forEach(cust=>{
+        const cKey=`cust_${rKey}_${cust}`.replace(/[^\w]/g,'_');
+        const cCol=SP.collapsed[cKey];
+        const cs=spStats(repTree[rep].custs[cust].rows);
+        const cc30=getCommit30('customer',cKey);
+        const csel=isSelRow('customer',cKey)?'sp-row-sel':'';
+        const custSegs=[...new Set(repTree[rep].custs[cust].rows.map(r=>r.customer_type))];
+        const custBadge=custSegs.map(s=>`<span class="sp-badge ${s==='EXT'?'sp-badge-ext':'sp-badge-int'}" style="font-size:6px">${s}</span>`).join('');
+        const prodCount=Object.keys(repTree[rep].custs[cust].prods).length;
+        h+=`<tr class="sp-row-l1 ${csel}" onclick="spSelectScope('customer','${cKey}','${cust}','',${JSON.stringify(cust)},${JSON.stringify(rep)})">
+          <td class="td-lbl">
+            <span class="sp-toggle" onclick="event.stopPropagation();spToggle('${cKey}')">${cCol?'▸':'▾'}</span>
+            ${cust} ${custBadge}
+            <span style="font-family:var(--mono);font-size:7px;color:var(--text-dim);margin-left:4px">${prodCount} prod.</span>
+          </td>
+          <td>${Number(cs.avg).toLocaleString()}</td>
+          <td class="sp-cell-a">${Number(cs.peak).toLocaleString()}</td>
+          <td>${Number(cs.last30).toLocaleString()}</td>
+          <td class="${cc30!==null?'sp-cell-a':''}">${cc30!==null?Number(cc30).toLocaleString():'—'}</td>
+          ${fmtVsTarget()}<td class="sp-cell-d">${Number(cs.txns).toLocaleString()}</td></tr>`;
 
-        if(!rCol){
-          Object.keys(tree[seg].reps[rep].custs).sort().forEach(cust=>{
-            const cKey=`cust_${seg}_${rep}_${cust}`.replace(/[^\w]/g,'_');
-            const cCol=SP.collapsed[cKey];
-            const cs=spStats(tree[seg].reps[rep].custs[cust].rows);
-            const cc30=getCommit30('customer',cKey);
-            const csel=isSelRow('customer',cKey)?'sp-row-sel':'';
-            const custJ=JSON.stringify(cust);
-            h+=`<tr class="sp-row-l2 ${csel}" onclick="spSelectScope('customer','${cKey}','${cust}','${seg}',${custJ},${JSON.stringify(rep)})">
-              <td class="td-lbl"><span class="sp-toggle" onclick="event.stopPropagation();spToggle('${cKey}')">${cCol?'▸':'▾'}</span>${cust}</td>
-              <td>${Number(cs.avg).toLocaleString()}</td><td class="sp-cell-a">${Number(cs.peak).toLocaleString()}</td>
-              <td>${Number(cs.last30).toLocaleString()}</td>
-              <td class="${cc30!==null?'sp-cell-a':''}">${cc30!==null?Number(cc30).toLocaleString():'—'}</td>
-              ${fmtVsTarget()}<td class="sp-cell-d">${Number(cs.txns).toLocaleString()}</td></tr>`;
-
-            if(!cCol){
-              Object.keys(tree[seg].reps[rep].custs[cust].prods).sort().forEach(prod=>{
-                const pKey=`prod_${cKey}_${prod}`.replace(/[^\w]/g,'_');
-                const ps=spStats(tree[seg].reps[rep].custs[cust].prods[prod].rows);
-                const pc30=getCommit30('product',pKey);
-                const psel=isSelRow('product',pKey)?'sp-row-sel':'';
-                const dot=`<div style="display:inline-block;width:8px;height:8px;border-radius:1px;background:${spProdColor(prod,true)};margin-right:5px;vertical-align:middle"></div>`;
-                h+=`<tr class="sp-row-l3 ${psel}" onclick="spSelectScope('product','${pKey}','${spShortProd(prod)}','${seg}',${JSON.stringify(cust)},${JSON.stringify(rep)})">
-                  <td class="td-lbl">${dot}${spShortProd(prod)}</td>
-                  <td>${Number(ps.avg).toLocaleString()}</td><td class="sp-cell-a">${Number(ps.peak).toLocaleString()}</td>
-                  <td>${Number(ps.last30).toLocaleString()}</td>
-                  <td class="${pc30!==null?'sp-cell-a':''}">${pc30!==null?Number(pc30).toLocaleString():'—'}</td>
-                  ${fmtVsTarget()}<td class="sp-cell-d">${Number(ps.txns).toLocaleString()}</td></tr>`;
-              });
-            }
+        if(!cCol){
+          Object.keys(repTree[rep].custs[cust].prods).sort().forEach(prod=>{
+            const pKey=`prod_${cKey}_${prod}`.replace(/[^\w]/g,'_');
+            const ps=spStats(repTree[rep].custs[cust].prods[prod].rows);
+            const pc30=getCommit30('product',pKey);
+            const psel=isSelRow('product',pKey)?'sp-row-sel':'';
+            const dot=`<span style="display:inline-block;width:8px;height:8px;border-radius:1px;background:${spProdColor(prod,true)};margin-right:5px;vertical-align:middle;flex-shrink:0"></span>`;
+            h+=`<tr class="sp-row-l2 ${psel}" onclick="spSelectScope('product','${pKey}','${spShortProd(prod).replace(/'/g,"\'")}','',${JSON.stringify(cust)},${JSON.stringify(rep)})">
+              <td class="td-lbl">${dot}${spShortProd(prod)}</td>
+              <td>${Number(ps.avg).toLocaleString()}</td>
+              <td class="sp-cell-a">${Number(ps.peak).toLocaleString()}</td>
+              <td>${Number(ps.last30).toLocaleString()}</td>
+              <td class="${pc30!==null?'sp-cell-a':''}">${pc30!==null?Number(pc30).toLocaleString():'—'}</td>
+              ${fmtVsTarget()}<td class="sp-cell-d">${Number(ps.txns).toLocaleString()}</td></tr>`;
           });
         }
       });
@@ -6011,32 +6037,53 @@ function spRenderTable(){
   tbody.innerHTML=h;
 }
 
-function spToggle(key){ SP.collapsed[key]=!SP.collapsed[key]; spRenderTable(); }
+function spToggle(key){
+  SP.collapsed[key]=!SP.collapsed[key];
+  // Track whether user explicitly expanded this key
+  if(!SP.collapsed[key]) SP._userExpanded[key]=true;
+  else delete SP._userExpanded[key];
+  spRenderTable();
+}
 
 function spExpandAll(expand){
   SP.collapsed={};
+  SP._userExpanded={};
   if(!expand){
-    const segs=[...new Set(SP.filteredRows.map(r=>r.customer_type))];
-    segs.forEach(s=>{ SP.collapsed[`seg_${s}`]=true; });
+    // Collapse all rep rows back to default
+    const reps=[...new Set(SP.filteredRows.map(r=>r.sales_manager||'—'))];
+    reps.forEach(rep=>{ SP.collapsed[`rep_${rep.replace(/[^\w]/g,'_')}`]=true; });
   }
   spRenderTable();
 }
 
 // ── SCOPE SELECTION ──────────────────────────────────
-// Selecting a row also updates the cascade dropdowns to match
+// Clicking a row in the table scopes the chart to that rep / customer / product.
+// Also cascades the top-bar dropdowns to match the selection.
 function spSelectScope(type, key, label, custType, custName, repName){
   SP.selScope={type,key,label,custType};
 
-  // Push selection into cascade filters for reactivity
+  // Push selection into cascade filters so dropdowns reflect the scope
   const changes={};
   if(repName  && repName!=='ALL')  changes.rep=repName;
   if(custName && custName!=='ALL') changes.customer=custName;
 
   if(Object.keys(changes).length){
     Object.assign(SP.f, changes);
-    if('customer' in changes && !('rep' in changes)){/*keep*/}
+    // Cascade: setting customer should not reset product in this case
     spRebuildCascade();
     spSyncFilterUI();
+    // Re-filter with new cascade selection
+    SP.filteredRows = DB.real_shipments_daily.filter(r=>{
+      const df=SP.f.dateFrom, dt=SP.f.dateTo;
+      if(df && r.date < df) return false;
+      if(dt && r.date > dt) return false;
+      if(SP.f.origin  !=='ALL' && r.origin               !==SP.f.origin)  return false;
+      if(SP.f.rep     !=='ALL' && (r.sales_manager||'—') !==SP.f.rep)     return false;
+      if(SP.f.customer!=='ALL' && r.ship_to_name         !==SP.f.customer)return false;
+      if(SP.f.custType!=='all' && r.customer_type        !==SP.f.custType)return false;
+      if(SP.f.product !=='ALL' && (r.product||'')        !==SP.f.product) return false;
+      return true;
+    });
   }
 
   SP.scopedRows = spGetScopeRows(SP.filteredRows, SP.selScope);
@@ -6049,8 +6096,8 @@ function spSelectScope(type, key, label, custType, custName, repName){
 function spClearScope(){
   SP.selScope=null;
   SP.scopedRows=SP.filteredRows;
-  // Also reset cascade to ALL if no explicit filter set
-  SP.f.rep='ALL'; SP.f.customer='ALL';
+  SP.f.rep='ALL'; SP.f.customer='ALL'; SP.f.product='ALL';
+  SP.collapsed={}; SP._userExpanded={};
   spRebuildCascade(); spSyncFilterUI();
   const badge=document.getElementById('sp-scope-badge'); if(badge) badge.style.display='none';
   spApplyFilters();
@@ -6059,17 +6106,15 @@ function spClearScope(){
 
 function spGetScopeRows(rows, scope){
   if(!scope) return rows;
+  const sane=s=>s.replace(/[^\w]/g,'_');
   return rows.filter(r=>{
-    const seg=r.customer_type||'EXT';
     const rep=r.sales_manager||'—';
     const cust=r.ship_to_name||String(r.ship_to||'Unknown');
     const prod=r.product||r.origin;
-    const sKey=`seg_${seg}`;
-    const rKey=`rep_${seg}_${rep}`;
-    const cKey=`cust_${seg}_${rep}_${cust}`.replace(/[^\w]/g,'_');
-    const pKey=`prod_${cKey}_${prod}`.replace(/[^\w]/g,'_');
+    const rKey=`rep_${sane(rep)}`;
+    const cKey=`cust_${rKey}_${sane(cust)}`;
+    const pKey=`prod_${cKey}_${sane(prod)}`;
     switch(scope.type){
-      case 'segment': return sKey===scope.key;
       case 'rep':     return rKey===scope.key;
       case 'customer':return cKey===scope.key;
       case 'product': return pKey===scope.key;
@@ -6343,7 +6388,7 @@ async function spHandleFile(input){
     if(msg) msg.innerHTML=`<div class="sp-val-ok">✓ ${Number(raw.length).toLocaleString()} rows → ${Number(aggCount).toLocaleString()} daily records · ${dateMin} → ${dateMax} · ${skipped} reversals skipped</div>`;
 
     // Reset SP filter state for fresh load
-    SP.f={dateFrom:dateMin,dateTo:dateMax,origin:'ALL',rep:'ALL',customer:'ALL',custType:'all'};
+    SP.f={dateFrom:dateMin,dateTo:dateMax,origin:'ALL',rep:'ALL',customer:'ALL',custType:'all',product:'ALL'};
     SP.selScope=null; SP.scopedRows=[]; SP.collapsed={};
 
     autoSave();
