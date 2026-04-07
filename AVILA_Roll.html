@@ -5471,15 +5471,15 @@ function renderSalesPerfView(){
   content.style.flexDirection = 'column';
   content.style.gap = '14px';
   if(hasData){
-    spApplyFilters();
     const m = DB.real_shipments_meta;
     document.getElementById('sp-meta-lbl').textContent =
       `${Number(m.row_count||0).toLocaleString()} records · ${m.date_min||'?'} → ${m.date_max||'?'} · loaded ${m.loaded_at||'?'}`;
-    // Set default date range
-    if(m.date_min && !document.getElementById('sp-date-from').value){
+    // Always set date range from meta (on every navigation to this view)
+    if(m.date_min){
       document.getElementById('sp-date-from').value = m.date_min;
-      document.getElementById('sp-date-to').value = m.date_max;
+      document.getElementById('sp-date-to').value   = m.date_max;
     }
+    spApplyFilters();
   }
 }
 
@@ -6192,13 +6192,15 @@ async function spHandleFile(input){
     }
     if(progBar) progBar.style.width='30%';
 
+    // Read with cellDates:false so we get raw values we can normalize ourselves
     const buf=await file.arrayBuffer();
-    const wb=XLSX.read(buf,{type:'array',cellDates:true});
+    const wb=XLSX.read(buf,{type:'array',cellDates:false,raw:true});
     if(progBar) progBar.style.width='50%';
 
     // Find RealShipments sheet
     const sheetName=wb.SheetNames.find(n=>n==='SalesConsolidated')||wb.SheetNames[0];
     const ws=wb.Sheets[sheetName];
+    // Use raw:false for string output (dates come as strings in date format)
     const raw=XLSX.utils.sheet_to_json(ws,{raw:false,defval:''});
 
     if(!raw.length){ throw new Error('Sheet is empty'); }
@@ -6209,30 +6211,53 @@ async function spHandleFile(input){
     if(missing.length){ throw new Error(`Missing columns: ${missing.join(', ')}`); }
     if(progBar) progBar.style.width='70%';
 
-    // Aggregate: date + ORIGIN + product + customer_type + ship_to + ship_to_name + sales_manager → volume sum
+    // Helper: normalize any date value to YYYY-MM-DD string
+    function spNormalizeDate(v){
+      if(!v&&v!==0) return null;
+      // XLSX serial number (number or numeric string)
+      const n=typeof v==='number'?v:parseFloat(v);
+      if(!isNaN(n)&&n>40000&&n<60000){
+        // Excel date serial → JS date (Excel epoch is Dec 30 1899)
+        const ms=(n-25569)*86400000;
+        const d=new Date(ms);
+        return d.toISOString().split('T')[0];
+      }
+      const s=String(v).trim();
+      // Already ISO YYYY-MM-DD
+      if(/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0,10);
+      // M/D/YYYY or MM/DD/YYYY
+      if(/^\d{1,2}\/\d{1,2}\/\d{4}/.test(s)){
+        const p=s.split('/');
+        return `${p[2]}-${p[0].padStart(2,'0')}-${p[1].padStart(2,'0')}`;
+      }
+      // D/M/YYYY  (less common but handle it)
+      if(/^\d{1,2}-\d{1,2}-\d{4}/.test(s)){
+        const p=s.split('-');
+        return `${p[2]}-${p[1].padStart(2,'0')}-${p[0].padStart(2,'0')}`;
+      }
+      // Try JS Date parse as last resort
+      const d=new Date(s);
+      if(!isNaN(d)) return d.toISOString().split('T')[0];
+      return null;
+    }
+
+    // Aggregate: date + ORIGIN + product + customer_type + ship_to → volume sum
     const aggMap={};
     let dateMin='9999', dateMax='0000';
-    const origins=new Set(), products=new Set(), shipments_meta={row_count:raw.length};
+    const origins=new Set(), products=new Set();
+    let skipped=0;
 
     raw.forEach(r=>{
       const vol=parseFloat(r['Volume'])||0;
-      if(vol<=0) return; // skip negatives/zeroes (reversals)
-      let dateStr=r['Date']||'';
-      // Normalize date
-      if(dateStr instanceof Date) dateStr=dateStr.toISOString().split('T')[0];
-      else if(typeof dateStr==='string'&&dateStr.includes('/')){
-        const p=dateStr.split('/');
-        dateStr=`${p[2]}-${p[0].padStart(2,'0')}-${p[1].padStart(2,'0')}`;
-      } else if(typeof dateStr==='string'&&dateStr.length>=10){
-        dateStr=dateStr.slice(0,10);
-      }
-      if(!dateStr||dateStr.length!==10) return;
+      if(vol<=0){ skipped++; return; } // skip negatives/zeroes (reversals)
+      const dateStr=spNormalizeDate(r['Date']);
+      if(!dateStr){ skipped++; return; }
       if(dateStr<dateMin) dateMin=dateStr;
       if(dateStr>dateMax) dateMax=dateStr;
       const origin=(r['ORIGIN']||'').trim();
       const product=(r['product']||r['Name Inv Roll']||'').trim();
       const custType=(r['Customer Type']||'EXT').trim();
-      const shipTo=r['Ship-To']||'';
+      const shipTo=String(r['Ship-To']||'').trim();
       const shipToName=(r['Ship-To Name']||'').trim();
       const rep=(r['Sales Manager']||'—').trim();
       const key=`${dateStr}|${origin}|${product}|${custType}|${shipTo}`;
@@ -6254,10 +6279,33 @@ async function spHandleFile(input){
     };
 
     if(progBar) progBar.style.width='100%';
-    if(msg) msg.innerHTML=`<div class="sp-val-ok">✓ Loaded ${Number(raw.length).toLocaleString()} rows → ${Number(DB.real_shipments_daily.length).toLocaleString()} aggregated records · ${dateMin} → ${dateMax}</div>`;
+
+    const aggCount=DB.real_shipments_daily.length;
+    if(aggCount===0){
+      throw new Error(`Parsed ${raw.length} rows but 0 passed aggregation. Check Date column format — expected M/D/YYYY, YYYY-MM-DD, or Excel serial number.`);
+    }
+
+    if(msg) msg.innerHTML=`<div class="sp-val-ok">✓ Loaded ${Number(raw.length).toLocaleString()} rows → ${Number(aggCount).toLocaleString()} daily records · ${dateMin} → ${dateMax} · ${skipped} reversals skipped</div>`;
 
     autoSave();
-    setTimeout(()=>{ renderSalesPerfView(); },600);
+
+    // Set default date filter before rendering
+    document.getElementById('sp-date-from').value = dateMin;
+    document.getElementById('sp-date-to').value   = dateMax;
+
+    // Short delay so user sees the success message, then reveal dashboard
+    setTimeout(()=>{
+      document.getElementById('sp-upload-zone').style.display='none';
+      const content=document.getElementById('sp-content');
+      content.style.display='flex';
+      content.style.flexDirection='column';
+      content.style.gap='14px';
+      spBuildOriginChips();
+      const m=DB.real_shipments_meta;
+      document.getElementById('sp-meta-lbl').textContent=
+        `${Number(m.row_count||0).toLocaleString()} records · ${m.date_min} → ${m.date_max} · loaded ${m.loaded_at}`;
+      spApplyFilters();
+    },800);
 
   }catch(err){
     if(msg) msg.innerHTML=`<div class="sp-val-error">✗ ${err.message}</div>`;
