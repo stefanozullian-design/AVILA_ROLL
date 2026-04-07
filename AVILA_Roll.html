@@ -5602,8 +5602,7 @@ function spSyncFilterUI(){
 // ── ORIGIN CHIPS — only show origins present in current data ─────────────
 function spRenderOriginChips(){
   const wrap = document.getElementById('sp-origin-chips'); if(!wrap) return;
-  // Compute which origins are reachable given rep/customer/custType/product filters
-  // (origin itself is excluded from this pool — it filters itself)
+  // Compute which origins are reachable given other active filters
   const pool = DB.real_shipments_daily.filter(r=>{
     if(SP.f.rep     !=='ALL' && (r.sales_manager||'—') !==SP.f.rep)     return false;
     if(SP.f.customer!=='ALL' && r.ship_to_name         !==SP.f.customer)return false;
@@ -5613,15 +5612,20 @@ function spRenderOriginChips(){
   });
   const available = new Set(pool.map(r=>r.origin));
   const allOrigins = DB.real_shipments_meta.origins||[];
-  const origins = ['ALL', ...allOrigins];
-  wrap.innerHTML = origins.map(o => {
-    const active = SP.f.origin===o;
-    const disabled = o!=='ALL' && !available.has(o);
-    return `<div class="sp-chip${active?' active':''}${disabled?' sp-chip-disabled':''}"
-      style="${disabled?'opacity:.35;cursor:default':''}"
-      onclick="${disabled?'':'spDispatch({origin:''+o+''})'}">
-      ${o}</div>`;
+  // Build chips using data attributes — no inline JS quoting issues
+  wrap.innerHTML = ['ALL',...allOrigins].map(o=>{
+    const active  = SP.f.origin===o;
+    const disabled= o!=='ALL' && !available.has(o);
+    return '<div class="sp-chip'+(active?' active':'')+(disabled?' sp-chip-disabled':'')+'"'+
+      ' data-origin="'+o+'"'+
+      (disabled?' style="opacity:.35;cursor:default"':'')+'>'+o+'</div>';
   }).join('');
+  // Single delegated listener — replace each time we rebuild
+  wrap.onclick=function(e){
+    const chip=e.target.closest('[data-origin]');
+    if(!chip||chip.classList.contains('sp-chip-disabled')) return;
+    spDispatch({origin:chip.dataset.origin});
+  };
 }
 
 // ── REP DROPDOWN ──────────────────────────────────────
@@ -6022,7 +6026,8 @@ function spRenderTable(){
             const pc30=getCommit30('product',pKey);
             const psel=isSelRow('product',pKey)?'sp-row-sel':'';
             const dot=`<span style="display:inline-block;width:8px;height:8px;border-radius:1px;background:${spProdColor(prod,true)};margin-right:5px;vertical-align:middle;flex-shrink:0"></span>`;
-            h+=`<tr class="sp-row-l2 ${psel}" onclick="spSelectScope('product','${pKey}','${spShortProd(prod).replace(/'/g,"\'")}','',${JSON.stringify(cust)},${JSON.stringify(rep)})">
+            const pLabel=spShortProd(prod).replace(/'/g,'&#39;');
+            h+=`<tr class="sp-row-l2 ${psel}" onclick="spSelectScope('product','${pKey}','${pLabel}','',${JSON.stringify(cust)},${JSON.stringify(rep)})">
               <td class="td-lbl">${dot}${spShortProd(prod)}</td>
               <td>${Number(ps.avg).toLocaleString()}</td>
               <td class="sp-cell-a">${Number(ps.peak).toLocaleString()}</td>
