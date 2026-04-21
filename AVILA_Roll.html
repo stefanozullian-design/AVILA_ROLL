@@ -1508,6 +1508,7 @@ const ET = {
     {k:'destination_facility_id',l:'Rail Destination Facility',t:'facility_select'}
   ]},
   demand_point:{label:'Demand Point',shape:'triangle',color:'#00ff9d',cat:'source',fields:[
+    {k:'dp_code',l:'Sales File Code (e.g. BRS/DEM/BRS_ILX-BLK/EXT)',t:'text'},
     {k:'demand_mode',l:'Demand Mode',t:'select',opts:['Monthly Volume','Fixed Daily']},
     {k:'dispatch_schedule',l:'Dispatch Schedule',t:'select',opts:['weekdays','mon_sat','7_days']},
     {k:'daily_tonnage',l:'Fixed Daily Fallback (t/day) — used when Monthly Volume mode has no data',t:'number'}
@@ -11868,7 +11869,8 @@ function dsWriteActualsToDemandGrid(){
   const today = new Date().toISOString().split('T')[0];
 
   // ── Aggregate real_shipments_daily by product (= Demand Point) + date ──
-  const aggByDpDate = {};
+  // product field in real_shipments_daily holds the Demand Point string
+  const aggByDpDate = {}; // key: `${demandPoint}|${date}` → total volume
   DB.real_shipments_daily.forEach(r=>{
     if(!r.product || !r.date) return;
     if(r.date > today) return; // only past/today = actuals
@@ -11878,34 +11880,39 @@ function dsWriteActualsToDemandGrid(){
 
   if(!Object.keys(aggByDpDate).length) return;
 
-  // ── Build name → element_id lookup ───────────────────────────────────
-  // Try three sources in priority order:
-  //  1. el.name on demand_point elements
-  //  2. el.props.demand_point on any element
-  //  3. element_name on DB.demand_points records
-  const dpNameMap = {};
+  // ── Build name → element_id lookup ─────────────────────────────────
+  // Priority 1: el.props.dp_code  — explicit Sales File Code set in element props
+  // Priority 2: el.name           — if element was named exactly after the DP string
+  // Priority 3: DB.demand_points.element_name
+  const dpEls = DB.elements.filter(e=>e.type==='demand_point');
+  if(!dpEls.length) return;
 
-  DB.elements.filter(e=>e.type==='demand_point').forEach(el=>{
+  const dpNameMap = {};
+  // P3 first (lowest priority, overwritten by higher)
+  DB.demand_points.forEach(dp=>{
+    const k=(dp.element_name||'').trim().toUpperCase();
+    if(k && dp.element_id) dpNameMap[k]=dp.element_id;
+  });
+  // P2: element name
+  dpEls.forEach(el=>{
     const k=(el.name||'').trim().toUpperCase();
     if(k) dpNameMap[k]=el.id;
   });
-  DB.elements.forEach(el=>{
-    const k=(el.props?.demand_point||'').trim().toUpperCase();
-    if(k && !dpNameMap[k]) dpNameMap[k]=el.id;
-  });
-  DB.demand_points.forEach(dp=>{
-    const k=(dp.element_name||'').trim().toUpperCase();
-    if(k && dp.element_id && !dpNameMap[k]) dpNameMap[k]=dp.element_id;
+  // P1: explicit dp_code prop (highest priority)
+  dpEls.forEach(el=>{
+    const k=(el.props?.dp_code||'').trim().toUpperCase();
+    if(k) dpNameMap[k]=el.id;
   });
 
-  // Diagnostic — log unique unmatched DP names (up to 10)
+  // Diagnostic
   const allDpNames=[...new Set(DB.real_shipments_daily.map(r=>r.product).filter(Boolean))];
-  const unmatched=allDpNames.filter(n=>!dpNameMap[n.trim().toUpperCase()]);
   const matched=allDpNames.filter(n=>dpNameMap[n.trim().toUpperCase()]);
+  const unmatched=allDpNames.filter(n=>!dpNameMap[n.trim().toUpperCase()]);
   console.log(`dsWriteActualsToDemandGrid: ${matched.length} DP names matched, ${unmatched.length} unmatched`);
   if(unmatched.length) console.log('Sample unmatched DPs:', unmatched.slice(0,5));
   if(matched.length)   console.log('Sample matched DPs:',   matched.slice(0,5));
-  console.log('Topology demand_point element names:', DB.elements.filter(e=>e.type==='demand_point').map(e=>e.name).slice(0,5));
+  console.log('Topology dp_code props:', dpEls.map(e=>e.props?.dp_code||'(none)').slice(0,5));
+  console.log('Topology element names:', dpEls.map(e=>e.name).slice(0,5));
 
   // ── Write to demand_values ────────────────────────────────────────────
   let written = 0, skipped = 0;
@@ -12133,15 +12140,7 @@ function hideTyping(){if(typingEl){typingEl.remove();typingEl=null;}}
 // ═══════════════════════════════════════════════════════
 function autoSave(){
   try{
-    // Exclude large transient tables that are reloaded from source files on startup
-    // real_shipments_daily can be 500k+ chars — far too large for localStorage
-    const dbToSave = Object.fromEntries(
-      Object.entries(DB).filter(([k])=>
-        k !== 'real_shipments_daily' &&
-        k !== 'real_shipments_meta'
-      )
-    );
-    localStorage.setItem('prodcast_v3',JSON.stringify({DB:dbToSave,counter:S.elCounter,simCfg:S.simCfg}));
+    localStorage.setItem('prodcast_v3',JSON.stringify({DB,counter:S.elCounter,simCfg:S.simCfg}));
   }catch(e){console.error('Save error',e);}
   statMsg('Saved');
 }
