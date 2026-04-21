@@ -910,6 +910,14 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
         <div class="tb-div"></div>
         <button class="tb-btn amber" onclick="openDemandBuilder(null)">⚙ Forecast Builder</button>
         <button class="tb-btn sec" onclick="openNonWorkingDaysPanel()">⊘ Non-Working Days</button>
+        <div style="display:flex;align-items:center;gap:8px;margin-left:8px;padding-left:8px;border-left:1px solid var(--border2)">
+          <div style="display:flex;align-items:center;gap:4px;font-family:var(--mono);font-size:8px;color:var(--green)">
+            <div style="width:12px;height:12px;background:rgba(0,255,157,.15);border-left:2px solid rgba(0,255,157,.5)"></div>Actual
+          </div>
+          <div style="display:flex;align-items:center;gap:4px;font-family:var(--mono);font-size:8px;color:var(--text-dim)">
+            <div style="width:12px;height:12px;background:transparent;border:1px solid var(--border2)"></div>Forecast
+          </div>
+        </div>
         <div style="margin-left:auto;display:flex;gap:6px">
           <button class="tb-btn sec" onclick="demandScrollToday()">Today</button>
           <button class="tb-btn" onclick="saveDemandValues()" style="background:var(--green);color:var(--bg)">↓ Save Forecast</button>
@@ -1347,7 +1355,7 @@ const DB = {
 
   // Demand
   demand_points: [], // { id, facility_id, element_id, element_name, products:[{product_id, priority}], mode, daily_tonnage, objective, rolling_days }
-  demand_values: [],    // { element_id, date, value_t } — one record per demand_point per day, the grid source of truth
+  demand_values: [],    // { element_id, date, value_t, source:'actual'|'forecast' } — one record per demand_point per day
   monthly_demand: [], // legacy — kept for migration
   demand_forecasts: [], // { id, element_id, method, schedule, value, rolling_days, sat_pct, to_preset, date_from, date_to } — builder rules, ephemeral
   non_working_days: [], // { id, date:'YYYY-MM-DD', reason } — global holidays/shutdowns
@@ -3352,6 +3360,10 @@ function renderDemandView(){
     const rec=(DB.demand_values||[]).find(v=>v.element_id===elId&&v.date===ds);
     return rec?parseFloat(rec.value_t)||0:0;
   };
+  const getSource=(elId,ds)=>{
+    const rec=(DB.demand_values||[]).find(v=>v.element_id===elId&&v.date===ds);
+    return rec?.source||'forecast';
+  };
   const grpTotal=(els,ds)=>els.reduce((s,el)=>s+getVal(el.id,ds),0);
   const grpMonTotal=(els,mon)=>mon.dates.reduce((s,ds)=>s+grpTotal(els,ds),0);
 
@@ -3512,11 +3524,21 @@ function renderDemandView(){
             h+=`<td style="background:rgba(77,166,255,.06);border-left:2px solid rgba(77,166,255,.2);font-size:9px;color:var(--blue);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${monTotal>0?Math.round(monTotal).toLocaleString():''}</td>`;
             if(!isCol) mon.dates.forEach(ds=>{
               const v=getVal(el.id,ds);
+              const src=getSource(el.id,ds);
               const isNwd=nwdSet.has(ds);
-              h+=`<td class="dem-day-${mon.ym}" style="padding:1px 2px;border-bottom:1px solid var(--border);border-right:1px solid rgba(255,255,255,.03);${tdSty(ds)}">
-                <input class="dem-cell" data-el="${el.id}" data-date="${ds}" value="${v||''}"
-                  ${isNwd?'disabled title="Non-working day"':''}
-                  style="width:50px;background:${isNwd?'rgba(255,61,90,.08)':'transparent'};border:none;color:${isNwd?'rgba(255,61,90,.4)':'var(--text)'};font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;outline:none">
+              const isActual=src==='actual';
+              // Actual cells: read-only, green-tinted background, no input border
+              // Forecast cells: editable as before
+              const cellBg=isNwd?'rgba(255,61,90,.08)':isActual?'rgba(0,255,157,.06)':'transparent';
+              const cellColor=isNwd?'rgba(255,61,90,.4)':isActual?'var(--green)':'var(--text)';
+              const cellBorder=isActual?'border-left:2px solid rgba(0,255,157,.35);':'';
+              h+=`<td class="dem-day-${mon.ym}" style="padding:1px 2px;border-bottom:1px solid var(--border);border-right:1px solid rgba(255,255,255,.03);${tdSty(ds)}${cellBorder}">
+                ${isActual
+                  ? `<div style="width:50px;font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;color:${cellColor};background:${cellBg}" title="Actual shipment data">${v?Math.round(v*10)/10:''}</div>`
+                  : `<input class="dem-cell" data-el="${el.id}" data-date="${ds}" value="${v||''}"
+                      ${isNwd?'disabled title="Non-working day"':''}
+                      style="width:50px;background:${cellBg};border:none;color:${cellColor};font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;outline:none">`
+                }
               </td>`;
             });
           });
@@ -3584,6 +3606,8 @@ function demandScrollToday(){
 
 function saveDemandValues(){
   if(!DB.demand_values) DB.demand_values=[];
+  // Note: actual cells (source='actual') are rendered as divs not inputs, so they
+  // won't appear in querySelectorAll('.dem-cell') — no extra guard needed.
   const inputs=document.querySelectorAll('.dem-cell');
   inputs.forEach(inp=>{
     const elId=inp.dataset.el, ds=inp.dataset.date;
@@ -11723,6 +11747,9 @@ async function spIngestFile(buf, fileName){
     origins: [...origins].sort(), products: [...products].sort()
   };
 
+  // Write actuals into the Demand grid (past dates only)
+  dsWriteActualsToDemandGrid();
+
   // If Sales page is active, refresh it
   if(S.view==='salesperf') renderSalesPerfView();
   autoSave();
@@ -11826,6 +11853,74 @@ function dsCfgPanelHTML(){
   </div>`;
 }
 
+
+// ═══════════════════════════════════════════════════════
+// ACTUALS → DEMAND GRID
+// ═══════════════════════════════════════════════════════
+// Called after spIngestFile() completes.
+// Aggregates DB.real_shipments_daily by Demand Point name + date,
+// matches to demand_point elements by name, and writes to DB.demand_values
+// with source:'actual' — overriding any existing value for past dates.
+
+function dsWriteActualsToDemandGrid(){
+  if(!DB.real_shipments_daily.length) return;
+
+  const today = new Date().toISOString().split('T')[0];
+
+  // ── Aggregate real_shipments_daily by product (= Demand Point) + date ──
+  // product field in real_shipments_daily holds the Demand Point string
+  const aggByDpDate = {}; // key: `${demandPoint}|${date}` → total volume
+  DB.real_shipments_daily.forEach(r=>{
+    if(!r.product || !r.date) return;
+    if(r.date > today) return; // only past/today = actuals
+    const key = r.product + '|' + r.date;
+    aggByDpDate[key] = (aggByDpDate[key]||0) + r.volume;
+  });
+
+  if(!Object.keys(aggByDpDate).length) return;
+
+  // ── Match demand point elements by name ──────────────────────────────
+  // Demand point elements: el.type==='demand_point', el.name = the DP string
+  const dpEls = DB.elements.filter(e=>e.type==='demand_point');
+  if(!dpEls.length) return;
+
+  // Build lookup: dpName → element_id  (case-insensitive, trimmed)
+  const dpNameMap = {};
+  dpEls.forEach(el=>{
+    const key = (el.name||'').trim().toUpperCase();
+    if(key) dpNameMap[key] = el.id;
+  });
+
+  // ── Write to demand_values ────────────────────────────────────────────
+  let written = 0, skipped = 0;
+  Object.entries(aggByDpDate).forEach(([key, vol])=>{
+    const [dpName, date] = key.split('|');
+    const elId = dpNameMap[(dpName||'').trim().toUpperCase()];
+    if(!elId){ skipped++; return; }
+
+    // Remove any existing record for this element+date
+    DB.demand_values = (DB.demand_values||[]).filter(
+      v=>!(v.element_id===elId && v.date===date)
+    );
+    // Write actual — rounded to 1 decimal
+    if(vol > 0){
+      DB.demand_values.push({
+        element_id: elId,
+        date,
+        value_t: Math.round(vol * 10) / 10,
+        source: 'actual'
+      });
+      written++;
+    }
+  });
+
+  autoSave();
+  console.log(`dsWriteActualsToDemandGrid: ${written} actuals written, ${skipped} DP names unmatched`);
+  statMsg(`Demand grid updated — ${written} actual values written`);
+
+  // Refresh Demand view if it's open
+  if(S.view==='demand') renderDemandView();
+}
 
 // ═══════════════════════════════════════════════════════
 // UI CONTROLS
