@@ -928,6 +928,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
         <div id="dem-top-inner" style="height:1px"></div>
       </div>
       <!-- Table -->
+      <div id="dem-actuals-warn" style="display:none;padding:7px 14px;background:rgba(255,184,48,.08);border-bottom:1px solid rgba(255,184,48,.25);font-family:var(--mono);font-size:9px;flex-shrink:0"></div>
       <div style="flex:1;overflow:auto" id="demand-table-wrap">
         <div style="font-family:var(--mono);font-size:10px;color:var(--text-dim);padding:30px;text-align:center">
           Run a simulation first to set the date horizon, then use the Forecast Builder.
@@ -1508,7 +1509,6 @@ const ET = {
     {k:'destination_facility_id',l:'Rail Destination Facility',t:'facility_select'}
   ]},
   demand_point:{label:'Demand Point',shape:'triangle',color:'#00ff9d',cat:'source',fields:[
-    {k:'dp_code',l:'Sales File Code (e.g. BRS/DEM/BRS_ILX-BLK/EXT)',t:'text'},
     {k:'demand_mode',l:'Demand Mode',t:'select',opts:['Monthly Volume','Fixed Daily']},
     {k:'dispatch_schedule',l:'Dispatch Schedule',t:'select',opts:['weekdays','mon_sat','7_days']},
     {k:'daily_tonnage',l:'Fixed Daily Fallback (t/day) — used when Monthly Volume mode has no data',t:'number'}
@@ -11868,68 +11868,57 @@ function dsWriteActualsToDemandGrid(){
 
   const today = new Date().toISOString().split('T')[0];
 
-  // ── Aggregate real_shipments_daily by product (= Demand Point) + date ──
-  // product field in real_shipments_daily holds the Demand Point string
-  const aggByDpDate = {}; // key: `${demandPoint}|${date}` → total volume
-  DB.real_shipments_daily.forEach(r=>{
-    if(!r.product || !r.date) return;
-    if(r.date > today) return; // only past/today = actuals
-    const key = r.product + '|' + r.date;
-    aggByDpDate[key] = (aggByDpDate[key]||0) + r.volume;
-  });
+  // ── Normalise Excel DP string → topology naming convention ────────────
+  // Excel:    BRS/DEM/BRS_ILX-PAK/EXT  (has /DEM/, dash before type suffix)
+  // Topology: BRS/BRS_ILX/PAK/EXT      (no /DEM/, slash instead of dash)
+  function normDP(s){
+    s = (s||'').trim().replace('/DEM/','/')
+               .replace(/-([A-Z]+)\/([A-Z]+)$/, '/$1/$2');
+    return s.toUpperCase();
+  }
 
+  // ── Aggregate by (normalisedDpName + date) ────────────────────────────
+  const aggByDpDate = {};
+  const rawDpForNorm = {}; // norm key → original Excel string (for reporting)
+  DB.real_shipments_daily.forEach(r=>{
+    if(!r.product || !r.date || r.date > today) return;
+    const norm = normDP(r.product);
+    const key  = norm + '|' + r.date;
+    aggByDpDate[key] = (aggByDpDate[key]||0) + r.volume;
+    rawDpForNorm[norm] = r.product;
+  });
   if(!Object.keys(aggByDpDate).length) return;
 
-  // ── Build name → element_id lookup ─────────────────────────────────
-  // Priority 1: el.props.dp_code  — explicit Sales File Code set in element props
-  // Priority 2: el.name           — if element was named exactly after the DP string
-  // Priority 3: DB.demand_points.element_name
+  // ── Build lookup: normalisedName → element_id ─────────────────────────
   const dpEls = DB.elements.filter(e=>e.type==='demand_point');
   if(!dpEls.length) return;
 
   const dpNameMap = {};
-  // P3 first (lowest priority, overwritten by higher)
-  DB.demand_points.forEach(dp=>{
-    const k=(dp.element_name||'').trim().toUpperCase();
-    if(k && dp.element_id) dpNameMap[k]=dp.element_id;
-  });
-  // P2: element name
   dpEls.forEach(el=>{
-    const k=(el.name||'').trim().toUpperCase();
-    if(k) dpNameMap[k]=el.id;
-  });
-  // P1: explicit dp_code prop (highest priority)
-  dpEls.forEach(el=>{
-    const k=(el.props?.dp_code||'').trim().toUpperCase();
-    if(k) dpNameMap[k]=el.id;
+    // Register both raw and normalised form of the element name
+    const raw  = (el.name||'').trim().toUpperCase();
+    const norm = normDP(el.name);
+    if(raw)  dpNameMap[raw]  = el.id;
+    if(norm) dpNameMap[norm] = el.id;
+    // Explicit dp_code override (highest priority)
+    const code = (el.props?.dp_code||'').trim().toUpperCase();
+    if(code) dpNameMap[code] = el.id;
   });
 
-  // Diagnostic
-  const allDpNames=[...new Set(DB.real_shipments_daily.map(r=>r.product).filter(Boolean))];
-  const matched=allDpNames.filter(n=>dpNameMap[n.trim().toUpperCase()]);
-  const unmatched=allDpNames.filter(n=>!dpNameMap[n.trim().toUpperCase()]);
-  console.log(`dsWriteActualsToDemandGrid: ${matched.length} DP names matched, ${unmatched.length} unmatched`);
-  if(unmatched.length) console.log('Sample unmatched DPs:', unmatched.slice(0,5));
-  if(matched.length)   console.log('Sample matched DPs:',   matched.slice(0,5));
-  console.log('Topology dp_code props:', dpEls.map(e=>e.props?.dp_code||'(none)').slice(0,5));
-  console.log('Topology element names:', dpEls.map(e=>e.name).slice(0,5));
-
-  // ── Write to demand_values ────────────────────────────────────────────
-  let written = 0, skipped = 0;
+  // ── Write actuals to demand_values ────────────────────────────────────
+  let written = 0;
+  const matchedNorms = new Set();
   Object.entries(aggByDpDate).forEach(([key, vol])=>{
-    const [dpName, date] = key.split('|');
-    const elId = dpNameMap[(dpName||'').trim().toUpperCase()];
-    if(!elId){ skipped++; return; }
-
-    // Remove any existing record for this element+date
+    const [normName, date] = key.split('|');
+    const elId = dpNameMap[normName];
+    if(!elId) return;
+    matchedNorms.add(normName);
     DB.demand_values = (DB.demand_values||[]).filter(
       v=>!(v.element_id===elId && v.date===date)
     );
-    // Write actual — rounded to 1 decimal
     if(vol > 0){
       DB.demand_values.push({
-        element_id: elId,
-        date,
+        element_id: elId, date,
         value_t: Math.round(vol * 10) / 10,
         source: 'actual'
       });
@@ -11937,11 +11926,27 @@ function dsWriteActualsToDemandGrid(){
     }
   });
 
-  autoSave();
-  console.log(`dsWriteActualsToDemandGrid: ${written} actuals written, ${skipped} DP names unmatched`);
-  statMsg(`Demand grid updated — ${written} actual values written`);
+  // ── Warn about Excel DPs with no topology match ───────────────────────
+  const allNorms = [...new Set(Object.keys(aggByDpDate).map(k=>k.split('|')[0]))];
+  const unmatched = allNorms.filter(n=>!dpNameMap[n]).map(n=>rawDpForNorm[n]||n);
+  const warnEl = document.getElementById('dem-actuals-warn');
+  if(warnEl){
+    if(unmatched.length){
+      warnEl.style.display = 'block';
+      warnEl.innerHTML =
+        '<span style="color:var(--amber);font-weight:700">⚠ '+unmatched.length+
+        ' demand point'+(unmatched.length>1?'s':'')+' in sales file have no topology element:</span> '+
+        '<span style="color:var(--text-dim);font-size:8px">'+unmatched.join(' · ')+'</span>';
+    } else {
+      warnEl.style.display = 'none';
+    }
+  }
 
-  // Refresh Demand view if it's open
+  autoSave();
+  console.log(`dsWriteActualsToDemandGrid: ${written} actuals written, ${unmatched.length} unmatched DPs`);
+  if(unmatched.length) console.log('Unmatched Excel DPs:', unmatched);
+  statMsg('Demand grid — '+written+' actuals written'+(unmatched.length?' · '+unmatched.length+' unmatched DPs':''));
+
   if(S.view==='demand') renderDemandView();
 }
 
