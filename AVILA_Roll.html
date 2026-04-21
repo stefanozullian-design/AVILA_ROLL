@@ -875,7 +875,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
           ondrop="event.preventDefault();this.classList.remove('drag');spHandleFile({files:event.dataTransfer.files})">
           <div class="sp-upload-icon">↑</div>
           <div class="sp-upload-title">Drop SalesConsolidated.xlsx here or click to browse</div>
-          <div class="sp-upload-hint">Expected sheet: SalesConsolidated · Columns: Shipping Type, Customer Type, Sales Manager, Ship-To Name, Ship-To, Material, Name Inv Roll, Date, Volume, ORIGIN, product</div>
+          <div class="sp-upload-hint">Accepts: RealShip format (Abrev, SH Sales Manager, Demand Point, Volume*) or legacy SalesConsolidated format</div>
           <div id="sp-upload-msg" style="margin-top:10px"></div>
           <div class="sp-progress" id="sp-progress" style="width:300px;margin:10px auto 0;display:none"><div class="sp-progress-bar" id="sp-progress-bar" style="width:0%"></div></div>
         </div>
@@ -5498,7 +5498,10 @@ const SP = {
 };
 
 // ── REQUIRED COLUMNS ─────────────────────────────────
-const SP_REQUIRED_COLS = ['Shipping Type','Customer Type','Sales Manager','Ship-To Name','Ship-To','Material','Name Inv Roll','Date','Volume','ORIGIN','product'];
+// Supports both old format (SalesConsolidated) and new format (RealShip)
+const SP_REQUIRED_COLS_OLD = ['Customer Type','Sales Manager','Ship-To Name','Ship-To','Material','Name Inv Roll','Date','Volume','ORIGIN','product'];
+const SP_REQUIRED_COLS_NEW = ['Abrev','Customer Type','Date','Demand Point','Ship-To Name','Ship-To','Volume*'];
+// Minimum overlap: if neither matches fully, report what's missing
 
 // ── PRODUCT COLOR PALETTE ────────────────────────────
 const SP_PROD_COLORS = [
@@ -6576,13 +6579,18 @@ async function spHandleFile(input){
     const buf=await file.arrayBuffer();
     const wb=XLSX.read(buf,{type:'array',cellDates:false,raw:true});
     if(progBar) progBar.style.width='50%';
-    const sheetName=wb.SheetNames.find(n=>n==='SalesConsolidated')||wb.SheetNames[0];
+    const sheetName=wb.SheetNames.find(n=>n==='RealShip')||wb.SheetNames.find(n=>n==='SalesConsolidated')||wb.SheetNames[0];
     const ws=wb.Sheets[sheetName];
     const raw=XLSX.utils.sheet_to_json(ws,{raw:false,defval:''});
     if(!raw.length) throw new Error('Sheet is empty');
     const cols=Object.keys(raw[0]);
-    const missing=SP_REQUIRED_COLS.filter(c=>!cols.includes(c));
-    if(missing.length) throw new Error(`Missing columns: ${missing.join(', ')}`);
+    // Detect file format: new (RealShip) vs old (SalesConsolidated)
+    const isNewFormat = cols.includes('Abrev') && cols.includes('Demand Point') && cols.includes('Volume*');
+    const isOldFormat = cols.includes('ORIGIN') && cols.includes('product') && cols.includes('Volume');
+    if(!isNewFormat && !isOldFormat){
+      const missingNew = SP_REQUIRED_COLS_NEW.filter(col=>!cols.includes(col));
+      throw new Error(`Unrecognised file format. Expected columns: ${missingNew.join(', ')}`);
+    }
     if(progBar) progBar.style.width='70%';
 
     function spNormalizeDate(v){
@@ -6611,18 +6619,30 @@ async function spHandleFile(input){
     const origins=new Set(),products=new Set();
     let skipped=0;
     raw.forEach(r=>{
-      const vol=parseFloat(r['Volume'])||0;
+      // ── Field extraction — handles both file formats ──
+      let vol, origin, product, custType, shipTo, shipToName, rep;
+      if(isNewFormat){
+        vol       = parseFloat(r['Volume*'])||0;
+        origin    = (r['Abrev']||'').trim();          // 'WPB', 'BRS', ' EXT' → trim
+        product   = (r['Demand Point']||'').trim();   // 'BRS/DEM/BRS_ILX-BLK/EXT'
+        custType  = (r['Customer Type']||'EXT').trim();
+        shipTo    = String(r['Ship-To']||'').trim();
+        shipToName= (r['Ship-To Name']||'').trim();
+        rep       = (r['SH Sales Manager']||'—').trim();
+      } else {
+        vol       = parseFloat(r['Volume'])||0;
+        origin    = (r['ORIGIN']||'').trim();
+        product   = (r['product']||r['Name Inv Roll']||'').trim();
+        custType  = (r['Customer Type']||'EXT').trim();
+        shipTo    = String(r['Ship-To']||'').trim();
+        shipToName= (r['Ship-To Name']||'').trim();
+        rep       = (r['Sales Manager']||'—').trim();
+      }
       if(vol<=0){ skipped++; return; }
       const dateStr=spNormalizeDate(r['Date']);
       if(!dateStr){ skipped++; return; }
       if(dateStr<dateMin) dateMin=dateStr;
       if(dateStr>dateMax) dateMax=dateStr;
-      const origin=(r['ORIGIN']||'').trim();
-      const product=(r['product']||r['Name Inv Roll']||'').trim();
-      const custType=(r['Customer Type']||'EXT').trim();
-      const shipTo=String(r['Ship-To']||'').trim();
-      const shipToName=(r['Ship-To Name']||'').trim();
-      const rep=(r['Sales Manager']||'—').trim();
       const key=`${dateStr}|${origin}|${product}|${custType}|${shipTo}`;
       if(!aggMap[key]) aggMap[key]={date:dateStr,origin,product,customer_type:custType,
         ship_to:parseInt(shipTo)||0,ship_to_name:shipToName,sales_manager:rep,volume:0};
