@@ -988,6 +988,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
           <div class="sp-chip"             id="sp-type-ext"   onclick="spDispatch({custType:'EXT'})">EXT</div>
           <div class="sp-chip"             id="sp-type-int"   onclick="spDispatch({custType:'INT'})">INT</div>
           <button class="sp-upload-btn" onclick="document.getElementById('sp-file-input').click()">↑ Load Actuals</button>
+          <button class="sp-upload-btn" style="border-color:var(--green);color:var(--green)" onclick="dsAutoRefreshAll();statMsg('Refreshing data sources…')">↻ Refresh</button>
           <input type="file" id="sp-file-input" accept=".xlsx,.xls" style="display:none" onchange="spHandleFile(this)">
         </div>
 
@@ -998,7 +999,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
           ondrop="event.preventDefault();this.classList.remove('drag');spHandleFile({files:event.dataTransfer.files})">
           <div class="sp-upload-icon">↑</div>
           <div class="sp-upload-title">Drop SalesConsolidated.xlsx here or click to browse</div>
-          <div class="sp-upload-hint">Accepts: RealShip format (Abrev, SH Sales Manager, Demand Point, Volume*) or legacy SalesConsolidated format</div>
+          <div class="sp-upload-hint">Drop file to load manually · or configure a persistent path in Configure → Data Sources for auto-refresh on startup</div>
           <div id="sp-upload-msg" style="margin-top:10px"></div>
           <div class="sp-progress" id="sp-progress" style="width:300px;margin:10px auto 0;display:none"><div class="sp-progress-bar" id="sp-progress-bar" style="width:0%"></div></div>
         </div>
@@ -9915,6 +9916,7 @@ function simCfgHTML(){
     <button style="${tabSty(false)}" id="cfg-tab-rules" onclick="_cfgTab('rules')">
       Rules <span style="background:${activeRules.length?'var(--amber)':'var(--border2)'};color:var(--bg);font-size:8px;padding:1px 5px;border-radius:8px;margin-left:4px">${activeRules.length}</span>
     </button>
+    <button style="${tabSty(false)}" id="cfg-tab-datasources" onclick="_cfgTab('datasources')">Data Sources</button>
   </div>
 
   <!-- SETTINGS PANEL -->
@@ -9971,6 +9973,11 @@ function simCfgHTML(){
     <div style="max-height:420px;overflow-y:auto" id="rules-list-wrap">
       ${_renderRulesList()}
     </div>
+  </div>
+
+  <!-- DATA SOURCES PANEL -->
+  <div id="cfg-panel-datasources" style="display:none;max-height:480px;overflow-y:auto">
+    \${dsCfgPanelHTML()}
   </div>`;
 }
 
@@ -9978,10 +9985,12 @@ function _cfgTab(tab){
   document.getElementById('cfg-panel-settings').style.display=tab==='settings'?'':'none';
   document.getElementById('cfg-panel-settings-footer').style.display=tab==='settings'?'':'none';
   document.getElementById('cfg-panel-rules').style.display=tab==='rules'?'':'none';
+  document.getElementById('cfg-panel-datasources').style.display=tab==='datasources'?'':'none';
   const tabStyActive=`padding:7px 16px;font-family:var(--mono);font-size:10px;cursor:pointer;border:none;background:transparent;border-bottom:2px solid var(--green);color:var(--green);letter-spacing:.5px;text-transform:uppercase`;
   const tabStyInactive=`padding:7px 16px;font-family:var(--mono);font-size:10px;cursor:pointer;border:none;background:transparent;border-bottom:2px solid transparent;color:var(--text-dim);letter-spacing:.5px;text-transform:uppercase`;
   document.getElementById('cfg-tab-settings').style.cssText=tab==='settings'?tabStyActive:tabStyInactive;
   document.getElementById('cfg-tab-rules').style.cssText=tab==='rules'?tabStyActive:tabStyInactive;
+  document.getElementById('cfg-tab-datasources').style.cssText=tab==='datasources'?tabStyActive:tabStyInactive;
 }
 
 function _renderRulesList(){
@@ -11441,119 +11450,380 @@ async function spHandleFile(input){
   if(prog) prog.style.display='block';
   if(progBar){ progBar.style.background='var(--blue)'; progBar.style.width='10%'; }
   try{
-    if(typeof XLSX==='undefined'){
-      await new Promise((res,rej)=>{
-        const s=document.createElement('script');
-        s.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
-        s.onload=res; s.onerror=rej; document.head.appendChild(s);
-      });
-    }
-    if(progBar) progBar.style.width='30%';
     const buf=await file.arrayBuffer();
-    const wb=XLSX.read(buf,{type:'array',cellDates:false,raw:true});
-    if(progBar) progBar.style.width='50%';
-    const sheetName=wb.SheetNames.find(n=>n==='RealShip')||wb.SheetNames.find(n=>n==='SalesConsolidated')||wb.SheetNames[0];
-    const ws=wb.Sheets[sheetName];
-    const raw=XLSX.utils.sheet_to_json(ws,{raw:false,defval:''});
-    if(!raw.length) throw new Error('Sheet is empty');
-    const cols=Object.keys(raw[0]);
-    // Detect file format: new (RealShip) vs old (SalesConsolidated)
-    const isNewFormat = cols.includes('Abrev') && cols.includes('Demand Point') && cols.includes('Volume*');
-    const isOldFormat = cols.includes('ORIGIN') && cols.includes('product') && cols.includes('Volume');
-    if(!isNewFormat && !isOldFormat){
-      const missingNew = SP_REQUIRED_COLS_NEW.filter(col=>!cols.includes(col));
-      throw new Error(`Unrecognised file format. Expected columns: ${missingNew.join(', ')}`);
-    }
-    if(progBar) progBar.style.width='70%';
-
-    function spNormalizeDate(v){
-      if(!v&&v!==0) return null;
-      const n=typeof v==='number'?v:parseFloat(v);
-      if(!isNaN(n)&&n>40000&&n<60000){
-        const ms=(n-25569)*86400000;
-        return new Date(ms).toISOString().split('T')[0];
-      }
-      const s=String(v).trim();
-      if(/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0,10);
-      if(/^\d{1,2}\/\d{1,2}\/\d{4}/.test(s)){
-        const p=s.split('/');
-        return `${p[2]}-${p[0].padStart(2,'0')}-${p[1].padStart(2,'0')}`;
-      }
-      if(/^\d{1,2}-\d{1,2}-\d{4}/.test(s)){
-        const p=s.split('-');
-        return `${p[2]}-${p[1].padStart(2,'0')}-${p[0].padStart(2,'0')}`;
-      }
-      const d=new Date(s); if(!isNaN(d)) return d.toISOString().split('T')[0];
-      return null;
-    }
-
-    const aggMap={};
-    let dateMin='9999',dateMax='0000';
-    const origins=new Set(),products=new Set();
-    let skipped=0;
-    raw.forEach(r=>{
-      // ── Field extraction — handles both file formats ──
-      let vol, origin, product, custType, shipTo, shipToName, rep;
-      if(isNewFormat){
-        vol       = parseFloat(r['Volume*'])||0;
-        origin    = (r['Abrev']||'').trim();          // 'WPB', 'BRS', ' EXT' → trim
-        product   = (r['Demand Point']||'').trim();   // 'BRS/DEM/BRS_ILX-BLK/EXT'
-        custType  = (r['Customer Type']||'EXT').trim();
-        shipTo    = String(r['Ship-To']||'').trim();
-        shipToName= (r['Ship-To Name']||'').trim();
-        rep       = (r['SH Sales Manager']||'—').trim();
-      } else {
-        vol       = parseFloat(r['Volume'])||0;
-        origin    = (r['ORIGIN']||'').trim();
-        product   = (r['product']||r['Name Inv Roll']||'').trim();
-        custType  = (r['Customer Type']||'EXT').trim();
-        shipTo    = String(r['Ship-To']||'').trim();
-        shipToName= (r['Ship-To Name']||'').trim();
-        rep       = (r['Sales Manager']||'—').trim();
-      }
-      if(vol<=0){ skipped++; return; }
-      const dateStr=spNormalizeDate(r['Date']);
-      if(!dateStr){ skipped++; return; }
-      if(dateStr<dateMin) dateMin=dateStr;
-      if(dateStr>dateMax) dateMax=dateStr;
-      const key=`${dateStr}|${origin}|${product}|${custType}|${shipTo}`;
-      if(!aggMap[key]) aggMap[key]={date:dateStr,origin,product,customer_type:custType,
-        ship_to:parseInt(shipTo)||0,ship_to_name:shipToName,sales_manager:rep,volume:0};
-      aggMap[key].volume+=vol;
-      origins.add(origin); products.add(product);
-    });
-
-    DB.real_shipments_daily=Object.values(aggMap).map(r=>({...r,volume:Math.round(r.volume)}));
-    DB.real_shipments_meta={
-      loaded_at:new Date().toISOString().slice(0,16).replace('T',' '),
-      row_count:raw.length,agg_count:DB.real_shipments_daily.length,
-      date_min:dateMin,date_max:dateMax,
-      origins:[...origins].sort(),products:[...products].sort()
-    };
-
+    await spIngestFile(buf, file.name);
     if(progBar) progBar.style.width='100%';
-    const aggCount=DB.real_shipments_daily.length;
-    if(aggCount===0) throw new Error(`Parsed ${raw.length} rows but 0 passed aggregation. Check Date column format.`);
-
-    if(msg) msg.innerHTML=`<div class="sp-val-ok">✓ ${Number(raw.length).toLocaleString()} rows → ${Number(aggCount).toLocaleString()} daily records · ${dateMin} → ${dateMax} · ${skipped} reversals skipped</div>`;
-
-    // Reset SP filter state for fresh load
-    SP.f={dateFrom:dateMin,dateTo:dateMax,origin:'ALL',rep:'ALL',customer:'ALL',custType:'all',product:'ALL'};
+    const m=DB.real_shipments_meta;
+    if(msg) msg.innerHTML=`<div class="sp-val-ok">✓ ${Number(m.row_count||0).toLocaleString()} rows → ${Number(m.agg_count||0).toLocaleString()} daily records · ${m.date_min} → ${m.date_max}</div>`;
+    SP.f={dateFrom:m.date_min,dateTo:m.date_max,origin:'ALL',rep:'ALL',customer:'ALL',custType:'all',product:'ALL'};
     SP.selScope=null; SP.scopedRows=[]; SP.collapsed={};
-
-    autoSave();
     setTimeout(()=>{
       document.getElementById('sp-upload-zone').style.display='none';
       const content=document.getElementById('sp-content');
       content.style.display='flex'; content.style.flexDirection='column'; content.style.gap='14px';
       renderSalesPerfView();
     },800);
-
   }catch(err){
     if(msg) msg.innerHTML=`<div class="sp-val-error">✗ ${err.message}</div>`;
     if(progBar){ progBar.style.width='0%'; progBar.style.background='var(--red)'; }
     console.error('SP upload error',err);
   }
+}
+
+
+// ═══════════════════════════════════════════════════════
+// DATA SOURCES — File System Access API
+// Handles persistent file path registration + auto-refresh
+// ═══════════════════════════════════════════════════════
+
+// ── Data source definitions ───────────────────────────
+// Each slot: { id, label, description, handler, dbKey }
+const DS_SLOTS = [
+  { id:'realSales',      label:'Real Sales',       description:'IR_RealSales.xlsx — actual shipment records', handler:'spIngestFile',  dbKey:'real_shipments_daily' },
+  { id:'realProduction', label:'Real Production',  description:'Production actuals by terminal and product',  handler:'dsIngestProduction', dbKey:'real_production_daily' },
+  { id:'transportCost',  label:'Transport Cost',   description:'Freight and logistics cost matrix',            handler:'dsIngestTransport',  dbKey:'transport_costs' },
+  { id:'custom',         label:'Custom',           description:'User-defined data file',                       handler:'dsIngestCustom',     dbKey:'custom_data' },
+];
+
+// ── Persistent metadata (stored in localStorage, no handles) ──
+// DS.meta[id] = { label, fileName, lastLoaded, rowCount, fileSize, error }
+// File handles stored separately in IndexedDB (not JSON-serializable)
+const DS = {
+  meta: {},      // populated from localStorage on init
+  handles: {},   // FileSystemFileHandle objects, loaded from IndexedDB
+  refreshing: {},// { id: bool } — in-flight flags
+};
+
+// ── IndexedDB for file handles ────────────────────────
+let _dsDB = null;
+function dsOpenIDB(){
+  return new Promise((res,rej)=>{
+    if(_dsDB){ res(_dsDB); return; }
+    const req = indexedDB.open('avila_datasources', 1);
+    req.onupgradeneeded = e => e.target.result.createObjectStore('handles');
+    req.onsuccess = e => { _dsDB = e.target.result; res(_dsDB); };
+    req.onerror   = () => rej(req.error);
+  });
+}
+
+async function dsSaveHandle(id, handle){
+  try{
+    const db = await dsOpenIDB();
+    await new Promise((res,rej)=>{
+      const tx = db.transaction('handles','readwrite');
+      tx.objectStore('handles').put(handle, id);
+      tx.oncomplete = res; tx.onerror = rej;
+    });
+  }catch(e){ console.warn('DS: could not save handle',e); }
+}
+
+async function dsLoadHandle(id){
+  try{
+    const db = await dsOpenIDB();
+    return await new Promise((res,rej)=>{
+      const tx = db.transaction('handles','readonly');
+      const req = tx.objectStore('handles').get(id);
+      req.onsuccess = () => res(req.result||null);
+      req.onerror   = () => res(null);
+    });
+  }catch(e){ return null; }
+}
+
+async function dsDeleteHandle(id){
+  try{
+    const db = await dsOpenIDB();
+    await new Promise((res,rej)=>{
+      const tx = db.transaction('handles','readwrite');
+      tx.objectStore('handles').delete(id);
+      tx.oncomplete = res; tx.onerror = rej;
+    });
+  }catch(e){}
+}
+
+// ── Meta persistence ──────────────────────────────────
+function dsSaveMeta(){
+  try{ localStorage.setItem('avila_datasources', JSON.stringify(DS.meta)); }
+  catch(e){ console.warn('DS: meta save failed',e); }
+}
+function dsLoadMeta(){
+  try{
+    const raw = localStorage.getItem('avila_datasources');
+    if(raw) DS.meta = JSON.parse(raw);
+  }catch(e){}
+}
+
+// ── Init — called once on DOMContentLoaded ────────────
+async function dsInit(){
+  dsLoadMeta();
+  // Load all handles from IDB into memory
+  for(const slot of DS_SLOTS){
+    const h = await dsLoadHandle(slot.id);
+    if(h) DS.handles[slot.id] = h;
+  }
+  // Auto-refresh all configured slots
+  dsAutoRefreshAll();
+}
+
+// ── Auto-refresh all slots that have a handle ─────────
+async function dsAutoRefreshAll(){
+  const promises = DS_SLOTS
+    .filter(s => DS.handles[s.id])
+    .map(s => dsRefreshSlot(s.id, false));
+  await Promise.allSettled(promises);
+  // Update UI if Configure modal is open
+  dsRefreshConfigUI();
+  // Update Sales page status
+  const metaLbl = document.getElementById('sp-meta-lbl');
+  if(metaLbl && DB.real_shipments_daily.length){
+    const m = DB.real_shipments_meta;
+    metaLbl.textContent = `${Number(m.row_count||0).toLocaleString()} records · ${m.date_min||'?'} → ${m.date_max||'?'} · ${m.loaded_at||'?'}`;
+  }
+}
+
+// ── Refresh a single slot ─────────────────────────────
+async function dsRefreshSlot(id, showErrors=true){
+  if(DS.refreshing[id]) return;
+  DS.refreshing[id] = true;
+  dsUpdateSlotUI(id, 'loading');
+
+  const slot = DS_SLOTS.find(s=>s.id===id);
+  let handle = DS.handles[id];
+
+  try{
+    if(!handle) throw new Error('No file configured');
+
+    // Re-request permission if needed
+    let perm = await handle.queryPermission({mode:'read'});
+    if(perm !== 'granted'){
+      perm = await handle.requestPermission({mode:'read'});
+    }
+    if(perm !== 'granted') throw new Error('File access denied');
+
+    const file = await handle.getFile();
+    const buf  = await file.arrayBuffer();
+
+    // Dispatch to the right ingestion handler
+    const result = await window[slot.handler]?.(buf, file.name) || {rowCount:0};
+
+    DS.meta[id] = {
+      ...DS.meta[id],
+      fileName:  file.name,
+      fileSize:  file.size,
+      lastLoaded:new Date().toISOString().slice(0,16).replace('T',' '),
+      rowCount:  result.rowCount || 0,
+      error:     null,
+    };
+    dsSaveMeta();
+    dsUpdateSlotUI(id, 'ok');
+
+  }catch(err){
+    DS.meta[id] = { ...(DS.meta[id]||{}), error: err.message, lastLoaded: DS.meta[id]?.lastLoaded||null };
+    dsSaveMeta();
+    dsUpdateSlotUI(id, 'error', err.message);
+    if(showErrors) console.warn(`DS [${id}]:`, err.message);
+  }finally{
+    DS.refreshing[id] = false;
+  }
+}
+
+// ── Pick a file for a slot ────────────────────────────
+async function dsPickFile(id){
+  try{
+    const [handle] = await window.showOpenFilePicker({
+      types:[{ description:'Excel / CSV', accept:{'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':['.xlsx'],
+        'application/vnd.ms-excel':['.xls'],'text/csv':['.csv']} }],
+      multiple: false
+    });
+    DS.handles[id] = handle;
+    await dsSaveHandle(id, handle);
+    if(!DS.meta[id]) DS.meta[id]={};
+    DS.meta[id].fileName = handle.name;
+    dsSaveMeta();
+    await dsRefreshSlot(id, true);
+  }catch(e){
+    if(e.name !== 'AbortError') statMsg('File picker cancelled or failed');
+  }
+}
+
+// ── Disconnect a slot ─────────────────────────────────
+async function dsDisconnect(id){
+  delete DS.handles[id];
+  await dsDeleteHandle(id);
+  delete DS.meta[id];
+  dsSaveMeta();
+  dsUpdateSlotUI(id, 'empty');
+  dsRefreshConfigUI();
+}
+
+// ── Ingestion handler for Real Sales ─────────────────
+// Wraps the existing spHandleFile logic but takes ArrayBuffer directly
+async function spIngestFile(buf, fileName){
+  if(typeof XLSX === 'undefined'){
+    await new Promise((res,rej)=>{
+      const s=document.createElement('script');
+      s.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+      s.onload=res; s.onerror=rej; document.head.appendChild(s);
+    });
+  }
+
+  const wb = XLSX.read(buf, {type:'array', cellDates:false, raw:true});
+  const sheetName = wb.SheetNames.find(n=>n==='RealShip') || wb.SheetNames.find(n=>n==='SalesConsolidated') || wb.SheetNames[0];
+  const ws  = wb.Sheets[sheetName];
+  const raw = XLSX.utils.sheet_to_json(ws, {raw:false, defval:''});
+  if(!raw.length) throw new Error('Sheet is empty');
+
+  const cols = Object.keys(raw[0]);
+  const isNew = cols.includes('Abrev') && cols.includes('Volume*');
+  const isOld = cols.includes('ORIGIN') && cols.includes('Volume');
+  if(!isNew && !isOld) throw new Error('Unrecognised column format');
+
+  function normDate(v){
+    if(!v && v!==0) return null;
+    const n = typeof v==='number'?v:parseFloat(v);
+    if(!isNaN(n) && n>40000 && n<60000){
+      return new Date((n-25569)*86400000).toISOString().split('T')[0];
+    }
+    const s = String(v).trim();
+    if(/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0,10);
+    if(/^\d{1,2}\/\d{1,2}\/\d{4}/.test(s)){
+      const p=s.split('/'); return `${p[2]}-${p[0].padStart(2,'0')}-${p[1].padStart(2,'0')}`;
+    }
+    const d=new Date(s); return isNaN(d)?null:d.toISOString().split('T')[0];
+  }
+
+  const aggMap={};
+  let dateMin='9999', dateMax='0000', skipped=0;
+  const origins=new Set(), products=new Set();
+
+  raw.forEach(r=>{
+    const vol  = parseFloat(isNew ? r['Volume*'] : r['Volume']) || 0;
+    if(vol<=0){ skipped++; return; }
+    const date = normDate(r['Date']);
+    if(!date){ skipped++; return; }
+    if(date<dateMin) dateMin=date;
+    if(date>dateMax) dateMax=date;
+    const origin    = (isNew ? r['Abrev']           : r['ORIGIN']                  ||'').trim();
+    const product   = (isNew ? r['Demand Point']    : r['product']||r['Name Inv Roll']||'').trim();
+    const custType  = (r['Customer Type']||'EXT').trim();
+    const shipTo    = String(r['Ship-To']||'').trim();
+    const shipToName= (r['Ship-To Name']||'').trim();
+    const rep       = (isNew ? r['SH Sales Manager'] : r['Sales Manager']||'—').trim();
+    const key       = `${date}|${origin}|${product}|${custType}|${shipTo}`;
+    if(!aggMap[key]) aggMap[key]={date,origin,product,customer_type:custType,
+      ship_to:parseInt(shipTo)||0,ship_to_name:shipToName,sales_manager:rep,volume:0};
+    aggMap[key].volume += vol;
+    origins.add(origin); products.add(product);
+  });
+
+  DB.real_shipments_daily = Object.values(aggMap).map(r=>({...r,volume:Math.round(r.volume)}));
+  DB.real_shipments_meta  = {
+    loaded_at: new Date().toISOString().slice(0,16).replace('T',' '),
+    row_count: raw.length, agg_count: DB.real_shipments_daily.length,
+    date_min: dateMin, date_max: dateMax,
+    origins: [...origins].sort(), products: [...products].sort()
+  };
+
+  // If Sales page is active, refresh it
+  if(S.view==='salesperf') renderSalesPerfView();
+  autoSave();
+
+  return { rowCount: raw.length };
+}
+
+// ── Stub handlers for future file types ───────────────
+async function dsIngestProduction(buf, name){ return {rowCount:0}; }
+async function dsIngestTransport(buf, name){  return {rowCount:0}; }
+async function dsIngestCustom(buf, name){     return {rowCount:0}; }
+
+// ── Configure modal UI helpers ────────────────────────
+function dsRefreshConfigUI(){
+  DS_SLOTS.forEach(s=>{
+    const el=document.getElementById('ds-slot-'+s.id);
+    if(!el) return;
+    el.outerHTML = dsBuildSlotHTML(s);
+  });
+}
+
+function dsUpdateSlotUI(id, state, errMsg=''){
+  const wrap = document.getElementById('ds-slot-'+id);
+  if(!wrap) return;
+  const slot = DS_SLOTS.find(s=>s.id===id);
+  const meta = DS.meta[id]||{};
+  let statusHtml = '';
+  if(state==='loading'){
+    statusHtml=`<span style="color:var(--blue);font-size:8px">↻ Refreshing…</span>`;
+  } else if(state==='ok'){
+    statusHtml=`<span style="color:var(--green);font-size:8px">✓ ${meta.rowCount?.toLocaleString()||0} rows · ${meta.lastLoaded||''}</span>`;
+  } else if(state==='error'){
+    statusHtml=`<span style="color:var(--red);font-size:8px">✗ ${errMsg||meta.error||'Error'}</span>`;
+  } else {
+    statusHtml=`<span style="color:var(--text-dim);font-size:8px">Not configured</span>`;
+  }
+  const statusEl=wrap.querySelector('.ds-status');
+  if(statusEl) statusEl.innerHTML=statusHtml;
+}
+
+// Build one slot row
+function dsBuildSlotHTML(slot){
+  const meta    = DS.meta[slot.id]||{};
+  const handle  = DS.handles[slot.id];
+  const hasFile = !!handle;
+  const isRefreshing = DS.refreshing[slot.id];
+
+  let statusHtml;
+  if(isRefreshing){
+    statusHtml=`<span style="color:var(--blue);font-size:8px">↻ Refreshing…</span>`;
+  } else if(meta.error){
+    statusHtml=`<span style="color:var(--red);font-size:8px">✗ ${meta.error}</span>`;
+  } else if(hasFile && meta.lastLoaded){
+    statusHtml=`<span style="color:var(--green);font-size:8px">✓ ${Number(meta.rowCount||0).toLocaleString()} rows · ${meta.lastLoaded}</span>`;
+  } else if(hasFile){
+    statusHtml=`<span style="color:var(--amber);font-size:8px">Pending first load</span>`;
+  } else {
+    statusHtml=`<span style="color:var(--text-dim);font-size:8px">Not configured</span>`;
+  }
+
+  return `<div id="ds-slot-${slot.id}" style="display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)">
+    <div>
+      <div style="font-family:var(--mono);font-size:10px;color:var(--text);margin-bottom:2px">${slot.label}
+        ${hasFile?`<span style="font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-left:6px">${meta.fileName||''}</span>`:''}
+      </div>
+      <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-bottom:4px">${slot.description}</div>
+      <div class="ds-status">${statusHtml}</div>
+    </div>
+    <div style="display:flex;gap:5px;flex-shrink:0">
+      ${hasFile?`<button class="btn-sec" style="font-size:8px;padding:3px 9px" onclick="dsRefreshSlot('${slot.id}',true);dsRefreshConfigUI()">↻ Refresh</button>`:''}
+      <button class="btn-sec" style="font-size:8px;padding:3px 9px" onclick="dsPickFile('${slot.id}')">
+        ${hasFile?'Change':'Set File'}
+      </button>
+      ${hasFile?`<button class="btn-sec" style="font-size:8px;padding:3px 9px;color:var(--red);border-color:var(--red)" onclick="dsDisconnect('${slot.id}')">✕</button>`:''}
+    </div>
+  </div>`;
+}
+
+// ── Data Sources panel HTML (injected into Configure modal) ──
+function dsCfgPanelHTML(){
+  const supported = ('showOpenFilePicker' in window);
+  if(!supported){
+    return `<div style="padding:16px">
+      <div style="font-family:var(--mono);font-size:9px;color:var(--amber);padding:10px;background:rgba(255,184,48,.06);border:1px solid rgba(255,184,48,.2);margin-bottom:12px">
+        ⚠ File System Access API is not supported in this browser. Use Chrome or Edge for auto-refresh functionality.
+      </div>
+      <div style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">
+        You can still load files manually using the ↑ Load Actuals button on the Sales page.
+      </div>
+    </div>`;
+  }
+  return `<div style="padding:14px 16px">
+    <div style="font-family:var(--mono);font-size:9px;color:var(--text-dim);margin-bottom:12px;line-height:1.7">
+      Configure a file path for each data source. The app will automatically refresh these files on startup and when you click Refresh.
+      Files are read directly from your local disk — nothing is uploaded to any server.
+    </div>
+    ${DS_SLOTS.map(s=>dsBuildSlotHTML(s)).join('')}
+    <div style="margin-top:12px;display:flex;justify-content:flex-end">
+      <button class="btn-pri" onclick="dsAutoRefreshAll();statMsg('Refreshing all data sources…')">↻ Refresh All</button>
+    </div>
+  </div>`;
 }
 
 
@@ -11885,6 +12155,7 @@ function loadSaved(){
 document.addEventListener('DOMContentLoaded',()=>{
   loadSaved();
   seedCatalogs();
+  dsInit();  // init data sources + auto-refresh on load
   document.getElementById('sim-date-lbl').textContent=`Day 0 / ${S.simCfg.horizon}`;
 
   // If facilities exist, select first one
