@@ -12154,6 +12154,11 @@ function autoSave(){
   const dbToSave = Object.fromEntries(
     Object.entries(DB).filter(([k]) => !TRANSIENT_TABLES.has(k))
   );
+  // Strip actuals from demand_values — they reload from file on startup
+  // Only persist user-entered forecast values
+  if(dbToSave.demand_values){
+    dbToSave.demand_values = dbToSave.demand_values.filter(v => v.source !== 'actual');
+  }
 
   try{
     // Clear any old oversized entry first to make room
@@ -12215,6 +12220,16 @@ function loadSaved(){
       localStorage.removeItem('prodcast_v3');
     } else if(raw){
       const probe = JSON.parse(raw);
+      // Strip actual demand_values in place (don't clear everything)
+      if(probe.DB?.demand_values){
+        const before = probe.DB.demand_values.length;
+        probe.DB.demand_values = probe.DB.demand_values.filter(v=>v.source!=='actual');
+        if(probe.DB.demand_values.length < before){
+          console.warn('loadSaved: stripped',before-probe.DB.demand_values.length,'actual demand_values from saved state');
+          localStorage.removeItem('prodcast_v3');
+          localStorage.setItem('prodcast_v3', JSON.stringify(probe));
+        }
+      }
       if(probe.DB && (
         (probe.DB.simulation_day_states?.length > 0) ||
         (probe.DB.real_shipments_daily?.length > 0) ||
