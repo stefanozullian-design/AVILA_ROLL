@@ -3321,15 +3321,28 @@ function renderDemandView(){
     return;
   }
 
-  const simStart=new Date(S.simCfg.start_date+'T00:00:00');
+  const simStart=new Date((S.simCfg.start_date||new Date().toISOString().split('T')[0])+'T00:00:00');
   const horizon=S.simCfg.horizon||90;
   const nwdSet=new Set((DB.non_working_days||[]).map(n=>n.date));
   const todayStr=new Date().toISOString().split('T')[0];
 
-  // Date spine
+  // ── Date spine — always include actuals history ───────────────────────
+  // Find earliest actual in demand_values so past data is always visible
+  const actualDates = (DB.demand_values||[])
+    .filter(v=>v.source==='actual' && v.date)
+    .map(v=>v.date);
+  const earliestActual = actualDates.length ? actualDates.reduce((a,b)=>a<b?a:b) : null;
+
+  // Grid start = earliest actual OR sim start, whichever is earlier
+  const gridStart = earliestActual && earliestActual < simStart.toISOString().split('T')[0]
+    ? new Date(earliestActual+'T00:00:00')
+    : simStart;
+
+  // Grid end = sim start + horizon (future forecast window)
+  const simEnd = new Date(simStart.getTime() + horizon*864e5);
+
   const allDates=[];
-  for(let d=0;d<horizon;d++){
-    const dt=new Date(simStart.getTime()+d*864e5);
+  for(let dt=new Date(gridStart); dt<simEnd; dt=new Date(dt.getTime()+864e5)){
     allDates.push(dt.toISOString().split('T')[0]);
   }
   // Group by month
