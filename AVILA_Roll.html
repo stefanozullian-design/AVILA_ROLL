@@ -12139,24 +12139,86 @@ function hideTyping(){if(typingEl){typingEl.remove();typingEl=null;}}
 // SAVE / LOAD
 // ═══════════════════════════════════════════════════════
 function autoSave(){
+  // Tables that are either regenerated on startup (from source files) or
+  // regenerated on simulation run — never save these to localStorage
+  const TRANSIENT_TABLES = new Set([
+    'real_shipments_daily',   // reloaded from Excel file on startup
+    'real_shipments_meta',    // reloaded from Excel file on startup
+    'simulation_day_states',  // regenerated on Run Simulation
+    'simulation_inventory',   // regenerated on Run Simulation
+    'simulation_stop_events', // regenerated on Run Simulation
+    'simulation_runs',        // regenerated on Run Simulation
+    'in_transit_inventory',   // computed from schedules
+  ]);
+
+  const dbToSave = Object.fromEntries(
+    Object.entries(DB).filter(([k]) => !TRANSIENT_TABLES.has(k))
+  );
+
   try{
-    // Exclude only the large transient raw sales data — everything else including
-    // demand_values (which holds actuals) must be persisted
-    const {real_shipments_daily, real_shipments_meta, ...dbToSave} = DB;
-    localStorage.setItem('prodcast_v3',JSON.stringify({DB:dbToSave,counter:S.elCounter,simCfg:S.simCfg}));
+    // Clear any old oversized entry first to make room
+    localStorage.removeItem('prodcast_v3');
+    localStorage.setItem('prodcast_v3', JSON.stringify({
+      DB: dbToSave,
+      counter: S.elCounter,
+      simCfg: S.simCfg
+    }));
   }catch(e){
-    console.error('Save error',e);
-    // Fallback: save only the most critical tables
+    console.error('Save error — data too large even without transient tables:', e);
+    // Last resort: save only user-created structural data
     try{
-      const {real_shipments_daily, real_shipments_meta, simulation_day_states,
-             simulation_inventory, simulation_stop_events, ...dbToSave} = DB;
-      localStorage.setItem('prodcast_v3',JSON.stringify({DB:dbToSave,counter:S.elCounter,simCfg:S.simCfg}));
-    }catch(e2){ console.error('Fallback save also failed',e2); }
+      const minimalDB = {
+        macro_regions:  DB.macro_regions,
+        countries:      DB.countries,
+        regions:        DB.regions,
+        sub_regions:    DB.sub_regions,
+        facilities:     DB.facilities,
+        elements:       DB.elements,
+        connections:    DB.connections,
+        products:       DB.products,
+        recipes:        DB.recipes,
+        raw_materials:  DB.raw_materials,
+        demand_points:  DB.demand_points,
+        demand_values:  DB.demand_values,
+        non_working_days: DB.non_working_days,
+        simulation_rules: DB.simulation_rules,
+        vessel_calls:   DB.vessel_calls,
+        rail_movements: DB.rail_movements,
+        forecast_commitments: DB.forecast_commitments,
+      };
+      localStorage.removeItem('prodcast_v3');
+      localStorage.setItem('prodcast_v3', JSON.stringify({
+        DB: minimalDB,
+        counter: S.elCounter,
+        simCfg: S.simCfg
+      }));
+      statMsg('Saved (compact mode)');
+      return;
+    }catch(e2){
+      console.error('Minimal save also failed:', e2);
+      statMsg('⚠ Save failed — localStorage full');
+      return;
+    }
   }
   statMsg('Saved');
 }
 
 function loadSaved(){
+  // ── One-time migration: clear any old oversized localStorage entry ──────
+  // If the stored entry contains simulation_day_states or real_shipments_daily
+  // it was saved before the quota fix and will block all future saves.
+  try{
+    const raw = localStorage.getItem('prodcast_v3');
+    if(raw){
+      const probe = JSON.parse(raw);
+      if(probe.DB && (probe.DB.simulation_day_states?.length > 0 || probe.DB.real_shipments_daily?.length > 0)){
+        console.warn('autoSave: clearing oversized legacy localStorage entry');
+        localStorage.removeItem('prodcast_v3');
+        // Re-save will happen at next autoSave() call
+      }
+    }
+  }catch(e){}
+
   try{
     const raw=localStorage.getItem('prodcast_v3');
     if(raw){
