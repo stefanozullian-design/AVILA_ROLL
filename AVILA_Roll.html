@@ -12204,20 +12204,27 @@ function autoSave(){
 }
 
 function loadSaved(){
-  // ── One-time migration: clear any old oversized localStorage entry ──────
-  // If the stored entry contains simulation_day_states or real_shipments_daily
-  // it was saved before the quota fix and will block all future saves.
+  // ── Clear oversized legacy localStorage entries ─────────────────────────
+  // Any entry containing simulation output or raw sales data is too large.
+  // Clear it unconditionally — the lean re-save happens at next autoSave().
   try{
     const raw = localStorage.getItem('prodcast_v3');
-    if(raw){
+    if(raw && raw.length > 800000){
+      // Entry is over 800KB — definitely contains bloat, clear it
+      console.warn('loadSaved: clearing oversized localStorage entry ('+Math.round(raw.length/1024)+'KB)');
+      localStorage.removeItem('prodcast_v3');
+    } else if(raw){
       const probe = JSON.parse(raw);
-      if(probe.DB && (probe.DB.simulation_day_states?.length > 0 || probe.DB.real_shipments_daily?.length > 0)){
-        console.warn('autoSave: clearing oversized legacy localStorage entry');
+      if(probe.DB && (
+        (probe.DB.simulation_day_states?.length > 0) ||
+        (probe.DB.real_shipments_daily?.length > 0) ||
+        (probe.DB.simulation_inventory?.length > 0)
+      )){
+        console.warn('loadSaved: clearing legacy entry with transient tables');
         localStorage.removeItem('prodcast_v3');
-        // Re-save will happen at next autoSave() call
       }
     }
-  }catch(e){}
+  }catch(e){ localStorage.removeItem('prodcast_v3'); }
 
   try{
     const raw=localStorage.getItem('prodcast_v3');
