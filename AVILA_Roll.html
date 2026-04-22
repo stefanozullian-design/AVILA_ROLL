@@ -11940,7 +11940,8 @@ function dsWriteActualsToDemandGrid(){
   if(unmatchedDps.size) console.log('Unmatched:', [...unmatchedDps]);
   statMsg('Demand grid — ' + written + ' actuals written' + (unmatchedDps.size ? ' · ' + unmatchedDps.size + ' unmatched DPs' : ''));
 
-  if(S.view==='demand') renderDemandView();
+  // Refresh demand view so actuals appear immediately
+  renderDemandView();
 }
 
 
@@ -12139,26 +12140,18 @@ function hideTyping(){if(typingEl){typingEl.remove();typingEl=null;}}
 // ═══════════════════════════════════════════════════════
 function autoSave(){
   try{
-    // Exclude large transient tables reloaded from source files on startup
+    // Exclude only the large transient raw sales data — everything else including
+    // demand_values (which holds actuals) must be persisted
     const {real_shipments_daily, real_shipments_meta, ...dbToSave} = DB;
     localStorage.setItem('prodcast_v3',JSON.stringify({DB:dbToSave,counter:S.elCounter,simCfg:S.simCfg}));
   }catch(e){
     console.error('Save error',e);
-    // If still too large, save only critical tables
+    // Fallback: save only the most critical tables
     try{
-      const critical={
-        facilities:DB.facilities, elements:DB.elements, connections:DB.connections,
-        demand_points:DB.demand_points, demand_values:DB.demand_values,
-        vessel_calls:DB.vessel_calls, rail_movements:DB.rail_movements,
-        forecast_commitments:DB.forecast_commitments,
-        products:DB.products, recipes:DB.recipes,
-        simulation_rules:DB.simulation_rules,
-        non_working_days:DB.non_working_days,
-        macro_regions:DB.macro_regions, countries:DB.countries,
-        regions:DB.regions, sub_regions:DB.sub_regions,
-      };
-      localStorage.setItem('prodcast_v3',JSON.stringify({DB:critical,counter:S.elCounter,simCfg:S.simCfg}));
-    }catch(e2){ console.error('Critical save also failed',e2); }
+      const {real_shipments_daily, real_shipments_meta, simulation_day_states,
+             simulation_inventory, simulation_stop_events, ...dbToSave} = DB;
+      localStorage.setItem('prodcast_v3',JSON.stringify({DB:dbToSave,counter:S.elCounter,simCfg:S.simCfg}));
+    }catch(e2){ console.error('Fallback save also failed',e2); }
   }
   statMsg('Saved');
 }
