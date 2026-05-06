@@ -11527,6 +11527,7 @@ async function spHandleFile(input){
 // ── Data source definitions ───────────────────────────
 // Each slot: { id, label, description, handler, dbKey }
 const DS_SLOTS = [
+  { id:'topology',       label:'Topology JSON',    description:'AVILA_Roll_BRS_2026-05-06.json — facility topology, demand points, products, and recipes', handler:'dsIngestTopology', dbKey:'_topology' },
   { id:'realSales',      label:'Real Sales',       description:'IR_RealSales.xlsx — actual shipment records', handler:'spIngestFile',  dbKey:'real_shipments_daily' },
   { id:'realProduction', label:'Real Production',  description:'Production actuals by terminal and product',  handler:'dsIngestProduction', dbKey:'real_production_daily' },
   { id:'transportCost',  label:'Transport Cost',   description:'Freight and logistics cost matrix',            handler:'dsIngestTransport',  dbKey:'transport_costs' },
@@ -11784,6 +11785,35 @@ async function spIngestFile(buf, fileName){
   autoSave();
 
   return { rowCount: raw.length };
+}
+
+// ── Topology JSON handler ─────────────────────────────
+async function dsIngestTopology(buf, name){
+  try{
+    const text = new TextDecoder().decode(buf);
+    const saved = JSON.parse(text);
+    if(!saved.DB) return {rowCount:0, error:'No DB found in JSON'};
+
+    // Merge topology into database
+    Object.keys(DB).forEach(table=>{
+      if(saved.DB[table]!==undefined) DB[table]=saved.DB[table];
+    });
+    if(saved.simCfg) Object.assign(S.simCfg,saved.simCfg);
+    if(saved.counter) S.elCounter=saved.counter;
+    syncElCounter();
+
+    // Re-render all views
+    if(S.view==='demand') renderDemandView();
+    renderDtree(S.simResults);
+    updateStatusBar();
+    renderLocationTree();
+    updateNavFacilities();
+
+    const elCount = DB.elements?.length||0;
+    return {rowCount:elCount, info:`Loaded ${elCount} elements`};
+  }catch(e){
+    return {rowCount:0, error:e.message};
+  }
 }
 
 // ── Stub handlers for future file types ───────────────
