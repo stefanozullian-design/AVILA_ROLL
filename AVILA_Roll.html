@@ -3529,20 +3529,14 @@ function renderDemandView(){
       h+=`</tr>`;
 
       if(!isCollapsed){
-        node.els.forEach(el=>{
-          // Initialize demand point collapse state
-          const dpKey=`dp_${el.id}`;
-          if(!window._dpCol) window._dpCol=new Set();
-          const isDpCollapsed=window._dpCol.has(dpKey);
+        // Sort demand points alphabetically by name
+        const sortedEls=[...node.els].sort((a,b)=>a.name.localeCompare(b.name));
 
-          // Extract products from element props
-          const products=(el.props?.products||[]);
-          const hasProducts=products.length>0;
-
-          // Demand point header row
-          h+=`<tr onclick="${hasProducts?`_demToggleDp('${dpKey}')`:''}" style="${hasProducts?'cursor:pointer;':''}background:rgba(76,175,80,.05)">
+        sortedEls.forEach(el=>{
+          // Demand point row (no product rows beneath)
+          h+=`<tr style="background:rgba(76,175,80,.05)">
             <td style="${stickyLeft('rgba(76,175,80,.08)',node.depth+1,'border-bottom:1px solid var(--border),')}color:var(--green);font-size:9px;font-weight:600">
-              ${hasProducts?`<span style="margin-right:3px">${isDpCollapsed?'▶':'▼'}</span>`:''}${el.name}
+              ${el.name}
             </td>`;
           months.forEach(mon=>{
             const isCol=collapsed.has(mon.ym);
@@ -3550,41 +3544,23 @@ function renderDemandView(){
             h+=`<td style="background:rgba(76,175,80,.08);border-left:2px solid rgba(76,175,80,.25);font-size:9px;color:var(--green);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:600">${monTotal>0?Math.round(monTotal).toLocaleString():''}</td>`;
             if(!isCol) mon.dates.forEach(ds=>{
               const v=getVal(el.id,ds);
-              h+=`<td class="dem-day-${mon.ym}" style="background:rgba(76,175,80,.04);font-size:9px;color:var(--green);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:600;${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`;
+              const src=getSource(el.id,ds);
+              const isNwd=nwdSet.has(ds);
+              const isActual=src==='actual';
+              const cellBg=isNwd?'rgba(255,61,90,.08)':isActual?'rgba(0,255,157,.06)':'transparent';
+              const cellColor=isNwd?'rgba(255,61,90,.4)':isActual?'var(--green)':'var(--text)';
+              const cellBorder=isActual?'border-left:2px solid rgba(0,255,157,.35);':'';
+              h+=`<td class="dem-day-${mon.ym}" style="padding:1px 2px;border-bottom:1px solid var(--border);border-right:1px solid rgba(255,255,255,.03);${tdSty(ds)}${cellBorder}">
+                ${isActual
+                  ? `<div style="width:50px;font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;color:${cellColor};background:${cellBg}" title="Actual shipment data">${v?Math.round(v*10)/10:''}</div>`
+                  : `<input class="dem-cell" data-el="${el.id}" data-date="${ds}" value="${v||''}"
+                      ${isNwd?'disabled title="Non-working day"':''}
+                      style="width:50px;background:${cellBg};border:none;color:${cellColor};font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;outline:none">`
+                }
+              </td>`;
             });
           });
           h+=`</tr>`;
-
-          // Product rows (shown if demand point not collapsed)
-          if(!isDpCollapsed && hasProducts){
-            products.forEach(prod=>{
-              h+=`<tr>
-                <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:var(--text-dim);font-size:8px;opacity:.8">⊢ ${prod}</td>`;
-              months.forEach(mon=>{
-                const isCol=collapsed.has(mon.ym);
-                const monTotal=mon.dates.reduce((s,ds)=>s+getVal(el.id,ds),0);
-                h+=`<td style="background:rgba(77,166,255,.06);border-left:2px solid rgba(77,166,255,.2);font-size:9px;color:var(--blue);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${monTotal>0?Math.round(monTotal).toLocaleString():''}</td>`;
-                if(!isCol) mon.dates.forEach(ds=>{
-                  const v=getVal(el.id,ds);
-                  const src=getSource(el.id,ds);
-                  const isNwd=nwdSet.has(ds);
-                  const isActual=src==='actual';
-                  const cellBg=isNwd?'rgba(255,61,90,.08)':isActual?'rgba(0,255,157,.06)':'transparent';
-                  const cellColor=isNwd?'rgba(255,61,90,.4)':isActual?'var(--green)':'var(--text)';
-                  const cellBorder=isActual?'border-left:2px solid rgba(0,255,157,.35);':'';
-                  h+=`<td class="dem-day-${mon.ym}" style="padding:1px 2px;border-bottom:1px solid var(--border);border-right:1px solid rgba(255,255,255,.03);${tdSty(ds)}${cellBorder}">
-                    ${isActual
-                      ? `<div style="width:50px;font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;color:${cellColor};background:${cellBg}" title="Actual shipment data">${v?Math.round(v*10)/10:''}</div>`
-                      : `<input class="dem-cell" data-el="${el.id}" data-date="${ds}" value="${v||''}"
-                          ${isNwd?'disabled title="Non-working day"':''}
-                          style="width:50px;background:${cellBg};border:none;color:${cellColor};font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;outline:none">`
-                    }
-                  </td>`;
-                });
-              });
-              h+=`</tr>`;
-            });
-          }
         });
       }
     } else {
