@@ -10431,7 +10431,8 @@ const SP = {
   _prodOptions: [],
   _userExpanded: {},  // tracks keys the user has explicitly expanded
   fcRepSel:{}, fcCustSel:{}, fcCustomVal:{}, fcShowInp:{},
-  forecastBasis: 'all10d',  // default forecast basis (all10d, all15d, all30d)
+  basisByRow: {},  // hierarchical: rKey → sKey → stKey → basis, e.g., {rKey: {sKey: {stKey: 'all10d'}}}
+  defaultBasis: 'all10d',  // system default basis (all10d, all15d, all30d)
 };
 
 // ── REQUIRED COLUMNS ─────────────────────────────────
@@ -10958,21 +10959,78 @@ function spGetHistoricalRange(basis, dateNow){
   return dates;
 }
 
-// ── Forecast basis selection ──
-function spSetForecastBasis(basis){
-  SP.forecastBasis = basis;
-  // Update button styling
-  ['10d','15d','30d'].forEach(b=>{
-    const btn = document.getElementById(`sp-fb-${b}`);
-    if(btn) btn.classList.toggle('active', basis===`all${b}`);
-  });
-  // Re-render table with new basis
+// ── HIERARCHICAL FORECAST BASIS SYSTEM ──
+// Get the applicable basis for a specific row by checking hierarchy:
+// 1. Check if this row has an override
+// 2. Otherwise check parent level
+// 3. Otherwise use system default
+function spGetBasisForRow(rKey, sKey, stKey){
+  // Check if Ship To has override
+  if(stKey && SP.basisByRow[rKey] && SP.basisByRow[rKey][sKey] && SP.basisByRow[rKey][sKey][stKey]){
+    return SP.basisByRow[rKey][sKey][stKey];
+  }
+  // Check if Sold To has override
+  if(sKey && SP.basisByRow[rKey] && SP.basisByRow[rKey][sKey] && SP.basisByRow[rKey][sKey]['_basis']){
+    return SP.basisByRow[rKey][sKey]['_basis'];
+  }
+  // Check if Rep has override
+  if(rKey && SP.basisByRow[rKey] && SP.basisByRow[rKey]['_basis']){
+    return SP.basisByRow[rKey]['_basis'];
+  }
+  // Return system default
+  return SP.defaultBasis;
+}
+
+// Set basis override at a specific level
+function spSetBasisForRow(rKey, sKey, stKey, basis){
+  if(!SP.basisByRow[rKey]) SP.basisByRow[rKey] = {};
+
+  if(stKey){
+    // Setting Ship To level
+    if(!SP.basisByRow[rKey][sKey]) SP.basisByRow[rKey][sKey] = {};
+    SP.basisByRow[rKey][sKey][stKey] = basis;
+  } else if(sKey){
+    // Setting Sold To level
+    if(!SP.basisByRow[rKey][sKey]) SP.basisByRow[rKey][sKey] = {};
+    SP.basisByRow[rKey][sKey]['_basis'] = basis;
+  } else {
+    // Setting Rep level
+    SP.basisByRow[rKey]['_basis'] = basis;
+  }
+
+  // Re-render table
   spRenderTable();
 }
 
-// Initialize forecast basis button styling
-function spInitForecastBasis(){
-  spSetForecastBasis(SP.forecastBasis);
+// Get label for basis (e.g., "10d Primary", "15d Override")
+function spGetBasisLabel(rKey, sKey, stKey){
+  const basis = spGetBasisForRow(rKey, sKey, stKey);
+  const basisNum = basis.replace('all','');
+
+  // Determine status (primary, inherited, or override)
+  let status = 'Primary';
+
+  if(stKey && SP.basisByRow[rKey] && SP.basisByRow[rKey][sKey] && SP.basisByRow[rKey][sKey][stKey]){
+    status = 'Override';
+  } else if(sKey && SP.basisByRow[rKey] && SP.basisByRow[rKey][sKey] && SP.basisByRow[rKey][sKey]['_basis']){
+    status = stKey ? 'Inherited' : 'Override';
+  } else if(rKey && SP.basisByRow[rKey] && SP.basisByRow[rKey]['_basis']){
+    status = sKey ? 'Inherited' : 'Override';
+  } else {
+    status = sKey || stKey ? 'Default' : 'Primary';
+  }
+
+  return `${basisNum}d ${status}`;
+}
+
+// Render basis selector buttons for a row
+function spRenderBasisButtons(rKey, sKey, stKey){
+  const currentBasis = spGetBasisForRow(rKey, sKey, stKey);
+  return `<div style="display:flex;gap:2px;font-size:6px">
+    <button style="padding:1px 4px;background:${currentBasis==='all10d'?'rgba(100,200,100,.3)':'transparent'};border:1px solid rgba(100,200,100,.5);color:#0f0;cursor:pointer;font-size:6px" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey||''}','${stKey||''}','all10d')">10d</button>
+    <button style="padding:1px 4px;background:${currentBasis==='all15d'?'rgba(100,200,100,.3)':'transparent'};border:1px solid rgba(100,200,100,.5);color:#0f0;cursor:pointer;font-size:6px" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey||''}','${stKey||''}','all15d')">15d</button>
+    <button style="padding:1px 4px;background:${currentBasis==='all30d'?'rgba(100,200,100,.3)':'transparent'};border:1px solid rgba(100,200,100,.5);color:#0f0;cursor:pointer;font-size:6px" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey||''}','${stKey||''}','all30d')">30d</button>
+  </div>`;
 }
 
 // ── Helper: render daily columns as compact cells (editable) ──
@@ -11095,6 +11153,7 @@ function spRenderTable(){
       <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:1px solid var(--border)">${Math.round(perf.mtd).toLocaleString()}</td>
       <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:1px solid var(--border)">${Math.round(perf.ytd).toLocaleString()}</td>
       <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:2px solid var(--border2)">${Math.round(perf.sply).toLocaleString()}</td>
+      <td style="padding:2px 3px;border-right:2px solid var(--border2)">${spRenderBasisButtons(rKey, '', '')}</td>
       <td colspan="40" style="background:rgba(255,255,255,.01)"></td>
     </tr>`;
 
@@ -11113,6 +11172,7 @@ function spRenderTable(){
           <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:1px solid var(--border)">${Math.round(sPerf.mtd).toLocaleString()}</td>
           <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:1px solid var(--border)">${Math.round(sPerf.ytd).toLocaleString()}</td>
           <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:2px solid var(--border2)">${Math.round(sPerf.sply).toLocaleString()}</td>
+          <td style="padding:2px 3px;border-right:2px solid var(--border2)">${spRenderBasisButtons(rKey, sKey, '')}</td>
           <td colspan="40" style="background:rgba(255,255,255,.01)"></td>
         </tr>`;
 
@@ -11131,6 +11191,7 @@ function spRenderTable(){
               <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:1px solid var(--border)">${Math.round(stPerf.mtd).toLocaleString()}</td>
               <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:1px solid var(--border)">${Math.round(stPerf.ytd).toLocaleString()}</td>
               <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:2px solid var(--border2)">${Math.round(stPerf.sply).toLocaleString()}</td>
+              <td style="padding:2px 3px;border-right:2px solid var(--border2)">${spRenderBasisButtons(rKey, sKey, stKey)}</td>
               <td colspan="40" style="background:rgba(255,255,255,.01)"></td>
             </tr>`;
 
@@ -11148,37 +11209,38 @@ function spRenderTable(){
                 // Note: With smart collapse, we rarely render all products, so this is safe
                 const showDetailedForecasts = true; // Always show detailed forecasts
 
-                // Get historical range for selected forecast basis
-                const histRange = spGetHistoricalRange(SP.forecastBasis, today);
+                // Get the applicable basis for this row (hierarchical: product → shipto → soldto → rep → default)
+                const applicableBasis = spGetBasisForRow(rKey, sKey, stKey);
+                const histRange = spGetHistoricalRange(applicableBasis, today);
 
-                // REST OF MONTH: Calculate forecast based on selected basis
-                const romDailyVals = spCalcForecast(prodRows, histRange, romDates, SP.forecastBasis);
+                // REST OF MONTH: Calculate forecast based on applicable basis
+                const romDailyVals = spCalcForecast(prodRows, histRange, romDates, applicableBasis);
                 romTotal = romDailyVals.reduce((s,v)=>s+v,0);
 
                 if(showDetailedForecasts){
                   // Only show daily cells if dataset is small
                   romCells = spRenderDailyColumns(romDailyVals, romDates, pKey, true);
 
-                  // JUNE daily values: forecast based on selected basis
-                  const juneDailyVals = spCalcForecast(prodRows, histRange, juneDates, SP.forecastBasis);
+                  // JUNE daily values: forecast based on applicable basis
+                  const juneDailyVals = spCalcForecast(prodRows, histRange, juneDates, applicableBasis);
                   juneTotal = juneDailyVals.reduce((s,v)=>s+v,0);
                   juneCells = spRenderDailyColumns(juneDailyVals, juneDates, pKey+'_jun', true);
 
-                  // JULY daily values: forecast based on selected basis
-                  const julyDailyVals = spCalcForecast(prodRows, histRange, julyDates, SP.forecastBasis);
+                  // JULY daily values: forecast based on applicable basis
+                  const julyDailyVals = spCalcForecast(prodRows, histRange, julyDates, applicableBasis);
                   julyTotal = julyDailyVals.reduce((s,v)=>s+v,0);
                   julyCells = spRenderDailyColumns(julyDailyVals, julyDates, pKey+'_jul', true);
 
-                  // REST OF YEAR monthly totals: forecast based on selected basis
+                  // REST OF YEAR monthly totals: forecast based on applicable basis
                   royMonthCells = restOfYearMonths.map(ym=>{
                     const monthDates = spGetMonthDates(ym);
-                    const monthlyVals = spCalcForecast(prodRows, histRange, monthDates, SP.forecastBasis);
+                    const monthlyVals = spCalcForecast(prodRows, histRange, monthDates, applicableBasis);
                     const monthVal = monthlyVals.reduce((s,v)=>s+v,0);
                     return `<td class="sp-cell-month" style="border-left:1px solid rgba(200,150,100,.2);background:rgba(200,150,100,.04);font-size:8px;text-align:right;padding:2px 4px">${Math.round(monthVal).toLocaleString()}</td>`;
                   }).join('');
                   royTotal = restOfYearMonths.reduce((s,ym)=>{
                     const monthDates = spGetMonthDates(ym);
-                    const monthlyVals = spCalcForecast(prodRows, histRange, monthDates, SP.forecastBasis);
+                    const monthlyVals = spCalcForecast(prodRows, histRange, monthDates, applicableBasis);
                     return s + monthlyVals.reduce((ss,v)=>ss+v,0);
                   }, 0);
                 }
