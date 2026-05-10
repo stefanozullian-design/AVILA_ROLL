@@ -10938,6 +10938,21 @@ function spRenderTable(){
   const today=new Date().toISOString().split('T')[0];
   const isWkday=ds=>{ const d=new Date(ds+'T12:00:00').getDay(); return d!==0&&d!==6; };
 
+  // Collapse Sold To, Ship To, and Product levels by default for performance
+  // (keep Reps expanded so user sees the structure)
+  rows.forEach(r=>{
+    const rep=r.sales_manager||'—';
+    const soldTo=spExtractSoldTo(r.ship_to_name||'—');
+    const shipTo=r.ship_to_name||'—';
+    const rKey='rep_'+rep.replace(/[^\w]/g,'_');
+    const sKey='soldto_'+rKey+'_'+soldTo.replace(/[^\w]/g,'_');
+    const stKey='shipto_'+sKey+'_'+shipTo.replace(/[^\w]/g,'_');
+
+    // Default: collapse sold-to and ship-to, but NOT reps
+    if(!(sKey in SP._userExpanded)) SP.collapsed[sKey]=true;
+    if(!(stKey in SP._userExpanded)) SP.collapsed[stKey]=true;
+  });
+
   // Performance metrics calculator
   const spPerfMetrics=(arr, dateNow)=>{
     const curMonth = dateNow.slice(0,7); // YYYY-MM
@@ -11065,31 +11080,42 @@ function spRenderTable(){
                 const pPerf=spPerfMetrics(prodRows, today);
                 const pKey=`prod_${stKey}_${prod}`.replace(/[^\w]/g,'_');
 
-                // ROM (Rest of Month) daily values
+                // LAZY LOAD: Only calculate forecast columns if data is small (avoid perf issues)
+                let romCells='', romTotal=0, juneCells='', juneTotal=0, julyCells='', julyTotal=0, royMonthCells='', royTotal=0;
+
+                // For performance: only show detailed daily columns if fewer filtered rows
+                // Otherwise just show totals without the daily breakdown
+                const showDetailedForecasts = SP.filteredRows.length < 1000;
+
+                // Always calculate ROM total for quick visibility
                 const romDailyVals = spGetDailyTotals(prodRows, romDates);
-                const romTotal = romDailyVals.reduce((s,v)=>s+v,0);
-                const romCells = spRenderDailyColumns(romDailyVals, romDates, pKey, true);
+                romTotal = romDailyVals.reduce((s,v)=>s+v,0);
 
-                // JUNE daily values
-                const juneDailyVals = spGetDailyTotals(prodRows, juneDates);
-                const juneTotal = juneDailyVals.reduce((s,v)=>s+v,0);
-                const juneCells = spRenderDailyColumns(juneDailyVals, juneDates, pKey+'_jun', true);
+                if(showDetailedForecasts){
+                  // Only show daily cells if dataset is small
+                  romCells = spRenderDailyColumns(romDailyVals, romDates, pKey, true);
 
-                // JULY daily values
-                const julyDailyVals = spGetDailyTotals(prodRows, julyDates);
-                const julyTotal = julyDailyVals.reduce((s,v)=>s+v,0);
-                const julyCells = spRenderDailyColumns(julyDailyVals, julyDates, pKey+'_jul', true);
+                  // JUNE daily values
+                  const juneDailyVals = spGetDailyTotals(prodRows, juneDates);
+                  juneTotal = juneDailyVals.reduce((s,v)=>s+v,0);
+                  juneCells = spRenderDailyColumns(juneDailyVals, juneDates, pKey+'_jun', true);
 
-                // REST OF YEAR monthly totals
-                const royMonthCells = restOfYearMonths.map(ym=>{
-                  const monthDates = spGetMonthDates(ym);
-                  const monthVal = spGetDailyTotals(prodRows, monthDates).reduce((s,v)=>s+v,0);
-                  return `<td class="sp-cell-month" style="border-left:1px solid rgba(200,150,100,.2);background:rgba(200,150,100,.04);font-size:8px;text-align:right;padding:2px 4px">${Math.round(monthVal).toLocaleString()}</td>`;
-                }).join('');
-                const royTotal = restOfYearMonths.reduce((s,ym)=>{
-                  const monthDates = spGetMonthDates(ym);
-                  return s + spGetDailyTotals(prodRows, monthDates).reduce((ss,v)=>ss+v,0);
-                }, 0);
+                  // JULY daily values
+                  const julyDailyVals = spGetDailyTotals(prodRows, julyDates);
+                  julyTotal = julyDailyVals.reduce((s,v)=>s+v,0);
+                  julyCells = spRenderDailyColumns(julyDailyVals, julyDates, pKey+'_jul', true);
+
+                  // REST OF YEAR monthly totals
+                  royMonthCells = restOfYearMonths.map(ym=>{
+                    const monthDates = spGetMonthDates(ym);
+                    const monthVal = spGetDailyTotals(prodRows, monthDates).reduce((s,v)=>s+v,0);
+                    return `<td class="sp-cell-month" style="border-left:1px solid rgba(200,150,100,.2);background:rgba(200,150,100,.04);font-size:8px;text-align:right;padding:2px 4px">${Math.round(monthVal).toLocaleString()}</td>`;
+                  }).join('');
+                  royTotal = restOfYearMonths.reduce((s,ym)=>{
+                    const monthDates = spGetMonthDates(ym);
+                    return s + spGetDailyTotals(prodRows, monthDates).reduce((ss,v)=>ss+v,0);
+                  }, 0);
+                }
 
                 const dot=`<span style="display:inline-block;width:6px;height:6px;border-radius:1px;background:${spProdColor(prod,true)};margin-right:4px;vertical-align:middle"></span>`;
 
