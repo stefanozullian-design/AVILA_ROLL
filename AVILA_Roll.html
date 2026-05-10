@@ -10859,154 +10859,150 @@ function _spClearLegend(){
 // ══════════════════════════════════════════════════════
 // PERFORMANCE TABLE
 // ══════════════════════════════════════════════════════
+// ── Helper: extract "Sold To" from ship_to_name by taking everything before location ──
+function spExtractSoldTo(shipToName){
+  if(!shipToName) return '—';
+  const parts = shipToName.split(' - ');
+  return parts[0].trim();
+}
+
 function spRenderTable(){
   const tbody=document.getElementById('sp-tbody'); if(!tbody) return;
   const rows=SP.filteredRows;
-  if(!rows.length){ tbody.innerHTML=`<tr><td colspan="8" class="sp-no-data">No data for current filters</td></tr>`; return; }
+  if(!rows.length){ tbody.innerHTML=`<tr><td colspan="20" class="sp-no-data">No data for current filters</td></tr>`; return; }
 
   const today=new Date().toISOString().split('T')[0];
   const isWkday=ds=>{ const d=new Date(ds+'T12:00:00').getDay(); return d!==0&&d!==6; };
 
-  // Pre-collapse customers by default
+  // Pre-collapse sold-to groups by default
   rows.forEach(r=>{
     const rep=r.sales_manager||'—';
-    const cust=r.ship_to_name||String(r.ship_to||'Unknown');
+    const soldTo=spExtractSoldTo(r.ship_to_name||'—');
     const rKey='rep_'+rep.replace(/[^\w]/g,'_');
-    const cKey='cust_'+rKey+'_'+cust.replace(/[^\w]/g,'_');
-    if(!(cKey in SP._userExpanded)) SP.collapsed[cKey]=true;
+    const sKey='soldto_'+rKey+'_'+soldTo.replace(/[^\w]/g,'_');
+    if(!(sKey in SP._userExpanded)) SP.collapsed[sKey]=true;
   });
 
-  // Weekday-aware stats: hist avg, last10wkday, last15d-wkdays, last30wkday
-  const spStats=(arr)=>{
-    const wkRows=arr.filter(r=>isWkday(r.date));
-    const byDate={};
-    wkRows.forEach(r=>{ byDate[r.date]=(byDate[r.date]||0)+r.volume; });
-    const vals=Object.values(byDate);
-    if(!vals.length) return{hist:0,d10:0,d15:0,d30:0,txns:arr.length};
-    const hist=Math.round(vals.reduce((a,b)=>a+b,0)/vals.length);
+  // Performance metrics calculator
+  const spPerfMetrics=(arr, dateNow)=>{
+    const curMonth = dateNow.slice(0,7); // YYYY-MM
+    const curYear = dateNow.slice(0,4);  // YYYY
+    const lastYear = String(parseInt(curYear)-1); // last year
 
-    // Last 10 weekdays
-    const sorted=[...new Set(wkRows.map(r=>r.date))].sort().slice(-10);
-    const v10=sorted.map(d=>byDate[d]||0);
-    const d10=v10.length?Math.round(v10.reduce((a,b)=>a+b,0)/v10.length):0;
+    // MTD = current month to date
+    const mtdRows = arr.filter(r=> r.date.slice(0,7)===curMonth);
+    const mtd = mtdRows.reduce((s,r)=>s+r.volume,0);
 
-    // Last 15 calendar days — weekdays only within that window
-    const d15cut=new Date(today); d15cut.setDate(d15cut.getDate()-15);
-    const d15cutStr=d15cut.toISOString().split('T')[0];
-    const v15=wkRows.filter(r=>r.date>=d15cutStr&&r.date<=today);
-    const by15={};
-    v15.forEach(r=>{by15[r.date]=(by15[r.date]||0)+r.volume;});
-    const v15arr=Object.values(by15);
-    const d15=v15arr.length?Math.round(v15arr.reduce((a,b)=>a+b,0)/v15arr.length):0;
+    // YTD = current year to date
+    const ytdRows = arr.filter(r=> r.date.slice(0,4)===curYear);
+    const ytd = ytdRows.reduce((s,r)=>s+r.volume,0);
 
-    // Last 30 weekdays
-    const sorted30=[...new Set(wkRows.map(r=>r.date))].sort().slice(-30);
-    const v30=sorted30.map(d=>byDate[d]||0);
-    const d30=v30.length?Math.round(v30.reduce((a,b)=>a+b,0)/v30.length):0;
+    // SPLY = same period last year (same day in last year)
+    const [,m,d] = dateNow.match(/(\d{2})-(\d{2})/) || ['','00','00'];
+    const spLastYearEnd = `${lastYear}-${m}-${d}`;
+    const spLastYearStart = dateNow.slice(0,7); // month in last year
+    const spLastYearStart2 = `${lastYear}-${dateNow.slice(5)}`; // YYYY-MM-DD last year
+    const splyRows = arr.filter(r=> r.date.slice(0,7)===`${lastYear}-${m}`);
+    const sply = splyRows.reduce((s,r)=>s+r.volume,0);
 
-    return{hist,d10,d15,d30,txns:arr.length};
+    return {mtd,ytd,sply};
   };
 
-  const isSelRow=(type,key)=>SP.selScope&&SP.selScope.type===type&&SP.selScope.key===key;
-
-  const getCommit30=(scopeType,scopeKey)=>{
-    const now=new Date().toISOString().split('T')[0];
-    const end=new Date(); end.setDate(end.getDate()+30); const endS=end.toISOString().split('T')[0];
-    const cs=DB.forecast_commitments.filter(fc=>fc.status==='approved'&&fc.scope_key===scopeKey&&fc.scope_type===scopeType);
-    if(!cs.length) return null;
-    const latest=cs[cs.length-1];
-    const entries=(latest.entries||[]).filter(e=>e.date>=now&&e.date<=endS);
-    if(!entries.length){ if(latest.resolved_val!=null) return latest.resolved_val; return null; }
-    return Math.round(entries.reduce((s,e)=>s+e.final,0)/entries.length);
-  };
-
-  // Build tree: rep → customer → product (segment surfaced as badge on rep row)
+  // Build 4-level tree: rep → soldto → shipto → product
   const repTree={};
   rows.forEach(r=>{
-    const seg=r.customer_type||'EXT';
     const rep=r.sales_manager||'—';
-    const cust=r.ship_to_name||String(r.ship_to||'Unknown');
+    const soldTo=spExtractSoldTo(r.ship_to_name||'—');
+    const shipTo=r.ship_to_name||'—';
     const prod=r.product||r.origin;
-    if(!repTree[rep]) repTree[rep]={rows:[],segs:new Set(),custs:{}};
+
+    if(!repTree[rep]) repTree[rep]={rows:[],segs:new Set(),soldtos:{}};
     repTree[rep].rows.push(r);
-    repTree[rep].segs.add(seg);
-    if(!repTree[rep].custs[cust]) repTree[rep].custs[cust]={rows:[],prods:{}};
-    repTree[rep].custs[cust].rows.push(r);
-    if(!repTree[rep].custs[cust].prods[prod]) repTree[rep].custs[cust].prods[prod]={rows:[]};
-    repTree[rep].custs[cust].prods[prod].rows.push(r);
+    repTree[rep].segs.add(r.customer_type||'EXT');
+
+    if(!repTree[rep].soldtos[soldTo]) repTree[rep].soldtos[soldTo]={rows:[],shiptos:{}};
+    repTree[rep].soldtos[soldTo].rows.push(r);
+
+    if(!repTree[rep].soldtos[soldTo].shiptos[shipTo]) repTree[rep].soldtos[soldTo].shiptos[shipTo]={rows:[],prods:{}};
+    repTree[rep].soldtos[soldTo].shiptos[shipTo].rows.push(r);
+
+    if(!repTree[rep].soldtos[soldTo].shiptos[shipTo].prods[prod]) repTree[rep].soldtos[soldTo].shiptos[shipTo].prods[prod]={rows:[]};
+    repTree[rep].soldtos[soldTo].shiptos[shipTo].prods[prod].rows.push(r);
   });
 
-  // ── Render: Rep (L0) → Customer (L1, collapsed by default) → Product (L2) ──
+  // Render 4-level hierarchy: Rep (L0) → Sold To (L1) → Ship To (L2) → Product (L3)
   let h='';
   Object.keys(repTree).sort().forEach(rep=>{
     const rKey=`rep_${rep}`.replace(/[^\w]/g,'_');
     const rCol=SP.collapsed[rKey];
-    const rs=spStats(repTree[rep].rows);
-    const rc30=getCommit30('rep',rKey);
-    const rsel=isSelRow('rep',rKey)?'sp-row-sel':'';
+    const perf=spPerfMetrics(repTree[rep].rows, today);
     const segBadges=[...repTree[rep].segs].map(s=>
       `<span class="sp-badge ${s==='EXT'?'sp-badge-ext':'sp-badge-int'}">${s}</span>`).join(' ');
-    const repJ=JSON.stringify(rep);
-    const custCount=Object.keys(repTree[rep].custs).length;
-    h+=`<tr class="sp-row-l0 ${rsel}" onclick="spSelectScope('rep','${rKey}','${rep}','',null,${repJ})">
-      <td class="td-lbl" style="border-right:2px solid var(--border2)">
-        <span class="sp-toggle" onclick="event.stopPropagation();spToggle('${rKey}')">${rCol?'▸':'▾'}</span>
-        ${rep} ${segBadges}
-        <span style="font-family:var(--mono);font-size:7px;color:var(--text-dim);margin-left:4px">${custCount} cust.</span>
+    const soldToCount=Object.keys(repTree[rep].soldtos).length;
+
+    h+=`<tr class="sp-row-l0" onclick="event.stopPropagation();spToggle('${rKey}')">
+      <td class="td-lbl" style="border-right:2px solid var(--border2);cursor:pointer">
+        <span class="sp-toggle">${rCol?'▸':'▾'}</span> <strong>${rep}</strong> ${segBadges}
+        <span style="font-size:7px;color:var(--text-dim);margin-left:4px">[${soldToCount} sold-to]</span>
       </td>
-      <td class="sp-cell-d">${Number(rs.hist).toLocaleString()}</td>
-      <td class="${rs.d10>rs.hist?'sp-cell-g':rs.d10<rs.hist?'sp-cell-a':'sp-cell-d'}">${Number(rs.d10).toLocaleString()}</td>
-      <td class="sp-cell-d">${Number(rs.d15).toLocaleString()}</td>
-      <td class="${rs.d30>rs.hist?'sp-cell-g':rs.d30<rs.hist?'sp-cell-a':'sp-cell-d'}">${Number(rs.d30).toLocaleString()}</td>
-      ${spFcCell(rKey,'rom',true,null,rs,null)}
-      ${spFcCell(rKey,'n3m',true,null,rs,null)}
-      ${spFcCell(rKey,'roy',true,null,rs,null)}</tr>`;
+      <td class="sp-cell-d" style="font-size:8px">${Math.round(perf.mtd).toLocaleString()}</td>
+      <td class="sp-cell-d" style="font-size:8px">${Math.round(perf.ytd).toLocaleString()}</td>
+      <td class="sp-cell-d" style="font-size:8px">${Math.round(perf.sply).toLocaleString()}</td>
+      <td colspan="40" style="background:rgba(255,255,255,.01)"></td>
+    </tr>`;
 
     if(!rCol){
-      // Build rep's customer stats list for proportional spread
-      const repCustStatsList=Object.keys(repTree[rep].custs).map(cn=>({
-        key:'cust_'+rKey+'_'+cn.replace(/[^\w]/g,'_'), stats:spStats(repTree[rep].custs[cn].rows)
-      }));
-      Object.keys(repTree[rep].custs).sort().forEach(cust=>{
-        const cKey=`cust_${rKey}_${cust}`.replace(/[^\w]/g,'_');
-        const cCol=SP.collapsed[cKey];
-        const cs=spStats(repTree[rep].custs[cust].rows);
-        const cc30=getCommit30('customer',cKey);
-        const csel=isSelRow('customer',cKey)?'sp-row-sel':'';
-        const custSegs=[...new Set(repTree[rep].custs[cust].rows.map(r=>r.customer_type))];
-        const custBadge=custSegs.map(s=>`<span class="sp-badge ${s==='EXT'?'sp-badge-ext':'sp-badge-int'}" style="font-size:6px">${s}</span>`).join('');
-        const prodCount=Object.keys(repTree[rep].custs[cust].prods).length;
-        h+=`<tr class="sp-row-l1 ${csel}" onclick="spSelectScope('customer','${cKey}','${cust}','',${JSON.stringify(cust)},${JSON.stringify(rep)})">
-          <td class="td-lbl" style="border-right:2px solid var(--border2)">
-            <span class="sp-toggle" onclick="event.stopPropagation();spToggle('${cKey}')">${cCol?'▸':'▾'}</span>
-            ${cust} ${custBadge}
-            <span style="font-family:var(--mono);font-size:7px;color:var(--text-dim);margin-left:4px">${prodCount} prod.</span>
-          </td>
-          <td class="sp-cell-d">${Number(cs.hist).toLocaleString()}</td>
-          <td class="${cs.d10>cs.hist?'sp-cell-g':cs.d10<cs.hist?'sp-cell-a':'sp-cell-d'}">${Number(cs.d10).toLocaleString()}</td>
-          <td class="sp-cell-d">${Number(cs.d15).toLocaleString()}</td>
-          <td class="${cs.d30>cs.hist?'sp-cell-g':cs.d30<cs.hist?'sp-cell-a':'sp-cell-d'}">${Number(cs.d30).toLocaleString()}</td>
-          ${spFcCell(cKey,'rom',false,rKey,cs,repCustStatsList)}
-          ${spFcCell(cKey,'n3m',false,rKey,cs,repCustStatsList)}
-          ${spFcCell(cKey,'roy',false,rKey,cs,repCustStatsList)}</tr>`;
+      Object.keys(repTree[rep].soldtos).sort().forEach(soldTo=>{
+        const sKey=`soldto_${rKey}_${soldTo}`.replace(/[^\w]/g,'_');
+        const sCol=SP.collapsed[sKey];
+        const sPerf=spPerfMetrics(repTree[rep].soldtos[soldTo].rows, today);
+        const shipToCount=Object.keys(repTree[rep].soldtos[soldTo].shiptos).length;
 
-        if(!cCol){
-          Object.keys(repTree[rep].custs[cust].prods).sort().forEach(prod=>{
-            const pKey=`prod_${cKey}_${prod}`.replace(/[^\w]/g,'_');
-            const ps=spStats(repTree[rep].custs[cust].prods[prod].rows);
-            const pc30=getCommit30('product',pKey);
-            const psel=isSelRow('product',pKey)?'sp-row-sel':'';
-            const dot=`<span style="display:inline-block;width:8px;height:8px;border-radius:1px;background:${spProdColor(prod,true)};margin-right:5px;vertical-align:middle;flex-shrink:0"></span>`;
-            const pLabel=spShortProd(prod).replace(/'/g,'&#39;');
-            h+=`<tr class="sp-row-l2 ${psel}" onclick="spSelectScope('product','${pKey}','${pLabel}','',${JSON.stringify(cust)},${JSON.stringify(rep)})">
-              <td class="td-lbl" style="border-right:2px solid var(--border2)">${dot}${spShortProd(prod)}</td>
-              <td class="sp-cell-d">${Number(ps.hist).toLocaleString()}</td>
-              <td class="${ps.d10>ps.hist?'sp-cell-g':ps.d10<ps.hist?'sp-cell-a':'sp-cell-d'}">${Number(ps.d10).toLocaleString()}</td>
-              <td class="sp-cell-d">${Number(ps.d15).toLocaleString()}</td>
-              <td class="${ps.d30>ps.hist?'sp-cell-g':ps.d30<ps.hist?'sp-cell-a':'sp-cell-d'}">${Number(ps.d30).toLocaleString()}</td>
-              <td class="sp-fc-cell" style="border-left:2px solid var(--border2)" colspan="3">
-                <span style="font-family:var(--mono);font-size:7px;color:var(--text-dim)">— product level —</span>
-              </td></tr>`;
+        h+=`<tr class="sp-row-l1" style="background:rgba(100,150,200,.03)" onclick="event.stopPropagation();spToggle('${sKey}')">
+          <td class="td-lbl" style="border-right:2px solid var(--border2);cursor:pointer;padding-left:24px">
+            <span class="sp-toggle">${sCol?'▸':'▾'}</span> SOLD TO: <strong>${soldTo}</strong>
+            <span style="font-size:7px;color:var(--text-dim);margin-left:4px">[${shipToCount} ship-to]</span>
+          </td>
+          <td class="sp-cell-d" style="font-size:8px">${Math.round(sPerf.mtd).toLocaleString()}</td>
+          <td class="sp-cell-d" style="font-size:8px">${Math.round(sPerf.ytd).toLocaleString()}</td>
+          <td class="sp-cell-d" style="font-size:8px">${Math.round(sPerf.sply).toLocaleString()}</td>
+          <td colspan="40" style="background:rgba(255,255,255,.01)"></td>
+        </tr>`;
+
+        if(!sCol){
+          Object.keys(repTree[rep].soldtos[soldTo].shiptos).sort().forEach(shipTo=>{
+            const stKey=`shipto_${sKey}_${shipTo}`.replace(/[^\w]/g,'_');
+            const stCol=SP.collapsed[stKey];
+            const stPerf=spPerfMetrics(repTree[rep].soldtos[soldTo].shiptos[shipTo].rows, today);
+            const prodCount=Object.keys(repTree[rep].soldtos[soldTo].shiptos[shipTo].prods).length;
+
+            h+=`<tr class="sp-row-l2" style="background:rgba(100,200,100,.03)" onclick="event.stopPropagation();spToggle('${stKey}')">
+              <td class="td-lbl" style="border-right:2px solid var(--border2);cursor:pointer;padding-left:40px">
+                <span class="sp-toggle">${stCol?'▸':'▾'}</span> SHIP TO: <strong>${shipTo}</strong>
+                <span style="font-size:7px;color:var(--text-dim);margin-left:4px">[${prodCount} products]</span>
+              </td>
+              <td class="sp-cell-d" style="font-size:8px">${Math.round(stPerf.mtd).toLocaleString()}</td>
+              <td class="sp-cell-d" style="font-size:8px">${Math.round(stPerf.ytd).toLocaleString()}</td>
+              <td class="sp-cell-d" style="font-size:8px">${Math.round(stPerf.sply).toLocaleString()}</td>
+              <td colspan="40" style="background:rgba(255,255,255,.01)"></td>
+            </tr>`;
+
+            if(!stCol){
+              Object.keys(repTree[rep].soldtos[soldTo].shiptos[shipTo].prods).sort().forEach(prod=>{
+                const pPerf=spPerfMetrics(repTree[rep].soldtos[soldTo].shiptos[shipTo].prods[prod].rows, today);
+                const dot=`<span style="display:inline-block;width:6px;height:6px;border-radius:1px;background:${spProdColor(prod,true)};margin-right:4px;vertical-align:middle"></span>`;
+
+                h+=`<tr class="sp-row-l3" style="background:rgba(200,200,100,.03)">
+                  <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:56px">
+                    ${dot}<span style="font-size:8px">${spShortProd(prod)}</span>
+                  </td>
+                  <td class="sp-cell-d" style="font-size:8px">${Math.round(pPerf.mtd).toLocaleString()}</td>
+                  <td class="sp-cell-d" style="font-size:8px">${Math.round(pPerf.ytd).toLocaleString()}</td>
+                  <td class="sp-cell-d" style="font-size:8px">${Math.round(pPerf.sply).toLocaleString()}</td>
+                  <td colspan="40" style="background:rgba(255,255,255,.01)"></td>
+                </tr>`;
+              });
+            }
           });
         }
       });
