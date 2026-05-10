@@ -10912,6 +10912,41 @@ function spGetRestOfYearMonths(dateNow){
   return months;
 }
 
+// ── Helper: calculate daily forecast based on basis method ──
+// basis: 'all10d', 'all15d', 'all30d' (or 'actual' to use actual historical data)
+// rows: shipment records, dates: days to calculate for, forecastDays: number of days to forecast
+function spCalcForecast(rows, historicalDateRange, forecastDays, basis='all10d'){
+  if(basis==='actual') return []; // Return empty to use actual data
+
+  // Get the average daily volume from the selected historical period
+  const historicalVals = spGetDailyTotals(rows, historicalDateRange);
+  const avgDaily = historicalVals.length > 0
+    ? historicalVals.reduce((s,v)=>s+v,0) / historicalVals.length
+    : 0;
+
+  // Create forecast: repeat the average for each day
+  return Array(forecastDays.length).fill(Math.round(avgDaily));
+}
+
+// ── Helper: get date ranges for forecast basis calculation ──
+function spGetHistoricalRange(basis, dateNow){
+  const today = new Date(dateNow+'T12:00:00');
+  const ranges = {
+    'all10d': { days: 10, label: 'Last 10d avg' },
+    'all15d': { days: 15, label: 'Last 15d avg' },
+    'all30d': { days: 30, label: 'Last 30d avg' }
+  };
+
+  const config = ranges[basis] || ranges['all10d'];
+  const dates = [];
+  for(let i = config.days - 1; i >= 0; i--){
+    const d = new Date(today);
+    d.setDate(d.getDate() - i);
+    dates.push(d.toISOString().split('T')[0]);
+  }
+  return dates;
+}
+
 // ── Helper: render daily columns as compact cells (editable) ──
 function spRenderDailyColumns(dailyValues, dates, rowKey, isEditable){
   if(!dates.length) return '';
