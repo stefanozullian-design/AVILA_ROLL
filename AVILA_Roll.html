@@ -11056,6 +11056,84 @@ function spRenderTable(){
   const today=new Date().toISOString().split('T')[0];
   const isWkday=ds=>{ const d=new Date(ds+'T12:00:00').getDay(); return d!==0&&d!==6; };
 
+  // Generate dynamic header with date labels
+  function spRenderHeaderRow(){
+    const romDates = spGetRestOfMonthDates(today);
+    const romWeekdayDates = romDates.filter(d => isWkday(d));
+    const nextMonth = new Date(new Date(today).setMonth(new Date(today).getMonth()+1)).toISOString().slice(0,7);
+    const month2 = new Date(new Date(today).setMonth(new Date(today).getMonth()+2)).toISOString().slice(0,7);
+    const month3 = new Date(new Date(today).setMonth(new Date(today).getMonth()+3)).toISOString().slice(0,7);
+    const restOfYearMonths = spGetRestOfYearMonths(today);
+    const royOnlyMonths = restOfYearMonths.filter(ym => ym > month3);
+
+    const formatDate = (ds) => {
+      const [y, m, d] = ds.split('-');
+      const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      return `${d}-${months[parseInt(m)-1]}`;
+    };
+
+    const formatMonth = (ym) => {
+      const [y, m] = ym.split('-');
+      const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      return `${months[parseInt(m)-1]}-${y.slice(2)}`;
+    };
+
+    let headerHtml = `
+      <th style="font-size:6px;width:40px;text-align:right;padding:2px;border-right:1px solid var(--border)"></th>
+      <th colspan="${romWeekdayDates.length + 1}" style="font-size:7px;text-align:center;background:rgba(255,184,48,.08);border:1px solid var(--border);padding:2px">FORECAST ROM</th>
+      <th colspan="4" style="font-size:7px;text-align:center;background:rgba(100,180,200,.08);border:1px solid var(--border);padding:2px">FORECAST N3M</th>
+      <th colspan="${royOnlyMonths.length + 1}" style="font-size:7px;text-align:center;background:rgba(200,150,100,.08);border:1px solid var(--border);padding:2px">FORECAST ROY</th>
+    `;
+
+    // Add date labels row
+    let dateLabelsHtml = `<th style="font-size:6px;width:40px"></th>`;
+
+    // ROM dates
+    romWeekdayDates.forEach(d => {
+      dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:right">${formatDate(d)}</th>`;
+    });
+    dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:right;background:rgba(255,184,48,.1);font-weight:700">ROM</th>`;
+
+    // N3M dates
+    [nextMonth, month2, month3].forEach(ym => {
+      dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:right">${formatMonth(ym)}</th>`;
+    });
+    dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:right;background:rgba(100,180,200,.1);font-weight:700">N3M</th>`;
+
+    // ROY dates
+    royOnlyMonths.forEach(ym => {
+      dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:right">${formatMonth(ym)}</th>`;
+    });
+    dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:right;background:rgba(200,150,100,.1);font-weight:700">ROY</th>`;
+
+    return { headerHtml, dateLabelsHtml };
+  }
+
+  const { headerHtml, dateLabelsHtml } = spRenderHeaderRow();
+  const thead = document.querySelector('#sp-table thead');
+  if(thead) {
+    // Add or update the dynamic header rows
+    let dynHeaderRow = thead.querySelector('.sp-dynamic-headers');
+    if(!dynHeaderRow) {
+      dynHeaderRow = document.createElement('tr');
+      dynHeaderRow.className = 'sp-dynamic-headers';
+      dynHeaderRow.innerHTML = headerHtml;
+      thead.appendChild(dynHeaderRow);
+    } else {
+      dynHeaderRow.innerHTML = headerHtml;
+    }
+
+    let dynDateRow = thead.querySelector('.sp-dynamic-dates');
+    if(!dynDateRow) {
+      dynDateRow = document.createElement('tr');
+      dynDateRow.className = 'sp-dynamic-dates';
+      dynDateRow.innerHTML = dateLabelsHtml;
+      thead.appendChild(dynDateRow);
+    } else {
+      dynDateRow.innerHTML = dateLabelsHtml;
+    }
+  }
+
   // Collapse Sold To, Ship To, and Product levels by default for performance
   // (keep Reps expanded so user sees the structure)
   rows.forEach(r=>{
@@ -11101,10 +11179,14 @@ function spRenderTable(){
   const currentYearMonth = today.slice(0,7);
   const nextMonth = new Date(new Date(today).setMonth(new Date(today).getMonth()+1)).toISOString().slice(0,7);
   const month2 = new Date(new Date(today).setMonth(new Date(today).getMonth()+2)).toISOString().slice(0,7);
+  const month3 = new Date(new Date(today).setMonth(new Date(today).getMonth()+3)).toISOString().slice(0,7);
   const restOfYearMonths = spGetRestOfYearMonths(today);
 
+  // Next 3 months: nextMonth, month2, month3
+  const next3Months = [nextMonth, month2, month3];
   const juneDates = spGetMonthDates(nextMonth);
   const julyDates = spGetMonthDates(month2);
+  const augustDates = spGetMonthDates(month3);
 
   // Pre-calculate all daily totals for caching
   const allRowsForCaching = SP.filteredRows;
@@ -11202,7 +11284,7 @@ function spRenderTable(){
                 const pKey=`prod_${stKey}_${prod}`.replace(/[^\w]/g,'_');
 
                 // LAZY LOAD: Only calculate forecast columns if data is small (avoid perf issues)
-                let romCells='', romTotal=0, juneCells='', juneTotal=0, julyCells='', julyTotal=0, royMonthCells='', royTotal=0;
+                let romCells='', romTotal=0, n3mCells='', n3mTotal=0, royMonthCells='', royTotal=0;
 
                 // For performance: only show detailed daily columns if fewer filtered rows
                 // Otherwise just show totals without the daily breakdown
@@ -11213,32 +11295,35 @@ function spRenderTable(){
                 const applicableBasis = spGetBasisForRow(rKey, sKey, stKey);
                 const histRange = spGetHistoricalRange(applicableBasis, today);
 
-                // REST OF MONTH: Calculate forecast based on applicable basis
-                const romDailyVals = spCalcForecast(prodRows, histRange, romDates, applicableBasis);
-                romTotal = romDailyVals.reduce((s,v)=>s+v,0);
-
                 if(showDetailedForecasts){
-                  // Only show daily cells if dataset is small
-                  romCells = spRenderDailyColumns(romDailyVals, romDates, pKey, true);
+                  // 1. REST OF MONTH: Daily weekday columns only (filter out weekends)
+                  const romWeekdayDates = romDates.filter(d => isWkday(d));
+                  const romDailyVals = spCalcForecast(prodRows, histRange, romWeekdayDates, applicableBasis);
+                  romTotal = romDailyVals.reduce((s,v)=>s+v,0);
+                  romCells = spRenderDailyColumns(romDailyVals, romWeekdayDates, pKey, true);
 
-                  // JUNE daily values: forecast based on applicable basis
-                  const juneDailyVals = spCalcForecast(prodRows, histRange, juneDates, applicableBasis);
-                  juneTotal = juneDailyVals.reduce((s,v)=>s+v,0);
-                  juneCells = spRenderDailyColumns(juneDailyVals, juneDates, pKey+'_jun', true);
+                  // 2. NEXT 3 MONTHS: Monthly totals only (June, July, August) - no daily breakdown
+                  const n3mMonths = [nextMonth, month2, month3];
+                  const n3mMonthlyCells = [];
+                  n3mTotal = 0;
+                  n3mMonths.forEach(ym => {
+                    const monthDates = spGetMonthDates(ym);
+                    const monthlyVals = spCalcForecast(prodRows, histRange, monthDates, applicableBasis);
+                    const monthVal = monthlyVals.reduce((s,v)=>s+v,0);
+                    n3mTotal += monthVal;
+                    n3mMonthlyCells.push(`<td class="sp-cell-month" style="border-left:1px solid rgba(100,180,200,.2);background:rgba(100,180,200,.04);font-size:8px;text-align:right;padding:2px 4px">${Math.round(monthVal).toLocaleString()}</td>`);
+                  });
+                  n3mCells = n3mMonthlyCells.join('');
 
-                  // JULY daily values: forecast based on applicable basis
-                  const julyDailyVals = spCalcForecast(prodRows, histRange, julyDates, applicableBasis);
-                  julyTotal = julyDailyVals.reduce((s,v)=>s+v,0);
-                  julyCells = spRenderDailyColumns(julyDailyVals, julyDates, pKey+'_jul', true);
-
-                  // REST OF YEAR monthly totals: forecast based on applicable basis
-                  royMonthCells = restOfYearMonths.map(ym=>{
+                  // 3. REST OF YEAR: Monthly totals for remaining months after month3
+                  const royOnlyMonths = restOfYearMonths.filter(ym => ym > month3);
+                  royMonthCells = royOnlyMonths.map(ym=>{
                     const monthDates = spGetMonthDates(ym);
                     const monthlyVals = spCalcForecast(prodRows, histRange, monthDates, applicableBasis);
                     const monthVal = monthlyVals.reduce((s,v)=>s+v,0);
                     return `<td class="sp-cell-month" style="border-left:1px solid rgba(200,150,100,.2);background:rgba(200,150,100,.04);font-size:8px;text-align:right;padding:2px 4px">${Math.round(monthVal).toLocaleString()}</td>`;
                   }).join('');
-                  royTotal = restOfYearMonths.reduce((s,ym)=>{
+                  royTotal = royOnlyMonths.reduce((s,ym)=>{
                     const monthDates = spGetMonthDates(ym);
                     const monthlyVals = spCalcForecast(prodRows, histRange, monthDates, applicableBasis);
                     return s + monthlyVals.reduce((ss,v)=>ss+v,0);
@@ -11254,14 +11339,15 @@ function spRenderTable(){
                   <td class="sp-cell-d" style="padding:2px 2px;text-align:right;border-right:1px solid var(--border)">${Math.round(pPerf.mtd).toLocaleString()}</td>
                   <td class="sp-cell-d" style="padding:2px 2px;text-align:right;border-right:1px solid var(--border)">${Math.round(pPerf.ytd).toLocaleString()}</td>
                   <td class="sp-cell-d" style="padding:2px 2px;text-align:right;border-right:2px solid var(--border2)">${Math.round(pPerf.sply).toLocaleString()}</td>
-                  <td class="sp-cell-total" style="border-left:2px solid var(--amber);background:rgba(255,184,48,.08);font-weight:700;text-align:right;padding:2px 2px;font-size:6px">${Math.round(romTotal).toLocaleString()}</td>
+                  <!-- REST OF MONTH: Daily weekday columns + ROM TOTAL -->
+                  <td class="sp-cell-total" style="border-left:2px solid var(--amber);background:rgba(255,184,48,.08);font-weight:700;text-align:right;padding:2px 2px;font-size:6px">ROM<br>${Math.round(romTotal).toLocaleString()}</td>
                   ${romCells}
-                  <td class="sp-cell-total" style="border-left:2px solid var(--amber);background:rgba(255,184,48,.08);font-weight:700;text-align:right;padding:2px 2px;font-size:6px">${Math.round(juneTotal).toLocaleString()}</td>
-                  ${juneCells}
-                  <td class="sp-cell-total" style="border-left:2px solid var(--amber);background:rgba(255,184,48,.08);font-weight:700;text-align:right;padding:2px 2px;font-size:6px">${Math.round(julyTotal).toLocaleString()}</td>
-                  ${julyCells}
+                  <!-- NEXT 3 MONTHS: Monthly total columns + N3M TOTAL -->
+                  <td class="sp-cell-total" style="border-left:2px solid var(--blue);background:rgba(100,180,200,.08);font-weight:700;text-align:right;padding:2px 2px;font-size:6px">N3M<br>${Math.round(n3mTotal).toLocaleString()}</td>
+                  ${n3mCells}
+                  <!-- REST OF YEAR: Monthly total columns + ROY TOTAL -->
+                  <td class="sp-cell-total" style="border-left:2px solid var(--orange);background:rgba(200,150,100,.1);font-weight:700;text-align:right;padding:2px 2px;font-size:6px">ROY<br>${Math.round(royTotal).toLocaleString()}</td>
                   ${royMonthCells}
-                  <td class="sp-cell-total" style="border-left:2px solid var(--amber);background:rgba(200,150,100,.1);font-weight:700;text-align:right;padding:2px 2px;font-size:6px">${Math.round(royTotal).toLocaleString()}</td>
                 </tr>`;
               });
             }
