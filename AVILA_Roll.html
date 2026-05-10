@@ -10866,6 +10866,44 @@ function spExtractSoldTo(shipToName){
   return parts[0].trim();
 }
 
+// ── Helper: get remaining days in current month ──
+function spGetRestOfMonthDates(dateNow){
+  const [y,m,d] = dateNow.split('-');
+  const current = new Date(y, parseInt(m)-1, parseInt(d));
+  const monthEnd = new Date(y, parseInt(m), 0); // last day of month
+  const days = [];
+  for(let dt=new Date(current); dt<=monthEnd; dt=new Date(dt.getTime()+864e5)){
+    days.push(dt.toISOString().split('T')[0]);
+  }
+  return days;
+}
+
+// ── Helper: sum volume by day for given rows ──
+function spGetDailyTotals(rows, dates){
+  const byDay = {};
+  rows.forEach(r=>{
+    if(dates.includes(r.date)){
+      byDay[r.date] = (byDay[r.date]||0) + r.volume;
+    }
+  });
+  return dates.map(d=>byDay[d]||0);
+}
+
+// ── Helper: render daily columns as compact cells (editable) ──
+function spRenderDailyColumns(dailyValues, dates, rowKey, isEditable){
+  if(!dates.length) return '';
+  return dates.map((d,i)=>{
+    const val = dailyValues[i]||0;
+    const dayNum = d.split('-')[2]; // just the day part
+    if(isEditable){
+      return `<td class="sp-cell-day" data-key="${rowKey}" data-date="${d}" style="padding:2px;border:1px solid rgba(100,200,100,.2);text-align:right;font-size:7px;cursor:pointer" title="${d}">
+        <input type="number" value="${val}" style="width:30px;border:none;background:transparent;text-align:right;font-size:7px;padding:0" data-orig="${val}" onchange="spSaveDaily(this)">
+      </td>`;
+    }
+    return `<td style="padding:2px;border:1px solid rgba(100,200,100,.1);text-align:right;font-size:7px">${val||'—'}</td>`;
+  }).join('');
+}
+
 function spRenderTable(){
   const tbody=document.getElementById('sp-tbody'); if(!tbody) return;
   const rows=SP.filteredRows;
@@ -10907,6 +10945,9 @@ function spRenderTable(){
 
     return {mtd,ytd,sply};
   };
+
+  // Calculate REST OF MONTH dates
+  const romDates = spGetRestOfMonthDates(today);
 
   // Build 4-level tree: rep → soldto → shipto → product
   const repTree={};
@@ -10989,8 +11030,13 @@ function spRenderTable(){
 
             if(!stCol){
               Object.keys(repTree[rep].soldtos[soldTo].shiptos[shipTo].prods).sort().forEach(prod=>{
-                const pPerf=spPerfMetrics(repTree[rep].soldtos[soldTo].shiptos[shipTo].prods[prod].rows, today);
+                const prodRows = repTree[rep].soldtos[soldTo].shiptos[shipTo].prods[prod].rows;
+                const pPerf=spPerfMetrics(prodRows, today);
+                const pKey=`prod_${stKey}_${prod}`.replace(/[^\w]/g,'_');
+                const dailyVals = spGetDailyTotals(prodRows, romDates);
+                const romTotal = dailyVals.reduce((s,v)=>s+v,0);
                 const dot=`<span style="display:inline-block;width:6px;height:6px;border-radius:1px;background:${spProdColor(prod,true)};margin-right:4px;vertical-align:middle"></span>`;
+                const dailyCells = spRenderDailyColumns(dailyVals, romDates, pKey, true);
 
                 h+=`<tr class="sp-row-l3" style="background:rgba(200,200,100,.03)">
                   <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:56px">
@@ -10999,7 +11045,8 @@ function spRenderTable(){
                   <td class="sp-cell-d" style="font-size:8px">${Math.round(pPerf.mtd).toLocaleString()}</td>
                   <td class="sp-cell-d" style="font-size:8px">${Math.round(pPerf.ytd).toLocaleString()}</td>
                   <td class="sp-cell-d" style="font-size:8px">${Math.round(pPerf.sply).toLocaleString()}</td>
-                  <td colspan="40" style="background:rgba(255,255,255,.01)"></td>
+                  <td class="sp-cell-total" style="border-left:2px solid var(--amber);background:rgba(255,184,48,.08);font-weight:700;font-size:8px;text-align:right;padding:2px 4px">${Math.round(romTotal).toLocaleString()}</td>
+                  ${dailyCells}
                 </tr>`;
               });
             }
@@ -11009,6 +11056,20 @@ function spRenderTable(){
     }
   });
   tbody.innerHTML=h;
+}
+
+// ── Save editable daily cell ──
+function spSaveDaily(input){
+  const newVal = parseInt(input.value)||0;
+  const origVal = parseInt(input.dataset.orig)||0;
+  if(newVal===origVal){
+    input.style.background='transparent';
+    return;
+  }
+  // Mark as edited (changed value)
+  input.style.background='rgba(255,200,0,.15)';
+  // TODO: persist to DB or local cache when user confirms
+  console.log(`Changed ${input.parentElement.dataset.date}: ${origVal} → ${newVal}`);
 }
 
 function spToggle(key){
