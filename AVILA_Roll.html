@@ -1074,16 +1074,17 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
             <div class="sp-tbl-wrap">
               <table class="sp-tbl" id="sp-table">
                 <thead>
-                  <tr style="border-bottom:2px solid var(--border2)">
-                    <th class="th-lbl" rowspan="2" style="vertical-align:bottom;padding-bottom:8px;border-right:2px solid var(--border2);font-size:8px">Rep / Sold To / Ship To / Product</th>
+                  <tr style="border-bottom:1px solid var(--border2)">
+                    <th class="th-lbl" style="vertical-align:bottom;padding-bottom:8px;border-right:2px solid var(--border2);font-size:8px">Rep / Sold To / Ship To / Product</th>
                     <th colspan="3" style="background:rgba(100,200,100,.08);color:var(--green);font-size:7px;letter-spacing:1px;text-align:center;border-bottom:1px solid var(--border2);border-right:2px solid var(--border2)">PERFORMANCE</th>
-                    <th colspan="100" style="background:rgba(255,184,48,.07);color:var(--amber);font-size:7px;letter-spacing:1px;text-align:center;border-bottom:1px solid var(--border2)">FORECAST SECTIONS</th>
+                    <!-- Dynamic forecast section headers inserted by spRenderTable() -->
                   </tr>
                   <tr>
+                    <th style="border-right:2px solid var(--border2)"></th>
                     <th title="Month To Date" style="font-size:7px;background:rgba(100,200,100,.08);border-right:1px solid var(--border2)">MTD</th>
                     <th title="Year To Date" style="font-size:7px;background:rgba(100,200,100,.08);border-right:1px solid var(--border2)">YTD</th>
                     <th title="Same Period Last Year" style="font-size:7px;background:rgba(100,200,100,.08);border-right:2px solid var(--border2)">SPLY</th>
-                    <th colspan="100" style="font-size:7px;color:#999;text-align:center">→ REST OF MONTH (daily) | JUNE (daily) | JULY (daily) | REST OF YEAR (monthly)</th>
+                    <!-- Dynamic forecast column headers (10D/15D/30D + dates) inserted by spRenderTable() -->
                   </tr>
                 </thead>
                 <tbody id="sp-tbody"></tbody>
@@ -11148,25 +11149,43 @@ function spRenderTable(){
   const { headerHtml, dateLabelsHtml, romDates } = spRenderHeaderRow();
   const thead = document.querySelector('#sp-table thead');
   if(thead) {
-    // Add or update the dynamic header rows
-    let dynHeaderRow = thead.querySelector('.sp-dynamic-headers');
-    if(!dynHeaderRow) {
-      dynHeaderRow = document.createElement('tr');
-      dynHeaderRow.className = 'sp-dynamic-headers';
-      dynHeaderRow.innerHTML = headerHtml;
-      thead.appendChild(dynHeaderRow);
-    } else {
-      dynHeaderRow.innerHTML = headerHtml;
-    }
+    // Get the two header rows (static rows from template)
+    const headerRows = thead.querySelectorAll('tr');
+    if(headerRows.length >= 2) {
+      // Row 1: Section headers (FORECAST ROM, FORECAST N3M, FORECAST ROY)
+      const row1 = headerRows[0];
+      // Find the comment and replace everything after SPLY cell
+      const cells1 = row1.querySelectorAll('th');
+      if(cells1.length >= 4) {
+        // Remove all dynamic header cells after the PERFORMANCE section
+        const perfCell = cells1[3]; // The border-right:2px cell after SPLY
+        const toRemove = [];
+        let node = perfCell.nextSibling;
+        while(node) {
+          toRemove.push(node);
+          node = node.nextSibling;
+        }
+        toRemove.forEach(n => n.remove());
+        // Add new section headers
+        row1.innerHTML += headerHtml;
+      }
 
-    let dynDateRow = thead.querySelector('.sp-dynamic-dates');
-    if(!dynDateRow) {
-      dynDateRow = document.createElement('tr');
-      dynDateRow.className = 'sp-dynamic-dates';
-      dynDateRow.innerHTML = dateLabelsHtml;
-      thead.appendChild(dynDateRow);
-    } else {
-      dynDateRow.innerHTML = dateLabelsHtml;
+      // Row 2: Column labels (10D, 15D, 30D + dates)
+      const row2 = headerRows[1];
+      const cells2 = row2.querySelectorAll('th');
+      if(cells2.length >= 4) {
+        // Remove all dynamic label cells
+        const perfCell = cells2[3]; // SPLY cell
+        const toRemove = [];
+        let node = perfCell.nextSibling;
+        while(node) {
+          toRemove.push(node);
+          node = node.nextSibling;
+        }
+        toRemove.forEach(n => n.remove());
+        // Add new column labels
+        row2.innerHTML += dateLabelsHtml;
+      }
     }
   }
 
