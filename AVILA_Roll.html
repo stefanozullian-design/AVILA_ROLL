@@ -3376,12 +3376,18 @@ function renderDemandView(){
   const tdSty=ds=>isSat(ds)?'border-left:2px solid rgba(255,61,90,.3);background:rgba(255,61,90,.04)':
                   new Date(ds+'T00:00:00').getDay()===0?'border-right:2px solid rgba(255,61,90,.3);background:rgba(255,61,90,.04)':'';
 
+  // Build indexed lookup map for O(1) lookups instead of O(n) searches
+  const demandMap={};
+  (DB.demand_values||[]).forEach(v=>{
+    if(v.element_id && v.date) demandMap[`${v.element_id}|${v.date}`]=v;
+  });
+
   const getVal=(elId,ds)=>{
-    const rec=(DB.demand_values||[]).find(v=>v.element_id===elId&&v.date===ds);
+    const rec=demandMap[`${elId}|${ds}`];
     return rec?parseFloat(rec.value_t)||0:0;
   };
   const getSource=(elId,ds)=>{
-    const rec=(DB.demand_values||[]).find(v=>v.element_id===elId&&v.date===ds);
+    const rec=demandMap[`${elId}|${ds}`];
     return rec?.source||'forecast';
   };
   const grpTotal=(els,ds)=>els.reduce((s,el)=>s+getVal(el.id,ds),0);
