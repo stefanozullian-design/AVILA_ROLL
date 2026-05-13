@@ -1062,21 +1062,12 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
               <div class="sp-tbl-leg-item"><div class="sp-pill sp-pill-ovr" style="cursor:default;pointer-events:none">15d</div>Customer override</div>
               <div class="sp-tbl-leg-item"><div class="sp-pill sp-pill-cust" style="cursor:default;pointer-events:none">cust</div>Custom (proportional)</div>
             </div>
-            <!-- Forecast Basis Selector -->
-            <div style="padding:6px 12px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center;background:rgba(255,184,48,.02)">
-              <span style="font-family:var(--mono);font-size:7px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase">Forecast basis:</span>
-              <div style="display:flex;gap:2px">
-                <div class="sp-ctrl" id="sp-fb-10d" style="padding:3px 8px" onclick="spSetForecastBasis('all10d')">Last 10d</div>
-                <div class="sp-ctrl" id="sp-fb-15d" style="padding:3px 8px" onclick="spSetForecastBasis('all15d')">Last 15d</div>
-                <div class="sp-ctrl" id="sp-fb-30d" style="padding:3px 8px" onclick="spSetForecastBasis('all30d')">Last 30d</div>
-              </div>
-            </div>
             <div class="sp-tbl-wrap">
               <table class="sp-tbl" id="sp-table">
                 <thead>
                   <tr style="border-bottom:1px solid var(--border2)">
                     <th class="th-lbl" style="vertical-align:bottom;padding-bottom:8px;border-right:2px solid var(--border2);font-size:8px">Rep / Sold To / Ship To / Product</th>
-                    <th style="background:rgba(100,200,100,.08);color:var(--green);font-size:7px;letter-spacing:1px;text-align:center;border-bottom:1px solid var(--border2);border-right:2px solid var(--border2)">PERFORMANCE</th>
+                    <th colspan="3" style="background:rgba(100,200,100,.08);color:var(--green);font-size:7px;letter-spacing:1px;text-align:center;border-bottom:1px solid var(--border2);border-right:2px solid var(--border2)">PERFORMANCE</th>
                     <!-- Dynamic forecast section headers inserted by spRenderTable() -->
                   </tr>
                   <tr>
@@ -11043,16 +11034,36 @@ function spGetBasisLabel(rKey, sKey, stKey){
   return `${basisNum}d ${status}`;
 }
 
-// Render basis selector buttons for a row
-function spRenderBasisButtons(rKey, sKey, stKey, section=''){
+// Render basis selector buttons for a row — with calculated daily average values
+function spRenderBasisButtons(rKey, sKey, stKey, section='', rowData=[]){
   const currentBasis = spGetBasisForRow(rKey, sKey, stKey, section);
-  const btnStyle=(basis)=>`padding:1px 4px;background:${currentBasis===basis?'rgba(100,200,100,.3)':'transparent'};border:1px solid rgba(100,200,100,.5);color:#0f0;cursor:pointer;font-size:6px`;
-  const sectionKey = section ? `_${section}` : '';
-  return `<div style="display:flex;gap:2px;font-size:6px">
-    <button style="${btnStyle('all10d')}" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey||''}','${stKey||''}','all10d','${section}')">10d</button>
-    <button style="${btnStyle('all15d')}" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey||''}','${stKey||''}','all15d','${section}')">15d</button>
-    <button style="${btnStyle('all30d')}" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey||''}','${stKey||''}','all30d','${section}')">30d</button>
-  </div>`;
+  const btnStyle=(basis)=>`padding:2px 6px;background:${currentBasis===basis?'rgba(100,200,100,.3)':'transparent'};border:1px solid rgba(100,200,100,.5);color:#0f0;cursor:pointer;font-size:7px;text-align:center;min-width:50px`;
+
+  // Calculate daily averages for each basis if row data is provided
+  let buttonHtml = `<div style="display:flex;gap:2px;font-size:7px">`;
+
+  const bases = ['all10d', 'all15d', 'all30d'];
+  const labels = ['10D', '15D', '30D'];
+
+  if(rowData && rowData.length > 0){
+    // Calculate daily average for each basis
+    bases.forEach((basis, idx) => {
+      const histRange = spGetHistoricalRange(basis, new Date().toISOString().split('T')[0]);
+      const dailyVals = spCalcForecast(rowData, histRange, histRange, basis);
+      const dailyAvg = dailyVals.length > 0 ? dailyVals[0] : 0;
+      const label = labels[idx];
+      buttonHtml += `<button style="${btnStyle(basis)}" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey||''}','${stKey||''}','${basis}','${section}')" title="${label} daily average">${Math.round(dailyAvg).toLocaleString()} MT</button>`;
+    });
+  } else {
+    // Fallback: show simple labels if no data
+    bases.forEach((basis, idx) => {
+      const label = labels[idx];
+      buttonHtml += `<button style="${btnStyle(basis)}" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey||''}','${stKey||''}','${basis}','${section}')">${label}</button>`;
+    });
+  }
+
+  buttonHtml += `</div>`;
+  return buttonHtml;
 }
 
 // ── Helper: render daily columns as compact cells (editable) ──
@@ -11099,10 +11110,13 @@ function spRenderTable(){
       return `${months[parseInt(m)-1]}-${y.slice(2)}`;
     };
 
-    // Section header row - no colspan, let table align naturally
-    let headerHtml = `<th style="font-size:7px;text-align:center;background:rgba(255,184,48,.08);border:1px solid var(--border);padding:2px">FORECAST ROM</th>
-      <th style="font-size:7px;text-align:center;background:rgba(100,180,200,.08);border:1px solid var(--border);padding:2px">FORECAST N3M</th>
-      <th style="font-size:7px;text-align:center;background:rgba(200,150,100,.08);border:1px solid var(--border);padding:2px">FORECAST ROY</th>`;
+    // Section header row with exact colspan matching cell counts
+    // ROM: 3 basis + romDates.length daily + 1 total
+    // N3M: 3 basis + 3 months + 1 total = 7
+    // ROY: 3 basis + royOnlyMonths.length months + 1 total
+    let headerHtml = `<th colspan="${3 + romDates.length + 1}" style="font-size:7px;text-align:center;background:rgba(255,184,48,.08);border:1px solid var(--border);padding:2px">FORECAST ROM</th>
+      <th colspan="7" style="font-size:7px;text-align:center;background:rgba(100,180,200,.08);border:1px solid var(--border);padding:2px">FORECAST N3M</th>
+      <th colspan="${3 + royOnlyMonths.length + 1}" style="font-size:7px;text-align:center;background:rgba(200,150,100,.08);border:1px solid var(--border);padding:2px">FORECAST ROY</th>`;
 
     // Column labels row (10D, 15D, 30D + dates + total)
     // No empty cell - row 2 already has the label cell placeholder
@@ -11282,11 +11296,11 @@ function spRenderTable(){
       <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:1px solid var(--border)">${Math.round(perf.ytd).toLocaleString()}</td>
       <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:2px solid var(--border2)">${Math.round(perf.sply).toLocaleString()}</td>
       <!-- ROM Basis Selection -->
-      <td style="padding:2px 3px;border-right:2px solid var(--border2);background:rgba(255,184,48,.08)">${spRenderBasisButtons(rKey, '', '', 'ROM')}</td>
+      <td style="padding:2px 3px;border-right:2px solid var(--border2);background:rgba(255,184,48,.08)">${spRenderBasisButtons(rKey, '', '', 'ROM', repTree[rep].rows)}</td>
       <!-- N3M Basis Selection -->
-      <td style="padding:2px 3px;border-right:2px solid var(--border2);background:rgba(100,180,200,.08)">${spRenderBasisButtons(rKey, '', '', 'N3M')}</td>
+      <td style="padding:2px 3px;border-right:2px solid var(--border2);background:rgba(100,180,200,.08)">${spRenderBasisButtons(rKey, '', '', 'N3M', repTree[rep].rows)}</td>
       <!-- ROY Basis Selection -->
-      <td style="padding:2px 3px;border-right:2px solid var(--border2);background:rgba(200,150,100,.08)">${spRenderBasisButtons(rKey, '', '', 'ROY')}</td>
+      <td style="padding:2px 3px;border-right:2px solid var(--border2);background:rgba(200,150,100,.08)">${spRenderBasisButtons(rKey, '', '', 'ROY', repTree[rep].rows)}</td>
       <td colspan="40" style="background:rgba(255,255,255,.01)"></td>
     </tr>`;
 
@@ -11306,11 +11320,11 @@ function spRenderTable(){
           <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:1px solid var(--border)">${Math.round(sPerf.ytd).toLocaleString()}</td>
           <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:2px solid var(--border2)">${Math.round(sPerf.sply).toLocaleString()}</td>
           <!-- ROM Basis Selection -->
-          <td style="padding:2px 3px;border-right:2px solid var(--border2);background:rgba(255,184,48,.08)">${spRenderBasisButtons(rKey, sKey, '', 'ROM')}</td>
+          <td style="padding:2px 3px;border-right:2px solid var(--border2);background:rgba(255,184,48,.08)">${spRenderBasisButtons(rKey, sKey, '', 'ROM', repTree[rep].soldtos[soldTo].rows)}</td>
           <!-- N3M Basis Selection -->
-          <td style="padding:2px 3px;border-right:2px solid var(--border2);background:rgba(100,180,200,.08)">${spRenderBasisButtons(rKey, sKey, '', 'N3M')}</td>
+          <td style="padding:2px 3px;border-right:2px solid var(--border2);background:rgba(100,180,200,.08)">${spRenderBasisButtons(rKey, sKey, '', 'N3M', repTree[rep].soldtos[soldTo].rows)}</td>
           <!-- ROY Basis Selection -->
-          <td style="padding:2px 3px;border-right:2px solid var(--border2);background:rgba(200,150,100,.08)">${spRenderBasisButtons(rKey, sKey, '', 'ROY')}</td>
+          <td style="padding:2px 3px;border-right:2px solid var(--border2);background:rgba(200,150,100,.08)">${spRenderBasisButtons(rKey, sKey, '', 'ROY', repTree[rep].soldtos[soldTo].rows)}</td>
           <td colspan="40" style="background:rgba(255,255,255,.01)"></td>
         </tr>`;
 
@@ -11330,11 +11344,11 @@ function spRenderTable(){
               <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:1px solid var(--border)">${Math.round(stPerf.ytd).toLocaleString()}</td>
               <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:2px solid var(--border2)">${Math.round(stPerf.sply).toLocaleString()}</td>
               <!-- ROM Basis Selection -->
-              <td style="padding:2px 3px;border-right:2px solid var(--border2);background:rgba(255,184,48,.08)">${spRenderBasisButtons(rKey, sKey, stKey, 'ROM')}</td>
+              <td style="padding:2px 3px;border-right:2px solid var(--border2);background:rgba(255,184,48,.08)">${spRenderBasisButtons(rKey, sKey, stKey, 'ROM', repTree[rep].soldtos[soldTo].shiptos[shipTo].rows)}</td>
               <!-- N3M Basis Selection -->
-              <td style="padding:2px 3px;border-right:2px solid var(--border2);background:rgba(100,180,200,.08)">${spRenderBasisButtons(rKey, sKey, stKey, 'N3M')}</td>
+              <td style="padding:2px 3px;border-right:2px solid var(--border2);background:rgba(100,180,200,.08)">${spRenderBasisButtons(rKey, sKey, stKey, 'N3M', repTree[rep].soldtos[soldTo].shiptos[shipTo].rows)}</td>
               <!-- ROY Basis Selection -->
-              <td style="padding:2px 3px;border-right:2px solid var(--border2);background:rgba(200,150,100,.08)">${spRenderBasisButtons(rKey, sKey, stKey, 'ROY')}</td>
+              <td style="padding:2px 3px;border-right:2px solid var(--border2);background:rgba(200,150,100,.08)">${spRenderBasisButtons(rKey, sKey, stKey, 'ROY', repTree[rep].soldtos[soldTo].shiptos[shipTo].rows)}</td>
               <td colspan="40" style="background:rgba(255,255,255,.01)"></td>
             </tr>`;
 
@@ -11357,17 +11371,19 @@ function spRenderTable(){
 
                   // 1. REST OF MONTH: Basis buttons + all daily columns (including weekends)
                   const romBasisVals = {};
+                  const romDailyAvgs = {};
                   bases.forEach(basis => {
                     const histRange = spGetHistoricalRange(basis, today);
                     const dailyVals = spCalcForecast(prodRows, histRange, romDates, basis);
                     romBasisVals[basis] = dailyVals.reduce((s,v)=>s+v,0);
+                    romDailyAvgs[basis] = dailyVals.length > 0 ? dailyVals[0] : 0;
                   });
 
-                  // Create basis buttons showing totals (clickable to apply that basis)
+                  // Create basis buttons showing daily averages (clickable to apply that basis)
                   romBasisCells = bases.map((basis, idx) => {
                     const label = ['10D', '15D', '30D'][idx];
-                    const val = romBasisVals[basis];
-                    return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(255,200,0,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spApplyBasisToRow('${pKey}','ROM','${basis}','${val}')" title="Click to apply ${label} basis">${Math.round(val).toLocaleString()}</td>`;
+                    const dailyAvg = romDailyAvgs[basis];
+                    return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(255,200,0,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey}','${stKey}','${basis}','ROM')" title="Click to apply ${label} basis (${Math.round(dailyAvg)} MT/day)">${Math.round(dailyAvg).toLocaleString()} MT</td>`;
                   }).join('');
 
                   // Get current basis for daily display
@@ -11380,6 +11396,7 @@ function spRenderTable(){
                   // 2. NEXT 3 MONTHS: Basis buttons + monthly columns
                   const n3mMonths = [nextMonth, month2, month3];
                   const n3mBasisVals = {};
+                  const n3mDailyAvgs = {};
                   bases.forEach(basis => {
                     const histRange = spGetHistoricalRange(basis, today);
                     let total = 0;
@@ -11389,12 +11406,16 @@ function spRenderTable(){
                       total += monthlyVals.reduce((s,v)=>s+v,0);
                     });
                     n3mBasisVals[basis] = total;
+                    // Daily average for N3M is from the same historical range
+                    const sampleDates = spGetMonthDates(nextMonth);
+                    const sampleVals = spCalcForecast(prodRows, histRange, sampleDates, basis);
+                    n3mDailyAvgs[basis] = sampleVals.length > 0 ? sampleVals[0] : 0;
                   });
 
                   n3mBasisCells = bases.map((basis, idx) => {
                     const label = ['10D', '15D', '30D'][idx];
-                    const val = n3mBasisVals[basis];
-                    return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(100,200,200,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spApplyBasisToRow('${pKey}','N3M','${basis}','${val}')" title="Click to apply ${label} basis">${Math.round(val).toLocaleString()}</td>`;
+                    const dailyAvg = n3mDailyAvgs[basis];
+                    return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(100,200,200,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey}','${stKey}','${basis}','N3M')" title="Click to apply ${label} basis (${Math.round(dailyAvg)} MT/day)">${Math.round(dailyAvg).toLocaleString()} MT</td>`;
                   }).join('');
 
                   // Get current N3M basis for display
@@ -11414,6 +11435,7 @@ function spRenderTable(){
                   // 3. REST OF YEAR: Basis buttons + monthly columns
                   const royOnlyMonths = restOfYearMonths.filter(ym => ym > month3);
                   const royBasisVals = {};
+                  const royDailyAvgs = {};
                   bases.forEach(basis => {
                     const histRange = spGetHistoricalRange(basis, today);
                     let total = 0;
@@ -11423,12 +11445,16 @@ function spRenderTable(){
                       total += monthlyVals.reduce((s,v)=>s+v,0);
                     });
                     royBasisVals[basis] = total;
+                    // Daily average for ROY is from the same historical range
+                    const sampleDates = royOnlyMonths.length > 0 ? spGetMonthDates(royOnlyMonths[0]) : [];
+                    const sampleVals = spCalcForecast(prodRows, histRange, sampleDates, basis);
+                    royDailyAvgs[basis] = sampleVals.length > 0 ? sampleVals[0] : 0;
                   });
 
                   royBasisCells = bases.map((basis, idx) => {
                     const label = ['10D', '15D', '30D'][idx];
-                    const val = royBasisVals[basis];
-                    return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(200,180,100,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spApplyBasisToRow('${pKey}','ROY','${basis}','${val}')" title="Click to apply ${label} basis">${Math.round(val).toLocaleString()}</td>`;
+                    const dailyAvg = royDailyAvgs[basis];
+                    return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(200,180,100,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey}','${stKey}','${basis}','ROY')" title="Click to apply ${label} basis (${Math.round(dailyAvg)} MT/day)">${Math.round(dailyAvg).toLocaleString()} MT</td>`;
                   }).join('');
 
                   // Get current ROY basis for display
