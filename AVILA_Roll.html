@@ -991,6 +991,11 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
           <div class="sp-chip green active" id="sp-type-all"  onclick="spDispatch({custType:'all'})">ALL</div>
           <div class="sp-chip"             id="sp-type-ext"   onclick="spDispatch({custType:'EXT'})">EXT</div>
           <div class="sp-chip"             id="sp-type-int"   onclick="spDispatch({custType:'INT'})">INT</div>
+          <div style="width:1px;height:20px;background:var(--border2)"></div>
+          <div class="sp-filter-label">Horizon</div>
+          <div class="sp-chip green active" id="sp-horizon-rom"  onclick="spDispatch({forecastHorizon:'ROM'})">ROM</div>
+          <div class="sp-chip"             id="sp-horizon-n3m"   onclick="spDispatch({forecastHorizon:'N3M'})">N3M</div>
+          <div class="sp-chip"             id="sp-horizon-roy"   onclick="spDispatch({forecastHorizon:'ROY'})">ROY</div>
           <button class="sp-upload-btn" onclick="document.getElementById('sp-file-input').click()">↑ Load Actuals</button>
           <button class="sp-upload-btn" style="border-color:var(--green);color:var(--green)" onclick="dsAutoRefreshAll();statMsg('Refreshing data sources…')">↻ Refresh</button>
           <input type="file" id="sp-file-input" accept=".xlsx,.xls" style="display:none" onchange="spHandleFile(this)">
@@ -10426,6 +10431,7 @@ const SP = {
   fcRepSel:{}, fcCustSel:{}, fcCustomVal:{}, fcShowInp:{},
   basisByRow: {},  // hierarchical: rKey → sKey → stKey → basis, e.g., {rKey: {sKey: {stKey: 'all10d'}}}
   defaultBasis: 'all10d',  // system default basis (all10d, all15d, all30d)
+  forecastHorizon: 'ROM',  // ROM, N3M, or ROY
 };
 
 // ── REQUIRED COLUMNS ─────────────────────────────────
@@ -10493,6 +10499,20 @@ function renderSalesPerfView(){
 // Called whenever a filter changes — the unidirectional pipeline entry point.
 // Order: origin → rep → customer → render dropdowns → filter rows → chart + table
 function spDispatch(changes){
+  // Handle forecastHorizon separately (not part of SP.f)
+  if('forecastHorizon' in changes){
+    SP.forecastHorizon = changes.forecastHorizon;
+    // Update active chip UI
+    ['rom','n3m','roy'].forEach(h => {
+      const el = document.getElementById(`sp-horizon-${h}`);
+      if(el) el.classList.toggle('active', h.toUpperCase() === SP.forecastHorizon);
+      if(el) el.classList.toggle('green', h.toUpperCase() === SP.forecastHorizon);
+    });
+    // Rebuild table with new horizon
+    spApplyFilters();
+    return;
+  }
+
   Object.assign(SP.f, changes);
 
   // Cascade: narrower selections reset when a broader filter changes
@@ -11090,7 +11110,7 @@ function spRenderTable(){
   const today=new Date().toISOString().split('T')[0];
   const isWkday=ds=>{ const d=new Date(ds+'T12:00:00').getDay(); return d!==0&&d!==6; };
 
-  // Generate dynamic header with basis and date labels
+  // Generate dynamic header with basis and date labels based on selected forecast horizon
   function spRenderHeaderRow(){
     const romDates = spGetRestOfMonthDates(today); // ALL days including weekends
     const nextMonth = new Date(new Date(today).setMonth(new Date(today).getMonth()+1)).toISOString().slice(0,7);
@@ -11111,58 +11131,49 @@ function spRenderTable(){
       return `${months[parseInt(m)-1]}-${y.slice(2)}`;
     };
 
-    // Section header row with exact colspan matching cell counts
-    // ROM: 3 basis + romDates.length daily + 1 total
-    // N3M: 3 basis + 3 months + 1 total = 7
-    // ROY: 3 basis + royOnlyMonths.length months + 1 total
-    let headerHtml = `<th colspan="${3 + romDates.length + 1}" style="font-size:7px;text-align:center;background:rgba(255,184,48,.08);border:1px solid var(--border);padding:2px">FORECAST ROM</th>
-      <th colspan="7" style="font-size:7px;text-align:center;background:rgba(100,180,200,.08);border:1px solid var(--border);padding:2px">FORECAST N3M</th>
-      <th colspan="${3 + royOnlyMonths.length + 1}" style="font-size:7px;text-align:center;background:rgba(200,150,100,.08);border:1px solid var(--border);padding:2px">FORECAST ROY</th>`;
-
-    // Column labels row (10D, 15D, 30D + dates + total)
-    // No empty cell - row 2 already has the label cell placeholder
+    let headerHtml = ``;
     let dateLabelsHtml = ``;
 
-    // ROM basis columns
-    ['10D', '15D', '30D'].forEach(basis => {
-      dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:center;background:rgba(255,200,0,.15);font-weight:600">${basis}</th>`;
-    });
+    if(SP.forecastHorizon === 'ROM'){
+      const colspan = 3 + romDates.length + 1;
+      headerHtml = `<th colspan="${colspan}" style="font-size:7px;text-align:center;background:rgba(255,184,48,.08);border:1px solid var(--border);padding:2px">FORECAST ROM</th>`;
 
-    // ROM date columns
-    romDates.forEach(d => {
-      dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:right">${formatDate(d)}</th>`;
-    });
-    // ROM total column header
-    dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:center;background:rgba(255,184,48,.15);font-weight:600">Total ROM</th>`;
+      ['10D', '15D', '30D'].forEach(basis => {
+        dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:center;background:rgba(255,200,0,.15);font-weight:600">${basis}</th>`;
+      });
+      romDates.forEach(d => {
+        dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:right">${formatDate(d)}</th>`;
+      });
+      dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:center;background:rgba(255,184,48,.15);font-weight:600">Total ROM</th>`;
+    }
+    else if(SP.forecastHorizon === 'N3M'){
+      headerHtml = `<th colspan="7" style="font-size:7px;text-align:center;background:rgba(100,180,200,.08);border:1px solid var(--border);padding:2px">FORECAST N3M</th>`;
 
-    // N3M basis columns
-    ['10D', '15D', '30D'].forEach(basis => {
-      dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:center;background:rgba(100,200,200,.15);font-weight:600">${basis}</th>`;
-    });
+      ['10D', '15D', '30D'].forEach(basis => {
+        dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:center;background:rgba(100,200,200,.15);font-weight:600">${basis}</th>`;
+      });
+      [nextMonth, month2, month3].forEach(ym => {
+        dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:right">${formatMonth(ym)}</th>`;
+      });
+      dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:center;background:rgba(100,180,200,.15);font-weight:600">Total N3M</th>`;
+    }
+    else if(SP.forecastHorizon === 'ROY'){
+      const colspan = 3 + royOnlyMonths.length + 1;
+      headerHtml = `<th colspan="${colspan}" style="font-size:7px;text-align:center;background:rgba(200,150,100,.08);border:1px solid var(--border);padding:2px">FORECAST ROY</th>`;
 
-    // N3M month columns
-    [nextMonth, month2, month3].forEach(ym => {
-      dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:right">${formatMonth(ym)}</th>`;
-    });
-    // N3M total column header
-    dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:center;background:rgba(100,180,200,.15);font-weight:600">Total N3M</th>`;
+      ['10D', '15D', '30D'].forEach(basis => {
+        dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:center;background:rgba(200,180,100,.15);font-weight:600">${basis}</th>`;
+      });
+      royOnlyMonths.forEach(ym => {
+        dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:right">${formatMonth(ym)}</th>`;
+      });
+      dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:center;background:rgba(200,150,100,.15);font-weight:600">Total ROY</th>`;
+    }
 
-    // ROY basis columns
-    ['10D', '15D', '30D'].forEach(basis => {
-      dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:center;background:rgba(200,180,100,.15);font-weight:600">${basis}</th>`;
-    });
-
-    // ROY month columns
-    royOnlyMonths.forEach(ym => {
-      dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:right">${formatMonth(ym)}</th>`;
-    });
-    // ROY total column header
-    dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:center;background:rgba(200,150,100,.15);font-weight:600">Total ROY</th>`;
-
-    return { headerHtml, dateLabelsHtml, romDates };
+    return { headerHtml, dateLabelsHtml, romDates, royOnlyMonths, n3mMonths: [nextMonth, month2, month3] };
   }
 
-  const { headerHtml, dateLabelsHtml, romDates } = spRenderHeaderRow();
+  const { headerHtml, dateLabelsHtml, romDates, royOnlyMonths, n3mMonths } = spRenderHeaderRow();
   const thead = document.querySelector('#sp-table thead');
   if(thead) {
     // Get the two header rows (static rows from template)
@@ -11247,11 +11258,7 @@ function spRenderTable(){
 
   // Calculate date ranges for forecast sections (needed for calculations below)
   const currentYearMonth = today.slice(0,7);
-  const nextMonth = new Date(new Date(today).setMonth(new Date(today).getMonth()+1)).toISOString().slice(0,7);
-  const month2 = new Date(new Date(today).setMonth(new Date(today).getMonth()+2)).toISOString().slice(0,7);
-  const month3 = new Date(new Date(today).setMonth(new Date(today).getMonth()+3)).toISOString().slice(0,7);
-  const restOfYearMonths = spGetRestOfYearMonths(today);
-  const royOnlyMonths = restOfYearMonths.filter(ym => ym > month3);
+  // Note: nextMonth, month2, month3, royOnlyMonths, n3mMonths are already destructured from spRenderHeaderRow() above
 
   // Pre-calculate all daily totals for caching
   const allRowsForCaching = SP.filteredRows;
@@ -11282,6 +11289,54 @@ function spRenderTable(){
     repTree[rep].soldtos[soldTo].shiptos[shipTo].prods[prod].rows.push(r);
   });
 
+  // Helper: Generate basis cells and collapsed section based on selected horizon
+  function spRenderHorizonCells(rows, rKey, sKey='', stKey='', today){
+    if(rows.length === 0) return '';
+
+    let html = '';
+    const basis = ['all10d', 'all15d', 'all30d'];
+    const basisLabels = ['10D', '15D', '30D'];
+
+    if(SP.forecastHorizon === 'ROM'){
+      // ROM Basis cells
+      html += basis.map((b, i) => {
+        const histRange = spGetHistoricalRange(b, today);
+        const vals = spCalcForecast(rows, histRange, histRange, b);
+        const avg = vals.length > 0 ? vals[0] : 0;
+        return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(255,200,0,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey}','${stKey}','${b}','ROM')" title="${basisLabels[i]} daily avg">${Math.round(avg).toLocaleString()} MT</td>`;
+      }).join('');
+      // ROM daily columns + total
+      html += `<td colspan="${romDates.length + 1}" style="background:rgba(255,255,255,.01)"></td>`;
+    }
+    else if(SP.forecastHorizon === 'N3M'){
+      // N3M Basis cells
+      html += basis.map((b, i) => {
+        const histRange = spGetHistoricalRange(b, today);
+        const sampleDates = spGetMonthDates(n3mMonths[0]);
+        const vals = spCalcForecast(rows, histRange, sampleDates, b);
+        const avg = vals.length > 0 ? vals[0] : 0;
+        return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(100,200,200,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey}','${stKey}','${b}','N3M')" title="${basisLabels[i]} daily avg">${Math.round(avg).toLocaleString()} MT</td>`;
+      }).join('');
+      // N3M monthly columns + total
+      html += `<td colspan="4" style="background:rgba(255,255,255,.01)"></td>`;
+    }
+    else if(SP.forecastHorizon === 'ROY'){
+      // ROY Basis cells
+      html += basis.map((b, i) => {
+        const histRange = spGetHistoricalRange(b, today);
+        const sampleMonth = royOnlyMonths.length > 0 ? royOnlyMonths[0] : '';
+        const sampleDates = sampleMonth ? spGetMonthDates(sampleMonth) : [];
+        const vals = sampleDates.length > 0 ? spCalcForecast(rows, histRange, sampleDates, b) : [];
+        const avg = vals.length > 0 ? vals[0] : 0;
+        return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(200,180,100,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey}','${stKey}','${b}','ROY')" title="${basisLabels[i]} daily avg">${Math.round(avg).toLocaleString()} MT</td>`;
+      }).join('');
+      // ROY monthly columns + total
+      html += `<td colspan="${royOnlyMonths.length + 2}" style="background:rgba(255,255,255,.01)"></td>`;
+    }
+
+    return html;
+  }
+
   // Render 4-level hierarchy: Rep (L0) → Sold To (L1) → Ship To (L2) → Product (L3)
   let h='';
   Object.keys(repTree).sort().forEach(rep=>{
@@ -11300,18 +11355,7 @@ function spRenderTable(){
       <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:1px solid var(--border)">${Math.round(perf.mtd).toLocaleString()}</td>
       <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:1px solid var(--border)">${Math.round(perf.ytd).toLocaleString()}</td>
       <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:2px solid var(--border2)">${Math.round(perf.sply).toLocaleString()}</td>
-      <!-- ROM Basis: 3 separate cells for 10D, 15D, 30D -->
-      ${[...repTree[rep].rows].length > 0 ? ['all10d', 'all15d', 'all30d'].map((b,i)=>{const histRange=spGetHistoricalRange(b,today);const vals=spCalcForecast(repTree[rep].rows,histRange,histRange,b);const avg=vals.length>0?vals[0]:0;return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(255,200,0,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','','','${b}','ROM')" title="${['10D','15D','30D'][i]} daily avg">${Math.round(avg).toLocaleString()} MT</td>`;}).join('') : '<td colspan="3"></td>'}
-      <!-- N3M Basis: 3 separate cells -->
-      ${[...repTree[rep].rows].length > 0 ? ['all10d', 'all15d', 'all30d'].map((b,i)=>{const histRange=spGetHistoricalRange(b,today);const sampleDates=spGetMonthDates(new Date(new Date(today).setMonth(new Date(today).getMonth()+1)).toISOString().slice(0,7));const vals=spCalcForecast(repTree[rep].rows,histRange,sampleDates,b);const avg=vals.length>0?vals[0]:0;return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(100,200,200,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','','','${b}','N3M')" title="${['10D','15D','30D'][i]} daily avg">${Math.round(avg).toLocaleString()} MT</td>`;}).join('') : '<td colspan="3"></td>'}
-      <!-- ROY Basis: 3 separate cells -->
-      ${[...repTree[rep].rows].length > 0 ? ['all10d', 'all15d', 'all30d'].map((b,i)=>{const histRange=spGetHistoricalRange(b,today);const restOfYear=spGetRestOfYearMonths(today);const sampleMonth=restOfYear.length>0?restOfYear[0]:'';const sampleDates=sampleMonth?spGetMonthDates(sampleMonth):[];const vals=sampleDates.length>0?spCalcForecast(repTree[rep].rows,histRange,sampleDates,b):[];const avg=vals.length>0?vals[0]:0;return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(200,180,100,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','','','${b}','ROY')" title="${['10D','15D','30D'][i]} daily avg">${Math.round(avg).toLocaleString()} MT</td>`;}).join('') : '<td colspan="3"></td>'}
-      <!-- Collapsed: ROM daily columns + total -->
-      <td colspan="${romDates.length + 1}" style="background:rgba(255,255,255,.01)"></td>
-      <!-- Collapsed: N3M monthly columns + total -->
-      <td colspan="4" style="background:rgba(255,255,255,.01)"></td>
-      <!-- Collapsed: ROY monthly columns + total -->
-      <td colspan="${royOnlyMonths.length + 2}" style="background:rgba(255,255,255,.01)"></td>
+      ${[...repTree[rep].rows].length > 0 ? spRenderHorizonCells(repTree[rep].rows, rKey, '', '', today) : '<td colspan="' + (SP.forecastHorizon === 'ROM' ? romDates.length + 4 : SP.forecastHorizon === 'N3M' ? 7 : royOnlyMonths.length + 5) + '"></td>'}
     </tr>`;
 
     if(!rCol){
@@ -11329,18 +11373,7 @@ function spRenderTable(){
           <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:1px solid var(--border)">${Math.round(sPerf.mtd).toLocaleString()}</td>
           <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:1px solid var(--border)">${Math.round(sPerf.ytd).toLocaleString()}</td>
           <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:2px solid var(--border2)">${Math.round(sPerf.sply).toLocaleString()}</td>
-          <!-- ROM Basis: 3 separate cells -->
-          ${[...repTree[rep].soldtos[soldTo].rows].length > 0 ? ['all10d', 'all15d', 'all30d'].map((b,i)=>{const histRange=spGetHistoricalRange(b,today);const vals=spCalcForecast(repTree[rep].soldtos[soldTo].rows,histRange,histRange,b);const avg=vals.length>0?vals[0]:0;return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(255,200,0,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey}','','${b}','ROM')" title="${['10D','15D','30D'][i]} daily avg">${Math.round(avg).toLocaleString()} MT</td>`;}).join('') : '<td colspan="3"></td>'}
-          <!-- N3M Basis: 3 separate cells -->
-          ${[...repTree[rep].soldtos[soldTo].rows].length > 0 ? ['all10d', 'all15d', 'all30d'].map((b,i)=>{const histRange=spGetHistoricalRange(b,today);const sampleDates=spGetMonthDates(new Date(new Date(today).setMonth(new Date(today).getMonth()+1)).toISOString().slice(0,7));const vals=spCalcForecast(repTree[rep].soldtos[soldTo].rows,histRange,sampleDates,b);const avg=vals.length>0?vals[0]:0;return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(100,200,200,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey}','','${b}','N3M')" title="${['10D','15D','30D'][i]} daily avg">${Math.round(avg).toLocaleString()} MT</td>`;}).join('') : '<td colspan="3"></td>'}
-          <!-- ROY Basis: 3 separate cells -->
-          ${[...repTree[rep].soldtos[soldTo].rows].length > 0 ? ['all10d', 'all15d', 'all30d'].map((b,i)=>{const histRange=spGetHistoricalRange(b,today);const restOfYear=spGetRestOfYearMonths(today);const sampleMonth=restOfYear.length>0?restOfYear[0]:'';const sampleDates=sampleMonth?spGetMonthDates(sampleMonth):[];const vals=sampleDates.length>0?spCalcForecast(repTree[rep].soldtos[soldTo].rows,histRange,sampleDates,b):[];const avg=vals.length>0?vals[0]:0;return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(200,180,100,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey}','','${b}','ROY')" title="${['10D','15D','30D'][i]} daily avg">${Math.round(avg).toLocaleString()} MT</td>`;}).join('') : '<td colspan="3"></td>'}
-          <!-- Collapsed: ROM daily columns + total -->
-          <td colspan="${romDates.length + 1}" style="background:rgba(255,255,255,.01)"></td>
-          <!-- Collapsed: N3M monthly columns + total -->
-          <td colspan="4" style="background:rgba(255,255,255,.01)"></td>
-          <!-- Collapsed: ROY monthly columns + total -->
-          <td colspan="${royOnlyMonths.length + 2}" style="background:rgba(255,255,255,.01)"></td>
+          ${[...repTree[rep].soldtos[soldTo].rows].length > 0 ? spRenderHorizonCells(repTree[rep].soldtos[soldTo].rows, rKey, sKey, '', today) : '<td colspan="' + (SP.forecastHorizon === 'ROM' ? romDates.length + 4 : SP.forecastHorizon === 'N3M' ? 7 : royOnlyMonths.length + 5) + '"></td>'}
         </tr>`;
 
         if(!sCol){
@@ -11358,18 +11391,7 @@ function spRenderTable(){
               <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:1px solid var(--border)">${Math.round(stPerf.mtd).toLocaleString()}</td>
               <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:1px solid var(--border)">${Math.round(stPerf.ytd).toLocaleString()}</td>
               <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:2px solid var(--border2)">${Math.round(stPerf.sply).toLocaleString()}</td>
-              <!-- ROM Basis: 3 separate cells -->
-              ${[...repTree[rep].soldtos[soldTo].shiptos[shipTo].rows].length > 0 ? ['all10d', 'all15d', 'all30d'].map((b,i)=>{const histRange=spGetHistoricalRange(b,today);const vals=spCalcForecast(repTree[rep].soldtos[soldTo].shiptos[shipTo].rows,histRange,histRange,b);const avg=vals.length>0?vals[0]:0;return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(255,200,0,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey}','${stKey}','${b}','ROM')" title="${['10D','15D','30D'][i]} daily avg">${Math.round(avg).toLocaleString()} MT</td>`;}).join('') : '<td colspan="3"></td>'}
-              <!-- N3M Basis: 3 separate cells -->
-              ${[...repTree[rep].soldtos[soldTo].shiptos[shipTo].rows].length > 0 ? ['all10d', 'all15d', 'all30d'].map((b,i)=>{const histRange=spGetHistoricalRange(b,today);const sampleDates=spGetMonthDates(new Date(new Date(today).setMonth(new Date(today).getMonth()+1)).toISOString().slice(0,7));const vals=spCalcForecast(repTree[rep].soldtos[soldTo].shiptos[shipTo].rows,histRange,sampleDates,b);const avg=vals.length>0?vals[0]:0;return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(100,200,200,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey}','${stKey}','${b}','N3M')" title="${['10D','15D','30D'][i]} daily avg">${Math.round(avg).toLocaleString()} MT</td>`;}).join('') : '<td colspan="3"></td>'}
-              <!-- ROY Basis: 3 separate cells -->
-              ${[...repTree[rep].soldtos[soldTo].shiptos[shipTo].rows].length > 0 ? ['all10d', 'all15d', 'all30d'].map((b,i)=>{const histRange=spGetHistoricalRange(b,today);const restOfYear=spGetRestOfYearMonths(today);const sampleMonth=restOfYear.length>0?restOfYear[0]:'';const sampleDates=sampleMonth?spGetMonthDates(sampleMonth):[];const vals=sampleDates.length>0?spCalcForecast(repTree[rep].soldtos[soldTo].shiptos[shipTo].rows,histRange,sampleDates,b):[];const avg=vals.length>0?vals[0]:0;return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(200,180,100,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey}','${stKey}','${b}','ROY')" title="${['10D','15D','30D'][i]} daily avg">${Math.round(avg).toLocaleString()} MT</td>`;}).join('') : '<td colspan="3"></td>'}
-              <!-- Collapsed: ROM daily columns + total -->
-              <td colspan="${romDates.length + 1}" style="background:rgba(255,255,255,.01)"></td>
-              <!-- Collapsed: N3M monthly columns + total -->
-              <td colspan="4" style="background:rgba(255,255,255,.01)"></td>
-              <!-- Collapsed: ROY monthly columns + total -->
-              <td colspan="${royOnlyMonths.length + 2}" style="background:rgba(255,255,255,.01)"></td>
+              ${[...repTree[rep].soldtos[soldTo].shiptos[shipTo].rows].length > 0 ? spRenderHorizonCells(repTree[rep].soldtos[soldTo].shiptos[shipTo].rows, rKey, sKey, stKey, today) : '<td colspan="' + (SP.forecastHorizon === 'ROM' ? romDates.length + 4 : SP.forecastHorizon === 'N3M' ? 7 : royOnlyMonths.length + 5) + '"></td>'}
             </tr>`;
 
             if(!stCol){
@@ -11378,120 +11400,91 @@ function spRenderTable(){
                 const pPerf=spPerfMetrics(prodRows, today);
                 const pKey=`prod_${stKey}_${prod}`.replace(/[^\w]/g,'_');
 
-                // LAZY LOAD: Only calculate forecast columns if data is small (avoid perf issues)
-                let romBasisCells='', romDailyCells='', romTotal=0;
-                let n3mBasisCells='', n3mMonthlyCells='', n3mTotal=0;
-                let royBasisCells='', royMonthCells='', royTotal=0;
+                // Calculate forecast columns based on selected horizon only
+                let basisCells='', forecastCells='', totalVal=0;
+                const bases = ['all10d', 'all15d', 'all30d'];
+                const basisLabels = ['10D', '15D', '30D'];
 
-                const showDetailedForecasts = true; // Always show detailed forecasts
-
-                if(showDetailedForecasts){
-                  // Calculate values for all three bases (10d, 15d, 30d)
-                  const bases = ['all10d', 'all15d', 'all30d'];
-
-                  // 1. REST OF MONTH: Basis buttons + all daily columns (including weekends)
-                  const romBasisVals = {};
+                if(SP.forecastHorizon === 'ROM'){
+                  // REST OF MONTH: Basis buttons + all daily columns
                   const romDailyAvgs = {};
                   bases.forEach(basis => {
                     const histRange = spGetHistoricalRange(basis, today);
                     const dailyVals = spCalcForecast(prodRows, histRange, romDates, basis);
-                    romBasisVals[basis] = dailyVals.reduce((s,v)=>s+v,0);
                     romDailyAvgs[basis] = dailyVals.length > 0 ? dailyVals[0] : 0;
                   });
 
-                  // Create basis buttons showing daily averages (clickable to apply that basis)
-                  romBasisCells = bases.map((basis, idx) => {
-                    const label = ['10D', '15D', '30D'][idx];
+                  basisCells = bases.map((basis, idx) => {
                     const dailyAvg = romDailyAvgs[basis];
-                    return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(255,200,0,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey}','${stKey}','${basis}','ROM')" title="Click to apply ${label} basis (${Math.round(dailyAvg)} MT/day)">${Math.round(dailyAvg).toLocaleString()} MT</td>`;
+                    return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(255,200,0,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey}','${stKey}','${basis}','ROM')" title="Click to apply ${basisLabels[idx]} basis (${Math.round(dailyAvg)} MT/day)">${Math.round(dailyAvg).toLocaleString()} MT</td>`;
                   }).join('');
 
-                  // Get current basis for daily display
                   const romBasis = spGetBasisForRow(rKey, sKey, stKey, 'ROM');
                   const romHistRange = spGetHistoricalRange(romBasis, today);
                   const romDailyVals = spCalcForecast(prodRows, romHistRange, romDates, romBasis);
-                  romTotal = romDailyVals.reduce((s,v)=>s+v,0);
-                  romDailyCells = spRenderDailyColumns(romDailyVals, romDates, pKey, true);
-
-                  // 2. NEXT 3 MONTHS: Basis buttons + monthly columns
-                  const n3mMonths = [nextMonth, month2, month3];
-                  const n3mBasisVals = {};
+                  totalVal = romDailyVals.reduce((s,v)=>s+v,0);
+                  forecastCells = spRenderDailyColumns(romDailyVals, romDates, pKey, true);
+                }
+                else if(SP.forecastHorizon === 'N3M'){
+                  // NEXT 3 MONTHS: Basis buttons + monthly columns
                   const n3mDailyAvgs = {};
                   bases.forEach(basis => {
                     const histRange = spGetHistoricalRange(basis, today);
-                    let total = 0;
-                    n3mMonths.forEach(ym => {
-                      const monthDates = spGetMonthDates(ym);
-                      const monthlyVals = spCalcForecast(prodRows, histRange, monthDates, basis);
-                      total += monthlyVals.reduce((s,v)=>s+v,0);
-                    });
-                    n3mBasisVals[basis] = total;
-                    // Daily average for N3M is from the same historical range
-                    const sampleDates = spGetMonthDates(nextMonth);
+                    const sampleDates = spGetMonthDates(n3mMonths[0]);
                     const sampleVals = spCalcForecast(prodRows, histRange, sampleDates, basis);
                     n3mDailyAvgs[basis] = sampleVals.length > 0 ? sampleVals[0] : 0;
                   });
 
-                  n3mBasisCells = bases.map((basis, idx) => {
-                    const label = ['10D', '15D', '30D'][idx];
+                  basisCells = bases.map((basis, idx) => {
                     const dailyAvg = n3mDailyAvgs[basis];
-                    return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(100,200,200,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey}','${stKey}','${basis}','N3M')" title="Click to apply ${label} basis (${Math.round(dailyAvg)} MT/day)">${Math.round(dailyAvg).toLocaleString()} MT</td>`;
+                    return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(100,200,200,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey}','${stKey}','${basis}','N3M')" title="Click to apply ${basisLabels[idx]} basis (${Math.round(dailyAvg)} MT/day)">${Math.round(dailyAvg).toLocaleString()} MT</td>`;
                   }).join('');
 
-                  // Get current N3M basis for display
                   const n3mBasis = spGetBasisForRow(rKey, sKey, stKey, 'N3M');
                   const n3mHistRange = spGetHistoricalRange(n3mBasis, today);
-                  n3mTotal = 0;
+                  totalVal = 0;
                   const n3mMonthCells = [];
                   n3mMonths.forEach(ym => {
                     const monthDates = spGetMonthDates(ym);
                     const monthlyVals = spCalcForecast(prodRows, n3mHistRange, monthDates, n3mBasis);
                     const monthVal = monthlyVals.reduce((s,v)=>s+v,0);
-                    n3mTotal += monthVal;
+                    totalVal += monthVal;
                     n3mMonthCells.push(`<td class="sp-cell-month" style="border-left:1px solid rgba(100,180,200,.2);background:rgba(100,180,200,.04);font-size:8px;text-align:right;padding:2px 4px">${Math.round(monthVal).toLocaleString()}</td>`);
                   });
-                  n3mMonthlyCells = n3mMonthCells.join('');
-
-                  // 3. REST OF YEAR: Basis buttons + monthly columns
-                  const royOnlyMonths = restOfYearMonths.filter(ym => ym > month3);
-                  const royBasisVals = {};
+                  forecastCells = n3mMonthCells.join('');
+                }
+                else if(SP.forecastHorizon === 'ROY'){
+                  // REST OF YEAR: Basis buttons + monthly columns
                   const royDailyAvgs = {};
                   bases.forEach(basis => {
                     const histRange = spGetHistoricalRange(basis, today);
-                    let total = 0;
-                    royOnlyMonths.forEach(ym => {
-                      const monthDates = spGetMonthDates(ym);
-                      const monthlyVals = spCalcForecast(prodRows, histRange, monthDates, basis);
-                      total += monthlyVals.reduce((s,v)=>s+v,0);
-                    });
-                    royBasisVals[basis] = total;
-                    // Daily average for ROY is from the same historical range
-                    const sampleDates = royOnlyMonths.length > 0 ? spGetMonthDates(royOnlyMonths[0]) : [];
+                    const sampleMonth = royOnlyMonths.length > 0 ? royOnlyMonths[0] : '';
+                    const sampleDates = sampleMonth ? spGetMonthDates(sampleMonth) : [];
                     const sampleVals = spCalcForecast(prodRows, histRange, sampleDates, basis);
                     royDailyAvgs[basis] = sampleVals.length > 0 ? sampleVals[0] : 0;
                   });
 
-                  royBasisCells = bases.map((basis, idx) => {
-                    const label = ['10D', '15D', '30D'][idx];
+                  basisCells = bases.map((basis, idx) => {
                     const dailyAvg = royDailyAvgs[basis];
-                    return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(200,180,100,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey}','${stKey}','${basis}','ROY')" title="Click to apply ${label} basis (${Math.round(dailyAvg)} MT/day)">${Math.round(dailyAvg).toLocaleString()} MT</td>`;
+                    return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(200,180,100,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey}','${stKey}','${basis}','ROY')" title="Click to apply ${basisLabels[idx]} basis (${Math.round(dailyAvg)} MT/day)">${Math.round(dailyAvg).toLocaleString()} MT</td>`;
                   }).join('');
 
-                  // Get current ROY basis for display
                   const royBasis = spGetBasisForRow(rKey, sKey, stKey, 'ROY');
                   const royHistRange = spGetHistoricalRange(royBasis, today);
-                  royTotal = 0;
+                  totalVal = 0;
                   const royMonthCellsArr = royOnlyMonths.map(ym=>{
                     const monthDates = spGetMonthDates(ym);
                     const monthlyVals = spCalcForecast(prodRows, royHistRange, monthDates, royBasis);
                     const monthVal = monthlyVals.reduce((s,v)=>s+v,0);
-                    royTotal += monthVal;
+                    totalVal += monthVal;
                     return `<td class="sp-cell-month" style="border-left:1px solid rgba(200,150,100,.2);background:rgba(200,150,100,.04);font-size:8px;text-align:right;padding:2px 4px">${Math.round(monthVal).toLocaleString()}</td>`;
                   });
-                  royMonthCells = royMonthCellsArr.join('');
+                  forecastCells = royMonthCellsArr.join('');
                 }
 
                 const dot=`<span style="display:inline-block;width:6px;height:6px;border-radius:1px;background:${spProdColor(prod,true)};margin-right:4px;vertical-align:middle"></span>`;
+                const totalBg = SP.forecastHorizon === 'ROM' ? 'rgba(255,184,48,.08)' : SP.forecastHorizon === 'N3M' ? 'rgba(100,180,200,.08)' : 'rgba(200,150,100,.1)';
+                const totalBorder = SP.forecastHorizon === 'ROM' ? 'var(--amber)' : SP.forecastHorizon === 'N3M' ? 'var(--blue)' : 'var(--orange)';
 
                 h+=`<tr class="sp-row-l3" style="background:rgba(200,200,100,.03);font-size:7px">
                   <td class="td-lbl" style="border-right:2px solid var(--border2);padding:2px 6px 2px 40px;font-size:7px">
@@ -11500,18 +11493,9 @@ function spRenderTable(){
                   <td class="sp-cell-d" style="padding:2px 2px;text-align:right;border-right:1px solid var(--border)">${Math.round(pPerf.mtd).toLocaleString()}</td>
                   <td class="sp-cell-d" style="padding:2px 2px;text-align:right;border-right:1px solid var(--border)">${Math.round(pPerf.ytd).toLocaleString()}</td>
                   <td class="sp-cell-d" style="padding:2px 2px;text-align:right;border-right:2px solid var(--border2)">${Math.round(pPerf.sply).toLocaleString()}</td>
-                  <!-- REST OF MONTH: Basis buttons + daily columns + ROM TOTAL -->
-                  ${romBasisCells}
-                  ${romDailyCells}
-                  <td class="sp-cell-total" style="border-left:2px solid var(--amber);background:rgba(255,184,48,.08);font-weight:700;text-align:right;padding:2px 2px;font-size:6px">${Math.round(romTotal).toLocaleString()}</td>
-                  <!-- NEXT 3 MONTHS: Basis buttons + monthly columns + N3M TOTAL -->
-                  ${n3mBasisCells}
-                  ${n3mMonthlyCells}
-                  <td class="sp-cell-total" style="border-left:2px solid var(--blue);background:rgba(100,180,200,.08);font-weight:700;text-align:right;padding:2px 2px;font-size:6px">${Math.round(n3mTotal).toLocaleString()}</td>
-                  <!-- REST OF YEAR: Basis buttons + monthly columns + ROY TOTAL -->
-                  ${royBasisCells}
-                  ${royMonthCells}
-                  <td class="sp-cell-total" style="border-left:2px solid var(--orange);background:rgba(200,150,100,.1);font-weight:700;text-align:right;padding:2px 2px;font-size:6px">${Math.round(royTotal).toLocaleString()}</td>
+                  ${basisCells}
+                  ${forecastCells}
+                  <td class="sp-cell-total" style="border-left:2px solid ${totalBorder};background:${totalBg};font-weight:700;text-align:right;padding:2px 2px;font-size:6px">${Math.round(totalVal).toLocaleString()}</td>
                 </tr>`;
               });
             }
