@@ -4074,12 +4074,10 @@ function supplyScrollToday(){
 }
 
 // ── Demand Builder modal ─────────────────────────────────
-// Single-panel, one demand point at a time. Fires directly to grid cells.
 function openDemandBuilder(elId){
   const allDpEls=(DB.elements||[]).filter(e=>e.type==='demand_point');
   if(!allDpEls.length){statMsg('No demand points in topology');return;}
 
-  // Build hierarchy lookup for all demand points
   const facMap=Object.fromEntries((DB.facilities||[]).map(f=>[f.id,f]));
   const subMap=Object.fromEntries((DB.sub_regions||[]).map(s=>[s.id,s]));
   const regMap=Object.fromEntries((DB.regions||[]).map(r=>[r.id,r]));
@@ -4090,25 +4088,33 @@ function openDemandBuilder(elId){
     e._fbFacId=fac?.id||null; e._fbSubId=sub?.id||null; e._fbRegId=reg?.id||null;
   });
 
-  // If seeded with elId, pre-select its region/sub/fac
   const seedEl=elId?allDpEls.find(e=>e.id===elId):null;
   const initReg=seedEl?seedEl._fbRegId:'';
   const initSub=seedEl?seedEl._fbSubId:'';
   const initFac=seedEl?seedEl._fbFacId:'';
 
   const regions=[...new Map(allDpEls.filter(e=>e._fbRegId).map(e=>[e._fbRegId,regMap[e._fbRegId]])).values()].sort((a,b)=>a.name.localeCompare(b.name));
+  const subsFor=rId=>allDpEls.filter(e=>!rId||e._fbRegId===rId).filter(e=>e._fbSubId).reduce((m,e)=>{m.set(e._fbSubId,subMap[e._fbSubId]);return m;},new Map());
+  const facsFor=(rId,sId)=>allDpEls.filter(e=>(!rId||e._fbRegId===rId)&&(!sId||e._fbSubId===sId)).filter(e=>e._fbFacId).reduce((m,e)=>{m.set(e._fbFacId,facMap[e._fbFacId]);return m;},new Map());
+  const dpsFor=(rId,sId,fId)=>allDpEls.filter(e=>(!rId||e._fbRegId===rId)&&(!sId||e._fbSubId===sId)&&(!fId||e._fbFacId===fId)).sort((a,b)=>a.name.localeCompare(b.name));
 
-  const subsFor=regId=>allDpEls.filter(e=>!regId||e._fbRegId===regId).filter(e=>e._fbSubId).reduce((m,e)=>{m.set(e._fbSubId,subMap[e._fbSubId]);return m;},new Map());
-  const facsFor=(regId,subId)=>allDpEls.filter(e=>(!regId||e._fbRegId===regId)&&(!subId||e._fbSubId===subId)).filter(e=>e._fbFacId).reduce((m,e)=>{m.set(e._fbFacId,facMap[e._fbFacId]);return m;},new Map());
-  const dpsFor=(regId,subId,facId)=>allDpEls.filter(e=>(!regId||e._fbRegId===regId)&&(!subId||e._fbSubId===subId)&&(!facId||e._fbFacId===facId));
+  const mk=(items,val,blank)=>`<option value="">${blank}</option>`+items.map(([id,nm])=>`<option value="${id}" ${id===val?'selected':''}>${nm}</option>`).join('');
 
-  const mkOpts=(items,val,blankLabel)=>`<option value="">${blankLabel}</option>`+items.map(([id,name])=>`<option value="${id}" ${id===val?'selected':''}>${name}</option>`).join('');
-
-  const regOpts=mkOpts(regions.map(r=>[r.id,r.name]),initReg,'All Regions');
-  const subOpts=mkOpts([...(subsFor(initReg)).values()].sort((a,b)=>a.name.localeCompare(b.name)).map(s=>[s.id,s.name]),initSub,'All Sub-Regions');
-  const facOpts=mkOpts([...(facsFor(initReg,initSub)).values()].sort((a,b)=>a.name.localeCompare(b.name)).map(f=>[f.id,f.name]),initFac,'All Facilities');
-  const dpList=dpsFor(initReg,initSub,initFac).sort((a,b)=>a.name.localeCompare(b.name));
+  const regOpts=mk(regions.map(r=>[r.id,r.name]),initReg,'All Regions');
+  const subOpts=mk([...(subsFor(initReg)).values()].sort((a,b)=>a.name.localeCompare(b.name)).map(s=>[s.id,s.name]),initSub,'All Sub-Regions');
+  const facOpts=mk([...(facsFor(initReg,initSub)).values()].sort((a,b)=>a.name.localeCompare(b.name)).map(f=>[f.id,f.name]),initFac,'All Facilities');
+  const dpList=dpsFor(initReg,initSub,initFac);
   const dpOpts=dpList.map(e=>`<option value="${e.id}" ${e.id===elId?'selected':''}>${e.name}</option>`).join('');
+
+  // Initial actuals filters from Excel rows for the seed DP
+  const actRows=(DB.real_shipments_daily||[]);
+  const dpProds=_fbDpProducts(elId);
+  const actForDp=dpProds.length?actRows.filter(r=>dpProds.includes((r.product||'').toUpperCase())):actRows;
+  const uniq=(arr,key)=>[...new Set(arr.map(r=>r[key]||'').filter(Boolean))].sort();
+  const custTypes=['EXT','INT'];
+  const initReps=uniq(actForDp,'sales_manager');
+  const initSoldTo=uniq(actForDp,'ship_to_name');
+  const initShipTo=uniq(actForDp,'ship_to');
 
   const simStart=S.simCfg.start_date||new Date().toISOString().split('T')[0];
   const nwdCount=(DB.non_working_days||[]).length;
@@ -4124,10 +4130,10 @@ function openDemandBuilder(elId){
     </div>
     <span class="modal-close" onclick="closeModal()">✕</span>
   </div>
-  <div style="padding:16px;display:flex;flex-direction:column;gap:14px">
+  <div style="padding:16px;display:flex;flex-direction:column;gap:12px">
 
-    <!-- Cascading location filters -->
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+    <!-- Line 1: Region · Sub-Region · Facility · Demand Point · Customer Type -->
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1.4fr 0.7fr;gap:8px">
       <div style="${pf}"><div style="${pl}">Region</div>
         <select style="${pi}" id="fb-f-reg" onchange="_fbCascadeReg()">${regOpts}</select>
       </div>
@@ -4137,34 +4143,70 @@ function openDemandBuilder(elId){
       <div style="${pf}"><div style="${pl}">Facility</div>
         <select style="${pi}" id="fb-f-fac" onchange="_fbCascadeFac()">${facOpts}</select>
       </div>
-    </div>
-
-    <!-- Demand point (final target — filtered by above) -->
-    <div style="${pf}">
-      <div style="${pl}">Demand Point</div>
-      <select style="${pi}" id="fb-el-id" onchange="_fbSyncEl()">
-        ${dpOpts||'<option value="">— no demand points match —</option>'}
-      </select>
-    </div>
-
-    <!-- Row 1: Start date + Method -->
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-      <div style="${pf}"><div style="${pl}">Start Date</div>
-        <input style="${pi}" type="date" id="fb-start" value="${simStart}">
+      <div style="${pf}"><div style="${pl}">Demand Point</div>
+        <select style="${pi}" id="fb-el-id" onchange="_fbSyncEl();_fbSyncActuals();_fbLivePreview()">
+          ${dpOpts||'<option value="">— no match —</option>'}
+        </select>
       </div>
+      <div style="${pf}"><div style="${pl}">Cust. Type</div>
+        <select style="${pi}" id="fb-f-ctype" onchange="_fbSyncActuals()">
+          <option value="">All</option>
+          ${custTypes.map(t=>`<option value="${t}">${t}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+
+    <!-- Line 2: Sales Rep · Sold To · Ship To -->
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+      <div style="${pf}"><div style="${pl}">Sales Rep</div>
+        <select style="${pi}" id="fb-f-rep">
+          <option value="">All Reps</option>
+          ${initReps.map(r=>`<option value="${r}">${r}</option>`).join('')}
+        </select>
+      </div>
+      <div style="${pf}"><div style="${pl}">Sold To</div>
+        <select style="${pi}" id="fb-f-soldto">
+          <option value="">All Customers</option>
+          ${initSoldTo.map(s=>`<option value="${s}">${s}</option>`).join('')}
+        </select>
+      </div>
+      <div style="${pf}"><div style="${pl}">Ship To</div>
+        <select style="${pi}" id="fb-f-shipto">
+          <option value="">All Ship-Tos</option>
+          ${initShipTo.map(s=>`<option value="${s}">${s}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+
+    <!-- Line 3: Start Date · Horizon · End Date (conditional) -->
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;align-items:end">
+      <div style="${pf}"><div style="${pl}">Start Date</div>
+        <input style="${pi}" type="date" id="fb-start" value="${simStart}" oninput="_fbLivePreview()">
+      </div>
+      <div id="fb-wrap-horizon" style="${pf}"><div style="${pl}">Horizon</div>
+        <select style="${pi}" id="fb-horizon" onchange="_fbSyncHorizon();_fbLivePreview()">
+          <option value="eom">End of month</option>
+          <option value="eoy" selected>End of year</option>
+          <option value="sim">End of simulation</option>
+          <option value="date">Specific date</option>
+        </select>
+      </div>
+      <div id="fb-wrap-enddate" style="${pf};display:none"><div style="${pl}">End Date</div>
+        <input style="${pi}" type="date" id="fb-end-date" value="${simStart}" oninput="_fbLivePreview()">
+      </div>
+    </div>
+
+    <!-- Line 4: Method + method-specific option -->
+    <div style="display:grid;grid-template-columns:1.2fr 1fr;gap:8px">
       <div style="${pf}"><div style="${pl}">Method</div>
-        <select style="${pi}" id="fb-method" onchange="_fbSyncMethod()">
+        <select style="${pi}" id="fb-method" onchange="_fbSyncMethod();_fbLivePreview()">
           <option value="rolling">Rolling weekday average</option>
           <option value="fixed">Fixed daily value</option>
           <option value="distribute">Distribute monthly total</option>
         </select>
       </div>
-    </div>
-
-    <!-- Row 2: Method-specific inputs -->
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
       <div id="fb-wrap-rolling" style="${pf}"><div style="${pl}">Rolling Window</div>
-        <select style="${pi}" id="fb-rolling-n">
+        <select style="${pi}" id="fb-rolling-n" onchange="_fbLivePreview()">
           <option value="5">5 weekdays</option>
           <option value="10" selected>10 weekdays</option>
           <option value="20">20 weekdays</option>
@@ -4172,52 +4214,42 @@ function openDemandBuilder(elId){
         </select>
       </div>
       <div id="fb-wrap-fixed" style="${pf};display:none"><div style="${pl}">Fixed Daily (t/day)</div>
-        <input style="${pi}" type="number" step="1" id="fb-fixed-val" value="0" placeholder="0">
+        <input style="${pi}" type="number" step="0.1" id="fb-fixed-val" value="0" placeholder="0" oninput="_fbLivePreview()">
       </div>
-      <div id="fb-wrap-month" style="${pf};display:none"><div style="${pl}">Month Total Target (t)</div>
-        <input style="${pi}" type="number" step="1" id="fb-month-total" value="0" placeholder="0">
-      </div>
-
-      <!-- Horizon — shown for rolling + fixed only -->
-      <div id="fb-wrap-horizon" style="${pf}"><div style="${pl}">Horizon</div>
-        <select style="${pi}" id="fb-horizon" onchange="_fbSyncHorizon()">
-          <option value="eom">End of month</option>
-          <option value="eoy" selected>End of year</option>
-          <option value="sim">End of simulation</option>
-          <option value="date">Specific date</option>
-        </select>
+      <div id="fb-wrap-month" style="${pf};display:none"><div style="${pl}">Monthly Total (t)</div>
+        <input style="${pi}" type="number" step="1" id="fb-month-total" value="0" placeholder="0" oninput="_fbLivePreview()">
       </div>
     </div>
 
-    <!-- End date (shown only when horizon = date) -->
-    <div id="fb-wrap-enddate" style="${pf};display:none">
-      <div style="${pl}">End Date</div>
-      <input style="${pi}" type="date" id="fb-end-date" value="${simStart}">
+    <!-- Line 5: Ships Saturdays + Saturday % -->
+    <div style="display:grid;grid-template-columns:auto 1fr;gap:16px;align-items:center">
+      <label style="display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:10px;color:var(--text);cursor:pointer;white-space:nowrap">
+        <input type="checkbox" id="fb-ships-sat" checked onchange="_fbLivePreview()">
+        Ships Saturdays
+      </label>
+      <div id="fb-wrap-sat-pct" style="${pf}">
+        <div style="${pl}">Saturday volume (% of weekday avg)</div>
+        <input style="${pi}" type="number" id="fb-sat-pct" value="25" min="0" max="100" placeholder="25" oninput="_fbLivePreview()">
+      </div>
     </div>
 
-    <!-- Saturday option -->
-    <label style="display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:10px;color:var(--text);cursor:pointer">
-      <input type="checkbox" id="fb-ships-sat" checked>
-      Ships Saturdays
-    </label>
-    <div id="fb-wrap-sat-pct" style="${pf}">
-      <div style="${pl}">Saturday volume (% of weekday avg)</div>
-      <input style="${pi}" type="number" id="fb-sat-pct" value="25" min="0" max="100" placeholder="25">
+    <!-- Line 6: Live computed preview -->
+    <div id="fb-live-preview" style="font-family:var(--mono);font-size:9px;padding:10px 12px;background:var(--surface2);border:1px solid var(--border2);border-radius:2px;display:flex;flex-wrap:wrap;gap:16px">
+      <span style="color:var(--text-dim)">Adjust settings to see computed values</span>
     </div>
 
-    <!-- Message bar -->
-    <div id="fb-msg" style="font-family:var(--mono);font-size:9px;color:var(--text-dim);padding:8px 10px;background:var(--surface2);border:1px solid var(--border2);min-height:32px"></div>
+    <!-- Status / apply message -->
+    <div id="fb-msg" style="font-family:var(--mono);font-size:9px;color:var(--text-dim);padding:8px 10px;background:var(--surface2);border:1px solid var(--border2);min-height:28px"></div>
 
     <!-- Non-working days note -->
     <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);display:flex;align-items:center;justify-content:space-between">
-      <span>⊘ ${nwdCount} global non-working day${nwdCount!==1?'s':''} — excluded from all calculations</span>
-      <span onclick="closeModal();openNonWorkingDaysPanel()" style="cursor:pointer;color:var(--blue);text-decoration:underline">Manage</span>
+      <span>⊘ ${nwdCount} non-working day${nwdCount!==1?'s':''} excluded</span>
+      <span onclick="closeModal();openNonWorkingDaysPanel()" style="cursor:pointer;color:var(--blue);text-decoration:underline">Manage non-working days</span>
     </div>
 
     <!-- Footer -->
     <div style="display:flex;gap:8px;justify-content:flex-end">
       <button class="tb-btn sec" onclick="closeModal()">Cancel</button>
-      <button class="tb-btn sec" onclick="_fbPreview()">Preview</button>
       <button class="tb-btn amber" onclick="_fbApply()">⚡ Apply Forecast</button>
     </div>
   </div>`;
@@ -4225,10 +4257,57 @@ function openDemandBuilder(elId){
   showModal('_custom');
   document.getElementById('modal-content').innerHTML=h;
   _fbSyncMethod();
+  _fbLivePreview();
 }
 
 function _fbSyncEl(){
   document.getElementById('fb-msg').textContent='';
+}
+
+// Return uppercase product names linked to a demand point element
+function _fbDpProducts(elId){
+  if(!elId) return [];
+  const dp=(DB.demand_points||[]).find(d=>d.element_id===elId);
+  if(!dp) return [];
+  return (dp.products||[]).map(p=>(DB.products||[]).find(x=>x.id===p.product_id)?.name||'').filter(Boolean).map(s=>s.toUpperCase());
+}
+
+// Repopulate Sales Rep / Sold To / Ship To based on selected DP + Customer Type
+function _fbSyncActuals(){
+  const elId=document.getElementById('fb-el-id')?.value||'';
+  const ctype=document.getElementById('fb-f-ctype')?.value||'';
+  const prods=_fbDpProducts(elId);
+  let rows=(DB.real_shipments_daily||[]);
+  if(prods.length) rows=rows.filter(r=>prods.includes((r.product||'').toUpperCase()));
+  if(ctype) rows=rows.filter(r=>(r.customer_type||'')=== ctype);
+  const uniq=(key)=>[...new Set(rows.map(r=>r[key]||'').filter(Boolean))].sort();
+  const repSel=document.getElementById('fb-f-rep');
+  const soldSel=document.getElementById('fb-f-soldto');
+  const shipSel=document.getElementById('fb-f-shipto');
+  if(repSel){const prev=repSel.value; repSel.innerHTML=`<option value="">All Reps</option>`+uniq('sales_manager').map(v=>`<option value="${v}" ${v===prev?'selected':''}>${v}</option>`).join('');}
+  if(soldSel){const prev=soldSel.value; soldSel.innerHTML=`<option value="">All Customers</option>`+uniq('ship_to_name').map(v=>`<option value="${v}" ${v===prev?'selected':''}>${v}</option>`).join('');}
+  if(shipSel){const prev=shipSel.value; shipSel.innerHTML=`<option value="">All Ship-Tos</option>`+uniq('ship_to').map(v=>`<option value="${v}" ${v===prev?'selected':''}>${v}</option>`).join('');}
+}
+
+// Live computed preview — called on any input change
+function _fbLivePreview(){
+  const result=_fbBuildRows();
+  const el=document.getElementById('fb-live-preview');
+  if(!el) return;
+  if(!result){el.innerHTML='<span style="color:var(--text-dim)">Select a demand point to see computed values</span>';return;}
+  const {rows,msgs}=result;
+  const active=rows.filter(r=>r.value>0);
+  const total=active.reduce((s,r)=>s+r.value,0);
+  const avgDay=active.length?total/active.length:0;
+  const wkdays=active.filter(r=>{const d=new Date(r.date+'T00:00:00').getDay();return d>=1&&d<=5;});
+  const sats=active.filter(r=>new Date(r.date+'T00:00:00').getDay()===6);
+  const avgWkday=wkdays.length?wkdays.reduce((s,r)=>s+r.value,0)/wkdays.length:0;
+  el.innerHTML=`
+    <span style="color:var(--text-dim)">Weekday avg</span><strong style="color:var(--text)">${avgWkday.toFixed(1)} t</strong>
+    <span style="color:var(--text-dim)">Sat avg</span><strong style="color:var(--text)">${sats.length?(sats.reduce((s,r)=>s+r.value,0)/sats.length).toFixed(1)+' t':'—'}</strong>
+    <span style="color:var(--text-dim)">Active days</span><strong style="color:var(--text)">${active.length}</strong>
+    <span style="color:var(--text-dim)">Total</span><strong style="color:var(--green)">${Math.round(total).toLocaleString()} t</strong>
+    <span style="color:var(--text-dim);font-size:8px">${msgs.join(' · ')}</span>`;
 }
 
 function _fbCascadeReg(){
@@ -4269,6 +4348,8 @@ function _fbCascadeFac(){
   const dpSel=document.getElementById('fb-el-id');
   dpSel.innerHTML=dps.length?dps.map(e=>`<option value="${e.id}">${e.name}</option>`).join(''):`<option value="">— no demand points match —</option>`;
   document.getElementById('fb-msg').textContent='';
+  _fbSyncActuals();
+  _fbLivePreview();
 }
 
 function _fbSyncMethod(){
@@ -4278,6 +4359,7 @@ function _fbSyncMethod(){
   document.getElementById('fb-wrap-fixed').style.display=m==='fixed'?'flex':'none';
   document.getElementById('fb-wrap-month').style.display=m==='distribute'?'flex':'none';
   document.getElementById('fb-wrap-horizon').style.display=m==='distribute'?'none':'flex';
+  if(m==='distribute') document.getElementById('fb-wrap-enddate').style.display='none';
   document.getElementById('fb-msg').textContent='';
 }
 
