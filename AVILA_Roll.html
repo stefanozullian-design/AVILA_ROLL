@@ -4428,12 +4428,24 @@ function _fbGetDpSplit(shipTo){
   return parts.map(p=>({elId:p.elId,name:p.name,proportion:p.vol/total}));
 }
 
+// Get all ship_to_name values that belong to a given soldTo prefix, optionally filtered by elId
+function _fbGetShipToSplit(soldTo, elId){
+  if(!soldTo) return null;
+  let rows=(DB.real_shipments_daily||[]).filter(r=>spExtractSoldTo(r.ship_to_name||'')===soldTo);
+  if(elId){ const prods=_fbDpProducts(elId); if(prods.length) rows=rows.filter(r=>prods.includes((r.product||'').trim().toUpperCase())); }
+  if(!rows.length) return null;
+  const volBySt={};
+  rows.forEach(r=>{ const st=r.ship_to_name||''; if(st) volBySt[st]=(volBySt[st]||0)+(parseFloat(r.volume)||0); });
+  const total=Object.values(volBySt).reduce((s,v)=>s+v,0)||1;
+  return Object.entries(volBySt).map(([st,vol])=>({ship_to:st,proportion:vol/total}));
+}
+
 function _fbBuildRows(elIdOverride){
   const elId=elIdOverride||document.getElementById('fb-el-id')?.value||null;
   const start=document.getElementById('fb-start')?.value; if(!start) return null;
   const shipTo=document.getElementById('fb-f-shipto')?.value||null;
-  // Need at least a demand point OR a ship_to (proportional path handled by _fbApply)
-  if(!elId&&!shipTo) return null;
+  const soldTo=document.getElementById('fb-f-soldto')?.value||null;
+  if(!elId&&!shipTo&&!soldTo) return null;
   const method=document.getElementById('fb-method')?.value;
   const shipsSat=document.getElementById('fb-ships-sat')?.checked;
   const satPct=parseFloat(document.getElementById('fb-sat-pct')?.value)||25;
@@ -4464,10 +4476,12 @@ function _fbBuildRows(elIdOverride){
     spine.push(d.toISOString().split('T')[0]);
   }
 
-  // Build actuals map from real_shipments_daily (better source than demand_values for rolling avg)
-  const prods=_fbDpProducts(elId);
-  let actRows=(DB.real_shipments_daily||[]).filter(r=>prods.includes((r.product||'').trim().toUpperCase()));
+  // Build actuals map from real_shipments_daily
+  const prods=_fbDpProducts(elId||'');
+  let actRows=(DB.real_shipments_daily||[]);
+  if(prods.length) actRows=actRows.filter(r=>prods.includes((r.product||'').trim().toUpperCase()));
   if(shipTo) actRows=actRows.filter(r=>r.ship_to_name===shipTo);
+  else if(soldTo) actRows=actRows.filter(r=>spExtractSoldTo(r.ship_to_name||'')===soldTo);
   const actualsMap={};
   actRows.forEach(r=>{ if(r.date) actualsMap[r.date]=(actualsMap[r.date]||0)+(parseFloat(r.volume)||0); });
 
@@ -4520,7 +4534,7 @@ function _fbBuildRows(elIdOverride){
     msgs.push(`Distributed ${total} t over ${eligible.length} eligible days`);
   }
 
-  return {rows,msgs,elId,shipTo};
+  return {rows,msgs,elId,shipTo,soldTo};
 }
 
 function _fbPreview(){
@@ -4534,6 +4548,29 @@ function _fbApply(){
   if(!DB.demand_values) DB.demand_values=[];
   const elId=document.getElementById('fb-el-id')?.value||null;
   const shipTo=document.getElementById('fb-f-shipto')?.value||null;
+  const soldTo=document.getElementById('fb-f-soldto')?.value||null;
+
+  // ── Sold To path: soldTo chosen + specific DP, no shipTo → distribute proportionally among ship_tos ──
+  if(soldTo && elId && !shipTo){
+    const split=_fbGetShipToSplit(soldTo,elId);
+    if(!split||!split.length){ document.getElementById('fb-msg').textContent='No historical ship-to data for this Sold To — select a specific Ship To instead.'; return; }
+    const result=_fbBuildRows(); if(!result) return;
+    const {rows,msgs}=result;
+    let totalDays=0,totalT=0;
+    split.forEach(({ship_to:st,proportion})=>{
+      rows.forEach(r=>{
+        const v=Math.round(r.value*proportion*10)/10;
+        DB.demand_values=DB.demand_values.filter(x=>!(x.element_id===elId&&x.date===r.date&&x.ship_to===st));
+        DB.demand_values=DB.demand_values.filter(x=>!(x.element_id===elId&&x.date===r.date&&!x.ship_to));
+        if(v>0){ DB.demand_values.push({element_id:elId,date:r.date,value_t:v,ship_to:st}); totalDays++; totalT+=v; }
+      });
+    });
+    autoSave(); _demandCacheInvalidate();
+    const splitDesc=split.map(p=>`${p.ship_to} ${Math.round(p.proportion*100)}%`).join(', ');
+    document.getElementById('fb-msg').innerHTML=`<span style="color:var(--green)">✓ Distributed to ${split.length} ship-to${split.length>1?'s':''}</span> (${splitDesc}) — ${Math.round(totalT).toLocaleString()} t`;
+    renderDemandView(); renderSalesPerfView();
+    return;
+  }
 
   // ── Proportional path: ship_to chosen, no specific demand point ──
   if(!elId && shipTo){
@@ -11334,12 +11371,25 @@ function spRenderTable(){
 
   // ── Per-row date cell renderer ──
   // shipTos: null=aggregated dp total | string[]=specific ship_to_names to sum
-  function renderCells(nodeRows, dpElId, dpElIds, shipTos){
+  function renderCells(nodeRows, dpElId, dpElIds, shipTos, dpTotalRows){
     const actMap={};
     nodeRows.forEach(r=>{ if(r.date) actMap[r.date]=(actMap[r.date]||0)+(r.volume||0); });
+    // Pre-compute historical proportion for cascade fallback (child vol / dp total vol)
+    const nodeVol=nodeRows.reduce((s,r)=>s+(r.volume||0),0);
+    const dpVol=dpTotalRows?dpTotalRows.reduce((s,r)=>s+(r.volume||0),0)||1:1;
+    const cascadeProp=dpTotalRows&&dpVol>0?nodeVol/dpVol:0;
     const getFc=(ds)=>{
       if(dpElId){
-        if(shipTos&&shipTos.length) return shipTos.reduce((s,st)=>s+spGetFcVal(dpElId,ds,demIdx,st),0);
+        if(shipTos&&shipTos.length){
+          const specific=shipTos.reduce((s,st)=>s+spGetFcVal(dpElId,ds,demIdx,st),0);
+          if(specific>0) return specific;
+          // Cascade: proportional share of top-down DP forecast
+          if(cascadeProp>0){
+            const topDown=spGetFcVal(dpElId,ds,demIdx,null);
+            if(topDown>0) return topDown*cascadeProp;
+          }
+          return 0;
+        }
         return spGetFcVal(dpElId,ds,demIdx,null);
       }
       if(dpElIds) return dpElIds.reduce((s,id)=>s+spGetFcVal(id,ds,demIdx,null),0);
@@ -11421,13 +11471,13 @@ function spRenderTable(){
             h+=`<tr class="sp-row-l4" onclick="spToggle('${soKey}')" style="cursor:pointer">
               <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:54px">
                 <span class="sp-toggle">${soCol?'▸':'▾'}</span>${so.name}
-              </td>${renderCells(so.rows,dp.dpElId,null,soShipTos)}</tr>`;
+              </td>${renderCells(so.rows,dp.dpElId,null,soShipTos,dp.rows)}</tr>`;
             if(soCol) return;
 
             sortObjs(so.shiptos).forEach(st=>{
               h+=`<tr class="sp-row-l5">
                 <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:66px;font-size:7px">${st.name}</td>
-                ${renderCells(st.rows,dp.dpElId,null,[st.name])}</tr>`;
+                ${renderCells(st.rows,dp.dpElId,null,[st.name],dp.rows)}</tr>`;
             });
           });
         });
