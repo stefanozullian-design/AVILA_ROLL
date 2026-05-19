@@ -4076,8 +4076,39 @@ function supplyScrollToday(){
 // ── Demand Builder modal ─────────────────────────────────
 // Single-panel, one demand point at a time. Fires directly to grid cells.
 function openDemandBuilder(elId){
-  const dpEls=getFacElements().filter(e=>e.type==='demand_point');
-  if(!dpEls.length){statMsg('No demand points in topology');return;}
+  const allDpEls=(DB.elements||[]).filter(e=>e.type==='demand_point');
+  if(!allDpEls.length){statMsg('No demand points in topology');return;}
+
+  // Build hierarchy lookup for all demand points
+  const facMap=Object.fromEntries((DB.facilities||[]).map(f=>[f.id,f]));
+  const subMap=Object.fromEntries((DB.sub_regions||[]).map(s=>[s.id,s]));
+  const regMap=Object.fromEntries((DB.regions||[]).map(r=>[r.id,r]));
+  allDpEls.forEach(e=>{
+    const fac=facMap[e.assigned_facility_id||e.facility_id];
+    const sub=fac?subMap[fac.sub_region_id]:null;
+    const reg=sub?regMap[sub.region_id]:null;
+    e._fbFacId=fac?.id||null; e._fbSubId=sub?.id||null; e._fbRegId=reg?.id||null;
+  });
+
+  // If seeded with elId, pre-select its region/sub/fac
+  const seedEl=elId?allDpEls.find(e=>e.id===elId):null;
+  const initReg=seedEl?seedEl._fbRegId:'';
+  const initSub=seedEl?seedEl._fbSubId:'';
+  const initFac=seedEl?seedEl._fbFacId:'';
+
+  const regions=[...new Map(allDpEls.filter(e=>e._fbRegId).map(e=>[e._fbRegId,regMap[e._fbRegId]])).values()].sort((a,b)=>a.name.localeCompare(b.name));
+
+  const subsFor=regId=>allDpEls.filter(e=>!regId||e._fbRegId===regId).filter(e=>e._fbSubId).reduce((m,e)=>{m.set(e._fbSubId,subMap[e._fbSubId]);return m;},new Map());
+  const facsFor=(regId,subId)=>allDpEls.filter(e=>(!regId||e._fbRegId===regId)&&(!subId||e._fbSubId===subId)).filter(e=>e._fbFacId).reduce((m,e)=>{m.set(e._fbFacId,facMap[e._fbFacId]);return m;},new Map());
+  const dpsFor=(regId,subId,facId)=>allDpEls.filter(e=>(!regId||e._fbRegId===regId)&&(!subId||e._fbSubId===subId)&&(!facId||e._fbFacId===facId));
+
+  const mkOpts=(items,val,blankLabel)=>`<option value="">${blankLabel}</option>`+items.map(([id,name])=>`<option value="${id}" ${id===val?'selected':''}>${name}</option>`).join('');
+
+  const regOpts=mkOpts(regions.map(r=>[r.id,r.name]),initReg,'All Regions');
+  const subOpts=mkOpts([...(subsFor(initReg)).values()].sort((a,b)=>a.name.localeCompare(b.name)).map(s=>[s.id,s.name]),initSub,'All Sub-Regions');
+  const facOpts=mkOpts([...(facsFor(initReg,initSub)).values()].sort((a,b)=>a.name.localeCompare(b.name)).map(f=>[f.id,f.name]),initFac,'All Facilities');
+  const dpList=dpsFor(initReg,initSub,initFac).sort((a,b)=>a.name.localeCompare(b.name));
+  const dpOpts=dpList.map(e=>`<option value="${e.id}" ${e.id===elId?'selected':''}>${e.name}</option>`).join('');
 
   const simStart=S.simCfg.start_date||new Date().toISOString().split('T')[0];
   const nwdCount=(DB.non_working_days||[]).length;
@@ -4095,16 +4126,24 @@ function openDemandBuilder(elId){
   </div>
   <div style="padding:16px;display:flex;flex-direction:column;gap:14px">
 
-    <!-- Demand point -->
+    <!-- Cascading location filters -->
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+      <div style="${pf}"><div style="${pl}">Region</div>
+        <select style="${pi}" id="fb-f-reg" onchange="_fbCascadeReg()">${regOpts}</select>
+      </div>
+      <div style="${pf}"><div style="${pl}">Sub-Region</div>
+        <select style="${pi}" id="fb-f-sub" onchange="_fbCascadeSub()">${subOpts}</select>
+      </div>
+      <div style="${pf}"><div style="${pl}">Facility</div>
+        <select style="${pi}" id="fb-f-fac" onchange="_fbCascadeFac()">${facOpts}</select>
+      </div>
+    </div>
+
+    <!-- Demand point (final target — filtered by above) -->
     <div style="${pf}">
       <div style="${pl}">Demand Point</div>
       <select style="${pi}" id="fb-el-id" onchange="_fbSyncEl()">
-        ${dpEls.map(e=>{
-          const facName=DB.facilities.find(f=>f.id===(e.assigned_facility_id||e.facility_id))?.name||'?';
-          const dp=DB.demand_points.find(d=>d.element_id===e.id||d.id===`dp_el_${e.id}`);
-          const prods=(dp?.products||[]).map(p=>DB.products.find(x=>x.id===p.product_id)?.name||p.product_id).join(', ');
-          return `<option value="${e.id}" ${e.id===elId?'selected':''}>${e.name} — ${facName}${prods?' · '+prods:''}</option>`;
-        }).join('')}
+        ${dpOpts||'<option value="">— no demand points match —</option>'}
       </select>
     </div>
 
@@ -4189,6 +4228,46 @@ function openDemandBuilder(elId){
 }
 
 function _fbSyncEl(){
+  document.getElementById('fb-msg').textContent='';
+}
+
+function _fbCascadeReg(){
+  const regId=document.getElementById('fb-f-reg')?.value||'';
+  const allDpEls=(DB.elements||[]).filter(e=>e.type==='demand_point');
+  const facMap=Object.fromEntries((DB.facilities||[]).map(f=>[f.id,f]));
+  const subMap=Object.fromEntries((DB.sub_regions||[]).map(s=>[s.id,s]));
+  const regMap=Object.fromEntries((DB.regions||[]).map(r=>[r.id,r]));
+  allDpEls.forEach(e=>{
+    const fac=facMap[e.assigned_facility_id||e.facility_id];
+    const sub=fac?subMap[fac.sub_region_id]:null;
+    const reg=sub?regMap[sub.region_id]:null;
+    e._fbFacId=fac?.id||null; e._fbSubId=sub?.id||null; e._fbRegId=reg?.id||null;
+  });
+  const subs=[...new Map(allDpEls.filter(e=>(!regId||e._fbRegId===regId)&&e._fbSubId).map(e=>[e._fbSubId,subMap[e._fbSubId]])).values()].sort((a,b)=>a.name.localeCompare(b.name));
+  const subSel=document.getElementById('fb-f-sub');
+  subSel.innerHTML=`<option value="">All Sub-Regions</option>`+subs.map(s=>`<option value="${s.id}">${s.name}</option>`).join('');
+  _fbCascadeSub();
+}
+
+function _fbCascadeSub(){
+  const regId=document.getElementById('fb-f-reg')?.value||'';
+  const subId=document.getElementById('fb-f-sub')?.value||'';
+  const allDpEls=(DB.elements||[]).filter(e=>e.type==='demand_point');
+  const facMap=Object.fromEntries((DB.facilities||[]).map(f=>[f.id,f]));
+  const facs=[...new Map(allDpEls.filter(e=>(!regId||e._fbRegId===regId)&&(!subId||e._fbSubId===subId)&&e._fbFacId).map(e=>[e._fbFacId,facMap[e._fbFacId]])).values()].sort((a,b)=>a.name.localeCompare(b.name));
+  const facSel=document.getElementById('fb-f-fac');
+  facSel.innerHTML=`<option value="">All Facilities</option>`+facs.map(f=>`<option value="${f.id}">${f.name}</option>`).join('');
+  _fbCascadeFac();
+}
+
+function _fbCascadeFac(){
+  const regId=document.getElementById('fb-f-reg')?.value||'';
+  const subId=document.getElementById('fb-f-sub')?.value||'';
+  const facId=document.getElementById('fb-f-fac')?.value||'';
+  const allDpEls=(DB.elements||[]).filter(e=>e.type==='demand_point');
+  const dps=allDpEls.filter(e=>(!regId||e._fbRegId===regId)&&(!subId||e._fbSubId===subId)&&(!facId||e._fbFacId===facId)).sort((a,b)=>a.name.localeCompare(b.name));
+  const dpSel=document.getElementById('fb-el-id');
+  dpSel.innerHTML=dps.length?dps.map(e=>`<option value="${e.id}">${e.name}</option>`).join(''):`<option value="">— no demand points match —</option>`;
   document.getElementById('fb-msg').textContent='';
 }
 
