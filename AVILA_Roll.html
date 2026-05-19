@@ -10692,11 +10692,15 @@ function renderSalesPerfView(){
   document.getElementById('sp-meta-lbl').textContent =
     `${Number(m.row_count||0).toLocaleString()} records · ${m.date_min||'?'} → ${m.date_max||'?'} · loaded ${m.loaded_at||'?'}`;
 
-  // Init date range from meta if not set
-  if(m.date_min && !SP.f.dateFrom){
-    SP.f.dateFrom = m.date_min;
-    SP.f.dateTo   = m.date_max;
-  }
+  // Set date range: actuals start → simulation end so forecast future is always visible.
+  // Always recompute simEnd so reloading data or changing simulation horizon extends the window.
+  const simEnd = S.simCfg.start_date
+    ? new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(S.simCfg.horizon||365)*864e5).toISOString().split('T')[0]
+    : `${new Date().getFullYear()+1}-12-31`;
+  if(m.date_min && !SP.f.dateFrom) SP.f.dateFrom = m.date_min;
+  // Extend dateTo to whichever is furthest: current user setting, data max, or sim end
+  const candidates=[SP.f.dateTo, m.date_max, simEnd].filter(Boolean);
+  SP.f.dateTo = candidates.reduce((a,b)=>a>b?a:b);
 
   spRebuildCascade();   // build all dropdowns from current state
   spSyncFilterUI();     // push state → UI elements
