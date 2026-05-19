@@ -5789,7 +5789,7 @@ function _demandRate(elId, dateStr){
   return (dow>=1&&dow<=5)?fallback:0;
 }
 // Invalidate cache whenever demand_values changes
-function _demandCacheInvalidate(){ _demandRate._cache={}; }
+function _demandCacheInvalidate(){ _demandRate._cache={}; if(typeof SP!=='undefined') SP._demIdx=null; }
 
 // ── Monthly demand total for an element (for dashboard summaries) ──
 function _demandMonthTotal(elId, year, month){
@@ -10739,6 +10739,7 @@ const SP = {
   basisByRow: {},
   defaultBasis: 'all10d',
   collapsedMonths: null,  // Set of YYYY-MM strings; null = auto-initialised on first render
+  _demIdx: null,          // cached demand index; cleared by _demandCacheInvalidate
 };
 
 // ── REQUIRED COLUMNS ─────────────────────────────────
@@ -11262,6 +11263,8 @@ function spBuildOrgTree(rows){
     const c=(el.props?.dp_code||'').trim().toUpperCase(); if(c) dpNameIdx[c]=el;
   });
   const getDpEl=prod=>dpNameIdx[(prod||'').trim().toUpperCase()]||null;
+  // Inline actMap update: called once per row per node (single pass, no re-scan)
+  const upd=(node,r)=>{ if(r.date) node.actMap[r.date]=(node.actMap[r.date]||0)+(r.volume||0); node.histVol+=(r.volume||0); };
   const tree={};
   rows.forEach(r=>{
     const facId=getFacId(r.origin), fac=facId?facMap[facId]:null;
@@ -11272,24 +11275,33 @@ function spBuildOrgTree(rows){
     const facKey=fac ?fac.id  :`__nofac_${(r.origin||'').replace(/\W/g,'_')}`;
     const dpKey =dpEl?dpEl.id :`__nodp_${(r.product||'').replace(/\W/g,'_')}`;
     const soldTo=spExtractSoldTo(r.ship_to_name||'—'), shipTo=r.ship_to_name||'—';
-    if(!tree[regId]) tree[regId]={id:regId,name:reg?reg.name:'Unknown Region',rows:[],subs:{}};
-    tree[regId].rows.push(r);
-    if(!tree[regId].subs[subId]) tree[regId].subs[subId]={id:subId,name:sub?sub.name:r.origin||'Unknown',rows:[],facs:{}};
-    tree[regId].subs[subId].rows.push(r);
-    if(!tree[regId].subs[subId].facs[facKey]) tree[regId].subs[subId].facs[facKey]={id:facKey,name:fac?fac.name:r.origin||'Unknown Plant',rows:[],dps:{}};
-    tree[regId].subs[subId].facs[facKey].rows.push(r);
-    if(!tree[regId].subs[subId].facs[facKey].dps[dpKey]) tree[regId].subs[subId].facs[facKey].dps[dpKey]={id:dpKey,name:dpEl?dpEl.name:r.product||'Unknown DP',dpElId:dpEl?.id||null,rows:[],soldtos:{}};
-    tree[regId].subs[subId].facs[facKey].dps[dpKey].rows.push(r);
-    if(!tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo]) tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo]={name:soldTo,rows:[],shiptos:{}};
-    tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo].rows.push(r);
-    if(!tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo].shiptos[shipTo]) tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo].shiptos[shipTo]={name:shipTo,rows:[]};
-    tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo].shiptos[shipTo].rows.push(r);
+    if(!tree[regId]) tree[regId]={id:regId,name:reg?reg.name:'Unknown Region',actMap:{},histVol:0,dpElIdSet:new Set(),subs:{}};
+    upd(tree[regId],r); if(dpEl) tree[regId].dpElIdSet.add(dpEl.id);
+    if(!tree[regId].subs[subId]) tree[regId].subs[subId]={id:subId,name:sub?sub.name:r.origin||'Unknown',actMap:{},histVol:0,dpElIdSet:new Set(),facs:{}};
+    upd(tree[regId].subs[subId],r); if(dpEl) tree[regId].subs[subId].dpElIdSet.add(dpEl.id);
+    if(!tree[regId].subs[subId].facs[facKey]) tree[regId].subs[subId].facs[facKey]={id:facKey,name:fac?fac.name:r.origin||'Unknown Plant',actMap:{},histVol:0,dpElIdSet:new Set(),dps:{}};
+    upd(tree[regId].subs[subId].facs[facKey],r); if(dpEl) tree[regId].subs[subId].facs[facKey].dpElIdSet.add(dpEl.id);
+    if(!tree[regId].subs[subId].facs[facKey].dps[dpKey]) tree[regId].subs[subId].facs[facKey].dps[dpKey]={id:dpKey,name:dpEl?dpEl.name:r.product||'Unknown DP',dpElId:dpEl?.id||null,actMap:{},histVol:0,soldtos:{}};
+    upd(tree[regId].subs[subId].facs[facKey].dps[dpKey],r);
+    if(!tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo]) tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo]={name:soldTo,actMap:{},histVol:0,shiptos:{}};
+    upd(tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo],r);
+    if(!tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo].shiptos[shipTo]) tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo].shiptos[shipTo]={name:shipTo,actMap:{},histVol:0};
+    upd(tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo].shiptos[shipTo],r);
+  });
+  // Convert per-node dpElIdSets → arrays for fbBtn and renderCells
+  Object.values(tree).forEach(reg=>{
+    reg.dpElIds=[...reg.dpElIdSet];
+    Object.values(reg.subs).forEach(sub=>{
+      sub.dpElIds=[...sub.dpElIdSet];
+      Object.values(sub.facs).forEach(fac=>{ fac.dpElIds=[...fac.dpElIdSet]; });
+    });
   });
   return tree;
 }
 
 // ── Demand values index for O(1) lookups ─────────────
 function spBuildDemandIndex(){
+  if(SP._demIdx) return SP._demIdx;
   const idx={};
   // Two-pass: first accumulate ship_to records, then fill null-record fallbacks
   const dpAgg={};
@@ -11310,6 +11322,7 @@ function spBuildDemandIndex(){
   });
   // Write aggregated dp-level values into idx
   Object.entries(dpAgg).forEach(([key,g])=>{ idx[key]=g.total; });
+  SP._demIdx=idx;
   return idx;
 }
 
@@ -11370,13 +11383,11 @@ function spRenderTable(){
   }
 
   // ── Per-row date cell renderer ──
+  // actMap and histVol are pre-computed in spBuildOrgTree (single pass over rows).
   // shipTos: null=aggregated dp total | string[]=specific ship_to_names to sum
-  function renderCells(nodeRows, dpElId, dpElIds, shipTos, dpHistVol){
-    const actMap={};
-    nodeRows.forEach(r=>{ if(r.date) actMap[r.date]=(actMap[r.date]||0)+(r.volume||0); });
-    // Pre-compute cascade proportion from pre-computed dpHistVol (passed from DP level, not re-computed here)
-    const nodeVol=dpHistVol>0?nodeRows.reduce((s,r)=>s+(r.volume||0),0):0;
-    const cascadeProp=dpHistVol>0?nodeVol/dpHistVol:0;
+  // dpHistVol: pre-computed total historical volume at DP level (for cascade proportion)
+  function renderCells(actMap, histVol, dpElId, dpElIds, shipTos, dpHistVol){
+    const cascadeProp=dpHistVol>0?histVol/dpHistVol:0;
     const getFc=(ds)=>{
       if(dpElId){
         if(shipTos&&shipTos.length){
@@ -11430,40 +11441,35 @@ function spRenderTable(){
   let h='';
   sortObjs(orgTree).forEach(reg=>{
     const rKey='reg_'+reg.id.replace(/\W/g,'_'), rCol=!!SP.collapsed[rKey];
-    const rDpIds=spGetDpElIds(reg.rows);
     h+=`<tr class="sp-row-l0" onclick="spToggle('${rKey}')" style="cursor:pointer">
       <td class="td-lbl" style="border-right:2px solid var(--border2)">
-        <span class="sp-toggle">${rCol?'▸':'▾'}</span><strong>${reg.name}</strong>${fbBtn(rDpIds,reg.name)}
-      </td>${renderCells(reg.rows,null,rDpIds)}</tr>`;
+        <span class="sp-toggle">${rCol?'▸':'▾'}</span><strong>${reg.name}</strong>${fbBtn(reg.dpElIds,reg.name)}
+      </td>${renderCells(reg.actMap,reg.histVol,null,reg.dpElIds)}</tr>`;
     if(rCol) return;
 
     sortObjs(reg.subs).forEach(sub=>{
       const sKey='sub_'+sub.id.replace(/\W/g,'_'), sCol=!!SP.collapsed[sKey];
-      const sDpIds=spGetDpElIds(sub.rows);
       h+=`<tr class="sp-row-l1" onclick="spToggle('${sKey}')" style="cursor:pointer">
         <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:18px">
-          <span class="sp-toggle">${sCol?'▸':'▾'}</span><strong>${sub.name}</strong>${fbBtn(sDpIds,sub.name)}
-        </td>${renderCells(sub.rows,null,sDpIds)}</tr>`;
+          <span class="sp-toggle">${sCol?'▸':'▾'}</span><strong>${sub.name}</strong>${fbBtn(sub.dpElIds,sub.name)}
+        </td>${renderCells(sub.actMap,sub.histVol,null,sub.dpElIds)}</tr>`;
       if(sCol) return;
 
       sortObjs(sub.facs).forEach(fac=>{
         const fKey='fac_'+fac.id.replace(/\W/g,'_'), fCol=!!SP.collapsed[fKey];
-        const fDpIds=spGetDpElIds(fac.rows);
         h+=`<tr class="sp-row-l2" onclick="spToggle('${fKey}')" style="cursor:pointer">
           <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:30px">
-            <span class="sp-toggle">${fCol?'▸':'▾'}</span><strong>${fac.name}</strong>${fbBtn(fDpIds,fac.name)}
-          </td>${renderCells(fac.rows,null,fDpIds)}</tr>`;
+            <span class="sp-toggle">${fCol?'▸':'▾'}</span><strong>${fac.name}</strong>${fbBtn(fac.dpElIds,fac.name)}
+          </td>${renderCells(fac.actMap,fac.histVol,null,fac.dpElIds)}</tr>`;
         if(fCol) return;
 
         sortObjs(fac.dps).forEach(dp=>{
           const dpKey='dp_'+dp.id.replace(/\W/g,'_'), dpCol=!!SP.collapsed[dpKey];
           const dpElIds=dp.dpElId?[dp.dpElId]:[];
-          // Pre-compute once; passed to child rows to avoid re-reducing dp.rows N times
-          const dpHistVol=dp.rows.reduce((s,r)=>s+(r.volume||0),0)||1;
           h+=`<tr class="sp-row-l3" onclick="spToggle('${dpKey}')" style="cursor:pointer">
             <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:42px">
               <span class="sp-toggle">${dpCol?'▸':'▾'}</span>${dp.name}${fbBtn(dpElIds,dp.name)}
-            </td>${renderCells(dp.rows,dp.dpElId,null)}</tr>`;
+            </td>${renderCells(dp.actMap,dp.histVol,dp.dpElId,null)}</tr>`;
           if(dpCol) return;
 
           sortObjs(dp.soldtos).forEach(so=>{
@@ -11472,13 +11478,13 @@ function spRenderTable(){
             h+=`<tr class="sp-row-l4" onclick="spToggle('${soKey}')" style="cursor:pointer">
               <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:54px">
                 <span class="sp-toggle">${soCol?'▸':'▾'}</span>${so.name}
-              </td>${renderCells(so.rows,dp.dpElId,null,soShipTos,dpHistVol)}</tr>`;
+              </td>${renderCells(so.actMap,so.histVol,dp.dpElId,null,soShipTos,dp.histVol||1)}</tr>`;
             if(soCol) return;
 
             sortObjs(so.shiptos).forEach(st=>{
               h+=`<tr class="sp-row-l5">
                 <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:66px;font-size:7px">${st.name}</td>
-                ${renderCells(st.rows,dp.dpElId,null,[st.name],dpHistVol)}</tr>`;
+                ${renderCells(st.actMap,st.histVol,dp.dpElId,null,[st.name],dp.histVol||1)}</tr>`;
             });
           });
         });
