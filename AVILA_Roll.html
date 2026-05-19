@@ -575,6 +575,10 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
 .sp-row-l1 td.td-lbl{color:var(--blue);padding-left:20px;}
 .sp-row-l2 td.td-lbl{color:var(--text);padding-left:36px;}
 .sp-row-l3 td.td-lbl{color:var(--text-dim);padding-left:52px;font-size:8px;}
+.sp-row-l4 td.td-lbl{color:var(--text-dim);padding-left:64px;font-size:7px;}
+.sp-row-l5 td.td-lbl{color:var(--text-dim);padding-left:76px;font-size:7px;}
+.sp-fb-btn{background:none;border:1px solid var(--amber);color:var(--amber);font-size:6px;padding:1px 4px;cursor:pointer;margin-left:6px;font-family:var(--mono);border-radius:2px;opacity:.55;vertical-align:middle;}
+.sp-fb-btn:hover{opacity:1;background:rgba(255,184,48,.12);}
 .sp-row-sel td{background:rgba(77,166,255,.06)!important;}
 .sp-row-sel td.td-lbl{color:var(--blue)!important;background:rgba(77,166,255,.1)!important;}
 .sp-toggle{font-size:8px;margin-right:5px;cursor:pointer;user-select:none;}
@@ -992,10 +996,10 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
           <div class="sp-chip"             id="sp-type-ext"   onclick="spDispatch({custType:'EXT'})">EXT</div>
           <div class="sp-chip"             id="sp-type-int"   onclick="spDispatch({custType:'INT'})">INT</div>
           <div style="width:1px;height:20px;background:var(--border2)"></div>
-          <div class="sp-filter-label">Horizon</div>
-          <div class="sp-chip green active" id="sp-horizon-rom"  onclick="spDispatch({forecastHorizon:'ROM'})">ROM</div>
-          <div class="sp-chip"             id="sp-horizon-n3m"   onclick="spDispatch({forecastHorizon:'N3M'})">N3M</div>
-          <div class="sp-chip"             id="sp-horizon-roy"   onclick="spDispatch({forecastHorizon:'ROY'})">ROY</div>
+          <div class="sp-filter-label">Quick</div>
+          <div class="sp-chip" id="sp-quick-mtd"  onclick="spSetQuickDate('MTD')">MTD</div>
+          <div class="sp-chip" id="sp-quick-ytd"  onclick="spSetQuickDate('YTD')">YTD</div>
+          <div class="sp-chip" id="sp-quick-r12m" onclick="spSetQuickDate('R12M')">R12M</div>
           <button class="sp-upload-btn" onclick="document.getElementById('sp-file-input').click()">↑ Load Actuals</button>
           <button class="sp-upload-btn" style="border-color:var(--green);color:var(--green)" onclick="dsAutoRefreshAll();statMsg('Refreshing data sources…')">↻ Refresh</button>
           <input type="file" id="sp-file-input" accept=".xlsx,.xls" style="display:none" onchange="spHandleFile(this)">
@@ -1057,40 +1061,25 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
             </div>
             <!-- Legend -->
             <div class="sp-tbl-legend">
-              <div class="sp-tbl-leg-item"><div class="sp-pill sp-pill-sel" style="cursor:default;pointer-events:none">10d</div>Rep primary</div>
-              <div class="sp-tbl-leg-item"><div class="sp-pill sp-pill-inh" style="cursor:default;pointer-events:none">10d</div>Inherited</div>
-              <div class="sp-tbl-leg-item"><div class="sp-pill sp-pill-ovr" style="cursor:default;pointer-events:none">15d</div>Customer override</div>
-              <div class="sp-tbl-leg-item"><div class="sp-pill sp-pill-cust" style="cursor:default;pointer-events:none">cust</div>Custom (proportional)</div>
+              <div class="sp-tbl-leg-item"><div class="sp-tbl-leg-swatch" style="background:rgba(0,255,157,.12);border-color:rgba(0,255,157,.4);color:var(--green)">A</div>Actual (from Excel)</div>
+              <div class="sp-tbl-leg-item"><div class="sp-tbl-leg-swatch" style="background:rgba(255,184,48,.08);border-color:rgba(255,184,48,.3);color:var(--amber)">F</div>Forecast (from builder)</div>
+              <div class="sp-tbl-leg-item"><div class="sp-tbl-leg-swatch" style="background:rgba(255,61,90,.12);border-color:rgba(255,61,90,.5);color:var(--red)">T</div>Today</div>
+              <div class="sp-tbl-leg-item" style="margin-left:8px;color:var(--amber)">⚙ = Forecast Builder on row</div>
             </div>
             <div class="sp-tbl-wrap">
               <table class="sp-tbl" id="sp-table">
-                <thead>
-                  <tr style="border-bottom:1px solid var(--border2)">
-                    <th class="th-lbl" style="vertical-align:bottom;padding-bottom:8px;border-right:2px solid var(--border2);font-size:8px">Rep / Sold To / Ship To / Product</th>
-                    <th colspan="3" style="background:rgba(100,200,100,.08);color:var(--green);font-size:7px;letter-spacing:1px;text-align:center;border-bottom:1px solid var(--border2);border-right:2px solid var(--border2)">PERFORMANCE</th>
-                    <!-- Dynamic forecast section headers inserted by spRenderTable() -->
-                  </tr>
-                  <tr>
-                    <th style="border-right:2px solid var(--border2)"></th>
-                    <th title="Month To Date" style="font-size:7px;background:rgba(100,200,100,.08);border-right:1px solid var(--border2)">MTD</th>
-                    <th title="Year To Date" style="font-size:7px;background:rgba(100,200,100,.08);border-right:1px solid var(--border2)">YTD</th>
-                    <th title="Same Period Last Year" style="font-size:7px;background:rgba(100,200,100,.08);border-right:2px solid var(--border2)">SPLY</th>
-                    <!-- Dynamic forecast column headers (10D/15D/30D + dates) inserted by spRenderTable() -->
-                  </tr>
-                </thead>
+                <thead id="sp-thead"></thead>
                 <tbody id="sp-tbody"></tbody>
               </table>
             </div>
             <!-- Commit footer -->
             <div class="sp-tbl-footer">
-              <span class="sp-tbl-footer-scope" id="sp-fc-scope">Portfolio total</span>
+              <span class="sp-tbl-footer-scope" id="sp-fc-scope">Period total</span>
               <div class="sp-tbl-footer-sep"></div>
-              <span class="sp-tbl-footer-lbl">RoM</span><span class="sp-tbl-footer-val" id="sp-fc-rom">—</span>
+              <span class="sp-tbl-footer-lbl">Actuals</span><span class="sp-tbl-footer-val sp-cell-g" id="sp-fc-actuals">—</span>
               <div class="sp-tbl-footer-sep"></div>
-              <span class="sp-tbl-footer-lbl">N3M</span><span class="sp-tbl-footer-val" id="sp-fc-n3m">—</span>
-              <div class="sp-tbl-footer-sep"></div>
-              <span class="sp-tbl-footer-lbl">RoY</span><span class="sp-tbl-footer-val" id="sp-fc-roy">—</span>
-              <button class="sp-commit-btn" id="sp-commit-btn" onclick="spCommit()" disabled style="margin-left:auto;opacity:.4">Commit →</button>
+              <span class="sp-tbl-footer-lbl">Forecast</span><span class="sp-tbl-footer-val" id="sp-fc-forecast">—</span>
+              <button class="sp-commit-btn" id="sp-commit-btn" onclick="spSaveForecast()" style="margin-left:auto">↓ Save Forecast</button>
             </div>
           </div>
         </div><!-- /sp-content -->
@@ -10434,9 +10423,9 @@ const SP = {
   _prodOptions: [],
   _userExpanded: {},  // tracks keys the user has explicitly expanded
   fcRepSel:{}, fcCustSel:{}, fcCustomVal:{}, fcShowInp:{},
-  basisByRow: {},  // hierarchical: rKey → sKey → stKey → basis, e.g., {rKey: {sKey: {stKey: 'all10d'}}}
-  defaultBasis: 'all10d',  // system default basis (all10d, all15d, all30d)
-  forecastHorizon: 'ROM',  // ROM, N3M, or ROY
+  basisByRow: {},
+  defaultBasis: 'all10d',
+  collapsedMonths: null,  // Set of YYYY-MM strings; null = auto-initialised on first render
 };
 
 // ── REQUIRED COLUMNS ─────────────────────────────────
@@ -10504,20 +10493,6 @@ function renderSalesPerfView(){
 // Called whenever a filter changes — the unidirectional pipeline entry point.
 // Order: origin → rep → customer → render dropdowns → filter rows → chart + table
 function spDispatch(changes){
-  // Handle forecastHorizon separately (not part of SP.f)
-  if('forecastHorizon' in changes){
-    SP.forecastHorizon = changes.forecastHorizon;
-    // Update active chip UI
-    ['rom','n3m','roy'].forEach(h => {
-      const el = document.getElementById(`sp-horizon-${h}`);
-      if(el) el.classList.toggle('active', h.toUpperCase() === SP.forecastHorizon);
-      if(el) el.classList.toggle('green', h.toUpperCase() === SP.forecastHorizon);
-    });
-    // Rebuild table with new horizon
-    spApplyFilters();
-    return;
-  }
-
   Object.assign(SP.f, changes);
 
   // Cascade: narrower selections reset when a broader filter changes
@@ -10892,14 +10867,281 @@ function _spClearLegend(){
 // ══════════════════════════════════════════════════════
 // PERFORMANCE TABLE
 // ══════════════════════════════════════════════════════
-// ── Helper: extract "Sold To" from ship_to_name by taking everything before location ──
+// ══════════════════════════════════════════════════════
+// PERFORMANCE TABLE — Date-spine with Org Hierarchy
+// ══════════════════════════════════════════════════════
+
+// ── Extract Sold-To name from Ship-To name ────────────
 function spExtractSoldTo(shipToName){
   if(!shipToName) return '—';
-  const parts = shipToName.split(' - ');
-  return parts[0].trim();
+  return shipToName.split(' - ')[0].trim();
 }
 
-// ── Helper: get remaining days in current month ──
+// ── Quick date range buttons ──────────────────────────
+function spSetQuickDate(mode){
+  const today=new Date().toISOString().split('T')[0];
+  const [y,m]=today.split('-');
+  let from, to;
+  if(mode==='MTD')      { from=`${y}-${m}-01`; to=new Date(+y,+m,0).toISOString().split('T')[0]; }
+  else if(mode==='YTD') { from=`${y}-01-01`; to=`${y}-12-31`; }
+  else if(mode==='R12M'){ const d=new Date(today+'T00:00:00'); d.setFullYear(d.getFullYear()-1); from=d.toISOString().split('T')[0]; to=today; }
+  else return;
+  const df=document.getElementById('sp-date-from'), dt=document.getElementById('sp-date-to');
+  if(df) df.value=from; if(dt) dt.value=to;
+  ['mtd','ytd','r12m'].forEach(k=>{
+    const el=document.getElementById(`sp-quick-${k}`);
+    if(el){ el.classList.toggle('active',k===mode.toLowerCase()); el.classList.toggle('green',k===mode.toLowerCase()); }
+  });
+  // Reset collapsed months so new range initialises fresh
+  SP.collapsedMonths=null;
+  spDispatch({dateFrom:from,dateTo:to});
+}
+
+// ── Toggle a month column between collapsed/expanded ──
+function spToggleMonth(ym){
+  if(!SP.collapsedMonths) SP.collapsedMonths=new Set();
+  if(SP.collapsedMonths.has(ym)) SP.collapsedMonths.delete(ym);
+  else SP.collapsedMonths.add(ym);
+  spRenderTable();
+}
+
+// ── Build date spine from current filter range ────────
+function spBuildDateSpine(){
+  const today=new Date().toISOString().split('T')[0];
+  const curYm=today.slice(0,7);
+  const from=SP.f.dateFrom||`${today.slice(0,4)}-01-01`;
+  const to  =SP.f.dateTo  ||`${today.slice(0,4)}-12-31`;
+  const months=[];
+  for(let d=new Date(from+'T00:00:00'); d.toISOString().split('T')[0]<=to; d.setDate(d.getDate()+1)){
+    const ds=d.toISOString().split('T')[0], ym=ds.slice(0,7);
+    let mo=months.find(m=>m.ym===ym);
+    if(!mo){ mo={ym,label:new Date(ds+'T00:00:00').toLocaleDateString('en',{month:'short',year:'2-digit'}),dates:[],isPast:ym<curYm,isCurrent:ym===curYm}; months.push(mo); }
+    mo.dates.push(ds);
+  }
+  if(!SP.collapsedMonths){
+    SP.collapsedMonths=new Set(months.filter(m=>m.isPast).map(m=>m.ym));
+  }
+  return {months,today};
+}
+
+// ── Build org hierarchy tree from filtered rows ───────
+function spBuildOrgTree(rows){
+  const facMap=Object.fromEntries(DB.facilities.map(f=>[f.id,f]));
+  const subMap=Object.fromEntries(DB.sub_regions.map(s=>[s.id,s]));
+  const regMap=Object.fromEntries(DB.regions.map(r=>[r.id,r]));
+  const origFacIdx={};
+  DB.facilities.forEach(f=>{
+    const n=(f.name||'').toUpperCase(); if(n) origFacIdx[n]=f.id;
+    const c=(f.code||'').toUpperCase(); if(c) origFacIdx[c]=f.id;
+  });
+  const getFacId=orig=>{
+    const up=(orig||'').toUpperCase();
+    return origFacIdx[up]||DB.facilities.find(f=>up.includes((f.name||'').toUpperCase())||(f.name||'').toUpperCase().includes(up))?.id||null;
+  };
+  const dpEls=(DB.elements||[]).filter(e=>e.type==='demand_point');
+  const dpNameIdx={};
+  dpEls.forEach(el=>{
+    const k=(el.name||'').trim().toUpperCase(); if(k) dpNameIdx[k]=el;
+    const c=(el.props?.dp_code||'').trim().toUpperCase(); if(c) dpNameIdx[c]=el;
+  });
+  const getDpEl=prod=>dpNameIdx[(prod||'').trim().toUpperCase()]||null;
+  const tree={};
+  rows.forEach(r=>{
+    const facId=getFacId(r.origin), fac=facId?facMap[facId]:null;
+    const sub=fac?subMap[fac.sub_region_id]:null, reg=sub?regMap[sub.region_id]:null;
+    const dpEl=getDpEl(r.product);
+    const regId =reg ?reg.id  :'__noreg';
+    const subId =sub ?sub.id  :`__nosub_${regId}`;
+    const facKey=fac ?fac.id  :`__nofac_${(r.origin||'').replace(/\W/g,'_')}`;
+    const dpKey =dpEl?dpEl.id :`__nodp_${(r.product||'').replace(/\W/g,'_')}`;
+    const soldTo=spExtractSoldTo(r.ship_to_name||'—'), shipTo=r.ship_to_name||'—';
+    if(!tree[regId]) tree[regId]={id:regId,name:reg?reg.name:'Unknown Region',rows:[],subs:{}};
+    tree[regId].rows.push(r);
+    if(!tree[regId].subs[subId]) tree[regId].subs[subId]={id:subId,name:sub?sub.name:r.origin||'Unknown',rows:[],facs:{}};
+    tree[regId].subs[subId].rows.push(r);
+    if(!tree[regId].subs[subId].facs[facKey]) tree[regId].subs[subId].facs[facKey]={id:facKey,name:fac?fac.name:r.origin||'Unknown Plant',rows:[],dps:{}};
+    tree[regId].subs[subId].facs[facKey].rows.push(r);
+    if(!tree[regId].subs[subId].facs[facKey].dps[dpKey]) tree[regId].subs[subId].facs[facKey].dps[dpKey]={id:dpKey,name:dpEl?dpEl.name:r.product||'Unknown DP',dpElId:dpEl?.id||null,rows:[],soldtos:{}};
+    tree[regId].subs[subId].facs[facKey].dps[dpKey].rows.push(r);
+    if(!tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo]) tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo]={name:soldTo,rows:[],shiptos:{}};
+    tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo].rows.push(r);
+    if(!tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo].shiptos[shipTo]) tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo].shiptos[shipTo]={name:shipTo,rows:[]};
+    tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo].shiptos[shipTo].rows.push(r);
+  });
+  return tree;
+}
+
+// ── Demand values index for O(1) lookups ─────────────
+function spBuildDemandIndex(){
+  const idx={};
+  (DB.demand_values||[]).forEach(v=>{ if(v.element_id&&v.date) idx[`${v.element_id}|${v.date}`]=v; });
+  return idx;
+}
+
+// ── Forecast value for one demand point + date ────────
+function spGetFcVal(dpElId, date, demIdx){
+  if(!dpElId) return 0;
+  const rec=demIdx[`${dpElId}|${date}`];
+  return rec?parseFloat(rec.value_t)||0:0;
+}
+
+// ── Collect demand_point element IDs from a row set ──
+function spGetDpElIds(rows){
+  const dpEls=(DB.elements||[]).filter(e=>e.type==='demand_point');
+  const dpMap={};
+  dpEls.forEach(el=>{ const k=(el.name||'').trim().toUpperCase(); if(k) dpMap[k]=el.id; const c=(el.props?.dp_code||'').trim().toUpperCase(); if(c) dpMap[c]=el.id; });
+  const ids=new Set();
+  rows.forEach(r=>{ const id=dpMap[(r.product||'').trim().toUpperCase()]; if(id) ids.add(id); });
+  return [...ids];
+}
+
+// ── Main table render ──────────────────────────────────
+function spRenderTable(){
+  const tbody=document.getElementById('sp-tbody'); if(!tbody) return;
+  const rows=SP.filteredRows;
+  if(!rows.length){ tbody.innerHTML=`<tr><td colspan="10" class="sp-no-data">No data for current filters</td></tr>`; return; }
+  const {months,today}=spBuildDateSpine();
+  const demIdx=spBuildDemandIndex();
+  const orgTree=spBuildOrgTree(rows);
+  if(!SP.collapsed) SP.collapsed={};
+
+  // ── Rebuild thead dynamically ──
+  const thead=document.getElementById('sp-thead');
+  if(thead){
+    let h1='',h2='';
+    months.forEach(mo=>{
+      const col=SP.collapsedMonths.has(mo.ym);
+      const span=col?1:mo.dates.length+1;
+      const bg=mo.isPast?'rgba(0,255,157,.06)':mo.isCurrent?'rgba(77,166,255,.06)':'rgba(255,184,48,.04)';
+      const tc=mo.isPast?'var(--green)':mo.isCurrent?'var(--blue)':'var(--amber)';
+      h1+=`<th colspan="${span}" style="background:${bg};color:${tc};font-size:7px;text-align:center;cursor:pointer;letter-spacing:.5px;border-left:1px solid var(--border2);padding:3px 4px" onclick="spToggleMonth('${mo.ym}')">${col?'▸':'▾'} ${mo.label}</th>`;
+      if(col){
+        h2+=`<th style="background:${bg};font-size:6px;text-align:center;border-left:1px solid var(--border2);padding:2px 4px">Σ</th>`;
+      } else {
+        mo.dates.forEach(ds=>{
+          const isToday=ds===today;
+          const bg2=ds<today?'rgba(0,255,157,.03)':isToday?'rgba(255,61,90,.06)':'';
+          const bd=isToday?'border-left:2px solid rgba(255,61,90,.4)':'border-left:1px solid var(--border)';
+          const dow=['S','M','T','W','T','F','S'][new Date(ds+'T00:00:00').getDay()];
+          h2+=`<th style="${bg2?'background:'+bg2+';':''}${bd};font-size:5px;padding:2px 1px;text-align:center;min-width:20px" title="${ds}">${ds.slice(8)}<br><span style="opacity:.5">${dow}</span></th>`;
+        });
+        h2+=`<th style="background:${bg};font-size:6px;text-align:center;font-weight:700;border-left:2px solid var(--border2);padding:2px 4px">Σ</th>`;
+      }
+    });
+    thead.innerHTML=`<tr>
+      <th class="th-lbl" style="vertical-align:bottom;padding-bottom:8px;border-right:2px solid var(--border2);font-size:8px" rowspan="2">Region / Sub-Region / Plant / Demand Point / Sold To / Ship To</th>
+      ${h1}
+    </tr><tr>${h2}</tr>`;
+  }
+
+  // ── Per-row date cell renderer ──
+  function renderCells(nodeRows, dpElId, dpElIds){
+    // Build actuals map for O(1) lookup
+    const actMap={};
+    nodeRows.forEach(r=>{ if(r.date) actMap[r.date]=(actMap[r.date]||0)+(r.volume||0); });
+    let cells='';
+    months.forEach(mo=>{
+      const col=SP.collapsedMonths.has(mo.ym);
+      const bgBase=mo.isPast?'rgba(0,255,157,.03)':'';
+      if(col){
+        let moSum=0;
+        mo.dates.forEach(ds=>{
+          moSum+=actMap[ds]||0;
+          if(ds>today){
+            if(dpElId) moSum+=spGetFcVal(dpElId,ds,demIdx);
+            else if(dpElIds) dpElIds.forEach(id=>{ moSum+=spGetFcVal(id,ds,demIdx); });
+          }
+        });
+        cells+=`<td style="text-align:right;padding:1px 4px;font-size:7px;${bgBase?'background:'+bgBase+';':''}border-left:1px solid var(--border2)">${moSum?Math.round(moSum).toLocaleString():'—'}</td>`;
+      } else {
+        let moSum=0;
+        mo.dates.forEach(ds=>{
+          const isToday=ds===today;
+          let val=0, bgCell='';
+          if(ds<=today){ val=actMap[ds]||0; bgCell='rgba(0,255,157,.04)'; }
+          else {
+            if(dpElId) val=spGetFcVal(dpElId,ds,demIdx);
+            else if(dpElIds) dpElIds.forEach(id=>{ val+=spGetFcVal(id,ds,demIdx); });
+          }
+          moSum+=val;
+          const bd=isToday?'border-left:2px solid rgba(255,61,90,.4)':'border-left:1px solid var(--border)';
+          cells+=`<td style="${bgCell?'background:'+bgCell+';':''}${bd};text-align:right;padding:1px 2px;font-size:7px">${val?Math.round(val).toLocaleString():''}</td>`;
+        });
+        cells+=`<td style="text-align:right;padding:1px 4px;font-size:7px;font-weight:700;${bgBase?'background:'+bgBase+';':''}border-left:2px solid var(--border2)">${moSum?Math.round(moSum).toLocaleString():'—'}</td>`;
+      }
+    });
+    return cells;
+  }
+
+  // ── Forecast builder button helper ────────────────
+  const fbBtn=(elIds,label)=>elIds&&elIds.length
+    ?`<button class="sp-fb-btn" onclick="event.stopPropagation();openSpForecastBuilder(${JSON.stringify(elIds)},${JSON.stringify(label)})" title="⚙ Forecast Builder">⚙</button>`
+    :'';
+
+  const sortObjs=obj=>Object.values(obj).sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+
+  // ── Render tree rows ──
+  let h='';
+  sortObjs(orgTree).forEach(reg=>{
+    const rKey='reg_'+reg.id.replace(/\W/g,'_'), rCol=!!SP.collapsed[rKey];
+    const rDpIds=spGetDpElIds(reg.rows);
+    h+=`<tr class="sp-row-l0" onclick="spToggle('${rKey}')" style="cursor:pointer">
+      <td class="td-lbl" style="border-right:2px solid var(--border2)">
+        <span class="sp-toggle">${rCol?'▸':'▾'}</span><strong>${reg.name}</strong>${fbBtn(rDpIds,reg.name)}
+      </td>${renderCells(reg.rows,null,rDpIds)}</tr>`;
+    if(rCol) return;
+
+    sortObjs(reg.subs).forEach(sub=>{
+      const sKey='sub_'+sub.id.replace(/\W/g,'_'), sCol=!!SP.collapsed[sKey];
+      const sDpIds=spGetDpElIds(sub.rows);
+      h+=`<tr class="sp-row-l1" onclick="spToggle('${sKey}')" style="cursor:pointer">
+        <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:18px">
+          <span class="sp-toggle">${sCol?'▸':'▾'}</span><strong>${sub.name}</strong>${fbBtn(sDpIds,sub.name)}
+        </td>${renderCells(sub.rows,null,sDpIds)}</tr>`;
+      if(sCol) return;
+
+      sortObjs(sub.facs).forEach(fac=>{
+        const fKey='fac_'+fac.id.replace(/\W/g,'_'), fCol=!!SP.collapsed[fKey];
+        const fDpIds=spGetDpElIds(fac.rows);
+        h+=`<tr class="sp-row-l2" onclick="spToggle('${fKey}')" style="cursor:pointer">
+          <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:30px">
+            <span class="sp-toggle">${fCol?'▸':'▾'}</span><strong>${fac.name}</strong>${fbBtn(fDpIds,fac.name)}
+          </td>${renderCells(fac.rows,null,fDpIds)}</tr>`;
+        if(fCol) return;
+
+        sortObjs(fac.dps).forEach(dp=>{
+          const dpKey='dp_'+dp.id.replace(/\W/g,'_'), dpCol=!!SP.collapsed[dpKey];
+          const dpElIds=dp.dpElId?[dp.dpElId]:[];
+          h+=`<tr class="sp-row-l3" onclick="spToggle('${dpKey}')" style="cursor:pointer">
+            <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:42px">
+              <span class="sp-toggle">${dpCol?'▸':'▾'}</span>${dp.name}${fbBtn(dpElIds,dp.name)}
+            </td>${renderCells(dp.rows,dp.dpElId,null)}</tr>`;
+          if(dpCol) return;
+
+          sortObjs(dp.soldtos).forEach(so=>{
+            const soKey='so_'+dpKey+'_'+so.name.replace(/\W/g,'_'), soCol=!!SP.collapsed[soKey];
+            h+=`<tr class="sp-row-l4" onclick="spToggle('${soKey}')" style="cursor:pointer">
+              <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:54px">
+                <span class="sp-toggle">${soCol?'▸':'▾'}</span>${so.name}
+              </td>${renderCells(so.rows,null,null)}</tr>`;
+            if(soCol) return;
+
+            sortObjs(so.shiptos).forEach(st=>{
+              h+=`<tr class="sp-row-l5">
+                <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:66px;font-size:7px">${st.name}</td>
+                ${renderCells(st.rows,null,null)}</tr>`;
+            });
+          });
+        });
+      });
+    });
+  });
+
+  if(!h) h=`<tr><td colspan="20" class="sp-no-data">No org hierarchy match — check that Origins in the Excel match facility names in your org structure</td></tr>`;
+  tbody.innerHTML=h;
+}
+
+// ── [old helpers removed — replaced by spBuildDateSpine / spBuildOrgTree] ──
 function spGetRestOfMonthDates(dateNow){
   const [y,m,d] = dateNow.split('-');
   const current = new Date(y, parseInt(m)-1, parseInt(d));
@@ -11107,7 +11349,7 @@ function spRenderDailyColumns(dailyValues, dates, rowKey, isEditable){
   }).join('');
 }
 
-function spRenderTable(){
+function _spRenderTable_legacy(){
   const tbody=document.getElementById('sp-tbody'); if(!tbody) return;
   const rows=SP.filteredRows;
   if(!rows.length){ tbody.innerHTML=`<tr><td colspan="20" class="sp-no-data">No data for current filters</td></tr>`; return; }
@@ -11547,11 +11789,123 @@ function spExpandAll(expand){
   SP.collapsed={};
   SP._userExpanded={};
   if(!expand){
-    // Collapse all rep rows back to default
-    const reps=[...new Set(SP.filteredRows.map(r=>r.sales_manager||'—'))];
-    reps.forEach(rep=>{ SP.collapsed[`rep_${rep.replace(/[^\w]/g,'_')}`]=true; });
+    // Collapse all region rows back to default
+    const orgTree=spBuildOrgTree(SP.filteredRows);
+    Object.keys(orgTree).forEach(k=>{ SP.collapsed['reg_'+k.replace(/\W/g,'_')]=true; });
   }
   spRenderTable();
+}
+
+// ── Forecast Builder from SP context ─────────────────
+function openSpForecastBuilder(dpElIds, label){
+  if(!dpElIds||!dpElIds.length){ statMsg('No demand points linked to this node — check org structure matches Origins in the Excel'); return; }
+  if(dpElIds.length===1){ openDemandBuilder(dpElIds[0]); return; }
+
+  // Multiple demand points: show adapted multi-target modal
+  const simStart=S.simCfg.start_date||new Date().toISOString().split('T')[0];
+  const nwdCount=(DB.non_working_days||[]).length;
+  const dpEls=dpElIds.map(id=>(DB.elements||[]).find(e=>e.id===id)).filter(Boolean);
+  const pi='background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:10px;padding:5px 7px;outline:none;width:100%';
+  const pl='font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-bottom:3px;letter-spacing:.5px;text-transform:uppercase';
+  const pf='display:flex;flex-direction:column;gap:0';
+
+  let h=`<div class="modal-hdr">
+    <div>
+      <span class="modal-title">⚙ Forecast Builder — ${label||'Selected Node'}</span>
+      <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-top:3px">Applies to ${dpEls.length} demand point${dpEls.length>1?'s':''} · values permeate to demand and simulation</div>
+    </div>
+    <span class="modal-close" onclick="closeModal()">✕</span>
+  </div>
+  <div style="padding:16px;display:flex;flex-direction:column;gap:14px">
+    <div style="${pf}">
+      <div style="${pl}">Apply To</div>
+      <select style="${pi}" id="fb-el-id">
+        <option value="__ALL__">All ${dpEls.length} demand points under "${label||'node'}"</option>
+        ${dpEls.map(e=>`<option value="${e.id}">${e.name}</option>`).join('')}
+      </select>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div style="${pf}"><div style="${pl}">Start Date</div>
+        <input style="${pi}" type="date" id="fb-start" value="${simStart}">
+      </div>
+      <div style="${pf}"><div style="${pl}">Method</div>
+        <select style="${pi}" id="fb-method" onchange="_fbSyncMethod()">
+          <option value="rolling">Rolling weekday average</option>
+          <option value="fixed">Fixed daily value</option>
+          <option value="distribute">Distribute monthly total</option>
+        </select>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div id="fb-wrap-rolling" style="${pf}"><div style="${pl}">Rolling Window</div>
+        <select style="${pi}" id="fb-rolling-n">
+          <option value="5">5 weekdays</option><option value="10" selected>10 weekdays</option>
+          <option value="20">20 weekdays</option><option value="30">30 weekdays</option>
+        </select>
+      </div>
+      <div id="fb-wrap-fixed" style="${pf};display:none"><div style="${pl}">Fixed Daily (t/day)</div>
+        <input style="${pi}" type="number" step="1" id="fb-fixed-val" value="0" placeholder="0">
+      </div>
+      <div id="fb-wrap-month" style="${pf};display:none"><div style="${pl}">Month Total Target (t)</div>
+        <input style="${pi}" type="number" step="1" id="fb-month-total" value="0" placeholder="0">
+      </div>
+      <div id="fb-wrap-horizon" style="${pf}"><div style="${pl}">Horizon</div>
+        <select style="${pi}" id="fb-horizon" onchange="_fbSyncHorizon()">
+          <option value="eom">End of month</option><option value="eoy" selected>End of year</option>
+          <option value="sim">End of simulation</option><option value="date">Specific date</option>
+        </select>
+      </div>
+    </div>
+    <div id="fb-wrap-enddate" style="${pf};display:none">
+      <div style="${pl}">End Date</div>
+      <input style="${pi}" type="date" id="fb-end-date" value="${simStart}">
+    </div>
+    <label style="display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:10px;color:var(--text);cursor:pointer">
+      <input type="checkbox" id="fb-ships-sat" checked>Ships Saturdays
+    </label>
+    <div id="fb-wrap-sat-pct" style="${pf}">
+      <div style="${pl}">Saturday volume (% of weekday avg)</div>
+      <input style="${pi}" type="number" id="fb-sat-pct" value="25" min="0" max="100">
+    </div>
+    <div id="fb-msg" style="font-family:var(--mono);font-size:9px;color:var(--text-dim);padding:8px 10px;background:var(--surface2);border:1px solid var(--border2);min-height:32px"></div>
+    <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">⊘ ${nwdCount} global non-working day${nwdCount!==1?'s':''} excluded from all calculations</div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="tb-btn sec" onclick="closeModal()">Cancel</button>
+      <button class="tb-btn sec" onclick="_fbPreview()">Preview</button>
+      <button class="tb-btn amber" onclick="_spFbApplyMulti(${JSON.stringify(dpElIds)})">⚡ Apply Forecast</button>
+    </div>
+  </div>`;
+  showModal('_custom');
+  document.getElementById('modal-content').innerHTML=h;
+  _fbSyncMethod();
+}
+
+function _spFbApplyMulti(dpElIds){
+  const sel=document.getElementById('fb-el-id')?.value;
+  const targets=sel==='__ALL__'?dpElIds:[sel];
+  const selEl=document.getElementById('fb-el-id');
+  if(!DB.demand_values) DB.demand_values=[];
+  let totalDays=0, totalT=0;
+  targets.forEach(elId=>{
+    if(selEl) selEl.value=elId;
+    const result=_fbBuildRows(); if(!result) return;
+    const {rows,elId:eid}=result;
+    rows.forEach(r=>{
+      DB.demand_values=DB.demand_values.filter(x=>!(x.element_id===eid&&x.date===r.date));
+      if(r.value>0){ DB.demand_values.push({element_id:eid,date:r.date,value_t:Math.round(r.value*10)/10}); totalDays++; totalT+=r.value; }
+    });
+  });
+  autoSave(); _demandCacheInvalidate();
+  document.getElementById('fb-msg').innerHTML=`<span style="color:var(--green)">✓ Applied to ${targets.length} demand point${targets.length>1?'s':''}</span> — ${totalDays} days · ${Math.round(totalT).toLocaleString()} t total`;
+  renderSalesPerfView();
+  if(S.view==='demand') renderDemandView();
+}
+
+function spSaveForecast(){
+  autoSave();
+  statMsg('Forecast saved — demand values written to all connected tables');
+  renderSalesPerfView();
+  if(S.view==='demand') renderDemandView();
 }
 
 // ── SCOPE SELECTION ──────────────────────────────────
@@ -11840,82 +12194,21 @@ function spFcResolvedVal(stats,custKey,repKey,hz){ return spFcResolve(stats,cust
 // ── Footer ────────────────────────────────────────────
 function spFcUpdateFooter(){
   const today=new Date().toISOString().split('T')[0];
-  const isWkday=ds=>{ const d=new Date(ds+'T12:00:00').getDay(); return d!==0&&d!==6; };
-
-  const calcStats=arr=>{
-    const wk=arr.filter(r=>isWkday(r.date));
-    const byDate={}; wk.forEach(r=>{byDate[r.date]=(byDate[r.date]||0)+r.volume;});
-    const vals=Object.values(byDate);
-    if(!vals.length) return{hist:0,d10:0,d15:0,d30:0};
-    const hist=Math.round(vals.reduce((a,b)=>a+b,0)/vals.length);
-    const sorted=[...new Set(wk.map(r=>r.date))].sort();
-    const v10=sorted.slice(-10).map(d=>byDate[d]||0);
-    const d10=v10.length?Math.round(v10.reduce((a,b)=>a+b,0)/v10.length):0;
-    const d15cut=new Date(today); d15cut.setDate(d15cut.getDate()-15);
-    const d15s=d15cut.toISOString().split('T')[0];
-    const v15o=wk.filter(r=>r.date>=d15s).reduce((m,r)=>{m[r.date]=(m[r.date]||0)+r.volume;return m;},{});
-    const d15=Object.values(v15o).length?Math.round(Object.values(v15o).reduce((a,b)=>a+b,0)/Object.values(v15o).length):0;
-    const v30=sorted.slice(-30).map(d=>byDate[d]||0);
-    const d30=v30.length?Math.round(v30.reduce((a,b)=>a+b,0)/v30.length):0;
-    return{hist,d10,d15,d30};
-  };
-
-  // Build repTree from filteredRows
-  const repTree={};
-  SP.filteredRows.forEach(r=>{
-    const rep=r.sales_manager||'—';
-    const cust=r.ship_to_name||String(r.ship_to||'Unknown');
-    const rKey='rep_'+rep.replace(/[^\w]/g,'_');
-    const cKey='cust_'+rKey+'_'+cust.replace(/[^\w]/g,'_');
-    if(!repTree[rKey]) repTree[rKey]={rows:[],custs:{}};
-    repTree[rKey].rows.push(r);
-    if(!repTree[rKey].custs[cKey]) repTree[rKey].custs[cKey]=[];
-    repTree[rKey].custs[cKey].push(r);
-  });
-
-  // Determine scope
-  let custRows=[], scopeLabel='Portfolio total';
-  if(SP.selScope){
-    const sk=SP.selScope.key, st=SP.selScope.type;
-    scopeLabel=SP.selScope.label;
-    if(st==='rep'){
-      const rd=repTree[sk];
-      if(rd) Object.keys(rd.custs).forEach(ck=>custRows.push({custKey:ck,repKey:sk,arr:rd.custs[ck],repTree}));
-    } else if(st==='customer'){
-      Object.keys(repTree).forEach(rk=>{
-        if(repTree[rk].custs[sk]) custRows.push({custKey:sk,repKey:rk,arr:repTree[rk].custs[sk],repTree});
-      });
-    }
-  } else {
-    Object.keys(repTree).forEach(rk=>{
-      Object.keys(repTree[rk].custs).forEach(ck=>{
-        custRows.push({custKey:ck,repKey:rk,arr:repTree[rk].custs[ck],repTree});
-      });
-    });
+  const df=SP.f.dateFrom||`${today.slice(0,4)}-01-01`;
+  const dt=SP.f.dateTo  ||`${today.slice(0,4)}-12-31`;
+  const actualsTotal=SP.filteredRows.filter(r=>r.date>=df&&r.date<=dt&&r.date<=today).reduce((s,r)=>s+(r.volume||0),0);
+  const dpElIds=spGetDpElIds(SP.filteredRows);
+  const demIdx=spBuildDemandIndex();
+  let fcTotal=0;
+  const fcStart=new Date(Math.max(new Date(today+'T00:00:00').getTime()+864e5, new Date(df+'T00:00:00').getTime()));
+  for(let d=new Date(fcStart); d.toISOString().split('T')[0]<=dt; d.setDate(d.getDate()+1)){
+    const ds=d.toISOString().split('T')[0];
+    dpElIds.forEach(id=>{ fcTotal+=spGetFcVal(id,ds,demIdx); });
   }
-
-  let romT=0,n3mT=0,royT=0,any=false;
-  custRows.forEach(({custKey,repKey,arr,repTree:rt})=>{
-    const stats=calcStats(arr);
-    const repCusts=rt[repKey]?Object.keys(rt[repKey].custs).map(k=>({key:k,stats:calcStats(rt[repKey].custs[k])})):[];
-    ['rom','n3m','roy'].forEach(hz=>{
-      const rv=spFcResolve(stats,custKey,repKey,hz,repCusts);
-      if(rv!==null){
-        if(hz==='rom') romT+=rv;
-        if(hz==='n3m') n3mT+=rv;
-        if(hz==='roy') royT+=rv;
-        any=true;
-      }
-    });
-  });
-
   const el=id=>document.getElementById(id);
-  if(el('sp-fc-scope')) el('sp-fc-scope').textContent=scopeLabel;
-  if(el('sp-fc-rom'))   el('sp-fc-rom').textContent=romT?romT.toLocaleString()+' t/wkday':'—';
-  if(el('sp-fc-n3m'))   el('sp-fc-n3m').textContent=n3mT?n3mT.toLocaleString()+' t/wkday':'—';
-  if(el('sp-fc-roy'))   el('sp-fc-roy').textContent=royT?royT.toLocaleString()+' t/wkday':'—';
-  const btn=el('sp-commit-btn');
-  if(btn){ btn.disabled=!any; btn.style.opacity=any?'1':'0.4'; }
+  if(el('sp-fc-scope'))    el('sp-fc-scope').textContent='Period total';
+  if(el('sp-fc-actuals'))  el('sp-fc-actuals').textContent=actualsTotal?Math.round(actualsTotal).toLocaleString()+' t':'—';
+  if(el('sp-fc-forecast')) el('sp-fc-forecast').textContent=fcTotal?Math.round(fcTotal).toLocaleString()+' t':'—';
 }
 
 function spCommit(){
