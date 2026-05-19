@@ -11371,13 +11371,12 @@ function spRenderTable(){
 
   // ── Per-row date cell renderer ──
   // shipTos: null=aggregated dp total | string[]=specific ship_to_names to sum
-  function renderCells(nodeRows, dpElId, dpElIds, shipTos, dpTotalRows){
+  function renderCells(nodeRows, dpElId, dpElIds, shipTos, dpHistVol){
     const actMap={};
     nodeRows.forEach(r=>{ if(r.date) actMap[r.date]=(actMap[r.date]||0)+(r.volume||0); });
-    // Pre-compute historical proportion for cascade fallback (child vol / dp total vol)
-    const nodeVol=nodeRows.reduce((s,r)=>s+(r.volume||0),0);
-    const dpVol=dpTotalRows?dpTotalRows.reduce((s,r)=>s+(r.volume||0),0)||1:1;
-    const cascadeProp=dpTotalRows&&dpVol>0?nodeVol/dpVol:0;
+    // Pre-compute cascade proportion from pre-computed dpHistVol (passed from DP level, not re-computed here)
+    const nodeVol=dpHistVol>0?nodeRows.reduce((s,r)=>s+(r.volume||0),0):0;
+    const cascadeProp=dpHistVol>0?nodeVol/dpHistVol:0;
     const getFc=(ds)=>{
       if(dpElId){
         if(shipTos&&shipTos.length){
@@ -11459,6 +11458,8 @@ function spRenderTable(){
         sortObjs(fac.dps).forEach(dp=>{
           const dpKey='dp_'+dp.id.replace(/\W/g,'_'), dpCol=!!SP.collapsed[dpKey];
           const dpElIds=dp.dpElId?[dp.dpElId]:[];
+          // Pre-compute once; passed to child rows to avoid re-reducing dp.rows N times
+          const dpHistVol=dp.rows.reduce((s,r)=>s+(r.volume||0),0)||1;
           h+=`<tr class="sp-row-l3" onclick="spToggle('${dpKey}')" style="cursor:pointer">
             <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:42px">
               <span class="sp-toggle">${dpCol?'▸':'▾'}</span>${dp.name}${fbBtn(dpElIds,dp.name)}
@@ -11471,13 +11472,13 @@ function spRenderTable(){
             h+=`<tr class="sp-row-l4" onclick="spToggle('${soKey}')" style="cursor:pointer">
               <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:54px">
                 <span class="sp-toggle">${soCol?'▸':'▾'}</span>${so.name}
-              </td>${renderCells(so.rows,dp.dpElId,null,soShipTos,dp.rows)}</tr>`;
+              </td>${renderCells(so.rows,dp.dpElId,null,soShipTos,dpHistVol)}</tr>`;
             if(soCol) return;
 
             sortObjs(so.shiptos).forEach(st=>{
               h+=`<tr class="sp-row-l5">
                 <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:66px;font-size:7px">${st.name}</td>
-                ${renderCells(st.rows,dp.dpElId,null,[st.name],dp.rows)}</tr>`;
+                ${renderCells(st.rows,dp.dpElId,null,[st.name],dpHistVol)}</tr>`;
             });
           });
         });
