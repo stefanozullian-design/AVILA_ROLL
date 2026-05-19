@@ -4323,10 +4323,22 @@ function _fbSyncActuals(){
 
 // Live computed preview — called on any input change
 function _fbLivePreview(){
-  const result=_fbBuildRows();
   const el=document.getElementById('fb-live-preview');
   if(!el) return;
-  if(!result){el.innerHTML='<span style="color:var(--text-dim)">Select a demand point to see computed values</span>';return;}
+  const elId=document.getElementById('fb-el-id')?.value||null;
+  const shipTo=document.getElementById('fb-f-shipto')?.value||null;
+
+  // Proportional preview: ship_to set, no DP
+  if(!elId && shipTo){
+    const split=_fbGetDpSplit(shipTo);
+    if(!split){el.innerHTML=`<span style="color:var(--amber)">No historical data for "${shipTo}" — select a specific Demand Point instead</span>`;return;}
+    const splitDesc=split.map(p=>`<strong>${p.name}</strong> ${Math.round(p.proportion*100)}%`).join(' · ');
+    el.innerHTML=`<span style="color:var(--text-dim)">Will distribute proportionally →</span> ${splitDesc}`;
+    return;
+  }
+
+  const result=_fbBuildRows();
+  if(!result){el.innerHTML='<span style="color:var(--text-dim)">Select a demand point or ship-to to see computed values</span>';return;}
   const {rows,msgs}=result;
   const active=rows.filter(r=>r.value>0);
   const total=active.reduce((s,r)=>s+r.value,0);
@@ -4400,11 +4412,29 @@ function _fbSyncHorizon(){
   document.getElementById('fb-wrap-enddate').style.display=h==='date'?'flex':'none';
 }
 
-function _fbBuildRows(){
-  const elId=document.getElementById('fb-el-id')?.value; if(!elId) return null;
+// Return proportional DP split for a ship_to customer based on historical actuals.
+// Returns [{elId, name, proportion}] or null if no data / single DP.
+function _fbGetDpSplit(shipTo){
+  if(!shipTo) return null;
+  const actRows=(DB.real_shipments_daily||[]).filter(r=>r.ship_to_name===shipTo);
+  if(!actRows.length) return null;
+  const volByProd={};
+  actRows.forEach(r=>{ volByProd[(r.product||'').trim().toUpperCase()]=(volByProd[(r.product||'').trim().toUpperCase()]||0)+(parseFloat(r.volume)||0); });
+  const allDpEls=(DB.elements||[]).filter(e=>e.type==='demand_point');
+  const dpNameIdx=Object.fromEntries(allDpEls.map(el=>[(el.name||'').trim().toUpperCase(),el]));
+  const parts=Object.entries(volByProd).map(([prod,vol])=>{const el=dpNameIdx[prod];return el?{elId:el.id,name:el.name,vol}:null;}).filter(Boolean);
+  if(!parts.length) return null;
+  const total=parts.reduce((s,p)=>s+p.vol,0)||1;
+  return parts.map(p=>({elId:p.elId,name:p.name,proportion:p.vol/total}));
+}
+
+function _fbBuildRows(elIdOverride){
+  const elId=elIdOverride||document.getElementById('fb-el-id')?.value||null;
   const start=document.getElementById('fb-start')?.value; if(!start) return null;
-  const method=document.getElementById('fb-method')?.value;
   const shipTo=document.getElementById('fb-f-shipto')?.value||null;
+  // Need at least a demand point OR a ship_to (proportional path handled by _fbApply)
+  if(!elId&&!shipTo) return null;
+  const method=document.getElementById('fb-method')?.value;
   const shipsSat=document.getElementById('fb-ships-sat')?.checked;
   const satPct=parseFloat(document.getElementById('fb-sat-pct')?.value)||25;
   const satCoef=satPct/100;
@@ -4501,28 +4531,56 @@ function _fbPreview(){
 }
 
 function _fbApply(){
-  const result=_fbBuildRows(); if(!result) return;
-  const {rows,msgs,elId,shipTo}=result;
   if(!DB.demand_values) DB.demand_values=[];
+  const elId=document.getElementById('fb-el-id')?.value||null;
+  const shipTo=document.getElementById('fb-f-shipto')?.value||null;
+
+  // ── Proportional path: ship_to chosen, no specific demand point ──
+  if(!elId && shipTo){
+    const split=_fbGetDpSplit(shipTo);
+    if(!split||!split.length){ document.getElementById('fb-msg').textContent='No historical data found for this customer — select a specific Demand Point.'; return; }
+    // Build rows using the customer total (no elId filter), then split by proportion
+    const baseResult=_fbBuildRows('__probe__');
+    if(!baseResult) return;
+    // Re-build using actuals totals for this customer across all DPs
+    const probeResult=_fbBuildRows(split[0].elId); // use first DP as seed for rolling avg computation
+    if(!probeResult) return;
+    const {rows,msgs}=probeResult;
+    let totalDays=0,totalT=0;
+    split.forEach(({elId:eid,name,proportion})=>{
+      rows.forEach(r=>{
+        const v=Math.round(r.value*proportion*10)/10;
+        DB.demand_values=DB.demand_values.filter(x=>!(x.element_id===eid&&x.date===r.date&&x.ship_to===shipTo));
+        DB.demand_values=DB.demand_values.filter(x=>!(x.element_id===eid&&x.date===r.date&&!x.ship_to));
+        if(v>0){ DB.demand_values.push({element_id:eid,date:r.date,value_t:v,ship_to:shipTo}); totalDays++; totalT+=v; }
+      });
+    });
+    autoSave(); _demandCacheInvalidate();
+    const splitDesc=split.map(p=>`${p.name} ${Math.round(p.proportion*100)}%`).join(', ');
+    document.getElementById('fb-msg').innerHTML=`<span style="color:var(--green)">✓ Distributed to ${split.length} demand point${split.length>1?'s':''}</span> (${splitDesc}) — ${Math.round(totalT).toLocaleString()} t`;
+    renderDemandView(); renderSalesPerfView();
+    return;
+  }
+
+  // ── Single demand point path ──
+  const result=_fbBuildRows(); if(!result) return;
+  const {rows,msgs,elId:eid,shipTo:st}=result;
   rows.forEach(r=>{
-    if(shipTo){
-      // Customer-level: remove matching ship_to record + any top-down null record for same date
-      DB.demand_values=DB.demand_values.filter(x=>!(x.element_id===elId&&x.date===r.date&&x.ship_to===shipTo));
-      DB.demand_values=DB.demand_values.filter(x=>!(x.element_id===elId&&x.date===r.date&&!x.ship_to));
-      if(r.value>0) DB.demand_values.push({element_id:elId,date:r.date,value_t:Math.round(r.value*10)/10,ship_to:shipTo});
+    if(st){
+      DB.demand_values=DB.demand_values.filter(x=>!(x.element_id===eid&&x.date===r.date&&x.ship_to===st));
+      DB.demand_values=DB.demand_values.filter(x=>!(x.element_id===eid&&x.date===r.date&&!x.ship_to));
+      if(r.value>0) DB.demand_values.push({element_id:eid,date:r.date,value_t:Math.round(r.value*10)/10,ship_to:st});
     } else {
-      // Top-down: wipe all records for this element+date (null and any ship_to)
-      DB.demand_values=DB.demand_values.filter(x=>!(x.element_id===elId&&x.date===r.date));
-      if(r.value>0) DB.demand_values.push({element_id:elId,date:r.date,value_t:Math.round(r.value*10)/10});
+      DB.demand_values=DB.demand_values.filter(x=>!(x.element_id===eid&&x.date===r.date));
+      if(r.value>0) DB.demand_values.push({element_id:eid,date:r.date,value_t:Math.round(r.value*10)/10});
     }
-    const inp=document.querySelector(`.dem-cell[data-el="${elId}"][data-date="${r.date}"]`);
+    const inp=document.querySelector(`.dem-cell[data-el="${eid}"][data-date="${r.date}"]`);
     if(inp) inp.value=r.value>0?Math.round(r.value*10)/10:'';
   });
-  autoSave();
-  _demandCacheInvalidate();
+  autoSave(); _demandCacheInvalidate();
   const active=rows.filter(r=>r.value>0);
   const total=Math.round(active.reduce((s,r)=>s+r.value,0));
-  const lbl=shipTo?` for <em>${shipTo}</em>`:'';
+  const lbl=st?` for <em>${st}</em>`:'';
   document.getElementById('fb-msg').innerHTML=`<span style="color:var(--green)">✓ Applied${lbl}</span> — ${[...msgs,`${active.length} days · ${total.toLocaleString()} t`].join(' · ')}`;
   renderDemandView();
 }
