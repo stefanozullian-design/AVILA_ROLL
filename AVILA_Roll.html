@@ -10740,6 +10740,8 @@ const SP = {
   defaultBasis: 'all10d',
   collapsedMonths: null,  // Set of YYYY-MM strings; null = auto-initialised on first render
   _demIdx: null,          // cached demand index; cleared by _demandCacheInvalidate
+  _tree:   null,          // cached org tree; cleared when filteredRows change
+  _spine:  null,          // cached date spine; cleared when date range changes
 };
 
 // ── REQUIRED COLUMNS ─────────────────────────────────
@@ -10952,6 +10954,10 @@ function spApplyFilters(){
     if(SP.f.product !== 'ALL' && (r.product||'')         !== SP.f.product)  return false;
     return true;
   });
+
+  // Filters changed — invalidate tree (depends on filteredRows) and spine (date range may differ)
+  SP._tree  = null;
+  SP._spine = null;
 
   // Scoped rows = filteredRows narrowed to selected table scope (if any)
   SP.scopedRows = SP.selScope ? spGetScopeRows(SP.filteredRows, SP.selScope) : SP.filteredRows;
@@ -11229,6 +11235,11 @@ function spBuildDateSpine(){
   const curYm=today.slice(0,7);
   const from=SP.f.dateFrom||`${today.slice(0,4)}-01-01`;
   const to  =SP.f.dateTo  ||`${today.slice(0,4)}-12-31`;
+  // Return cached spine if date range hasn't changed
+  if(SP._spine&&SP._spine.from===from&&SP._spine.to===to){
+    if(!SP.collapsedMonths) SP.collapsedMonths=new Set(SP._spine.months.filter(m=>m.isPast).map(m=>m.ym));
+    return {months:SP._spine.months,today};
+  }
   const months=[];
   for(let d=new Date(from+'T00:00:00'); d.toISOString().split('T')[0]<=to; d.setDate(d.getDate()+1)){
     const ds=d.toISOString().split('T')[0], ym=ds.slice(0,7);
@@ -11239,6 +11250,7 @@ function spBuildDateSpine(){
   if(!SP.collapsedMonths){
     SP.collapsedMonths=new Set(months.filter(m=>m.isPast).map(m=>m.ym));
   }
+  SP._spine={from,to,months};
   return {months,today};
 }
 
@@ -11263,8 +11275,16 @@ function spBuildOrgTree(rows){
     const c=(el.props?.dp_code||'').trim().toUpperCase(); if(c) dpNameIdx[c]=el;
   });
   const getDpEl=prod=>dpNameIdx[(prod||'').trim().toUpperCase()]||null;
-  // Inline actMap update: called once per row per node (single pass, no re-scan)
-  const upd=(node,r)=>{ if(r.date) node.actMap[r.date]=(node.actMap[r.date]||0)+(r.volume||0); node.histVol+=(r.volume||0); };
+  // 7-day activity cutoff relative to data max (not today, in case data lags)
+  const refDate=DB.real_shipments_meta?.date_max||new Date().toISOString().split('T')[0];
+  const cutoffD=new Date(refDate+'T00:00:00'); cutoffD.setDate(cutoffD.getDate()-7);
+  const cutoffStr=cutoffD.toISOString().split('T')[0];
+  // Inline actMap + recentVol update: single pass, no re-scan of rows later
+  const upd=(node,r)=>{
+    if(r.date) node.actMap[r.date]=(node.actMap[r.date]||0)+(r.volume||0);
+    node.histVol+=(r.volume||0);
+    if(r.date&&r.date>=cutoffStr) node.recentVol+=(r.volume||0);
+  };
   const tree={};
   rows.forEach(r=>{
     const facId=getFacId(r.origin), fac=facId?facMap[facId]:null;
@@ -11275,17 +11295,17 @@ function spBuildOrgTree(rows){
     const facKey=fac ?fac.id  :`__nofac_${(r.origin||'').replace(/\W/g,'_')}`;
     const dpKey =dpEl?dpEl.id :`__nodp_${(r.product||'').replace(/\W/g,'_')}`;
     const soldTo=spExtractSoldTo(r.ship_to_name||'—'), shipTo=r.ship_to_name||'—';
-    if(!tree[regId]) tree[regId]={id:regId,name:reg?reg.name:'Unknown Region',actMap:{},histVol:0,dpElIdSet:new Set(),subs:{}};
+    if(!tree[regId]) tree[regId]={id:regId,name:reg?reg.name:'Unknown Region',actMap:{},histVol:0,recentVol:0,dpElIdSet:new Set(),subs:{}};
     upd(tree[regId],r); if(dpEl) tree[regId].dpElIdSet.add(dpEl.id);
-    if(!tree[regId].subs[subId]) tree[regId].subs[subId]={id:subId,name:sub?sub.name:r.origin||'Unknown',actMap:{},histVol:0,dpElIdSet:new Set(),facs:{}};
+    if(!tree[regId].subs[subId]) tree[regId].subs[subId]={id:subId,name:sub?sub.name:r.origin||'Unknown',actMap:{},histVol:0,recentVol:0,dpElIdSet:new Set(),facs:{}};
     upd(tree[regId].subs[subId],r); if(dpEl) tree[regId].subs[subId].dpElIdSet.add(dpEl.id);
-    if(!tree[regId].subs[subId].facs[facKey]) tree[regId].subs[subId].facs[facKey]={id:facKey,name:fac?fac.name:r.origin||'Unknown Plant',actMap:{},histVol:0,dpElIdSet:new Set(),dps:{}};
+    if(!tree[regId].subs[subId].facs[facKey]) tree[regId].subs[subId].facs[facKey]={id:facKey,name:fac?fac.name:r.origin||'Unknown Plant',actMap:{},histVol:0,recentVol:0,dpElIdSet:new Set(),dps:{}};
     upd(tree[regId].subs[subId].facs[facKey],r); if(dpEl) tree[regId].subs[subId].facs[facKey].dpElIdSet.add(dpEl.id);
-    if(!tree[regId].subs[subId].facs[facKey].dps[dpKey]) tree[regId].subs[subId].facs[facKey].dps[dpKey]={id:dpKey,name:dpEl?dpEl.name:r.product||'Unknown DP',dpElId:dpEl?.id||null,actMap:{},histVol:0,soldtos:{}};
+    if(!tree[regId].subs[subId].facs[facKey].dps[dpKey]) tree[regId].subs[subId].facs[facKey].dps[dpKey]={id:dpKey,name:dpEl?dpEl.name:r.product||'Unknown DP',dpElId:dpEl?.id||null,actMap:{},histVol:0,recentVol:0,soldtos:{}};
     upd(tree[regId].subs[subId].facs[facKey].dps[dpKey],r);
-    if(!tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo]) tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo]={name:soldTo,actMap:{},histVol:0,shiptos:{}};
+    if(!tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo]) tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo]={name:soldTo,actMap:{},histVol:0,recentVol:0,shiptos:{}};
     upd(tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo],r);
-    if(!tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo].shiptos[shipTo]) tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo].shiptos[shipTo]={name:shipTo,actMap:{},histVol:0};
+    if(!tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo].shiptos[shipTo]) tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo].shiptos[shipTo]={name:shipTo,actMap:{},histVol:0,recentVol:0};
     upd(tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo].shiptos[shipTo],r);
   });
   // Convert per-node dpElIdSets → arrays for fbBtn and renderCells
@@ -11344,18 +11364,19 @@ function spGetDpElIds(rows){
 }
 
 // ── Main table render ──────────────────────────────────
-function spRenderTable(){
+function spRenderTable(skipThead=false){
   const tbody=document.getElementById('sp-tbody'); if(!tbody) return;
   const rows=SP.filteredRows;
   if(!rows.length){ tbody.innerHTML=`<tr><td colspan="10" class="sp-no-data">No data for current filters</td></tr>`; return; }
   const {months,today}=spBuildDateSpine();
   const demIdx=spBuildDemandIndex();
-  const orgTree=spBuildOrgTree(rows);
+  if(!SP._tree) SP._tree=spBuildOrgTree(rows);
+  const orgTree=SP._tree;
   if(!SP.collapsed) SP.collapsed={};
 
-  // ── Rebuild thead dynamically ──
+  // ── Rebuild thead dynamically (skipped on row-toggle since column structure is unchanged) ──
   const thead=document.getElementById('sp-thead');
-  if(thead){
+  if(thead&&!skipThead){
     let h1='',h2='';
     months.forEach(mo=>{
       const col=SP.collapsedMonths.has(mo.ym);
@@ -11383,11 +11404,15 @@ function spRenderTable(){
   }
 
   // ── Per-row date cell renderer ──
-  // actMap and histVol are pre-computed in spBuildOrgTree (single pass over rows).
+  // actMap/histVol/recentVol pre-computed in spBuildOrgTree (single O(N) pass).
+  // recentVol: volume in last 7 days — zero means inactive, cascade suppressed.
   // shipTos: null=aggregated dp total | string[]=specific ship_to_names to sum
-  // dpHistVol: pre-computed total historical volume at DP level (for cascade proportion)
-  function renderCells(actMap, histVol, dpElId, dpElIds, shipTos, dpHistVol){
-    const cascadeProp=dpHistVol>0?histVol/dpHistVol:0;
+  // dpHistVol: total historical volume at DP level (denominator for cascade proportion)
+  function renderCells(actMap, histVol, recentVol, dpElId, dpElIds, shipTos, dpHistVol){
+    // Inactive nodes (no shipments in last 7 days) get no cascade allocation.
+    // Specific demand_values entries still win (step 1 in getFc), so the forecast
+    // builder override for a specific sold-to continues to work regardless.
+    const cascadeProp=dpHistVol>0&&recentVol>0?histVol/dpHistVol:0;
     const getFc=(ds)=>{
       if(dpElId){
         if(shipTos&&shipTos.length){
@@ -11441,50 +11466,50 @@ function spRenderTable(){
   let h='';
   sortObjs(orgTree).forEach(reg=>{
     const rKey='reg_'+reg.id.replace(/\W/g,'_'), rCol=!!SP.collapsed[rKey];
-    h+=`<tr class="sp-row-l0" onclick="spToggle('${rKey}')" style="cursor:pointer">
+    h+=`<tr class="sp-row-l0" data-sp-key="${rKey}" data-sp-depth="0" onclick="spToggle('${rKey}')" style="cursor:pointer">
       <td class="td-lbl" style="border-right:2px solid var(--border2)">
         <span class="sp-toggle">${rCol?'▸':'▾'}</span><strong>${reg.name}</strong>${fbBtn(reg.dpElIds,reg.name)}
-      </td>${renderCells(reg.actMap,reg.histVol,null,reg.dpElIds)}</tr>`;
+      </td>${renderCells(reg.actMap,reg.histVol,reg.recentVol,null,reg.dpElIds)}</tr>`;
     if(rCol) return;
 
     sortObjs(reg.subs).forEach(sub=>{
       const sKey='sub_'+sub.id.replace(/\W/g,'_'), sCol=!!SP.collapsed[sKey];
-      h+=`<tr class="sp-row-l1" onclick="spToggle('${sKey}')" style="cursor:pointer">
+      h+=`<tr class="sp-row-l1" data-sp-key="${sKey}" data-sp-depth="1" onclick="spToggle('${sKey}')" style="cursor:pointer">
         <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:18px">
           <span class="sp-toggle">${sCol?'▸':'▾'}</span><strong>${sub.name}</strong>${fbBtn(sub.dpElIds,sub.name)}
-        </td>${renderCells(sub.actMap,sub.histVol,null,sub.dpElIds)}</tr>`;
+        </td>${renderCells(sub.actMap,sub.histVol,sub.recentVol,null,sub.dpElIds)}</tr>`;
       if(sCol) return;
 
       sortObjs(sub.facs).forEach(fac=>{
         const fKey='fac_'+fac.id.replace(/\W/g,'_'), fCol=!!SP.collapsed[fKey];
-        h+=`<tr class="sp-row-l2" onclick="spToggle('${fKey}')" style="cursor:pointer">
+        h+=`<tr class="sp-row-l2" data-sp-key="${fKey}" data-sp-depth="2" onclick="spToggle('${fKey}')" style="cursor:pointer">
           <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:30px">
             <span class="sp-toggle">${fCol?'▸':'▾'}</span><strong>${fac.name}</strong>${fbBtn(fac.dpElIds,fac.name)}
-          </td>${renderCells(fac.actMap,fac.histVol,null,fac.dpElIds)}</tr>`;
+          </td>${renderCells(fac.actMap,fac.histVol,fac.recentVol,null,fac.dpElIds)}</tr>`;
         if(fCol) return;
 
         sortObjs(fac.dps).forEach(dp=>{
           const dpKey='dp_'+dp.id.replace(/\W/g,'_'), dpCol=!!SP.collapsed[dpKey];
           const dpElIds=dp.dpElId?[dp.dpElId]:[];
-          h+=`<tr class="sp-row-l3" onclick="spToggle('${dpKey}')" style="cursor:pointer">
+          h+=`<tr class="sp-row-l3" data-sp-key="${dpKey}" data-sp-depth="3" onclick="spToggle('${dpKey}')" style="cursor:pointer">
             <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:42px">
               <span class="sp-toggle">${dpCol?'▸':'▾'}</span>${dp.name}${fbBtn(dpElIds,dp.name)}
-            </td>${renderCells(dp.actMap,dp.histVol,dp.dpElId,null)}</tr>`;
+            </td>${renderCells(dp.actMap,dp.histVol,dp.recentVol,dp.dpElId,null)}</tr>`;
           if(dpCol) return;
 
           sortObjs(dp.soldtos).forEach(so=>{
             const soKey='so_'+dpKey+'_'+so.name.replace(/\W/g,'_'), soCol=!!SP.collapsed[soKey];
             const soShipTos=Object.keys(so.shiptos);
-            h+=`<tr class="sp-row-l4" onclick="spToggle('${soKey}')" style="cursor:pointer">
+            h+=`<tr class="sp-row-l4" data-sp-key="${soKey}" data-sp-depth="4" onclick="spToggle('${soKey}')" style="cursor:pointer">
               <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:54px">
                 <span class="sp-toggle">${soCol?'▸':'▾'}</span>${so.name}
-              </td>${renderCells(so.actMap,so.histVol,dp.dpElId,null,soShipTos,dp.histVol||1)}</tr>`;
+              </td>${renderCells(so.actMap,so.histVol,so.recentVol,dp.dpElId,null,soShipTos,dp.histVol||1)}</tr>`;
             if(soCol) return;
 
             sortObjs(so.shiptos).forEach(st=>{
-              h+=`<tr class="sp-row-l5">
+              h+=`<tr class="sp-row-l5" data-sp-depth="5">
                 <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:66px;font-size:7px">${st.name}</td>
-                ${renderCells(st.actMap,st.histVol,dp.dpElId,null,[st.name],dp.histVol||1)}</tr>`;
+                ${renderCells(st.actMap,st.histVol,st.recentVol,dp.dpElId,null,[st.name],dp.histVol||1)}</tr>`;
             });
           });
         });
@@ -12137,18 +12162,19 @@ function spToggle(key){
   // Track whether user explicitly expanded this key
   if(!SP.collapsed[key]) SP._userExpanded[key]=true;
   else delete SP._userExpanded[key];
-  spRenderTable();
+  // skipThead: column structure doesn't change on row toggle
+  spRenderTable(true);
 }
 
 function spExpandAll(expand){
   SP.collapsed={};
   SP._userExpanded={};
   if(!expand){
-    // Collapse all region rows back to default
-    const orgTree=spBuildOrgTree(SP.filteredRows);
+    // Collapse all region rows — use cached tree if available
+    const orgTree=SP._tree||spBuildOrgTree(SP.filteredRows);
     Object.keys(orgTree).forEach(k=>{ SP.collapsed['reg_'+k.replace(/\W/g,'_')]=true; });
   }
-  spRenderTable();
+  spRenderTable(true);
 }
 
 // ── Forecast Builder from SP context ─────────────────
