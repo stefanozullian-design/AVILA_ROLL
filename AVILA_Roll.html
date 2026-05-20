@@ -12878,16 +12878,23 @@ async function dsRefreshSlot(id, showErrors=true){
 // ── Pick a file for a slot ────────────────────────────
 async function dsPickFile(id){
   try{
-    const [handle] = await window.showOpenFilePicker({
-      types:[{ description:'Excel / CSV', accept:{'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':['.xlsx'],
-        'application/vnd.ms-excel':['.xls'],'text/csv':['.csv']} }],
-      multiple: false
-    });
+    // Writable slots get a JSON-accepting picker; the rest keep the Excel/CSV filter
+    const writable = !!_dsWritableSlots[id];
+    const types = writable
+      ? [{ description:'Topology JSON', accept:{'application/json':['.json']} }]
+      : [{ description:'Excel / CSV', accept:{'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':['.xlsx'],
+          'application/vnd.ms-excel':['.xls'],'text/csv':['.csv']} }];
+    const [handle] = await window.showOpenFilePicker({ types, multiple:false });
     DS.handles[id] = handle;
     await dsSaveHandle(id, handle);
     if(!DS.meta[id]) DS.meta[id]={};
     DS.meta[id].fileName = handle.name;
+    DS.meta[id]._writeDenied = false; // clear any stale denial flag
     dsSaveMeta();
+    // For writable slots, request readwrite up front so the user is prompted
+    // once now rather than mid-edit later. Ignore the result — the first
+    // dsWriteSlot will re-request if it was declined.
+    if(writable) await _dsEnsureWritePermission(handle);
     await dsRefreshSlot(id, true);
   }catch(e){
     if(e.name !== 'AbortError') statMsg('File picker cancelled or failed');
@@ -12902,6 +12909,90 @@ async function dsDisconnect(id){
   dsSaveMeta();
   dsUpdateSlotUI(id, 'empty');
   dsRefreshConfigUI();
+}
+
+// ── Auto-write-back to picked file ────────────────────
+// Map of slot id → factory returning {blob, mime} to write on autosave.
+// Only slots whose content is owned/mutated by the app belong here. The
+// other slots are read-only feeds; writing them back would just re-emit
+// unchanged data.
+const _dsWritableSlots = {
+  topology: () => {
+    const TRANSIENT = new Set([
+      'real_shipments_daily','real_shipments_meta',
+      'simulation_day_states','simulation_inventory',
+      'simulation_stop_events','simulation_runs','in_transit_inventory',
+    ]);
+    const dbOut = Object.fromEntries(
+      Object.entries(DB).filter(([k]) => !TRANSIENT.has(k))
+    );
+    // Strip actual demand_values — those reload from the Excel feed
+    if(dbOut.demand_values) dbOut.demand_values = dbOut.demand_values.filter(v => v.source !== 'actual');
+    const payload = { DB: dbOut, counter: S.elCounter, simCfg: S.simCfg };
+    return { blob: new Blob([JSON.stringify(payload, null, 2)], {type:'application/json'}), mime:'application/json' };
+  },
+};
+
+// Per-slot debounce timers so a burst of edits (e.g. canvas drag) coalesces
+// into one disk write.
+const _dsWriteTimers = {};
+const DS_WRITE_DEBOUNCE_MS = 500;
+
+// Request readwrite permission (upgrading older read-only handles in place)
+async function _dsEnsureWritePermission(handle){
+  if(!handle) return false;
+  let perm = await handle.queryPermission({mode:'readwrite'});
+  if(perm === 'granted') return true;
+  perm = await handle.requestPermission({mode:'readwrite'});
+  return perm === 'granted';
+}
+
+// Actually perform the write — atomic via createWritable's temp-file swap.
+async function dsWriteSlot(id){
+  const factory = _dsWritableSlots[id];
+  const handle  = DS.handles[id];
+  if(!factory || !handle) return;
+  try{
+    const granted = await _dsEnsureWritePermission(handle);
+    if(!granted){
+      // User declined — surface once, then go silent until next pick
+      if(!DS.meta[id]?._writeDenied){
+        statMsg(`Auto-sync to ${handle.name||id} declined — file will not be updated`);
+        DS.meta[id] = { ...(DS.meta[id]||{}), _writeDenied: true };
+        dsSaveMeta();
+      }
+      return;
+    }
+    const { blob } = factory();
+    const writable = await handle.createWritable();
+    await writable.write(blob);
+    await writable.close();
+    DS.meta[id] = {
+      ...(DS.meta[id]||{}),
+      lastWritten: new Date().toISOString().slice(0,16).replace('T',' '),
+      _writeDenied: false,
+      writeError: null,
+    };
+    dsSaveMeta();
+    dsRefreshConfigUI();
+  }catch(err){
+    DS.meta[id] = { ...(DS.meta[id]||{}), writeError: err.message };
+    dsSaveMeta();
+    console.warn(`DS write [${id}]:`, err.message);
+  }
+}
+
+// Debounced wrapper — call freely from autoSave, only the last call in a
+// DS_WRITE_DEBOUNCE_MS window actually hits disk.
+function dsScheduleWrite(id){
+  if(!_dsWritableSlots[id] || !DS.handles[id]) return;
+  clearTimeout(_dsWriteTimers[id]);
+  _dsWriteTimers[id] = setTimeout(()=>dsWriteSlot(id), DS_WRITE_DEBOUNCE_MS);
+}
+
+// Fan out a write tick to every connected writable slot.
+function dsScheduleAllWrites(){
+  Object.keys(_dsWritableSlots).forEach(id => { if(DS.handles[id]) dsScheduleWrite(id); });
 }
 
 // ── Ingestion handler for Real Sales ─────────────────
@@ -13045,6 +13136,17 @@ function dsUpdateSlotUI(id, state, errMsg=''){
   } else {
     statusHtml=`<span style="color:var(--text-dim);font-size:8px">Not configured</span>`;
   }
+  if(state!=='empty' && _dsWritableSlots[id]){
+    if(meta.writeError){
+      statusHtml += `<br><span style="color:var(--red);font-size:8px">⇪ Sync error: ${meta.writeError}</span>`;
+    } else if(meta._writeDenied){
+      statusHtml += `<br><span style="color:var(--amber);font-size:8px">⇪ Auto-sync disabled (permission declined)</span>`;
+    } else if(meta.lastWritten){
+      statusHtml += `<br><span style="color:var(--blue);font-size:8px">⇪ Auto-sync · last write ${meta.lastWritten}</span>`;
+    } else {
+      statusHtml += `<br><span style="color:var(--text-dim);font-size:8px">⇪ Auto-sync ready</span>`;
+    }
+  }
   const statusEl=wrap.querySelector('.ds-status');
   if(statusEl) statusEl.innerHTML=statusHtml;
 }
@@ -13067,6 +13169,18 @@ function dsBuildSlotHTML(slot){
     statusHtml=`<span style="color:var(--amber);font-size:8px">Pending first load</span>`;
   } else {
     statusHtml=`<span style="color:var(--text-dim);font-size:8px">Not configured</span>`;
+  }
+  // Auto-sync indicator for writable slots
+  if(hasFile && _dsWritableSlots[slot.id]){
+    if(meta.writeError){
+      statusHtml += `<br><span style="color:var(--red);font-size:8px">⇪ Sync error: ${meta.writeError}</span>`;
+    } else if(meta._writeDenied){
+      statusHtml += `<br><span style="color:var(--amber);font-size:8px">⇪ Auto-sync disabled (permission declined)</span>`;
+    } else if(meta.lastWritten){
+      statusHtml += `<br><span style="color:var(--blue);font-size:8px">⇪ Auto-sync · last write ${meta.lastWritten}</span>`;
+    } else {
+      statusHtml += `<br><span style="color:var(--text-dim);font-size:8px">⇪ Auto-sync ready</span>`;
+    }
   }
 
   return `<div id="ds-slot-${slot.id}" style="display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)">
@@ -13466,6 +13580,9 @@ function autoSave(){
     }
   }
   statMsg('Saved');
+  // Fire-and-forget: if any writable Data Source slot is connected, schedule
+  // a debounced write so the picked file mirrors localStorage.
+  if(typeof dsScheduleAllWrites === 'function') dsScheduleAllWrites();
 }
 
 function loadSaved(){
