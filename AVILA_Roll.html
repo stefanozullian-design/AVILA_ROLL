@@ -13630,8 +13630,10 @@ function loadSaved(){
       if(saved.counter) S.elCounter=saved.counter;
       syncElCounter();
       if(saved.simCfg) Object.assign(S.simCfg,saved.simCfg);
+      return true;   // signal: we have a saved state, skip seed fetch
     }
   }catch(e){console.error('Load error',e);}
+  return false;  // no localStorage data — caller may seed from server file
 
   // ── MIGRATION: convert legacy element types ────────────
   const legacyTypeMap={
@@ -13743,24 +13745,28 @@ function loadSaved(){
 // INIT
 // ═══════════════════════════════════════════════════════
 document.addEventListener('DOMContentLoaded',async()=>{
-  loadSaved();
+  const hasSavedState = loadSaved();
 
-  // Auto-load JSON from server — always refresh with latest data
-  try{
-    const resp=await fetch('./AVILA_Roll_BRS_2026-05-06.json');
-    if(resp.ok){
-      const saved=await resp.json();
-      if(saved.DB){
-        Object.keys(DB).forEach(table=>{
-          if(saved.DB[table]!==undefined) DB[table]=saved.DB[table];
-        });
-        if(saved.simCfg) Object.assign(S.simCfg,saved.simCfg);
-        if(saved.counter) S.elCounter=saved.counter;
-        syncElCounter();
+  // Seed from the bundled server JSON only when localStorage is empty
+  // (first-ever load or after a manual clear). Never overwrite an
+  // existing saved state — that caused user edits to be clobbered on refresh.
+  if(!hasSavedState){
+    try{
+      const resp=await fetch('./AVILA_Roll_BRS_2026-05-06.json');
+      if(resp.ok){
+        const saved=await resp.json();
+        if(saved.DB){
+          Object.keys(DB).forEach(table=>{
+            if(saved.DB[table]!==undefined) DB[table]=saved.DB[table];
+          });
+          if(saved.simCfg) Object.assign(S.simCfg,saved.simCfg);
+          if(saved.counter) S.elCounter=saved.counter;
+          syncElCounter();
+        }
       }
+    }catch(err){
+      console.log('Seed JSON not found — starting blank',err);
     }
-  }catch(err){
-    console.log('Auto-load JSON failed',err);
   }
 
   seedCatalogs();
