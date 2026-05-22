@@ -5852,12 +5852,16 @@ function _planRailShipments(rBase){
       const transitDays=parseInt(dest.transit_days)||1;
       const acceptedProds=dest.accepted_products||[];
 
-      // Find terminal berth and its directly-connected receiving silo
+      // Find terminal berth — canvas elements first, then all DB.elements for cross-facility terminals
       const berthEl=allEls.find(e=>e.type==='berth'&&
-        (e.assigned_facility_id||e.facility_id)===facId);
+          (e.assigned_facility_id||e.facility_id)===facId)
+        ||DB.elements.find(e=>e.type==='berth'&&
+          (e.props?.berth_type||'').includes('Rail')&&
+          (e.assigned_facility_id||e.facility_id)===facId);
       if(!berthEl) return;
-      const termSilos=allEls.filter(e=>e.type==='bulk_silo'&&
-        getFacConnections().some(c=>c.from_element_id===berthEl.id&&c.to_element_id===e.id));
+      // Silos connected to this berth — search all DB.connections/DB.elements for cross-facility
+      const termSilos=DB.connections.filter(c=>c.from_element_id===berthEl.id)
+        .map(c=>DB.elements.find(e=>e.id===c.to_element_id&&e.type==='bulk_silo')).filter(Boolean);
       const termSilo=termSilos.find(s=>getSiloProducts(s).some(p=>acceptedProds.includes(p)))||termSilos[0];
       if(!termSilo) return;
 
@@ -5872,8 +5876,8 @@ function _planRailShipments(rBase){
         ?(parseFloat(termSilo.props?.start_inventory)||0)
         :(invHist[d-2]??invHist[invHist.length-1]??0);
 
-      // Daily demand at destination
-      const termDemEls=allEls.filter(e=>e.type==='demand_point'&&
+      // Daily demand at destination — search all DB.elements for cross-facility terminals
+      const termDemEls=DB.elements.filter(e=>e.type==='demand_point'&&
         (e.assigned_facility_id||e.facility_id)===facId);
       const getDemand=d=>{
         const dt=new Date(simStart.getTime()+(d-1)*864e5);
@@ -6481,9 +6485,11 @@ function simulate(elements, connections, horizon, includeProposed=false){
   // In Pass 2 (includeProposed=true), also pre-load all planned/confirmed/proposed movements.
   // Pass 1 excludes Proposed but still includes Planned/Confirmed (user-entered, ground truth).
   const transitQueue={};
+  // Pre-load movements arriving AT this facility (to_facility_id = current facility).
+  // "From" filter was incorrect — transitQueue tracks inbound arrivals, not outbound departures.
   DB.rail_movements
     .filter(rm=>{
-      if(!rm.from_facility_id||rm.from_facility_id!==S.facility_id) return false;
+      if(!rm.to_facility_id||rm.to_facility_id!==S.facility_id) return false;
       const st=rm.status||'Planned';
       if(st==='Proposed') return includeProposed; // auto-generated: only in Pass 2
       return ['Planned','Confirmed','In Transit'].includes(st); // user-entered: always
@@ -6550,8 +6556,11 @@ function simulate(elements, connections, horizon, includeProposed=false){
     railDestBerthMap[dp.id]={};
     const downBerths=(dn[dp.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='berth');
     (dp.props.destinations||[]).forEach(dest=>{
-      const berth=downBerths.find(b=>
-        (b.assigned_facility_id||b.facility_id)===dest.facility_id);
+      // First look in canvas downstream; fall back to DB.elements for cross-facility terminals
+      const berth=downBerths.find(b=>(b.assigned_facility_id||b.facility_id)===dest.facility_id)
+        ||DB.elements.find(e=>e.type==='berth'&&
+            (e.props?.berth_type||'').includes('Rail')&&
+            (e.assigned_facility_id||e.facility_id)===dest.facility_id);
       if(berth) railDestBerthMap[dp.id][dest.facility_id]={
         berthId:berth.id,
         transitDays:parseInt(dest.transit_days)||1
@@ -7879,13 +7888,21 @@ function renderResultsTable(){
     `<span style="font-size:7px;font-family:var(--mono);color:var(--amber);letter-spacing:.5px;cursor:pointer;font-weight:700;opacity:.9" onclick="openMaintenanceEventById('${evId}')">MAINT</span>`;
 
   // Transport events for this facility
-  const railEvsByDay={};
+  const railEvsByDay={};   // arrivals TO this facility
+  const railDepsByDay={};  // departures FROM this facility
   const vesselEvsByDay={};
   DB.rail_movements.forEach(rm=>{
+    // Inbound arrivals
     const arrDay=dateToDayOffset(rm.departure_date||rm.date,S.simCfg.start_date)+(rm.transit_days||1);
     if(arrDay>=0&&arrDay<=horizon&&rm.to_facility_id===S.facility_id){
       if(!railEvsByDay[arrDay]) railEvsByDay[arrDay]=[];
       railEvsByDay[arrDay].push(rm);
+    }
+    // Outbound departures
+    const depDay=dateToDayOffset(rm.departure_date||rm.date,S.simCfg.start_date)+1;
+    if(depDay>=1&&depDay<=horizon&&rm.from_facility_id===S.facility_id){
+      if(!railDepsByDay[depDay]) railDepsByDay[depDay]=[];
+      railDepsByDay[depDay].push(rm);
     }
   });
   const facBerthIds=new Set(getFacElements().filter(e=>e.type==='berth').map(e=>e.id));
@@ -8049,6 +8066,7 @@ function renderResultsTable(){
 
     // Transport events cell
     const railArr=railEvsByDay[day]||[];
+    const railDeps=railDepsByDay[day]||[];
     const vesselArr=vesselEvsByDay[day]||[];
     const truckActive=DB.truck_movements.filter(t=>{
       const sd=dateToDayOffset(t.date,S.simCfg.start_date);
@@ -8057,9 +8075,13 @@ function renderResultsTable(){
     });
     let transportCell='<td style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">';
     if(railArr.length) transportCell+=`<span style="color:var(--blue)" title="Rail arrival">↓ Rail ${railArr.map(r=>Number(r.total_capacity_t).toLocaleString()+'t').join(', ')}</span> `;
+    if(railDeps.length){
+      const depLabel=railDeps.map(r=>{const dest=DB.facilities.find(f=>f.id===r.to_facility_id);return `${Number(r.total_capacity_t).toLocaleString()}t→${dest?.name||'?'}`;}).join(', ');
+      transportCell+=`<span style="color:var(--blue);opacity:.7" title="Rail departure (${railDeps[0].status||'Planned'})">↑ Rail ${depLabel}</span> `;
+    }
     if(vesselArr.length) transportCell+=`<span style="color:var(--amber)" title="Vessel arrival">⚓ ${vesselArr.map(v=>v.name).join(', ')}</span> `;
     if(truckActive.length) transportCell+=`<span style="color:var(--green)" title="Truck active">↔ Truck ×${truckActive.length}</span>`;
-    if(!railArr.length&&!vesselArr.length&&!truckActive.length) transportCell+='—';
+    if(!railArr.length&&!railDeps.length&&!vesselArr.length&&!truckActive.length) transportCell+='—';
     transportCell+='</td>';
     h+=transportCell;
 
