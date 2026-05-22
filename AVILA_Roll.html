@@ -6799,6 +6799,23 @@ function simulate(elements, connections, horizon, includeProposed=false){
     });
   };
 
+  // ── PLANNED DISPATCH MAP ─────────────────────────────
+  // plannedSwitchMap[dispatchPointId][switchDay] = [rail_movement]
+  // Lets Step 6 use Planned/Confirmed movements as authoritative dispatch
+  // instead of computing proportional allocation from yard inventory.
+  const plannedSwitchMap={};
+  DB.rail_movements
+    .filter(rm=>{
+      const st=rm.status||'Planned';
+      return ['Planned','Confirmed'].includes(st)&&rm.from_facility_id===S.facility_id&&rm.from_dispatch_id;
+    })
+    .forEach(rm=>{
+      const swDay=rm.switch_day||(rm.departure_date?dateToDayOffset(rm.departure_date,S.simCfg.start_date)+1:null);
+      if(!swDay||swDay<1||swDay>horizon) return;
+      if(!plannedSwitchMap[rm.from_dispatch_id]) plannedSwitchMap[rm.from_dispatch_id]={};
+      if(!plannedSwitchMap[rm.from_dispatch_id][swDay]) plannedSwitchMap[rm.from_dispatch_id][swDay]=[];
+      plannedSwitchMap[rm.from_dispatch_id][swDay].push(rm);
+    });
 
   for(let day=1;day<=horizon;day++){
 
@@ -6939,9 +6956,15 @@ function simulate(elements, connections, horizon, includeProposed=false){
     // to start being filled today. If so, add a hard override entry.
     // railFillTarget[railSiloId] = {tonnes, prodId} for this day only.
     const railFillTarget={};
-    if(includeProposed){
+    {
+      // Always honor Planned/Confirmed fill windows; honor Proposed only in Pass 2
       DB.rail_movements
-        .filter(rm=>rm.status==='Proposed'&&rm.from_facility_id===S.facility_id&&rm.load_start_day)
+        .filter(rm=>{
+          const st=rm.status||'Planned';
+          if(!rm.from_facility_id||rm.from_facility_id!==S.facility_id||!rm.load_start_day) return false;
+          if(st==='Proposed') return includeProposed;
+          return ['Planned','Confirmed'].includes(st);
+        })
         .forEach(rm=>{
           if(day<rm.load_start_day||day>=rm.switch_day) return; // not our window
           // Find the rail dispatch point and its upstream RAIL silo
@@ -7353,82 +7376,102 @@ function simulate(elements, connections, horizon, includeProposed=false){
       // Dispatch on switch days
       const dispatchByDest={};
       if(isSwitch){
-        const totalYardCars=Object.values(s.yardByProduct).reduce((a,b)=>a+b,0);
-        if(totalYardCars>0&&dests.length>0){
-          // Score each destination by urgency using the same formula as mill scheduling
-          // Score each destination by summing daily_tonnage of demand elements assigned to it
-          const destScores=dests.map(dest=>{
-            const demandForDest=demandPoints
-              .filter(dp=>dp.facilityId===dest.facility_id)
-              .reduce((s,dp)=>s+(dp.dailyRates[day-1]||0),0)||1;
-            return {dest, score:demandForDest};
+        const lockedMoves=(plannedSwitchMap[el.id]||{})[day]||[];
+
+        if(lockedMoves.length>0){
+          // ── LOCKED DISPATCH: Planned/Confirmed movements are authoritative ──
+          // Use exact tonnages and destinations from DB.rail_movements instead of
+          // computing proportional allocation from yard inventory.
+          const dispatchByDestByProduct={};
+          let totalTonnesPlanned=0;
+          lockedMoves.forEach(rm=>{
+            const facId=rm.to_facility_id; if(!facId) return;
+            const tonnes=rm.total_capacity_t||0;
+            const cars=Math.round(tonnes/carCap);
+            const pid=rm.product_id||'';
+            dispatchByDest[facId]=(dispatchByDest[facId]||0)+cars;
+            if(!dispatchByDestByProduct[facId]) dispatchByDestByProduct[facId]={};
+            dispatchByDestByProduct[facId][pid]=(dispatchByDestByProduct[facId][pid]||0)+cars;
+            totalTonnesPlanned+=tonnes;
           });
-          const totalScore=destScores.reduce((a,b)=>a+b.score,0)||1;
-
-          // Allocate yard cars to destinations proportionally by demand score.
-          // Each destination only receives cars whose product it accepts.
-          // Cars are allocated in score order (highest demand first).
-          let remainingYard={...s.yardByProduct};
-          const sortedDests=[...destScores].sort((a,b)=>b.score-a.score);
-          let remainingTotal=totalYardCars;
-          const dispatchByDestByProduct={}; // facId → {pid: cars}
-
-          sortedDests.forEach(({dest,score})=>{
-            if(remainingTotal<=0) return;
-            const share=score/totalScore;
-            let targetCars=Math.round(totalYardCars*share);
-            let allocated=0;
-            if(!dispatchByDestByProduct[dest.facility_id]) dispatchByDestByProduct[dest.facility_id]={};
-
-            // Give this destination up to targetCars, from products it accepts
-            (dest.accepted_products||[]).forEach(pid=>{
-              if(allocated>=targetCars) return;
-              const available=remainingYard[pid]||0;
-              if(available<=0) return;
-              const give=Math.min(available, targetCars-allocated);
-              if(give>0){
-                allocated+=give;
-                dispatchByDestByProduct[dest.facility_id][pid]=(dispatchByDestByProduct[dest.facility_id][pid]||0)+give;
-                remainingYard[pid]=Math.max(0,available-give);
-                remainingTotal-=give;
-              }
-            });
-            if(allocated>0) dispatchByDest[dest.facility_id]=allocated;
-          });
-
-          // Any leftover cars (rounding, unmatched products) go to first dest that accepts them
-          Object.keys(remainingYard).forEach(pid=>{
-            if(remainingYard[pid]<=0) return;
-            const acceptingDest=sortedDests.find(({dest})=>(dest.accepted_products||[]).includes(pid));
-            if(acceptingDest){
-              const fid=acceptingDest.dest.facility_id;
-              dispatchByDest[fid]=(dispatchByDest[fid]||0)+remainingYard[pid];
-              if(!dispatchByDestByProduct[fid]) dispatchByDestByProduct[fid]={};
-              dispatchByDestByProduct[fid][pid]=(dispatchByDestByProduct[fid][pid]||0)+remainingYard[pid];
-              remainingYard[pid]=0;
-            }
-          });
-          // Reset yard on switch day
+          // Deduct planned tonnage from the upstream silo (ground truth)
+          if(upSilo&&totalTonnesPlanned>0)
+            siloOutflow[upSilo.id]=(siloOutflow[upSilo.id]||0)+totalTonnesPlanned;
+          // Reset yard
           s.yardByProduct={};
-
-          // ── Inject dispatched cars into transit queue ──────────────────
-          const carCap=parseFloat(el.props.car_capacity_t)||50;
+          // Inject into transit queue
           Object.entries(dispatchByDest).forEach(([facId,cars])=>{
             const berthInfo=(railDestBerthMap[el.id]||{})[facId];
             if(!berthInfo) return;
             const arrivalDay=day+berthInfo.transitDays;
-            if(arrivalDay>horizon) return; // arrives after horizon — skip
+            if(arrivalDay>horizon) return;
             if(!transitQueue[arrivalDay]) transitQueue[arrivalDay]=[];
-            const byProdCars=dispatchByDestByProduct[facId]||{};
             const byProdTonnes={};
-            Object.entries(byProdCars).forEach(([pid,c])=>{
-              byProdTonnes[pid]=(c*carCap);
-            });
-            transitQueue[arrivalDay].push({berthId:berthInfo.berthId, byProduct:byProdTonnes, fromFacId:S.facility_id, toFacId:facId});
+            Object.entries(dispatchByDestByProduct[facId]||{}).forEach(([pid,c])=>{byProdTonnes[pid]=c*carCap;});
+            transitQueue[arrivalDay].push({berthId:berthInfo.berthId,byProduct:byProdTonnes,fromFacId:S.facility_id,toFacId:facId});
           });
-        } else if(totalYardCars>0&&dests.length===0){
-          // No destinations configured — dispatch all and reset
-          s.yardByProduct={};
+
+        } else {
+          // ── AUTO DISPATCH: no locked movements — allocate by demand score ──
+          const totalYardCars=Object.values(s.yardByProduct).reduce((a,b)=>a+b,0);
+          if(totalYardCars>0&&dests.length>0){
+            const destScores=dests.map(dest=>{
+              const demandForDest=demandPoints
+                .filter(dp=>dp.facilityId===dest.facility_id)
+                .reduce((s,dp)=>s+(dp.dailyRates[day-1]||0),0)||1;
+              return {dest, score:demandForDest};
+            });
+            const totalScore=destScores.reduce((a,b)=>a+b.score,0)||1;
+            let remainingYard={...s.yardByProduct};
+            const sortedDests=[...destScores].sort((a,b)=>b.score-a.score);
+            let remainingTotal=totalYardCars;
+            const dispatchByDestByProduct={};
+            sortedDests.forEach(({dest,score})=>{
+              if(remainingTotal<=0) return;
+              const share=score/totalScore;
+              let targetCars=Math.round(totalYardCars*share);
+              let allocated=0;
+              if(!dispatchByDestByProduct[dest.facility_id]) dispatchByDestByProduct[dest.facility_id]={};
+              (dest.accepted_products||[]).forEach(pid=>{
+                if(allocated>=targetCars) return;
+                const available=remainingYard[pid]||0;
+                if(available<=0) return;
+                const give=Math.min(available, targetCars-allocated);
+                if(give>0){
+                  allocated+=give;
+                  dispatchByDestByProduct[dest.facility_id][pid]=(dispatchByDestByProduct[dest.facility_id][pid]||0)+give;
+                  remainingYard[pid]=Math.max(0,available-give);
+                  remainingTotal-=give;
+                }
+              });
+              if(allocated>0) dispatchByDest[dest.facility_id]=allocated;
+            });
+            Object.keys(remainingYard).forEach(pid=>{
+              if(remainingYard[pid]<=0) return;
+              const acceptingDest=sortedDests.find(({dest})=>(dest.accepted_products||[]).includes(pid));
+              if(acceptingDest){
+                const fid=acceptingDest.dest.facility_id;
+                dispatchByDest[fid]=(dispatchByDest[fid]||0)+remainingYard[pid];
+                if(!dispatchByDestByProduct[fid]) dispatchByDestByProduct[fid]={};
+                dispatchByDestByProduct[fid][pid]=(dispatchByDestByProduct[fid][pid]||0)+remainingYard[pid];
+                remainingYard[pid]=0;
+              }
+            });
+            s.yardByProduct={};
+            Object.entries(dispatchByDest).forEach(([facId,cars])=>{
+              const berthInfo=(railDestBerthMap[el.id]||{})[facId];
+              if(!berthInfo) return;
+              const arrivalDay=day+berthInfo.transitDays;
+              if(arrivalDay>horizon) return;
+              if(!transitQueue[arrivalDay]) transitQueue[arrivalDay]=[];
+              const byProdCars=dispatchByDestByProduct[facId]||{};
+              const byProdTonnes={};
+              Object.entries(byProdCars).forEach(([pid,c])=>{byProdTonnes[pid]=(c*carCap);});
+              transitQueue[arrivalDay].push({berthId:berthInfo.berthId,byProduct:byProdTonnes,fromFacId:S.facility_id,toFacId:facId});
+            });
+          } else if(totalYardCars>0&&dests.length===0){
+            s.yardByProduct={};
+          }
         }
         s.status='running';
       }
