@@ -1172,6 +1172,10 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
                 <div id="rp-dest-filter" style="display:flex;gap:3px;flex-wrap:wrap"></div>
               </div>
             </div>
+            <!-- Charts section: rendered by rpRenderCharts() after a simulation run -->
+            <div id="rp-charts-section" style="display:none;margin-bottom:16px">
+              <div id="rp-charts-inner" style="display:grid;grid-template-columns:1fr 1fr;gap:10px"></div>
+            </div>
             <!-- Two stacked planner tables -->
             <div id="rp-dest-section">
               <div class="tp-section-hdr">DESTINATION</div>
@@ -4908,6 +4912,7 @@ const _rp={
   view:'sim',        // current view preset
   dests:[],          // selected destination facility IDs (multi)
 };
+const _rpCharts={};  // active Chart.js instances — destroyed and rebuilt on each rpRender()
 
 // ── Topology helpers ─────────────────────────────────────────────
 // Get all facilities that have a Rail berth on the current canvas
@@ -5116,7 +5121,12 @@ function rpRender(){
   document.getElementById('rp-dest-section').style.display=hasDests?'':'none';
   document.getElementById('rp-orig-section').style.display=hasDests?'':'none';
   document.getElementById('rp-empty').style.display=hasDests?'none':'block';
-  if(!hasDests) return;
+  if(!hasDests){
+    rpDestroyCharts();
+    document.getElementById('rp-charts-section').style.display='none';
+    return;
+  }
+  rpRenderCharts();
 
   // ── Build column headers ──
   const thHtml=`<th>Element</th>`+days.map(d=>{
@@ -5448,6 +5458,164 @@ function rpDeleteArrival(rmId){
   rpRender();
   renderRailTable();
   statMsg('Rail movement deleted');
+}
+
+// ── Rail planner charts ───────────────────────────────────────────
+function rpDestroyCharts(){
+  Object.values(_rpCharts).forEach(c=>{try{c.destroy();}catch(e){}});
+  Object.keys(_rpCharts).forEach(k=>delete _rpCharts[k]);
+}
+
+function rpRenderCharts(){
+  rpDestroyCharts();
+  const section=document.getElementById('rp-charts-section');
+  const inner=document.getElementById('rp-charts-inner');
+  if(!section||!inner) return;
+  inner.innerHTML='';
+
+  if(!S.simResults||!_rp.dests.length){section.style.display='none';return;}
+  section.style.display='';
+
+  const {startDay,endDay}=rpGetRange();
+  const days=[]; for(let d=startDay;d<=endDay;d++) days.push(d);
+  const labels=days.map(d=>rpDayDate(d).slice(5));
+
+  const chartBuilders=[];
+
+  _rp.dests.forEach((destFacId,di)=>{
+    const origins=rpGetOriginsForDest(destFacId); if(!origins.length) return;
+    const {dp,destCfg,berth,railSilo}=origins[0];
+    const destSilo=rpGetDestSilo(berth);
+    const destFac=DB.facilities.find(f=>f.id===destFacId);
+    const carCap=parseFloat(dp.props?.car_capacity_t)||50;
+    const transit=parseInt(destCfg?.transit_days)||1;
+    const hist=S.simResults.railHistory[dp.id]||[];
+
+    const mkCanvas=(id)=>{
+      const div=document.createElement('div');
+      div.style.cssText='background:var(--surface2);border-radius:4px;padding:8px 10px;height:180px;position:relative';
+      const canvas=document.createElement('canvas');
+      canvas.id=id;
+      div.appendChild(canvas);
+      inner.appendChild(div);
+      return canvas;
+    };
+
+    const baseOpts=(title)=>({
+      responsive:true,maintainAspectRatio:false,
+      plugins:{
+        title:{display:true,text:title,color:'#8e9ab8',font:{family:'Space Mono',size:8},padding:{top:0,bottom:4}},
+        legend:{display:false},
+        tooltip:{mode:'index',intersect:false,
+          callbacks:{
+            title:its=>its[0]?.label||'',
+            label:c=>{const v=c.raw; if(v==null||v===0) return '';
+              return `${c.dataset.label}: ${Number(Math.round(v)).toLocaleString()}${c.dataset._u||' t'}`;}
+          }
+        }
+      },
+      scales:{
+        x:{grid:{color:'rgba(255,255,255,.03)'},
+          ticks:{color:'#8e9ab8',font:{family:'Space Mono',size:7},maxTicksLimit:8,autoSkip:true,maxRotation:0}},
+        y:{beginAtZero:true,grid:{color:'rgba(255,255,255,.06)'},
+          ticks:{color:'#8e9ab8',font:{family:'Space Mono',size:7},
+            callback:v=>v>=1000?Math.round(v/100)/10+'k':Math.round(v)}}
+      }
+    });
+
+    // Chart 1 — Origin Rail Silo Inventory
+    if(railSilo){
+      const siloMax=parseFloat(railSilo.props?.max_capacity)||0;
+      const floor=(parseFloat(railSilo.props?.critical_floor_pct)||10)/100*siloMax;
+      const invData=days.map(d=>{const v=rpInv(railSilo.id,d);return v!==null?v:null;});
+      const cid=`rpc1_${di}`;
+      const canvas=mkCanvas(cid);
+      const ds=[
+        {label:'Rail Silo',data:invData,borderColor:'#38bdf8',backgroundColor:'rgba(56,189,248,.12)',
+         fill:true,tension:0.2,pointRadius:0,borderWidth:1.5,_u:' t'}
+      ];
+      if(siloMax>0) ds.push({label:'Capacity',data:days.map(()=>siloMax),borderColor:'rgba(255,255,255,.18)',borderDash:[5,3],pointRadius:0,borderWidth:1,type:'line',_u:' t'});
+      if(floor>0)   ds.push({label:'Floor',data:days.map(()=>floor),borderColor:'rgba(248,113,113,.65)',borderDash:[3,3],pointRadius:0,borderWidth:1,type:'line',_u:' t'});
+      chartBuilders.push(()=>{_rpCharts[cid]=new Chart(canvas,{type:'line',data:{labels,datasets:ds},options:baseOpts(`RAIL SILO · ${railSilo.name}`)});});
+    }
+
+    // Chart 2 — Railyard Accumulation
+    {
+      const yardData=days.map(d=>{
+        const h=hist[d-1]; if(!h) return 0;
+        return Object.values(h.carsInYardByProduct||{}).reduce((a,b)=>a+b,0)*carCap;
+      });
+      const dispData=days.map(d=>{
+        const h=hist[d-1]; if(!h) return null;
+        const cars=Object.values(h.dispatchByDest||{}).reduce((a,b)=>a+b,0);
+        return cars>0?cars*carCap:null;
+      });
+      const cid=`rpc2_${di}`;
+      const canvas=mkCanvas(cid);
+      chartBuilders.push(()=>{
+        _rpCharts[cid]=new Chart(canvas,{type:'bar',data:{labels,datasets:[
+          {label:'In Yard',data:yardData,backgroundColor:'rgba(77,166,255,.45)',borderColor:'#4da6ff',borderWidth:1,_u:' t'},
+          {label:'Dispatched',data:dispData,backgroundColor:'rgba(255,148,51,.75)',borderColor:'#ff9433',borderWidth:1,_u:' t'}
+        ]},options:baseOpts(`RAILYARD · ${dp.name}`)});
+      });
+    }
+
+    // Chart 3 — In-Transit Pipeline
+    {
+      const inTransitData=days.map(d=>{
+        let total=0;
+        for(let dep=Math.max(1,d-transit);dep<d;dep++){
+          const h=hist[dep-1]; if(!h) continue;
+          total+=((h.dispatchByDest||{})[destFacId]||0)*carCap;
+        }
+        return total;
+      });
+      const cid=`rpc3_${di}`;
+      const canvas=mkCanvas(cid);
+      chartBuilders.push(()=>{
+        _rpCharts[cid]=new Chart(canvas,{type:'line',data:{labels,datasets:[
+          {label:'In Transit',data:inTransitData,borderColor:'#a78bfa',backgroundColor:'rgba(167,139,250,.15)',
+           fill:true,tension:0.2,pointRadius:0,borderWidth:1.5,_u:' t'}
+        ]},options:baseOpts(`IN TRANSIT → ${destFac?.name||destFacId} (${transit}d)`)});
+      });
+    }
+
+    // Chart 4 — Destination Silo Inventory
+    if(destSilo){
+      const siloMax=parseFloat(destSilo.props?.max_capacity)||0;
+      const floor=(parseFloat(destSilo.props?.critical_floor_pct)||10)/100*siloMax;
+      const invData=days.map(d=>{const v=rpInv(destSilo.id,d);return v!==null?v:null;});
+      const demEls=rpGetDestDemEls(destFacId);
+      const demData=days.map(d=>demEls.reduce((s,e)=>s+rpDemand(e.id,d),0));
+      const arrHist=S.simResults.berthArrivalHistory[berth?.id]||[];
+      const arrData=days.map(d=>arrHist[d-1]||null);
+      const cid=`rpc4_${di}`;
+      const canvas=mkCanvas(cid);
+      const ds=[
+        {label:'Arrivals',data:arrData,type:'bar',backgroundColor:'rgba(77,166,255,.55)',borderColor:'#4da6ff',borderWidth:1,_u:' t'},
+        {label:'Inventory',data:invData,borderColor:'#34d399',backgroundColor:'rgba(52,211,153,.1)',
+         fill:true,tension:0.2,pointRadius:0,borderWidth:1.5,type:'line',_u:' t'},
+        {label:'Demand/d',data:demData,borderColor:'rgba(251,191,36,.6)',borderDash:[2,3],pointRadius:0,borderWidth:1,type:'line',_u:' t/d'}
+      ];
+      if(siloMax>0) ds.push({label:'Max',data:days.map(()=>siloMax),borderColor:'rgba(255,255,255,.15)',borderDash:[5,3],pointRadius:0,borderWidth:1,type:'line',_u:' t'});
+      if(floor>0)   ds.push({label:'Floor',data:days.map(()=>floor),borderColor:'rgba(248,113,113,.55)',borderDash:[3,3],pointRadius:0,borderWidth:1,type:'line',_u:' t'});
+      chartBuilders.push(()=>{
+        _rpCharts[cid]=new Chart(canvas,{type:'bar',data:{labels,datasets:ds},
+          options:baseOpts(`DESTINATION · ${destFac?.name||destFacId}`)});
+      });
+    }
+  });
+
+  // Build all charts, loading Chart.js on demand if needed
+  const buildAll=()=>chartBuilders.forEach(f=>f());
+  if(typeof Chart==='undefined'){
+    const s=document.createElement('script');
+    s.src='https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js';
+    s.onload=buildAll;
+    document.head.appendChild(s);
+  } else {
+    buildAll();
+  }
 }
 
 function _rpToggleLegacy(){
@@ -6817,6 +6985,21 @@ function simulate(elements, connections, horizon, includeProposed=false){
       plannedSwitchMap[rm.from_dispatch_id][swDay].push(rm);
     });
 
+  // plannedLoadWindowMap[dpId] = Set<day> — days within the loading window of a Planned/Confirmed move.
+  // Used in Step 6 to restrict loading to planned windows only (prevents continuous over-depletion
+  // of the rail silo between shipments).
+  const plannedLoadWindowMap={};
+  DB.rail_movements
+    .filter(rm=>{
+      const st=rm.status||'Planned';
+      return ['Planned','Confirmed'].includes(st)&&rm.from_facility_id===S.facility_id
+        &&rm.from_dispatch_id&&rm.load_start_day&&rm.switch_day;
+    })
+    .forEach(rm=>{
+      if(!plannedLoadWindowMap[rm.from_dispatch_id]) plannedLoadWindowMap[rm.from_dispatch_id]=new Set();
+      for(let d=rm.load_start_day;d<rm.switch_day;d++) plannedLoadWindowMap[rm.from_dispatch_id].add(d);
+    });
+
   for(let day=1;day<=horizon;day++){
 
     // Per-day flow accumulators
@@ -7340,8 +7523,14 @@ function simulate(elements, connections, horizon, includeProposed=false){
 
       const carsLoadedByProduct={};
 
-      // Load cars on working days
-      if(isWorking&&upSilo){
+      // Load cars on working days.
+      // When Planned/Confirmed moves exist for this dispatch point, restrict loading to
+      // their declared windows (load_start_day..switch_day-1) and skip switch days where
+      // locked dispatch will run. For auto/Proposed-only points, load every working day.
+      const _hasLockedNow=(plannedSwitchMap[el.id]||{})[day]?.length>0;
+      const _hasAnyLocked=Object.keys(plannedSwitchMap[el.id]||{}).length>0;
+      const _inLoadWindow=!_hasAnyLocked||(plannedLoadWindowMap[el.id]||new Set()).has(day);
+      if(isWorking&&!_hasLockedNow&&_inLoadWindow&&upSilo){
         const siloState=state[upSilo.id];
         // Include same-day inflow (e.g. FM production into this silo today)
         const totalInSilo=(siloState.inventory+(siloInflow[upSilo.id]||0))-(siloOutflow[upSilo.id]||0);
@@ -7394,9 +7583,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
             dispatchByDestByProduct[facId][pid]=(dispatchByDestByProduct[facId][pid]||0)+cars;
             totalTonnesPlanned+=tonnes;
           });
-          // Deduct planned tonnage from the upstream silo (ground truth)
-          if(upSilo&&totalTonnesPlanned>0)
-            siloOutflow[upSilo.id]=(siloOutflow[upSilo.id]||0)+totalTonnesPlanned;
+          // Silo deduction is handled by the daily loading step; no re-deduction needed here.
           // Reset yard
           s.yardByProduct={};
           // Inject into transit queue
