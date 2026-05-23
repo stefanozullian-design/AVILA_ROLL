@@ -6218,7 +6218,7 @@ function _writeProposedVesselCalls(r){
   DB.vessel_calls=DB.vessel_calls.filter(v=>v.status!=='Proposed');
 
   const simStart=new Date(S.simCfg.start_date+'T00:00:00');
-  const horizon=S.simCfg.horizon;
+  const horizon=r?.simHorizon||S.simCfg.horizon;
   const allEls=getFacElements();
   const allConns=getFacConnections();
 
@@ -6264,6 +6264,8 @@ function _writeProposedVesselCalls(r){
 
       const siloMax=parseFloat(targetSilo.props.max_capacity)||0; if(!siloMax) return;
       const siloStart=parseFloat(targetSilo.props.start_inventory)||0;
+      const _objSp=targetSilo.props?.inventory_objective||'maximize';
+      const targetInvSp=({maximize:1.00,meet_demand:0.75,minimize:0.50}[_objSp]??1.00)*siloMax;
 
       const demIds=[];
       const visited=new Set([targetSilo.id]);
@@ -6278,61 +6280,69 @@ function _writeProposedVesselCalls(r){
         });
       }
 
-      const dailyOutflow=new Array(horizon+1).fill(0);
+      const dailyOutflow=new Array(horizon+2).fill(0);
       for(let d=1;d<=horizon;d++){
         const dt=new Date(simStart.getTime()+(d-1)*864e5);
         const ds=dt.toISOString().split('T')[0];
         dailyOutflow[d]=demIds.reduce((s,id)=>s+(_demandRate(id,ds)||0),0);
       }
-      if(dailyOutflow.reduce((s,v)=>s+v,0)<=0) return;
+      const totDemSp=dailyOutflow.reduce((s,v)=>s+v,0);
+      if(totDemSp<=0) return;
+      const critFloorSp=minCoverDays*(totDemSp/horizon);
 
       const lockedCalls=DB.vessel_calls.filter(v=>
         allocBerths.some(ab=>v.berth_element_id===ab.berth.id||
           (v.legs||[]).some(l=>l.berth_element_id===ab.berth.id))
         &&v.product_id===productId&&v.status!=='Proposed'
       );
-      const lockedInflow=new Array(horizon+1).fill(0);
+      const lockedInflow=new Array(horizon+2).fill(0);
       lockedCalls.forEach(v=>{
         const arrDay=dateToDayOffset(v.arrival_date,S.simCfg.start_date)+1;
         const ud=berthRate>0?Math.ceil(primaryQty/(berthRate*24)):unloadDays;
         for(let d=arrDay;d<arrDay+ud&&d<=horizon;d++) lockedInflow[d]+=primaryQty/ud;
       });
 
-      const propInflow=new Array(horizon+1).fill(0);
+      const propInflow=new Array(horizon+2).fill(0);
       const proposedCalls=[];
-      const coverTrigger=minCoverDays+leadDays;
-
-      for(let day=1;day<=horizon;day++){
-        let proj=siloStart;
-        for(let d=1;d<=day;d++){
-          proj+=lockedInflow[d]+propInflow[d]-dailyOutflow[d];
-          proj=Math.max(0,Math.min(siloMax,proj));
+      const projInvSp=new Array(horizon+2).fill(0);
+      projInvSp[1]=Math.max(0,Math.min(siloMax,siloStart));
+      const rebuildFromSp=from=>{
+        for(let d=from;d<=horizon;d++){
+          projInvSp[d+1]=Math.max(0,Math.min(siloMax,
+            projInvSp[d]+lockedInflow[d]+propInflow[d]-dailyOutflow[d]
+          ));
         }
-        let projAtArrival=proj;
-        for(let d=day+1;d<=day+leadDays&&d<=horizon;d++){
-          projAtArrival+=lockedInflow[d]+propInflow[d]-dailyOutflow[d];
-          projAtArrival=Math.max(0,Math.min(siloMax,projAtArrival));
-        }
-        const avgDailyOut=dailyOutflow.slice(day,day+leadDays).reduce((s,v)=>s+v,0)/Math.max(1,leadDays);
-        const coverAtArrival=avgDailyOut>0?projAtArrival/avgDailyOut:999;
-        if(coverAtArrival>minCoverDays) continue;
+      };
+      rebuildFromSp(1);
 
-        const idealArrival=day+leadDays;
-        if(idealArrival>horizon) continue;
+      let scanFromSp=1, guardSp=horizon+10;
+      while(guardSp-->0){
+        let critDay=null;
+        for(let d=scanFromSp;d<=horizon;d++){
+          const eod=projInvSp[d]+lockedInflow[d]+propInflow[d]-dailyOutflow[d];
+          if(eod<=critFloorSp){critDay=d;break;}
+        }
+        if(!critDay) break;
+
+        const idealArrival=critDay;
+        const orderDay=idealArrival-leadDays;
+        if(orderDay<1||idealArrival>horizon){scanFromSp=critDay+1;continue;}
+
+        const projAtArrival=projInvSp[idealArrival];
+        if(projAtArrival>=targetInvSp*0.95){scanFromSp=critDay+1;continue;}
 
         const alreadyCovered=[...lockedCalls,...proposedCalls].some(v=>{
-          const ad=typeof v.arrivalDay!=='undefined'?v.arrivalDay:dateToDayOffset(v.arrival_date,S.simCfg.start_date)+1;
+          const ad=v.arrivalDay??dateToDayOffset(v.arrival_date,S.simCfg.start_date)+1;
           return ad>=idealArrival-unloadDays&&ad<=idealArrival+unloadDays+1;
         });
-        if(alreadyCovered) continue;
+        if(alreadyCovered){scanFromSp=critDay+1;continue;}
 
         const arrivalStr=new Date(simStart.getTime()+(idealArrival-1)*864e5).toISOString().split('T')[0];
-        const orderDate=new Date(simStart.getTime()+(day-1)*864e5).toISOString().split('T')[0];
+        const orderStr=new Date(simStart.getTime()+(orderDay-1)*864e5).toISOString().split('T')[0];
         proposedCalls.push({arrivalDay:idealArrival});
-        for(let d=idealArrival;d<idealArrival+unloadDays&&d<=horizon;d++) propInflow[d]+=primaryQty/unloadDays;
+        for(let d=idealArrival;d<idealArrival+unloadDays&&d<=horizon;d++) propInflow[d]+=primaryQty/Math.max(1,unloadDays);
+        rebuildFromSp(idealArrival);
 
-        // Build legs with per-berth arrival dates (secondary berths add days based on transit)
-        // For now first berth arrives on idealArrival; other berths arrive +unloadDays later each
         let legOffset=0;
         const legs=allocBerths.map((ab,li)=>{
           if(li>0) legOffset+=berthRate>0?Math.ceil(allocBerths[li-1].qty/(berthRate*24)):unloadDays;
@@ -6343,7 +6353,7 @@ function _writeProposedVesselCalls(r){
             arrival_date:legArrival,
             quantity_t:ab.qty,
             unload_rate_tph:parseFloat(legBerth.props.max_unload_rate_tph)||0,
-            status:'Proposed'  // inherits parent — advances with parent until Confirmed
+            status:'Proposed'
           };
         });
 
@@ -6361,9 +6371,11 @@ function _writeProposedVesselCalls(r){
           unload_rate_tph:legs[0].unload_rate_tph,
           legs,
           transit_days:leadDays,
-          notes:`Auto-proposed split. Order by: ${orderDate}`,
+          notes:`Auto-proposed split. Order by: ${orderStr}`,
           status:'Proposed'
         });
+
+        scanFromSp=1;
       }
       return; // done with this supply source — skip individual berth loop
     }
@@ -6380,8 +6392,9 @@ function _writeProposedVesselCalls(r){
 
       const siloMax=parseFloat(targetSilo.props.max_capacity)||0; if(!siloMax) return;
       const siloStart=parseFloat(targetSilo.props.start_inventory)||0;
+      const _obj=targetSilo.props?.inventory_objective||'maximize';
+      const targetInv=({maximize:1.00,meet_demand:0.75,minimize:0.50}[_obj]??1.00)*siloMax;
 
-      // Find all demand points downstream of this silo (same walk as dashboard)
       const demIds=[];
       const visited=new Set([targetSilo.id]);
       const q=[targetSilo.id];
@@ -6397,26 +6410,20 @@ function _writeProposedVesselCalls(r){
         });
       }
 
-      // Build per-day demand outflow from actual demand_values
-      // This is the ground truth — not derived from inventory history
-      const dailyOutflow=new Array(horizon+1).fill(0);
+      const dailyOutflow=new Array(horizon+2).fill(0);
       for(let d=1;d<=horizon;d++){
         const dt=new Date(simStart.getTime()+(d-1)*864e5);
         const ds=dt.toISOString().split('T')[0];
         dailyOutflow[d]=demIds.reduce((s,id)=>s+(_demandRate(id,ds)||0),0);
       }
-
-      // Check there is any demand at all
       const totalDemand=dailyOutflow.reduce((s,v)=>s+v,0);
       if(totalDemand<=0) return;
+      const critFloor=minCoverDays*(totalDemand/horizon);
 
-      // Locked vessel calls for this berth+product
       const lockedCalls=DB.vessel_calls.filter(v=>
         v.berth_element_id===berth.id&&v.product_id===productId&&v.status!=='Proposed'
       );
-
-      // Build per-day inflow from locked vessels
-      const lockedInflow=new Array(horizon+1).fill(0);
+      const lockedInflow=new Array(horizon+2).fill(0);
       lockedCalls.forEach(v=>{
         const arrDay=dateToDayOffset(v.arrival_date,S.simCfg.start_date)+1;
         const rate=parseFloat(v.unload_rate_tph)||berthRate;
@@ -6425,61 +6432,56 @@ function _writeProposedVesselCalls(r){
         for(let d=arrDay;d<arrDay+ud&&d<=horizon;d++) lockedInflow[d]+=dailyQty;
       });
 
-      // Forward projection from silo starting inventory
-      // propInflow accumulates as we add proposed vessels
-      const propInflow=new Array(horizon+1).fill(0);
+      const propInflow=new Array(horizon+2).fill(0);
       const proposedCalls=[];
 
-      // Trigger: order when projected stock at (day + leadDays) would be below minCoverDays of demand
-      // We look ahead leadDays to see where inventory will be when the vessel arrives
-      for(let day=1;day<=horizon;day++){
-
-        // Project inventory at end of today using running balance
-        // (recalculate from scratch each day to stay accurate)
-        let proj=siloStart;
-        for(let d=1;d<=day;d++){
-          proj+=lockedInflow[d]+propInflow[d]-dailyOutflow[d];
-          proj=Math.max(0,Math.min(siloMax,proj));
+      // Forward projection: projInv[d] = BOD inventory on day d
+      const projInv=new Array(horizon+2).fill(0);
+      projInv[1]=Math.max(0,Math.min(siloMax,siloStart));
+      const rebuildFrom=from=>{
+        for(let d=from;d<=horizon;d++){
+          projInv[d+1]=Math.max(0,Math.min(siloMax,
+            projInv[d]+lockedInflow[d]+propInflow[d]-dailyOutflow[d]
+          ));
         }
+      };
+      rebuildFrom(1);
 
-        // Now project forward from today to today+leadDays to see where we land at vessel arrival
-        let projAtArrival=proj;
-        for(let d=day+1;d<=day+leadDays&&d<=horizon;d++){
-          projAtArrival+=lockedInflow[d]+propInflow[d]-dailyOutflow[d];
-          projAtArrival=Math.max(0,Math.min(siloMax,projAtArrival));
+      const facName=DB.facilities.find(f=>f.id===(berth.assigned_facility_id||berth.facility_id||S.facility_id))?.name||'';
+      const vesselFacId=berth.assigned_facility_id||berth.facility_id||S.facility_id;
+      let scanFrom=1, guard=horizon+10;
+
+      while(guard-->0){
+        // Find first day where EOD inventory hits the critical floor
+        let critDay=null;
+        for(let d=scanFrom;d<=horizon;d++){
+          const eod=projInv[d]+lockedInflow[d]+propInflow[d]-dailyOutflow[d];
+          if(eod<=critFloor){critDay=d;break;}
         }
+        if(!critDay) break;
 
-        // Days of cover at arrival point
-        const avgDailyOut=dailyOutflow.slice(day,day+leadDays).reduce((s,v)=>s+v,0)/Math.max(1,leadDays);
-        const coverAtArrival=avgDailyOut>0?projAtArrival/avgDailyOut:999;
+        const idealArrival=critDay;
+        const orderDay=idealArrival-leadDays;
+        if(orderDay<1||idealArrival>horizon){scanFrom=critDay+1;continue;}
 
-        if(coverAtArrival>minCoverDays) continue; // still safe when vessel would arrive
+        // Skip if silo will already be near or above target at arrival
+        const projAtArrival=projInv[idealArrival];
+        if(projAtArrival>=targetInv*0.95){scanFrom=critDay+1;continue;}
 
-        const idealArrival=day+leadDays;
-        if(idealArrival>horizon) continue;
-
-        // Skip if a locked or proposed vessel is already coming around this time
+        // Skip if a vessel is already arriving close enough to cover this period
         const alreadyCovered=[...lockedCalls,...proposedCalls].some(v=>{
-          const ad=typeof v.arrivalDay!=='undefined'
-            ?v.arrivalDay
-            :dateToDayOffset(v.arrival_date,S.simCfg.start_date)+1;
+          const ad=v.arrivalDay??dateToDayOffset(v.arrival_date,S.simCfg.start_date)+1;
           return ad>=idealArrival-unloadDays&&ad<=idealArrival+unloadDays+1;
         });
-        if(alreadyCovered) continue;
+        if(alreadyCovered){scanFrom=critDay+1;continue;}
 
-        // Propose vessel
-        const arrivalDate=new Date(simStart.getTime()+(idealArrival-1)*864e5);
-        const arrivalStr=arrivalDate.toISOString().split('T')[0];
-        const orderDate=new Date(simStart.getTime()+(day-1)*864e5).toISOString().split('T')[0];
-        const facName=DB.facilities.find(f=>f.id===(berth.assigned_facility_id||berth.facility_id||S.facility_id))?.name||'';
-        // Use the berth's assigned terminal facility_id so proposals appear in the correct terminal view
-        const vesselFacId=berth.assigned_facility_id||berth.facility_id||S.facility_id;
+        const arrivalStr=new Date(simStart.getTime()+(idealArrival-1)*864e5).toISOString().split('T')[0];
+        const orderStr=new Date(simStart.getTime()+(orderDay-1)*864e5).toISOString().split('T')[0];
 
         proposedCalls.push({arrivalDay:idealArrival});
-        const dailyUnload=typicalVol/unloadDays;
-        for(let d=idealArrival;d<idealArrival+unloadDays&&d<=horizon;d++){
-          propInflow[d]+=dailyUnload;
-        }
+        const dailyUnload=typicalVol/Math.max(1,unloadDays);
+        for(let d=idealArrival;d<idealArrival+unloadDays&&d<=horizon;d++) propInflow[d]+=dailyUnload;
+        rebuildFrom(idealArrival);
 
         DB.vessel_calls.push({
           id:`vc_prop_${ss.id}_${berth.id}_${idealArrival}`,
@@ -6493,9 +6495,11 @@ function _writeProposedVesselCalls(r){
           quantity_t:typicalVol,
           unload_rate_tph:berthRate,
           transit_days:leadDays,
-          notes:`Auto-proposed. Order by: ${orderDate}`,
+          notes:`Auto-proposed. Order by: ${orderStr}`,
           status:'Proposed'
         });
+
+        scanFrom=1; // restart scan — projection updated
       }
     });
   });
