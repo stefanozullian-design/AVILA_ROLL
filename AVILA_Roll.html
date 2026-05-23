@@ -4999,6 +4999,7 @@ function rpSetView(preset,btn){
   document.querySelectorAll('#rail-planner-wrap .vw-btn').forEach(b=>b.classList.remove('active'));
   if(btn) btn.classList.add('active');
   rpRender();
+  renderRailTable();
 }
 
 function rpGetRange(){
@@ -5047,6 +5048,7 @@ function rpToggleDest(facId,ev){
   }
   rpBuildDestFilter();
   rpRender();
+  renderRailTable();
 }
 
 // ── Demand rate helper ────────────────────────────────────────────
@@ -5867,11 +5869,26 @@ function _vpToggleLegacy(){
 
 function renderRailTable(){
   const tbody=document.getElementById('rail-tbody'); if(!tbody) return;
-  if(!DB.rail_movements.length){
-    tbody.innerHTML=`<tr><td colspan="11" style="color:var(--text-dim);text-align:center;padding:14px">No rail movements scheduled — rail deducts from source and adds to destination after transit time</td></tr>`;
+  // Apply logistics filters (terminal selection + date range)
+  const destFilter=_rp?.dests||[];
+  const {startDay,endDay}=rpGetRange();
+  const startDate=rpDayDate(startDay);
+  const endDate=rpDayDate(endDay);
+  const filtered=DB.rail_movements.map((r,i)=>({r,i})).filter(({r})=>{
+    if(destFilter.length&&!destFilter.includes(r.to_facility_id)) return false;
+    const dep=r.departure_date||r.date||'';
+    if(dep&&dep<startDate) return false;
+    if(dep&&dep>endDate) return false;
+    return true;
+  });
+  if(!filtered.length){
+    const msg=!DB.rail_movements.length
+      ?'No rail movements scheduled — rail deducts from source and adds to destination after transit time'
+      :'No movements match the current filter';
+    tbody.innerHTML=`<tr><td colspan="11" style="color:var(--text-dim);text-align:center;padding:14px">${msg}</td></tr>`;
     return;
   }
-  tbody.innerHTML=DB.rail_movements.map((r,i)=>{
+  tbody.innerHTML=filtered.map(({r,i})=>{
     const fromFac=DB.facilities.find(f=>f.id===r.from_facility_id);
     const toFac=DB.facilities.find(f=>f.id===r.to_facility_id);
     const prod=DB.products.find(p=>p.id===r.product_id);
