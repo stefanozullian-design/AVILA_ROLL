@@ -6012,8 +6012,10 @@ function _planRailShipments(rBase){
   DB.rail_movements=DB.rail_movements.filter(m=>m.status!=='Proposed');
 
   const simStart=new Date(S.simCfg.start_date+'T00:00:00');
-  const horizon=S.simCfg.horizon;
+  const horizon=rBase.simHorizon||S.simCfg.horizon;
   const allEls=getFacElements();
+  // Default target percentages by inventory_objective — same as siloTarget() inside simulate()
+  const _objTargetPct={maximize:1.00, meet_demand:0.75, minimize:0.50};
 
   // For each rail dispatch point, plan shipments for each destination
   allEls.filter(e=>e.type==='dispatch_point'&&e.props.dispatch_type==='Rail').forEach(dp=>{
@@ -6058,9 +6060,16 @@ function _planRailShipments(rBase){
       if(!termSilo) return;
 
       const siloMax=parseFloat(termSilo.props?.max_capacity)||0; if(!siloMax) return;
-      // Read the floor directly from the silo's critical_floor_pct field
       const critFloor=(parseFloat(termSilo.props?.critical_floor_pct)||10)/100*siloMax;
-      const targetInv=(parseFloat(termSilo.props?.target_pct)||75)/100*siloMax;
+      // Target respects inventory_objective: maximize→100%, meet_demand→75%, minimize→50%
+      // target_pct prop overrides the objective default if explicitly set
+      const _obj=termSilo.props?.inventory_objective||'maximize';
+      const _targetPctDefault=_objTargetPct[_obj]??1.00;
+      const _targetPctProp=termSilo.props?.target_pct;
+      const targetPct=(_targetPctProp!=null&&_targetPctProp!==''&&parseFloat(_targetPctProp)>0)
+        ?parseFloat(_targetPctProp)/100
+        :_targetPctDefault;
+      const targetInv=targetPct*siloMax;
 
       // Inventory history from Pass 1 (EOD array, 0-indexed by day-1)
       const invHist=rBase.inventoryHistory[termSilo.id]||[];
@@ -6528,6 +6537,7 @@ async function runSimulation(){
     // ── Pass 1: baseline without proposed vessels/rail ──────────
     // Generates rail and vessel proposals from clean inventory picture.
     const rBase=simulate(els, getFacConnections(), effectiveHorizon, false);
+    rBase.simHorizon=effectiveHorizon;
     _planRailShipments(rBase);
     _writeProposedVesselCalls(rBase);
 
