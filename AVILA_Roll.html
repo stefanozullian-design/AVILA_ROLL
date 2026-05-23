@@ -4917,11 +4917,16 @@ const _rpCharts={};  // active Chart.js instances — destroyed and rebuilt on e
 // ── Topology helpers ─────────────────────────────────────────────
 // Get all facilities that have a Rail berth on the current canvas
 function rpGetRailDestinations(){
-  return getFacElements()
-    .filter(e=>e.type==='berth'&&(e.props?.berth_type||'').toLowerCase().includes('rail'))
-    .map(e=>DB.facilities.find(f=>f.id===(e.assigned_facility_id||e.facility_id)))
-    .filter(Boolean)
-    .filter((f,i,a)=>a.findIndex(x=>x.id===f.id)===i); // unique
+  const allEls=getFacElements();
+  const facIds=new Set();
+  // Primary: scan dispatch_point destination configs (catches new terminals regardless of berth type)
+  allEls.filter(e=>e.type==='dispatch_point'&&e.props?.dispatch_type==='Rail')
+    .forEach(dp=>(dp.props?.destinations||[]).forEach(d=>d.facility_id&&facIds.add(d.facility_id)));
+  // Fallback: berths explicitly marked as rail type
+  allEls.filter(e=>e.type==='berth'&&(e.props?.berth_type||'').toLowerCase().includes('rail'))
+    .forEach(e=>{const fid=e.assigned_facility_id||e.facility_id;if(fid)facIds.add(fid);});
+  return [...facIds].map(id=>DB.facilities.find(f=>f.id===id)).filter(Boolean)
+    .filter((f,i,a)=>a.findIndex(x=>x.id===f.id)===i);
 }
 
 // Get rail dispatch points on BRS canvas that can reach a destination
@@ -4997,7 +5002,7 @@ function rpSetView(preset,btn){
 }
 
 function rpGetRange(){
-  const horizon=S.simCfg.horizon||90;
+  const horizon=S.simResults?.simHorizon||S.simCfg.horizon||90;
   const simStart=new Date(S.simCfg.start_date+'T00:00:00');
   const today=new Date();
   const todayOff=Math.max(1,Math.round((today-simStart)/864e5)+1);
@@ -5063,19 +5068,23 @@ function rpInv(elId,d){
 
 // ── Planned arrivals from DB.rail_movements ───────────────────────
 function rpPlannedArrivalsForDest(destFacId,berthId){
-  // Returns {day: tonnes} for all Planned/Confirmed movements
+  // Returns {day: [{tonnes,status}]} — all movements, all statuses, switch_day used as fallback
   const map={};
   DB.rail_movements
-    .filter(rm=>rm.to_facility_id===destFacId&&['Planned','Confirmed','In Transit'].includes(rm.status||''))
+    .filter(rm=>rm.to_facility_id===destFacId)
     .forEach(rm=>{
-      const depDay=(function(){
-        if(!rm.departure_date||!S.simCfg.start_date) return null;
-        return Math.round((new Date(rm.departure_date)-new Date(S.simCfg.start_date+'T00:00:00'))/864e5)+1;
-      })();
+      const st=rm.status||'Planned';
+      let depDay=null;
+      if(rm.departure_date&&S.simCfg.start_date){
+        depDay=Math.round((new Date(rm.departure_date)-new Date(S.simCfg.start_date+'T00:00:00'))/864e5)+1;
+      } else if(rm.switch_day){
+        depDay=rm.switch_day;
+      }
       if(!depDay) return;
       const transit=parseInt(rm.transit_days)||1;
       const arrDay=depDay+transit;
-      map[arrDay]=(map[arrDay]||0)+(rm.total_capacity_t||0);
+      if(!map[arrDay]) map[arrDay]=[];
+      map[arrDay].push({tonnes:rm.total_capacity_t||0,status:st});
     });
   return map;
 }
@@ -5150,16 +5159,27 @@ function rpRender(){
     const demEls=rpGetDestDemEls(destFacId);
     const arrivals=rpPlannedArrivalsForDest(destFacId,berth?.id);
 
-    // TRANSF/ARRIVAL row — clickable
+    // Destination group header
+    const _colspan=days.length+1;
+    destRows.push(`<tr><td colspan="${_colspan}" style="background:rgba(77,166,255,.07);color:#4da6ff;font-family:var(--mono);font-size:8px;padding:3px 8px;letter-spacing:.06em;border-top:1px solid rgba(77,166,255,.18)">▸ ${destFac?.name||destFacId}</td></tr>`);
+
+    // TRANSF/ARRIVAL row — clickable, color-coded by movement status
+    const _statusPriority=['In Transit','Unloading','Confirmed','Planned','Proposed','Finished'];
     const arrCells=days.map(d=>{
-      const tonnes=arrivals[d]||0;
+      const entries=arrivals[d]||[];
       const ds=rpDayDate(d);
       let cls='tp-cell-clickable';
       let val='—';
-      if(tonnes>0){cls+=' tp-cell-planned';val=`${Number(tonnes).toLocaleString()}t`;}
+      if(entries.length>0){
+        const totalTonnes=entries.reduce((s,e)=>s+e.tonnes,0);
+        const domSt=_statusPriority.find(s=>entries.some(e=>e.status===s))||entries[0].status;
+        const col=_tsGet(domSt).color;
+        cls+=' tp-cell-planned';
+        val=`<span style="color:${col}">${Number(totalTonnes).toLocaleString()}t</span>`;
+      }
       return `<td class="${cls}" onclick="rpOpenArrivalDialog('${destFacId}','${d}','${ds}')" title="Click to add/edit arrival">${val}</td>`;
     }).join('');
-    destRows.push(`<tr class="tp-row-arrival"><td>${destFac?.name||destFacId}/TRANSF/ARRIVAL</td>${arrCells}</tr>`);
+    destRows.push(`<tr class="tp-row-arrival"><td style="padding-left:10px">TRANSF/ARRIVAL</td>${arrCells}</tr>`);
 
     // INVENTORY row
     if(destSilo){
@@ -5222,21 +5242,21 @@ function rpRender(){
         origRows.push(`<tr class="tp-row-rail-silo"><td style="color:#38bdf8">${railSilo.name}</td>${railCells}</tr>`);
       }
 
-      // Loading per day (from planned rail movements)
+      // Loading per day (all statuses shown)
       const loadMap={}; const dispMap={};
       myDests.forEach(destFacId=>{
-        const dCfg=(dp.props?.destinations||[]).find(d=>d.facility_id===destFacId);
         DB.rail_movements
-          .filter(rm=>rm.from_facility_id===S.facility_id&&rm.to_facility_id===destFacId
-            &&['Planned','Confirmed'].includes(rm.status||''))
+          .filter(rm=>rm.from_facility_id===S.facility_id&&rm.to_facility_id===destFacId)
           .forEach(rm=>{
             const sw=rm.switch_day; const ls=rm.load_start_day;
             if(!sw||!ls) return;
+            const st=rm.status||'Planned';
             const cars=parseInt(rm.wagon_count)||0;
             const daysLoad=sw-ls||1;
             const cpd=Math.ceil(cars/daysLoad);
             for(let d=ls;d<sw;d++) loadMap[d]=(loadMap[d]||0)+cpd;
-            dispMap[sw]=(dispMap[sw]||0)+cars;
+            if(!dispMap[sw]) dispMap[sw]=[];
+            dispMap[sw].push({cars,status:st});
           });
       });
 
@@ -5247,11 +5267,16 @@ function rpRender(){
       }).join('');
       origRows.push(`<tr class="tp-row-loading"><td style="color:#4da6ff">  ↑ Loading (cars/d)</td>${loadCells}</tr>`);
 
-      // Dispatch on switch days
+      // Dispatch on switch days — color-coded by movement status
+      const _dOrder=['In Transit','Confirmed','Planned','Proposed'];
       const dispCells=days.map(d=>{
-        const cars=dispMap[d]||0;
+        const entries=dispMap[d]||[];
         let cls=rpIsSwitch(d,switchDays)?` class="tp-col-switch"`:'';
-        return `<td${cls}>${cars>0?`<span style="color:var(--amber)">${cars} cars</span>`:'—'}</td>`;
+        if(!entries.length) return `<td${cls}>—</td>`;
+        const totalCars=entries.reduce((s,e)=>s+e.cars,0);
+        const domSt=_dOrder.find(s=>entries.some(e=>e.status===s))||entries[0].status;
+        const col=_tsGet(domSt).color;
+        return `<td${cls}><span style="color:${col}">${totalCars} cars</span></td>`;
       }).join('');
       origRows.push(`<tr class="tp-row-dispatch"><td style="color:#ff9433">  ⇒ Dispatch (switch day)</td>${dispCells}</tr>`);
     });
@@ -6491,22 +6516,33 @@ async function runSimulation(){
   statMsg('Running simulation…');
   document.getElementById('mode-lbl').textContent='Running';
   setTimeout(()=>{
+    // Auto-extend horizon to cover all planned/confirmed/in-transit movement arrival days
+    let effectiveHorizon=S.simCfg.horizon||90;
+    DB.rail_movements.forEach(rm=>{
+      if(['Planned','Confirmed','In Transit'].includes(rm.status||'Planned')){
+        const transit=parseInt(rm.transit_days)||1;
+        const latest=(rm.switch_day||0)+transit;
+        if(latest>effectiveHorizon) effectiveHorizon=latest;
+      }
+    });
+
     // ── Pass 1: baseline without proposed vessels/rail ──────────
     // Generates rail and vessel proposals from clean inventory picture.
-    const rBase=simulate(els, getFacConnections(), S.simCfg.horizon, false);
+    const rBase=simulate(els, getFacConnections(), effectiveHorizon, false);
     _planRailShipments(rBase);
     _writeProposedVesselCalls(rBase);
 
     // ── Pass 2: full plan including proposed vessels ────────
     // Proposed vessels are now in DB.vessel_calls — sim includes them.
     // Dashboard, daily results and analysis show this world.
-    const r=simulate(els, getFacConnections(), S.simCfg.horizon, true);
+    const r=simulate(els, getFacConnections(), effectiveHorizon, true);
     S.simResults=r;
+    S.simResults.simHorizon=effectiveHorizon;
 
     renderResults(r);
     if(S.view==='supply') renderSupplyView();
     document.getElementById('mode-lbl').textContent='Planning';
-    document.getElementById('sim-date-lbl').textContent=`Day ${S.simCfg.horizon} / ${S.simCfg.horizon}`;
+    document.getElementById('sim-date-lbl').textContent=`Day ${effectiveHorizon} / ${effectiveHorizon}`;
     statMsg(`Simulation complete — ${r.stopEvents.length} stop event(s)`);
     // Re-render the planner tables if user is on the logistics page
     if(S.topSection==='logistics'){
