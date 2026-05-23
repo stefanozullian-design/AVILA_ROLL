@@ -1475,7 +1475,8 @@ const ET = {
     {k:'warm_cold_hrs',l:'Warm → Cold Threshold (hours)',t:'number'},
     {k:'start_state',l:'Starting Thermal State',t:'select',opts:['Running','Stopped-Hot','Stopped-Warm','Stopped-Cold']},
     {k:'start_rate_pct',l:'Starting Rate (% of rated)',t:'number'},
-    {k:'fuel_id',l:'Primary Fuel',t:'catalog',cat:'fuels'}
+    {k:'fuel_id',l:'Primary Fuel',t:'catalog',cat:'fuels'},
+    {k:'restart_floor_pct',l:'Restart Floor % (kiln holds until clinker silo drops below this)',t:'number'}
   ]},
   finish_mill:{label:'Finish Mill',shape:'diamond',color:'#00ff9d',cat:'transform',fields:[
     {k:'start_state',l:'Starting State',t:'select',opts:['Running','Stopped','Maintenance']},
@@ -6127,10 +6128,10 @@ function _planRailShipments(rBase){
         const latestDeparture=critDay-transitDays;
 
         // Find the latest unused switch day that still allows arrival in time
-        let switchDay=null;
+        let switchDay=null, switchIdx=-1;
         for(let si=allSwitchDayNums.length-1;si>=0;si--){
           const s=allSwitchDayNums[si];
-          if(s<=latestDeparture&&!usedSwitchDays.has(s)){switchDay=s;break;}
+          if(s<=latestDeparture&&!usedSwitchDays.has(s)){switchDay=s;switchIdx=si;break;}
         }
 
         if(!switchDay){
@@ -6140,15 +6141,17 @@ function _planRailShipments(rBase){
           continue;
         }
 
-        // How many cars to restore inventory to target on the arrival day,
-        // capped so we never overflow the silo.
+        // Fill silo as much as possible, capped by loading rate × available window.
         const arrivalDay=Math.min(switchDay+transitDays, horizon+1);
         const projAtArrival=Math.max(0, projInvFwd[arrivalDay]+(plannedArrivals[arrivalDay]||0));
-        const shortage=Math.max(0, targetInv-projAtArrival);
-        if(shortage<carCapT){ usedSwitchDays.add(switchDay); scanFrom=critDay+1; continue; }
-
+        // Skip if terminal will already be at/near capacity on arrival day
+        if(projAtArrival>=siloMax*0.95){ usedSwitchDays.add(switchDay); scanFrom=critDay+1; continue; }
+        // Loading rate cap: only load what can be produced in the window since previous switch
+        const prevSw=switchIdx>0?allSwitchDayNums[switchIdx-1]:0;
+        const availLoadDays=Math.max(1, switchDay-Math.max(1,prevSw+1));
+        const maxCarsLoadable=Math.floor(availLoadDays*stdCarsDay);
         const maxCarsSilo=Math.floor((siloMax-projAtArrival)/carCapT);
-        const carsNeeded=Math.min(Math.ceil(shortage/carCapT), Math.max(1,maxCarsSilo));
+        const carsNeeded=Math.max(1, Math.min(maxCarsSilo, maxCarsLoadable));
 
         // Verify loading window fits before sim start
         const loadDays=Math.ceil(carsNeeded/stdCarsDay);
@@ -7117,36 +7120,57 @@ function simulate(elements, connections, horizon, includeProposed=false){
 
       // ── RULE: restart_threshold ────────────────────────
       // If kiln was previously blocked due to high clinker inventory,
-      // hold it idle until downstream silo(s) drop to the threshold level.
+      // hold it idle until downstream silo(s) drop to the configured level.
       if(s._blockedHighInv){
-        const rtRules=getRules(el.id,'restart_threshold',day);
-        if(rtRules.length){
-          const rule=rtRules[0];
-          const metric=rule.structured.params?.metric||'inventory_pct';
-          const threshold=parseFloat(rule.structured.params?.threshold)||30;
+        const restartFloor=parseFloat(el.props?.restart_floor_pct);
+        if(!isNaN(restartFloor)&&restartFloor>0){
+          // Direct property takes precedence over rules
           const stillAbove=downClk.some(cs=>{
             const inv=state[cs.id]?.inventory||0;
             const maxCap=state[cs.id]?.maxCap||1;
-            if(metric==='inventory_pct') return (inv/maxCap*100)>threshold;
-            if(metric==='inventory_days'){
-              const avgOut=Math.max(1,(state[cs.id]?.outflowHistory||[]).slice(-3).reduce((a,b)=>a+b,0)/3);
-              return (inv/avgOut)>threshold;
-            }
-            if(metric==='inventory_t') return inv>threshold;
-            return false;
+            return (inv/maxCap*100)>restartFloor;
           });
           if(stillAbove){
             const cs=downClk[0];
             const pct=cs?Math.round((state[cs.id]?.inventory||0)/(state[cs.id]?.maxCap||1)*100):0;
             s.status='blocked';
             logStop(el.id,el.name,day,'blocked',
-              `Rule "${rule.name}": waiting for clinker silo to drop to ${threshold}${metric==='inventory_pct'?'%':metric==='inventory_days'?' days':' t'} (currently ${pct}%)`);
+              `Clinker silo at ${pct}% — waiting to drop below ${restartFloor}% before restart`);
             return;
           } else {
-            s._blockedHighInv=false; // threshold met — allow restart
+            s._blockedHighInv=false;
           }
         } else {
-          s._blockedHighInv=false; // no rule — normal restart
+          // Fall back to rules-based restart_threshold
+          const rtRules=getRules(el.id,'restart_threshold',day);
+          if(rtRules.length){
+            const rule=rtRules[0];
+            const metric=rule.structured.params?.metric||'inventory_pct';
+            const threshold=parseFloat(rule.structured.params?.threshold)||30;
+            const stillAbove=downClk.some(cs=>{
+              const inv=state[cs.id]?.inventory||0;
+              const maxCap=state[cs.id]?.maxCap||1;
+              if(metric==='inventory_pct') return (inv/maxCap*100)>threshold;
+              if(metric==='inventory_days'){
+                const avgOut=Math.max(1,(state[cs.id]?.outflowHistory||[]).slice(-3).reduce((a,b)=>a+b,0)/3);
+                return (inv/avgOut)>threshold;
+              }
+              if(metric==='inventory_t') return inv>threshold;
+              return false;
+            });
+            if(stillAbove){
+              const cs=downClk[0];
+              const pct=cs?Math.round((state[cs.id]?.inventory||0)/(state[cs.id]?.maxCap||1)*100):0;
+              s.status='blocked';
+              logStop(el.id,el.name,day,'blocked',
+                `Rule "${rule.name}": waiting for clinker silo to drop to ${threshold}${metric==='inventory_pct'?'%':metric==='inventory_days'?' days':' t'} (currently ${pct}%)`);
+              return;
+            } else {
+              s._blockedHighInv=false;
+            }
+          } else {
+            s._blockedHighInv=false; // no rule and no property — normal restart
+          }
         }
       }
 
