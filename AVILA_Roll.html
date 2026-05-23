@@ -4935,14 +4935,13 @@ function rpGetOriginsForDest(destFacId){
   const allConns=DB.connections.filter(c=>c.facility_id===S.facility_id);
   const results=[];
   allEls.filter(e=>e.type==='dispatch_point'&&e.props?.dispatch_type==='Rail').forEach(dp=>{
-    // Check if any destination config matches destFacId
-    const destCfg=(dp.props?.destinations||[]).find(d=>d.facility_id===destFacId);
-    if(!destCfg) return;
-    // Find the berth connected downstream
+    // Use canvas connections as primary check — catches terminals wired up but not yet in destinations config
     const downBerths=(allConns.filter(c=>c.from_element_id===dp.id))
       .map(c=>allEls.find(e=>e.id===c.to_element_id))
       .filter(e=>e?.type==='berth'&&(e.assigned_facility_id||e.facility_id)===destFacId);
     if(!downBerths.length) return;
+    // destCfg may be null if the destination was connected on canvas but not added to dispatch config
+    const destCfg=(dp.props?.destinations||[]).find(d=>d.facility_id===destFacId)||null;
     // Find upstream RAIL silo
     const upRailSilo=(allConns.filter(c=>c.to_element_id===dp.id))
       .map(c=>allEls.find(e=>e.id===c.from_element_id))
