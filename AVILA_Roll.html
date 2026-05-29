@@ -6726,10 +6726,15 @@ function simulate(elements, connections, horizon, includeProposed=false){
   // "From" filter was incorrect — transitQueue tracks inbound arrivals, not outbound departures.
   DB.rail_movements
     .filter(rm=>{
-      if(!rm.to_facility_id||rm.to_facility_id!==S.facility_id) return false;
       const st=rm.status||'Planned';
-      if(st==='Proposed') return includeProposed; // auto-generated: only in Pass 2
-      return ['Planned','Confirmed','In Transit'].includes(st); // user-entered: always
+      const statusOk=st==='Proposed'?includeProposed:['Planned','Confirmed','In Transit'].includes(st);
+      if(!statusOk) return false;
+      // Inbound: train arriving at this facility
+      if(rm.to_facility_id===S.facility_id) return true;
+      // Outbound: train departing from this facility to a terminal berth on this canvas
+      if(rm.from_facility_id===S.facility_id&&rm.to_berth_id)
+        return elements.some(e=>e.id===rm.to_berth_id);
+      return false;
     })
     .forEach(rm=>{
       const arrivalDay=dateToDayOffset(rm.departure_date,S.simCfg.start_date)+1+(parseInt(rm.transit_days)||1);
