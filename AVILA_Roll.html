@@ -5183,6 +5183,16 @@ function rpRender(){
     }).join('');
     destRows.push(`<tr class="tp-row-arrival"><td style="padding-left:10px">TRANSF/ARRIVAL</td>${arrCells}</tr>`);
 
+    // RAIL UNLOAD row — daily volume unloaded from the rail berth into the terminal silo
+    if(berth&&S.simResults?.berthUnloadHistory?.[berth.id]){
+      const unldHist=S.simResults.berthUnloadHistory[berth.id];
+      const unldCells=days.map(d=>{
+        const v=unldHist[d-1]||0;
+        return `<td style="color:var(--green);font-size:10px">${v>0?Number(v).toLocaleString()+'t':'—'}</td>`;
+      }).join('');
+      destRows.push(`<tr class="tp-row-unload"><td style="padding-left:14px;color:var(--green);font-size:10px">Rail unload</td>${unldCells}</tr>`);
+    }
+
     // INVENTORY row
     if(destSilo){
       const invCells=days.map(d=>{
@@ -6718,22 +6728,27 @@ function simulate(elements, connections, horizon, includeProposed=false){
 
   // ── RAIL TRANSIT PIPELINE ────────────────────────────
   // transitQueue[arrivalDay] = [{berthId, byProduct:{pid:tonnes}}]
-  // Built during simulation as cars are dispatched on switch days.
-  // In Pass 2 (includeProposed=true), also pre-load all planned/confirmed/proposed movements.
-  // Pass 1 excludes Proposed but still includes Planned/Confirmed (user-entered, ground truth).
+  // Two sources feed this queue:
+  //   1. Pre-build (here): Planned/Confirmed/In Transit outbound movements + all inbound movements.
+  //      Authoritative for confirmed schedules — dispatch_point locked-dispatch skips re-injection
+  //      to avoid double-counting.
+  //   2. Dispatch_point simulation (switch-day AUTO dispatch): Proposed movements only.
+  //      Runs in the day loop and handles demand-driven forward planning.
   const transitQueue={};
-  // Pre-load movements arriving AT this facility (to_facility_id = current facility).
-  // "From" filter was incorrect — transitQueue tracks inbound arrivals, not outbound departures.
   DB.rail_movements
     .filter(rm=>{
       const st=rm.status||'Planned';
-      const statusOk=st==='Proposed'?includeProposed:['Planned','Confirmed','In Transit'].includes(st);
-      if(!statusOk) return false;
-      // Inbound: train arriving at this facility
-      if(rm.to_facility_id===S.facility_id) return true;
-      // Outbound: train departing from this facility to a terminal berth on this canvas
-      if(rm.from_facility_id===S.facility_id&&rm.to_berth_id)
+      // Inbound to this facility: include all statuses (Proposed only in Pass 2)
+      if(rm.to_facility_id===S.facility_id){
+        return st==='Proposed'?includeProposed:['Planned','Confirmed','In Transit'].includes(st);
+      }
+      // Outbound FROM this facility to a terminal berth on this canvas:
+      // Only Planned/Confirmed/In Transit — Proposed outbound is handled by dispatch_point auto-dispatch
+      // to avoid double-counting (pre-build + sim injection = 2× material at destination).
+      if(rm.from_facility_id===S.facility_id&&rm.to_berth_id&&
+         ['Planned','Confirmed','In Transit'].includes(st)){
         return elements.some(e=>e.id===rm.to_berth_id);
+      }
       return false;
     })
     .forEach(rm=>{
@@ -7681,17 +7696,9 @@ function simulate(elements, connections, horizon, includeProposed=false){
           // Silo deduction is handled by the daily loading step; no re-deduction needed here.
           // Reset yard
           s.yardByProduct={};
-          // Inject into transit queue
-          Object.entries(dispatchByDest).forEach(([facId,cars])=>{
-            const berthInfo=(railDestBerthMap[el.id]||{})[facId];
-            if(!berthInfo) return;
-            const arrivalDay=day+berthInfo.transitDays;
-            if(arrivalDay>horizon) return;
-            if(!transitQueue[arrivalDay]) transitQueue[arrivalDay]=[];
-            const byProdTonnes={};
-            Object.entries(dispatchByDestByProduct[facId]||{}).forEach(([pid,c])=>{byProdTonnes[pid]=c*carCap;});
-            transitQueue[arrivalDay].push({berthId:berthInfo.berthId,byProduct:byProdTonnes,fromFacId:S.facility_id,toFacId:facId});
-          });
+          // Transit queue injection SKIPPED for locked movements — the pre-build transit queue
+          // already added these Planned/Confirmed outbound movements. Injecting here too would
+          // credit the destination berth twice, causing inventory to plateau at siloMax.
 
         } else {
           // ── AUTO DISPATCH: no locked movements — allocate by demand score ──
