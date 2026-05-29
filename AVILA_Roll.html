@@ -5626,19 +5626,48 @@ function rpRenderCharts(){
       const demData=days.map(d=>demEls.reduce((s,e)=>s+rpDemand(e.id,d),0));
       const arrHist=S.simResults.berthArrivalHistory[berth?.id]||[];
       const arrData=days.map(d=>arrHist[d-1]||null);
+
+      // Per-bar status colors — map each arrival day to the dominant movement status
+      const _statusPriority=['In Transit','Unloading','Confirmed','Planned','Proposed','Finished'];
+      const _statusChartColor={
+        'Proposed':  'rgba(142,154,184,.65)',
+        'Planned':   'rgba(255,184,48,.80)',
+        'Confirmed': 'rgba(0,229,160,.80)',
+        'In Transit':'rgba(77,166,255,.80)',
+        'Unloading': 'rgba(56,189,248,.80)',
+        'Finished':  'rgba(142,154,184,.40)',
+      };
+      const arrivals4=rpPlannedArrivalsForDest(destFacId,berth?.id);
+      const arrBgColors=days.map(d=>{
+        const entries=arrivals4[d]||[];
+        if(!entries.length) return 'rgba(77,166,255,.55)';
+        const domSt=_statusPriority.find(s=>entries.some(e=>e.status===s))||entries[0]?.status||'Planned';
+        return _statusChartColor[domSt]||'rgba(77,166,255,.55)';
+      });
+
       const cid=`rpc4_${di}`;
+      const _destFacIdCopy=destFacId; // capture for click handler closure
       const canvas=mkCanvas(cid);
       const ds=[
-        {label:'Arrivals',data:arrData,type:'bar',backgroundColor:'rgba(77,166,255,.55)',borderColor:'#4da6ff',borderWidth:1,_u:' t'},
+        {label:'Arrivals',data:arrData,type:'bar',backgroundColor:arrBgColors,borderColor:arrBgColors.map(c=>c.replace(/[\d.]+\)$/,'1)')),borderWidth:1,_u:' t'},
         {label:'Inventory',data:invData,borderColor:'#34d399',backgroundColor:'rgba(52,211,153,.1)',
          fill:true,tension:0.2,pointRadius:0,borderWidth:1.5,type:'line',_u:' t'},
         {label:'Demand/d',data:demData,borderColor:'rgba(251,191,36,.6)',borderDash:[2,3],pointRadius:0,borderWidth:1,type:'line',_u:' t/d'}
       ];
       if(siloMax>0) ds.push({label:'Max',data:days.map(()=>siloMax),borderColor:'rgba(255,255,255,.15)',borderDash:[5,3],pointRadius:0,borderWidth:1,type:'line',_u:' t'});
       if(floor>0)   ds.push({label:'Floor',data:days.map(()=>floor),borderColor:'rgba(248,113,113,.55)',borderDash:[3,3],pointRadius:0,borderWidth:1,type:'line',_u:' t'});
+      const chart4Opts={...baseOpts(`DESTINATION · ${destFac?.name||destFacId}`)};
+      chart4Opts.onClick=(evt,active)=>{
+        if(!active.length) return;
+        const idx=active[0].index;
+        const d=days[idx];
+        rpOpenArrivalDialog(_destFacIdCopy, String(d), rpDayDate(d).slice(5));
+      };
+      chart4Opts.onHover=(evt,active)=>{
+        if(evt?.native?.target) evt.native.target.style.cursor=active.length?'pointer':'default';
+      };
       chartBuilders.push(()=>{
-        _rpCharts[cid]=new Chart(canvas,{type:'bar',data:{labels,datasets:ds},
-          options:baseOpts(`DESTINATION · ${destFac?.name||destFacId}`)});
+        _rpCharts[cid]=new Chart(canvas,{type:'bar',data:{labels,datasets:ds},options:chart4Opts});
       });
     }
   });
@@ -6729,26 +6758,22 @@ function simulate(elements, connections, horizon, includeProposed=false){
   // ── RAIL TRANSIT PIPELINE ────────────────────────────
   // transitQueue[arrivalDay] = [{berthId, byProduct:{pid:tonnes}}]
   // Two sources feed this queue:
-  //   1. Pre-build (here): Planned/Confirmed/In Transit outbound movements + all inbound movements.
-  //      Authoritative for confirmed schedules — dispatch_point locked-dispatch skips re-injection
-  //      to avoid double-counting.
-  //   2. Dispatch_point simulation (switch-day AUTO dispatch): Proposed movements only.
-  //      Runs in the day loop and handles demand-driven forward planning.
+  //   1. Pre-build (here): all outbound movements (incl. Proposed in Pass 2) + all inbound movements.
+  //      Authoritative for confirmed schedules; dispatch_point locked-dispatch skips re-injection.
+  //   2. Dispatch_point simulation (switch-day AUTO dispatch): only injects when the (arrivalDay,berthId)
+  //      combination is NOT already pre-built, preventing double-counting.
   const transitQueue={};
+  const preBuiltArrivalKeys=new Set(); // `${arrivalDay}_${berthId}` — guards auto-dispatch injection
   DB.rail_movements
     .filter(rm=>{
       const st=rm.status||'Planned';
-      // Inbound to this facility: include all statuses (Proposed only in Pass 2)
-      if(rm.to_facility_id===S.facility_id){
-        return st==='Proposed'?includeProposed:['Planned','Confirmed','In Transit'].includes(st);
-      }
-      // Outbound FROM this facility to a terminal berth on this canvas:
-      // Only Planned/Confirmed/In Transit — Proposed outbound is handled by dispatch_point auto-dispatch
-      // to avoid double-counting (pre-build + sim injection = 2× material at destination).
-      if(rm.from_facility_id===S.facility_id&&rm.to_berth_id&&
-         ['Planned','Confirmed','In Transit'].includes(st)){
+      const statusOk=st==='Proposed'?includeProposed:['Planned','Confirmed','In Transit'].includes(st);
+      if(!statusOk) return false;
+      // Inbound: train arriving at this facility
+      if(rm.to_facility_id===S.facility_id) return true;
+      // Outbound: train departing from this facility to a terminal berth on this canvas
+      if(rm.from_facility_id===S.facility_id&&rm.to_berth_id)
         return elements.some(e=>e.id===rm.to_berth_id);
-      }
       return false;
     })
     .forEach(rm=>{
@@ -6768,6 +6793,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
         toFacId:rm.to_facility_id,
         fromPlannedRail:true
       });
+      preBuiltArrivalKeys.add(`${arrivalDay}_${berthId}`);
     });
 
   // ── VESSEL ARRIVALS PIPELINE ─────────────────────────
@@ -7752,6 +7778,8 @@ function simulate(elements, connections, horizon, includeProposed=false){
               if(!berthInfo) return;
               const arrivalDay=day+berthInfo.transitDays;
               if(arrivalDay>horizon) return;
+              // Skip if already pre-built from DB.rail_movements — prevents double-counting
+              if(preBuiltArrivalKeys.has(`${arrivalDay}_${berthInfo.berthId}`)) return;
               if(!transitQueue[arrivalDay]) transitQueue[arrivalDay]=[];
               const byProdCars=dispatchByDestByProduct[facId]||{};
               const byProdTonnes={};
