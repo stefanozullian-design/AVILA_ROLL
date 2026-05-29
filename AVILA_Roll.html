@@ -5299,194 +5299,66 @@ function rpRender(){
 // ── Arrival dialog ─────────────────────────────────────────────────
 function rpOpenArrivalDialog(destFacId,dayNum,arrDateStr){
   if(!S.simCfg.start_date) return;
-  const origins=rpGetOriginsForDest(destFacId);
-  if(!origins.length){alert('No rail dispatch point connected to this destination in the topology.');return;}
+  const d=parseInt(dayNum);
 
-  // Check if there's already a planned movement for this arrival date
-  const existing=DB.rail_movements.find(rm=>
-    rm.to_facility_id===destFacId&&rm.status==='Planned'&&
-    (function(){
-      const dep=rm.departure_date;
-      if(!dep) return false;
-      const depDay=Math.round((new Date(dep)-new Date(S.simCfg.start_date+'T00:00:00'))/864e5)+1;
-      return (depDay+parseInt(rm.transit_days||1))===parseInt(dayNum);
-    })()
-  );
+  // Find all existing movements arriving on this day for this destination (any status)
+  const matches=DB.rail_movements.map((rm,i)=>({rm,i})).filter(({rm})=>{
+    if(rm.to_facility_id!==destFacId) return false;
+    let depDay=null;
+    if(rm.departure_date)
+      depDay=Math.round((new Date(rm.departure_date)-new Date(S.simCfg.start_date+'T00:00:00'))/864e5)+1;
+    else if(rm.switch_day) depDay=rm.switch_day;
+    if(depDay===null) return false;
+    return (depDay+(parseInt(rm.transit_days)||1))===d;
+  });
 
-  const destFac=DB.facilities.find(f=>f.id===destFacId);
-
-  // Build origin options
-  const origOpts=origins.map((o,i)=>`<option value="${i}">${o.origFac?.name||'BRS'} via ${o.dp.name}</option>`).join('');
-
-  // Build product options from first origin
-  const firstOrig=origins[0];
-  const acceptedProds=firstOrig.destCfg?.accepted_products||[];
-  const prodOpts=acceptedProds.map(pid=>{
-    const p=DB.products.find(x=>x.id===pid);
-    return `<option value="${pid}">${p?.name||pid}</option>`;
-  }).join('')||'<option value="">— any —</option>';
-
-  // Build modal
-  const modal=document.createElement('div');
-  modal.className='tp-modal';
-  modal.id='tp-arrival-modal';
-  modal.innerHTML=`
-    <div class="tp-modal-box">
-      <div class="tp-modal-title">Rail Arrival — ${destFac?.name||destFacId} · ${arrDateStr}</div>
-      <div class="tp-modal-field">
-        <label class="tp-modal-label">Origin</label>
-        <select class="fi" id="tp-orig-sel" onchange="rpUpdateDepCalc()">${origOpts}</select>
-      </div>
-      <div class="tp-modal-field">
-        <label class="tp-modal-label">Product</label>
-        <select class="fi" id="tp-prod-sel">${prodOpts}</select>
-      </div>
-      <div class="tp-modal-field">
-        <label class="tp-modal-label">Number of railcars</label>
-        <input class="fi" type="number" id="tp-cars-inp" min="1" value="${existing?.wagon_count||10}" oninput="rpUpdateDepCalc()">
-        <div class="tp-modal-hint" id="tp-cars-hint"></div>
-      </div>
-      <div class="tp-modal-field" style="background:var(--surface2);padding:8px;font-family:var(--mono);font-size:8px">
-        <div style="color:var(--text-dim);margin-bottom:4px">CALCULATED SCHEDULE</div>
-        <div id="tp-dep-calc" style="line-height:1.8;color:var(--text)">—</div>
-      </div>
-      <div class="tp-modal-warn" id="tp-dep-warn"></div>
-      <div class="tp-modal-actions">
-        ${existing?`<button class="tb-btn sec" onclick="rpDeleteArrival('${existing.id}')">Delete</button>`:''}
-        <button class="tb-btn sec" onclick="document.getElementById('tp-arrival-modal').remove()">Cancel</button>
-        <button class="tb-btn blue" onclick="rpSaveArrival('${destFacId}','${dayNum}','${arrDateStr}')">Accept</button>
-      </div>
-    </div>`;
-  document.body.appendChild(modal);
-  // Store context
-  modal._destFacId=destFacId;
-  modal._arrDay=parseInt(dayNum);
-  modal._arrDate=arrDateStr;
-  modal._origins=origins;
-  rpUpdateDepCalc();
-}
-
-function rpUpdateDepCalc(){
-  const modal=document.getElementById('tp-arrival-modal');
-  if(!modal) return;
-  const origIdx=parseInt(document.getElementById('tp-orig-sel')?.value)||0;
-  const cars=parseInt(document.getElementById('tp-cars-inp')?.value)||0;
-  const orig=modal._origins[origIdx];
-  if(!orig){document.getElementById('tp-dep-calc').textContent='—';return;}
-
-  const carCap=parseFloat(orig.dp.props?.car_capacity_t)||112;
-  const carsPerDay=(parseFloat(orig.dp.props?.std_loading_cars_shift||orig.dp.props?.std_loading_cars_day)||10)
-                   *(parseFloat(orig.dp.props?.shifts_per_day)||1);
-  const transit=parseInt(orig.destCfg.transit_days)||1;
-  const switchDays=orig.dp.props?.switch_days||[];
-  const arrDay=modal._arrDay;
-  const tonnes=cars*carCap;
-
-  // Required departure = arrival - transit
-  const requiredDepDay=arrDay-transit;
-
-  // Find latest switch day <= requiredDepDay
-  let switchDay=null;
-  for(let d=requiredDepDay;d>=1;d--){
-    const dow=(new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5).getDay()+6)%7;
-    if(switchDays.includes(dow)){switchDay=d;break;}
-  }
-
-  // If no switch day found before requiredDepDay, push to next switch AFTER
-  let pushed=false;
-  if(!switchDay){
-    for(let d=requiredDepDay+1;d<=requiredDepDay+14;d++){
-      const dow=(new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5).getDay()+6)%7;
-      if(switchDays.includes(dow)){switchDay=d;pushed=true;break;}
-    }
-  }
-
-  if(!switchDay){
-    document.getElementById('tp-dep-calc').textContent='No valid switch day found in range.';
+  if(matches.length>0){
+    // Open the most actionable one: In Transit > Confirmed > Planned > Proposed > Finished
+    const _sp=['In Transit','Unloading','Confirmed','Planned','Proposed','Finished'];
+    matches.sort((a,b)=>_sp.indexOf(a.rm.status||'Planned')-_sp.indexOf(b.rm.status||'Planned'));
+    _editRail(matches[0].i);
     return;
   }
 
-  // Actual arrival = switchDay + transit
-  const actualArrDay=switchDay+transit;
-  const actualArrDate=rpDayDate(actualArrDay);
+  // No existing movement — open comprehensive Add dialog pre-filled with destination context
+  const origins=rpGetOriginsForDest(destFacId);
+  if(!origins.length){alert('No rail origin connected to this destination in the topology.');return;}
+  const {dp,destCfg,berth}=origins[0];
+  const transit=parseInt(destCfg?.transit_days)||1;
+  const carCap=parseFloat(dp.props?.car_capacity_t)||50;
+  const acceptedProds=destCfg?.accepted_products||[];
+  const carsPerDay=(parseFloat(dp.props?.std_loading_cars_shift||dp.props?.std_loading_cars_day)||10)
+                   *(parseFloat(dp.props?.shifts_per_day)||1);
 
-  // Loading window
-  const loadDays=Math.max(1,Math.ceil(cars/carsPerDay));
-  const loadStart=switchDay-loadDays;
+  showModalContent(railHTML());
 
-  document.getElementById('tp-dep-calc').innerHTML=
-    `Departs: <b>${rpDayDate(switchDay)}</b> (Day ${switchDay}) &nbsp;·&nbsp; Switch: ${['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][(new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(switchDay-1)*864e5).getDay()+6)%7]}<br>`+
-    `Arrival: <b>${actualArrDate}</b> (Day ${actualArrDay})${pushed?` <span style="color:var(--amber)">[pushed — actual arrival: ${actualArrDate}]</span>`:''}<br>`+
-    `Transit: ${transit} days &nbsp;·&nbsp; Total: ${Number(tonnes).toLocaleString()} t<br>`+
-    `Loading: ${rpDayDate(loadStart)} → ${rpDayDate(switchDay-1)} (${loadDays}d @ ${carsPerDay} cars/d)`;
+  // Pre-fill fields from topology context
+  const depDateStr=rpDayDate(Math.max(1,d-transit));
+  document.getElementById('rl-to').value=destFacId;
+  document.getElementById('rl-date').value=depDateStr;
+  document.getElementById('rl-transit').value=transit;
+  document.getElementById('rl-cap').value=carCap;
+  document.getElementById('rl-wagons').value=12;
+  if(acceptedProds.length) document.getElementById('rl-prod').value=acceptedProds[0];
+  calcRailTotal();
 
-  document.getElementById('tp-dep-warn').textContent=pushed?
-    `⚠ No switch day before required departure — pushed to ${rpDayDate(switchDay)}, arrival shifts to ${actualArrDate}`:'';
-
-  // Store for save
-  modal._switchDay=switchDay;
-  modal._loadStart=loadStart;
-  modal._transit=transit;
-  modal._carsPerDay=carsPerDay;
-  modal._carCap=carCap;
-  modal._origIdx=origIdx;
+  // Override save button to also patch simulation-routing fields (dispatch_id, berth, switch_day)
+  const saveBtn=document.querySelector('#modal-content .btn-pri');
+  if(saveBtn) saveBtn.onclick=function(){
+    saveRail();
+    const rm=DB.rail_movements[DB.rail_movements.length-1];
+    if(rm&&rm.to_facility_id===destFacId){
+      rm.from_dispatch_id=dp.id;
+      if(berth) rm.to_berth_id=berth.id;
+      const sw=dateToDayOffset(rm.departure_date,S.simCfg.start_date)+1;
+      rm.switch_day=sw;
+      const loadDays=Math.max(1,Math.ceil((rm.wagon_count||0)/carsPerDay));
+      rm.load_start_day=Math.max(1,sw-loadDays);
+      rm._carsPerDay=carsPerDay;
+    }
+  };
 }
 
-function rpSaveArrival(destFacId,dayNum,arrDateStr){
-  const modal=document.getElementById('tp-arrival-modal');
-  if(!modal) return;
-  const origIdx=modal._origIdx??0;
-  const orig=modal._origins[origIdx];
-  const cars=parseInt(document.getElementById('tp-cars-inp')?.value)||0;
-  const prodId=document.getElementById('tp-prod-sel')?.value||'';
-  const switchDay=modal._switchDay;
-  const loadStart=modal._loadStart;
-  const transit=modal._transit;
-  const carCap=modal._carCap;
-  const carsPerDay=modal._carsPerDay;
-
-  if(!switchDay||!orig||cars<=0) return;
-
-  const depDate=rpDayDate(switchDay);
-  const destFac=DB.facilities.find(f=>f.id===destFacId);
-  const origFac=orig.origFac;
-
-  // Remove existing planned movement for same arrival date if any
-  DB.rail_movements=DB.rail_movements.filter(rm=>{
-    if(rm.to_facility_id!==destFacId||rm.status!=='Planned') return true;
-    const dep=rm.departure_date; if(!dep) return true;
-    const depDay=Math.round((new Date(dep)-new Date(S.simCfg.start_date+'T00:00:00'))/864e5)+1;
-    return (depDay+parseInt(rm.transit_days||1))!==parseInt(dayNum);
-  });
-
-  DB.rail_movements.push({
-    id:`rm_plan_${Date.now()}`,
-    from_facility_id:S.facility_id,
-    to_facility_id:destFacId,
-    from_dispatch_id:orig.dp.id,
-    to_berth_id:orig.berth?.id||'',
-    to_silo_id:rpGetDestSilo(orig.berth)?.id||'',
-    reference:`PLAN-${depDate}-${destFac?.name||destFacId}`,
-    departure_date:depDate,
-    wagon_count:cars,
-    wagon_capacity_t:carCap,
-    total_capacity_t:Math.round(cars*carCap),
-    product_id:prodId,
-    transit_days:transit,
-    switch_day:switchDay,
-    load_start_day:loadStart,
-    _carsPerDay:carsPerDay,
-    min_load_pct:80,
-    notes:`Planned arrival ${arrDateStr}`,
-    status:'Planned'
-  });
-
-  autoSave();
-  modal.remove();
-  rpRender();
-  renderRailTable();
-  statMsg(`Rail movement planned: ${cars} cars → ${destFac?.name||destFacId} arriving ${rpDayDate(switchDay+transit)}`);
-}
 
 function rpDeleteArrival(rmId){
   DB.rail_movements=DB.rail_movements.filter(rm=>rm.id!==rmId);
@@ -10446,7 +10318,7 @@ function _saveEditRail(i){
   }
   r.notes=document.getElementById('er-notes')?.value||'';
   r.status=document.getElementById('er-status')?.value||r.status;
-  autoSave(); closeModal(); renderRailTable(); statMsg('Rail movement updated');
+  autoSave(); closeModal(); renderRailTable(); rpRender(); statMsg('Rail movement updated');
 }
 
 function truckHTML(){
