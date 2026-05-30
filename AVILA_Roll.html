@@ -1124,6 +1124,9 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
                 <div id="vp-dest-filter" style="display:flex;gap:3px;flex-wrap:wrap"></div>
               </div>
             </div>
+            <div id="vp-charts-section" style="display:none;margin-bottom:16px">
+              <div id="vp-charts-inner" style="display:grid;grid-template-columns:1fr 1fr;gap:10px"></div>
+            </div>
             <div id="vp-dest-section">
               <div class="tp-section-hdr">DESTINATION</div>
               <div class="tp-table-wrap" id="vp-dest-table-wrap">
@@ -4914,6 +4917,7 @@ const _rp={
   dests:[],          // selected destination facility IDs (multi)
 };
 const _rpCharts={};  // active Chart.js instances — destroyed and rebuilt on each rpRender()
+const _vpCharts={};  // active Chart.js instances for vessel planner
 
 // ── Topology helpers ─────────────────────────────────────────────
 // Get all facilities that have a Rail berth on the current canvas
@@ -5374,6 +5378,10 @@ function rpDestroyCharts(){
   Object.values(_rpCharts).forEach(c=>{try{c.destroy();}catch(e){}});
   Object.keys(_rpCharts).forEach(k=>delete _rpCharts[k]);
 }
+function vpDestroyCharts(){
+  Object.values(_vpCharts).forEach(c=>{try{c.destroy();}catch(e){}});
+  Object.keys(_vpCharts).forEach(k=>delete _vpCharts[k]);
+}
 
 function rpRenderCharts(){
   rpDestroyCharts();
@@ -5571,6 +5579,26 @@ function _rpToggleLegacy(){
 // ══════════════════════════════════════════════════════════════════
 const _vp={view:'sim',dests:[]};
 
+function vpPlannedArrivalsForBerth(berthId){
+  // Returns {day:[{tonnes,status,idx}]} — all vessel_calls at this berth, all statuses
+  const map={};
+  DB.vessel_calls.forEach((vc,idx)=>{
+    const st=vc.status||'Planned';
+    if(vc.legs&&vc.legs.length>0){
+      vc.legs.filter(l=>l.berth_element_id===berthId&&l.arrival_date&&S.simCfg.start_date).forEach(l=>{
+        const arrDay=Math.round((new Date(l.arrival_date)-new Date(S.simCfg.start_date+'T00:00:00'))/864e5)+1;
+        if(!map[arrDay]) map[arrDay]=[];
+        map[arrDay].push({tonnes:parseFloat(l.quantity_t)||0,status:st,idx});
+      });
+    } else if(vc.berth_element_id===berthId&&vc.arrival_date&&S.simCfg.start_date){
+      const arrDay=Math.round((new Date(vc.arrival_date)-new Date(S.simCfg.start_date+'T00:00:00'))/864e5)+1;
+      if(!map[arrDay]) map[arrDay]=[];
+      map[arrDay].push({tonnes:parseFloat(vc.quantity_t)||parseFloat(vc.total_quantity_t)||0,status:st,idx});
+    }
+  });
+  return map;
+}
+
 function vpGetVesselDestinations(){
   return getFacElements()
     .filter(e=>e.type==='berth'&&!(e.props?.berth_type||'').toLowerCase().includes('rail'))
@@ -5628,7 +5656,11 @@ function vpToggleDest(facId,ev){
 }
 
 function vpRender(){
-  if(!S.simCfg.start_date) return;
+  if(!S.simCfg.start_date){
+    document.getElementById('vp-dest-section').style.display='none';
+    document.getElementById('vp-orig-section').style.display='none';
+    return;
+  }
   vpBuildDestFilter();
   const {startDay,endDay}=vpGetRange();
   const days=[];
@@ -5640,18 +5672,24 @@ function vpRender(){
   const hasDests=_vp.dests.length>0;
   document.getElementById('vp-dest-section').style.display=hasDests?'':'none';
   document.getElementById('vp-orig-section').style.display=hasDests?'':'none';
-  if(!hasDests) return;
+  if(!hasDests){
+    vpDestroyCharts();
+    document.getElementById('vp-charts-section').style.display='none';
+    return;
+  }
+  vpRenderCharts();
 
   const thHtml=`<th>Element</th>`+days.map(d=>{
     const ds=vpDayDate(d).slice(5);
     let cls='';
-    if(new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5).getDay()===6) cls=' class="tp-col-sat"';
-    else if(new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5).getDay()===0) cls=' class="tp-col-sun"';
-    return `<th${cls}>${ds}</th>`;
+    if(rpIsSat(d)) cls=' class="tp-col-sat"';
+    else if(rpIsSun(d)) cls=' class="tp-col-sun"';
+    return `<th${cls} title="Day ${d}">${ds}</th>`;
   }).join('');
   document.getElementById('vp-dest-thead-row').innerHTML=thHtml;
   document.getElementById('vp-orig-thead-row').innerHTML=thHtml;
 
+  const _statusPriority=['In Transit','Unloading','Confirmed','Planned','Proposed','Finished'];
   const destRows=[];
   _vp.dests.forEach(destFacId=>{
     const destFac=DB.facilities.find(f=>f.id===destFacId);
@@ -5661,26 +5699,38 @@ function vpRender(){
     berths.forEach(berth=>{
       const destSilo=rpGetDestSilo(berth);
       const demEls=rpGetDestDemEls(destFacId);
+      const arrivals=vpPlannedArrivalsForBerth(berth.id);
 
-      // Planned vessel arrivals for this berth
-      const arrMap={};
-      DB.vessel_calls.filter(vc=>vc.berth_element_id===berth.id&&
-        ['Planned','Confirmed','In Transit','Unloading'].includes(vc.status||'Planned'))
-        .forEach(vc=>{
-          const arrDay=Math.round((new Date(vc.arrival_date)-new Date(S.simCfg.start_date+'T00:00:00'))/864e5)+1;
-          arrMap[arrDay]=(arrMap[arrDay]||0)+(parseFloat(vc.quantity_t)||0);
-        });
+      const _colspan=days.length+1;
+      destRows.push(`<tr><td colspan="${_colspan}" style="background:rgba(255,184,48,.06);color:var(--amber);font-family:var(--mono);font-size:8px;padding:3px 8px;letter-spacing:.06em;border-top:1px solid rgba(255,184,48,.15)">▸ ${destFac?.name||destFacId} / ${berth.name}</td></tr>`);
 
-      // VESSEL/ARRIVAL row — clickable
+      // VESSEL/ARRIVAL row — clickable, color-coded by dominant status
       const arrCells=days.map(d=>{
-        const tonnes=arrMap[d]||0;
+        const entries=arrivals[d]||[];
         let cls='tp-cell-clickable';
         let val='—';
-        if(tonnes>0){cls+=' tp-cell-planned';val=`${Number(tonnes).toLocaleString()}t`;}
-        return `<td class="${cls}" onclick="vpOpenArrivalDialog('${destFacId}','${berth.id}','${d}','${vpDayDate(d)}')" title="Click to add vessel arrival">${val}</td>`;
+        if(entries.length>0){
+          const totalTonnes=entries.reduce((s,e)=>s+e.tonnes,0);
+          const domSt=_statusPriority.find(s=>entries.some(e=>e.status===s))||entries[0].status;
+          const col=_tsGet(domSt).color;
+          cls+=' tp-cell-planned';
+          val=`<span style="color:${col}">${Number(totalTonnes).toLocaleString()}t</span>`;
+        }
+        return `<td class="${cls}" onclick="vpOpenArrivalDialog('${berth.id}','${d}')" title="Click to add/edit vessel arrival">${val}</td>`;
       }).join('');
-      destRows.push(`<tr class="tp-row-arrival"><td>${destFac?.name||destFacId}/VESSEL/ARRIVAL</td>${arrCells}</tr>`);
+      destRows.push(`<tr class="tp-row-arrival"><td style="padding-left:10px">VESSEL/ARRIVAL</td>${arrCells}</tr>`);
 
+      // VESSEL UNLOAD row — daily volume unloaded from the berth into the terminal silo
+      if(S.simResults?.berthUnloadHistory?.[berth.id]){
+        const unldHist=S.simResults.berthUnloadHistory[berth.id];
+        const unldCells=days.map(d=>{
+          const v=unldHist[d-1]||0;
+          return `<td style="color:var(--green);font-size:10px">${v>0?Number(v).toLocaleString()+'t':'—'}</td>`;
+        }).join('');
+        destRows.push(`<tr class="tp-row-unload"><td style="padding-left:14px;color:var(--green);font-size:10px">Vessel unload</td>${unldCells}</tr>`);
+      }
+
+      // INVENTORY row
       if(destSilo){
         const invCells=days.map(d=>{
           const v=rpInv(destSilo.id,d);
@@ -5692,6 +5742,8 @@ function vpRender(){
         }).join('');
         destRows.push(`<tr class="tp-row-inv"><td style="padding-left:14px">${destSilo.name}</td>${invCells}</tr>`);
       }
+
+      // DEMAND rows
       demEls.forEach(el=>{
         const demCells=days.map(d=>{const v=rpDemand(el.id,d);return `<td style="color:var(--amber)">${v>0?Number(v).toLocaleString():'—'}</td>`;}).join('');
         destRows.push(`<tr class="tp-row-dem"><td style="padding-left:14px">${el.name}</td>${demCells}</tr>`);
@@ -5703,69 +5755,153 @@ function vpRender(){
     `<tr><td colspan="999" style="color:var(--text-dim);font-size:9px;padding:10px">Vessels are external supply — no origin inventory deducted</td></tr>`;
 }
 
-function vpOpenArrivalDialog(destFacId,berthId,dayNum,arrDateStr){
-  const destFac=DB.facilities.find(f=>f.id===destFacId);
-  const berthEl=getEl(berthId);
-  // Find connected silo
-  const destSilo=rpGetDestSilo(berthEl);
-  // Products from silo
-  const prodOpts=(destSilo?getSiloProducts(destSilo):[]).map(pid=>{
-    const p=DB.products.find(x=>x.id===pid);
-    return `<option value="${pid}">${p?.name||pid}</option>`;
-  }).join('')||'<option value="">— select —</option>';
-
-  const modal=document.createElement('div');
-  modal.className='tp-modal';
-  modal.id='tp-vessel-modal';
-  modal.innerHTML=`
-    <div class="tp-modal-box">
-      <div class="tp-modal-title">Vessel Arrival — ${destFac?.name||destFacId} · ${arrDateStr}</div>
-      <div class="tp-modal-field">
-        <label class="tp-modal-label">Berth</label>
-        <div style="font-family:var(--mono);font-size:9px;color:var(--blue)">${berthEl?.name||berthId}</div>
-      </div>
-      <div class="tp-modal-field">
-        <label class="tp-modal-label">Product</label>
-        <select class="fi" id="vp-prod-sel">${prodOpts}</select>
-      </div>
-      <div class="tp-modal-field">
-        <label class="tp-modal-label">Quantity (t)</label>
-        <input class="fi" type="number" id="vp-qty-inp" min="1" value="5000">
-      </div>
-      <div class="tp-modal-field">
-        <label class="tp-modal-label">Unload Rate (t/h)</label>
-        <input class="fi" type="number" id="vp-rate-inp" min="1" value="${berthEl?.props?.default_unload_rate_tph||200}">
-      </div>
-      <div class="tp-modal-actions">
-        <button class="tb-btn sec" onclick="document.getElementById('tp-vessel-modal').remove()">Cancel</button>
-        <button class="tb-btn amber" onclick="vpSaveArrival('${destFacId}','${berthId}','${dayNum}','${arrDateStr}')">Accept</button>
-      </div>
-    </div>`;
-  document.body.appendChild(modal);
+function vpOpenArrivalDialog(berthId,dayNum){
+  if(!S.simCfg.start_date) return;
+  const d=parseInt(dayNum);
+  // Find existing vessel_call matching this berth and arrival day
+  let matchIdx=-1;
+  DB.vessel_calls.forEach((vc,i)=>{
+    if(matchIdx>=0) return;
+    if(vc.legs&&vc.legs.length>0){
+      const hit=vc.legs.some(l=>{
+        if(l.berth_element_id!==berthId||!l.arrival_date) return false;
+        const arrDay=Math.round((new Date(l.arrival_date)-new Date(S.simCfg.start_date+'T00:00:00'))/864e5)+1;
+        return arrDay===d;
+      });
+      if(hit) matchIdx=i;
+    } else if(vc.berth_element_id===berthId&&vc.arrival_date){
+      const arrDay=Math.round((new Date(vc.arrival_date)-new Date(S.simCfg.start_date+'T00:00:00'))/864e5)+1;
+      if(arrDay===d) matchIdx=i;
+    }
+  });
+  if(matchIdx>=0){editVessel(matchIdx);return;}
+  // No match — open Add dialog pre-filled with this berth and date
+  window._vcLegs=[{berth_element_id:berthId,arrival_date:vpDayDate(d),quantity_t:'',unload_rate_tph:''}];
+  showModalContent(vesselHTML());
+  _vcRenderLegs();
 }
 
-function vpSaveArrival(destFacId,berthId,dayNum,arrDateStr){
-  const qty=parseFloat(document.getElementById('vp-qty-inp')?.value)||0;
-  const rate=parseFloat(document.getElementById('vp-rate-inp')?.value)||200;
-  const prodId=document.getElementById('vp-prod-sel')?.value||'';
-  const destFac=DB.facilities.find(f=>f.id===destFacId);
-  if(qty<=0) return;
-  DB.vessel_calls.push({
-    id:`vc_plan_${Date.now()}`,
-    name:`VESSEL-${arrDateStr}-${destFac?.name||destFacId}`,
-    berth_element_id:berthId,
-    arrival_date:arrDateStr,
-    quantity_t:qty,
-    unload_rate_tph:rate,
-    product_id:prodId,
-    transit_days:0,
-    status:'Planned'
+function vpRenderCharts(){
+  vpDestroyCharts();
+  const section=document.getElementById('vp-charts-section');
+  const inner=document.getElementById('vp-charts-inner');
+  if(!section||!inner) return;
+  inner.innerHTML='';
+
+  if(!S.simResults||!_vp.dests.length){section.style.display='none';return;}
+  section.style.display='';
+
+  const {startDay,endDay}=vpGetRange();
+  const days=[]; for(let d=startDay;d<=endDay;d++) days.push(d);
+  const labels=days.map(d=>vpDayDate(d).slice(5));
+
+  const chartBuilders=[];
+
+  const baseOpts=(title)=>({
+    responsive:true,maintainAspectRatio:false,
+    plugins:{
+      title:{display:true,text:title,color:'#8e9ab8',font:{family:'Space Mono',size:8},padding:{top:0,bottom:4}},
+      legend:{display:false},
+      tooltip:{mode:'index',intersect:false,
+        callbacks:{
+          title:its=>its[0]?.label||'',
+          label:c=>{const v=c.raw;if(v==null||v===0)return '';
+            return `${c.dataset.label}: ${Number(Math.round(v)).toLocaleString()}${c.dataset._u||' t'}`;}
+        }
+      }
+    },
+    scales:{
+      x:{grid:{color:'rgba(255,255,255,.03)'},
+        ticks:{color:'#8e9ab8',font:{family:'Space Mono',size:7},maxTicksLimit:8,autoSkip:true,maxRotation:0}},
+      y:{beginAtZero:true,grid:{color:'rgba(255,255,255,.06)'},
+        ticks:{color:'#8e9ab8',font:{family:'Space Mono',size:7},
+          callback:v=>v>=1000?Math.round(v/100)/10+'k':Math.round(v)}}
+    }
   });
-  autoSave();
-  document.getElementById('tp-vessel-modal')?.remove();
-  vpRender();
-  renderVesselTable();
-  statMsg(`Vessel arrival planned: ${Number(qty).toLocaleString()}t → ${destFac?.name||destFacId} on ${arrDateStr}`);
+
+  const mkCanvas=(id)=>{
+    const div=document.createElement('div');
+    div.style.cssText='background:var(--surface2);border-radius:4px;padding:8px 10px;height:180px;position:relative';
+    const canvas=document.createElement('canvas');
+    canvas.id=id;
+    div.appendChild(canvas);
+    inner.appendChild(div);
+    return canvas;
+  };
+
+  const _statusPriority=['In Transit','Unloading','Confirmed','Planned','Proposed','Finished'];
+  const _statusChartColor={
+    'Proposed':  'rgba(142,154,184,.65)',
+    'Planned':   'rgba(255,184,48,.80)',
+    'Confirmed': 'rgba(0,229,160,.80)',
+    'In Transit':'rgba(77,166,255,.80)',
+    'Unloading': 'rgba(56,189,248,.80)',
+    'Finished':  'rgba(142,154,184,.40)',
+  };
+
+  _vp.dests.forEach((destFacId,di)=>{
+    const destFac=DB.facilities.find(f=>f.id===destFacId);
+    const berths=getFacElements().filter(e=>e.type==='berth'&&
+      (e.assigned_facility_id||e.facility_id)===destFacId&&
+      !(e.props?.berth_type||'').toLowerCase().includes('rail'));
+
+    berths.forEach((berth,bi)=>{
+      const destSilo=rpGetDestSilo(berth);
+      if(!destSilo) return;
+      const demEls=rpGetDestDemEls(destFacId);
+      const siloMax=parseFloat(destSilo.props?.max_capacity)||0;
+      const floor=(parseFloat(destSilo.props?.critical_floor_pct)||10)/100*siloMax;
+      const invData=days.map(d=>{const v=rpInv(destSilo.id,d);return v!==null?v:null;});
+      const demData=days.map(d=>demEls.reduce((s,e)=>s+rpDemand(e.id,d),0));
+      const arrHist=S.simResults.berthArrivalHistory?.[berth.id]||[];
+      const arrData=days.map(d=>arrHist[d-1]||null);
+
+      // Per-bar colors by dominant status
+      const arrivals=vpPlannedArrivalsForBerth(berth.id);
+      const arrBgColors=days.map(d=>{
+        const entries=arrivals[d]||[];
+        if(!entries.length) return 'rgba(255,184,48,.55)';
+        const domSt=_statusPriority.find(s=>entries.some(e=>e.status===s))||entries[0]?.status||'Planned';
+        return _statusChartColor[domSt]||'rgba(255,184,48,.55)';
+      });
+
+      const cid=`vpc1_${di}_${bi}`;
+      const _berthIdCopy=berth.id;
+      const canvas=mkCanvas(cid);
+      const ds=[
+        {label:'Arrivals',data:arrData,type:'bar',backgroundColor:arrBgColors,borderColor:arrBgColors.map(c=>c.replace(/[\d.]+\)$/,'1)')),borderWidth:1,_u:' t'},
+        {label:'Inventory',data:invData,borderColor:'#34d399',backgroundColor:'rgba(52,211,153,.1)',
+         fill:true,tension:0.2,pointRadius:0,borderWidth:1.5,type:'line',_u:' t'},
+        {label:'Demand/d',data:demData,borderColor:'rgba(251,191,36,.6)',borderDash:[2,3],pointRadius:0,borderWidth:1,type:'line',_u:' t/d'}
+      ];
+      if(siloMax>0) ds.push({label:'Max',data:days.map(()=>siloMax),borderColor:'rgba(255,255,255,.15)',borderDash:[5,3],pointRadius:0,borderWidth:1,type:'line',_u:' t'});
+      if(floor>0)   ds.push({label:'Floor',data:days.map(()=>floor),borderColor:'rgba(248,113,113,.55)',borderDash:[3,3],pointRadius:0,borderWidth:1,type:'line',_u:' t'});
+
+      const chartOpts={...baseOpts(`VESSEL BERTH · ${destFac?.name||destFacId} / ${berth.name}`)};
+      chartOpts.onClick=(evt,active)=>{
+        if(!active.length) return;
+        const idx=active[0].index;
+        const d=days[idx];
+        vpOpenArrivalDialog(_berthIdCopy,String(d));
+      };
+      chartOpts.onHover=(evt,active)=>{
+        if(evt?.native?.target) evt.native.target.style.cursor=active.length?'pointer':'default';
+      };
+      chartBuilders.push(()=>{
+        _vpCharts[cid]=new Chart(canvas,{type:'bar',data:{labels,datasets:ds},options:chartOpts});
+      });
+    });
+  });
+
+  const buildAll=()=>chartBuilders.forEach(f=>f());
+  if(typeof Chart==='undefined'){
+    const s=document.createElement('script');
+    s.src='https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js';
+    s.onload=buildAll;
+    document.head.appendChild(s);
+  } else {
+    buildAll();
+  }
 }
 
 function _vpToggleLegacy(){
@@ -10183,7 +10319,7 @@ function _saveEditVessel(i){
       v.unload_rate_tph=parseFloat(document.getElementById('ev-rate')?.value)||0;
     }
   }
-  autoSave(); closeModal(); renderVesselTable(); statMsg('Vessel call updated');
+  autoSave(); closeModal(); renderVesselTable(); vpRender(); statMsg('Vessel call updated');
 }
 
 function railHTML(){
