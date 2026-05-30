@@ -1120,7 +1120,10 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
                 <span class="vw-range-lbl" id="vp-range-lbl"></span>
               </div>
               <div class="tp-header-right">
-                <span class="vw-label">Destination</span>
+                <span class="vw-label">Mode</span>
+                <button id="vp-mode-manual" class="vw-btn" onclick="vpToggleMode('manual',this)" style="border-right:none;border-top-right-radius:0;border-bottom-right-radius:0">Manual</button>
+                <button id="vp-mode-sim" class="vw-btn active" onclick="vpToggleMode('simulation',this)" style="border-left:none;border-top-left-radius:0;border-bottom-left-radius:0">Simulation</button>
+                <span class="vw-label" style="margin-left:12px">Destination</span>
                 <div id="vp-dest-filter" style="display:flex;gap:3px;flex-wrap:wrap"></div>
               </div>
             </div>
@@ -1171,7 +1174,10 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
                 <span class="vw-range-lbl" id="rp-range-lbl"></span>
               </div>
               <div class="tp-header-right">
-                <span class="vw-label">Destination</span>
+                <span class="vw-label">Mode</span>
+                <button id="rp-mode-manual" class="vw-btn" onclick="rpToggleMode('manual',this)" style="border-right:none;border-top-right-radius:0;border-bottom-right-radius:0">Manual</button>
+                <button id="rp-mode-sim" class="vw-btn active" onclick="rpToggleMode('simulation',this)" style="border-left:none;border-top-left-radius:0;border-bottom-left-radius:0">Simulation</button>
+                <span class="vw-label" style="margin-left:12px">Destination</span>
                 <div id="rp-dest-filter" style="display:flex;gap:3px;flex-wrap:wrap"></div>
               </div>
             </div>
@@ -1533,7 +1539,9 @@ const S = {
   activeCatalog:'products', activeSchedTab:'vessels',
   selectedLocNode:null,  // { type, id } for location tree selection
   viewWindow:{preset:'sim', customStart:null, customEnd:null}, // controls display range across all result views
-  facFilter:null  // facility id to filter results, null = show all
+  facFilter:null,  // facility id to filter results, null = show all
+  vesselSchedMode:'simulation',  // 'manual' or 'simulation'
+  railSchedMode:'simulation'     // 'manual' or 'simulation'
 };
 
 // ═══════════════════════════════════════════════════════
@@ -4817,14 +4825,17 @@ function advanceRailStatus(id){
 
 function renderVesselTable(){
   const tbody=document.getElementById('vessel-tbody'); if(!tbody) return;
-  if(!DB.vessel_calls.length){
-    tbody.innerHTML=`<tr><td colspan="9" style="color:var(--text-dim);text-align:center;padding:14px">No vessel calls scheduled — vessels bring external supply with no source inventory deduction</td></tr>`;
+  const hideProposed=S.vesselSchedMode==='manual';
+  const visibleCalls=DB.vessel_calls.filter(v=>!(hideProposed&&(v.status||'Planned')==='Proposed'));
+  if(!visibleCalls.length){
+    const emptyMsg=hideProposed?'No manual vessel calls — switch to Simulation mode to see proposals':'No vessel calls scheduled — vessels bring external supply with no source inventory deduction';
+    tbody.innerHTML=`<tr><td colspan="9" style="color:var(--text-dim);text-align:center;padding:14px">${emptyMsg}</td></tr>`;
     return;
   }
   // Track which split vessels are expanded
   if(!window._vcExpanded) window._vcExpanded=new Set();
 
-  tbody.innerHTML=DB.vessel_calls.map((v,i)=>{
+  tbody.innerHTML=visibleCalls.map((v,i)=>{
     const prod=DB.products.find(p=>p.id===v.product_id);
     const locked=_tsLocked(v.status||'Planned');
     const nextSt=_tsNext(v.status||'Planned');
@@ -5057,6 +5068,14 @@ function rpToggleDest(facId,ev){
   renderRailTable();
 }
 
+function rpToggleMode(mode,btn){
+  S.railSchedMode=mode;
+  document.querySelectorAll('#rail-planner-wrap .tp-header-right .vw-btn[id^="rp-mode"]').forEach(b=>b.classList.remove('active'));
+  if(btn) btn.classList.add('active');
+  rpRender();
+  renderRailTable();
+}
+
 // ── Demand rate helper ────────────────────────────────────────────
 function rpDemand(elId,d){
   const dt=new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5);
@@ -5077,6 +5096,7 @@ function rpInv(elId,d){
 // ── Planned arrivals from DB.rail_movements ───────────────────────
 function rpPlannedArrivalsForDest(destFacId,berthId){
   // Returns {day: [{tonnes,status}]} — all movements, all statuses, switch_day used as fallback
+  // Always includes Proposed items for simulation/charts — toggle only affects table display
   const map={};
   DB.rail_movements
     .filter(rm=>rm.to_facility_id===destFacId)
@@ -5583,6 +5603,7 @@ const _vp={view:'sim',dests:[]};
 
 function vpPlannedArrivalsForBerth(berthId){
   // Returns {day:[{tonnes,status,idx}]} — all vessel_calls at this berth, all statuses
+  // Always includes Proposed items for simulation/charts — toggle only affects table display
   const map={};
   DB.vessel_calls.forEach((vc,idx)=>{
     const st=vc.status||'Planned';
@@ -5656,6 +5677,13 @@ function vpToggleDest(facId,ev){
     _vp.dests=_vp.dests.length===1&&_vp.dests[0]===facId?[]:[facId];
   }
   vpBuildDestFilter();
+  vpRender();
+}
+
+function vpToggleMode(mode,btn){
+  S.vesselSchedMode=mode;
+  document.querySelectorAll('#vessel-planner-wrap .tp-header-right .vw-btn[id^="vp-mode"]').forEach(b=>b.classList.remove('active'));
+  if(btn) btn.classList.add('active');
   vpRender();
 }
 
@@ -5923,12 +5951,14 @@ function _vpToggleLegacy(){
 
 function renderRailTable(){
   const tbody=document.getElementById('rail-tbody'); if(!tbody) return;
-  // Apply logistics filters (terminal selection + date range)
+  // Apply logistics filters (terminal selection + date range + mode filter)
   const destFilter=_rp?.dests||[];
+  const hideProposed=S.railSchedMode==='manual';
   const {startDay,endDay}=rpGetRange();
   const startDate=rpDayDate(startDay);
   const endDate=rpDayDate(endDay);
   const filtered=DB.rail_movements.map((r,i)=>({r,i})).filter(({r})=>{
+    if(hideProposed&&(r.status||'Planned')==='Proposed') return false;
     if(destFilter.length&&!destFilter.includes(r.to_facility_id)) return false;
     const dep=r.departure_date||r.date||'';
     if(dep&&dep<startDate) return false;
@@ -5936,9 +5966,10 @@ function renderRailTable(){
     return true;
   });
   if(!filtered.length){
-    const msg=!DB.rail_movements.length
-      ?'No rail movements scheduled — rail deducts from source and adds to destination after transit time'
-      :'No movements match the current filter';
+    let msg;
+    if(!DB.rail_movements.length) msg='No rail movements scheduled — rail deducts from source and adds to destination after transit time';
+    else if(hideProposed&&!DB.rail_movements.some(r=>(r.status||'Planned')!=='Proposed')) msg='No manual rail movements — switch to Simulation mode to see proposals';
+    else msg='No movements match the current filter';
     tbody.innerHTML=`<tr><td colspan="11" style="color:var(--text-dim);text-align:center;padding:14px">${msg}</td></tr>`;
     return;
   }
@@ -8462,12 +8493,28 @@ function renderResultsTable(){
       return day>=sd&&day<=ed&&(t.from_facility_id===S.facility_id||t.to_facility_id===S.facility_id);
     });
     let transportCell='<td style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">';
-    if(railArr.length) transportCell+=`<span style="color:var(--blue)" title="Rail arrival">↓ Rail ${railArr.map(r=>Number(r.total_capacity_t).toLocaleString()+'t').join(', ')}</span> `;
-    if(railDeps.length){
-      const depLabel=railDeps.map(r=>{const dest=DB.facilities.find(f=>f.id===r.to_facility_id);return `${Number(r.total_capacity_t).toLocaleString()}t→${dest?.name||'?'}`;}).join(', ');
-      transportCell+=`<span style="color:var(--blue);opacity:.7" title="Rail departure (${railDeps[0].status||'Planned'})">↑ Rail ${depLabel}</span> `;
+    if(railArr.length){
+      const arrItems=railArr.map(r=>{
+        const st=_tsGet(r.status||'Planned');
+        return `<span style="color:${st.color}" title="Status: ${r.status||'Planned'}; Tonnes: ${Number(r.total_capacity_t).toLocaleString()}t">${Number(r.total_capacity_t).toLocaleString()}t</span>`;
+      }).join(', ');
+      transportCell+=`<span title="Rail arrival">↓ Rail ${arrItems}</span> `;
     }
-    if(vesselArr.length) transportCell+=`<span style="color:var(--amber)" title="Vessel arrival">⚓ ${vesselArr.map(v=>v.name).join(', ')}</span> `;
+    if(railDeps.length){
+      const depLabel=railDeps.map(r=>{
+        const dest=DB.facilities.find(f=>f.id===r.to_facility_id);
+        const st=_tsGet(r.status||'Planned');
+        return `<span style="color:${st.color}" title="Status: ${r.status||'Planned'}">${Number(r.total_capacity_t).toLocaleString()}t→${dest?.name||'?'}</span>`;
+      }).join(', ');
+      transportCell+=`<span title="Rail departure">↑ Rail ${depLabel}</span> `;
+    }
+    if(vesselArr.length){
+      const vesselItems=vesselArr.map(v=>{
+        const st=_tsGet(v.status||'Planned');
+        return `<span style="color:${st.color}" title="Status: ${v.status||'Planned'}">${v.name}</span>`;
+      }).join(', ');
+      transportCell+=`<span title="Vessel arrival">⚓ ${vesselItems}</span> `;
+    }
     if(truckActive.length) transportCell+=`<span style="color:var(--green)" title="Truck active">↔ Truck ×${truckActive.length}</span>`;
     if(!railArr.length&&!railDeps.length&&!vesselArr.length&&!truckActive.length) transportCell+='—';
     transportCell+='</td>';
