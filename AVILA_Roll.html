@@ -3943,6 +3943,283 @@ function _renderSupplyViewInner(wrap){
       h+=`</tr>`;
 
       if(!isCollapsed){
+        // ╔══════════════════════════════════════════════════════════════╗
+        // ║ FACILITY-SCOPED SUPPLY CHAIN FLOW                            ║
+        // ║ Filter elements to current facility using assigned_facility  ║
+        // ║ as the authoritative source (assigned_facility_id overrides  ║
+        // ║ facility_id). This ensures data isolation: each facility      ║
+        // ║ sees only its own demand points, silos, and equipment.       ║
+        // ╚══════════════════════════════════════════════════════════════╝
+        const facEls=getFacElements().filter(e=>(e.assigned_facility_id||e.facility_id)===node.id);
+        const demandEls=facEls.filter(e=>e.type==='demand_point');
+        const demandPoints=DB.demand_points.filter(dp=>demandEls.some(el=>el.id===dp.element_id));
+
+        // ══════════════════════════════════════════════════════════════
+        // SECTION 1: PRODUCT REQUIREMENTS (from demand points)
+        // ══════════════════════════════════════════════════════════════
+
+        if(demandPoints.length>0){
+          const prodReqColor='#4da6ff';
+          // Get unique products demanded
+          const productsSet=new Set();
+          demandPoints.forEach(dp=>{
+            (dp.products||[]).forEach(p=>{
+              productsSet.add(p.product_id);
+            });
+          });
+
+          if(productsSet.size>0){
+            // Section header row
+            h+=`<tr style="background:rgba(77,166,255,.05);border-top:2px solid rgba(77,166,255,.3)">
+              <td style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${prodReqColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase">▸ PRODUCT REQUIREMENTS</td>`;
+            months.forEach(mon=>{
+              const isCol=collapsed.has(mon.ym);
+              h+=`<td style="border-left:2px solid rgba(77,166,255,.2);font-size:9px;color:${prodReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)"></td>`;
+              if(!isCol){
+                mon.dates.forEach(ds=>{
+                  h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}"></td>`;
+                });
+              }
+            });
+            h+=`</tr>`;
+
+            // One row per product
+            Array.from(productsSet).sort().forEach(prodId=>{
+              const prod=DB.products.find(p=>p.id===prodId);
+              const prodName=prod?.name||prodId;
+              h+=`<tr>
+                <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${prodReqColor};font-size:9px">${prodName}</td>`;
+              months.forEach(mon=>{
+                const isCol=collapsed.has(mon.ym);
+                const mt=mon.dates.reduce((s,ds)=>{
+                  const dpts=demandPoints.filter(dp=>dp.products&&dp.products.some(p=>p.product_id===prodId));
+                  const demand=dpts.reduce((sum,dp)=>{
+                    const el=demandEls.find(e=>e.id===dp.element_id);
+                    return sum+(_demandRate(el.id,ds)||0);
+                  },0);
+                  return s+demand;
+                },0);
+                h+=`<td style="border-left:2px solid rgba(77,166,255,.1);font-size:9px;color:${prodReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                if(!isCol){
+                  mon.dates.forEach(ds=>{
+                    const dpts=demandPoints.filter(dp=>dp.products&&dp.products.some(p=>p.product_id===prodId));
+                    const v=dpts.reduce((sum,dp)=>{
+                      const el=demandEls.find(e=>e.id===dp.element_id);
+                      return sum+(_demandRate(el.id,ds)||0);
+                    },0);
+                    h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${v>0?prodReqColor:'rgba(77,166,255,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`;
+                  });
+                }
+              });
+              h+=`</tr>`;
+            });
+          }
+        }
+
+        // ══════════════════════════════════════════════════════════════
+        // SECTION 2: STARTING INVENTORY (cement silos, per silo)
+        // ══════════════════════════════════════════════════════════════
+        const cementSilos=facEls.filter(e=>e.type==='bulk_silo').filter(s=>{
+          const siloProds=getSiloProducts(s);
+          return siloProds.some(p=>{
+            const prod=DB.products.find(pr=>pr.id===p);
+            return prod&&(prod.category==='cement_bulk'||prod.category==='cement_packed');
+          });
+        });
+
+        if(cementSilos.length>0){
+          const invColor='#00d9a3';
+          // Section header
+          h+=`<tr style="background:rgba(0,217,163,.05);border-top:2px solid rgba(0,217,163,.3)">
+            <td style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${invColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase">▸ STARTING INVENTORY (cement)</td>`;
+          months.forEach(mon=>{
+            const isCol=collapsed.has(mon.ym);
+            h+=`<td style="border-left:2px solid rgba(0,217,163,.2);font-size:9px;color:${invColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)"></td>`;
+            if(!isCol){
+              mon.dates.forEach(ds=>{
+                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}"></td>`;
+              });
+            }
+          });
+          h+=`</tr>`;
+
+          // One row per silo
+          cementSilos.forEach(silo=>{
+            const siloMax=parseFloat(silo.props?.max_capacity)||0;
+            h+=`<tr>
+              <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${invColor};font-size:9px">${silo.name}
+                <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${siloMax>0?'cap: '+siloMax.toLocaleString()+'t':''}</span>
+              </td>`;
+            months.forEach(mon=>{
+              const isCol=collapsed.has(mon.ym);
+              const mt=mon.dates.reduce((s,ds)=>{
+                const dayIdx=allDates.indexOf(ds);
+                const hist=r?.inventoryHistory?.[silo.id]||[];
+                const v=dayIdx<=0?parseFloat(silo.props?.start_inventory)||0:hist[dayIdx-1]??0;
+                return s+v;
+              },0);
+              const avgMonthly=mt/mon.dates.length;
+              h+=`<td style="border-left:2px solid rgba(0,217,163,.1);font-size:9px;color:${invColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${avgMonthly>0?Math.round(avgMonthly).toLocaleString():''}</td>`;
+              if(!isCol){
+                mon.dates.forEach((ds)=>{
+                  const dayIdx=allDates.indexOf(ds);
+                  const hist=r?.inventoryHistory?.[silo.id]||[];
+                  const v=dayIdx<=0?parseFloat(silo.props?.start_inventory)||0:hist[dayIdx-1]??0;
+                  h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${v>0?invColor:'rgba(0,217,163,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`;
+                });
+              }
+            });
+            h+=`</tr>`;
+          });
+        }
+
+        // ══════════════════════════════════════════════════════════════
+        // SECTION 3: CLINKER REQUIREMENTS (calculated from cement demand)
+        // ══════════════════════════════════════════════════════════════
+        if(demandPoints.length>0&&demandEls.length>0){
+          // Find all clinker products needed for cement products
+          const clinkerProdsSet=new Set();
+          demandPoints.forEach(dp=>{
+            (dp.products||[]).forEach(p=>{
+              const prod=DB.products.find(pr=>pr.id===p.product_id);
+              if(prod&&(prod.category==='cement_bulk'||prod.category==='cement_packed')){
+                const recipes=DB.recipes.filter(r=>r.product_id===p.product_id);
+                recipes.forEach(rec=>{
+                  const mat=DB.products.find(pm=>pm.id===rec.material_id);
+                  if(mat&&mat.category==='clinker'){
+                    clinkerProdsSet.add(rec.material_id);
+                  }
+                });
+              }
+            });
+          });
+
+          if(clinkerProdsSet.size>0){
+            const clinkerReqColor='#ff9d5c';
+            // Section header
+            h+=`<tr style="background:rgba(255,157,92,.05);border-top:2px solid rgba(255,157,92,.3)">
+              <td style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${clinkerReqColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase">▸ CLINKER REQUIREMENTS</td>`;
+            months.forEach(mon=>{
+              const isCol=collapsed.has(mon.ym);
+              h+=`<td style="border-left:2px solid rgba(255,157,92,.2);font-size:9px;color:${clinkerReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)"></td>`;
+              if(!isCol){
+                mon.dates.forEach(ds=>{
+                  h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}"></td>`;
+                });
+              }
+            });
+            h+=`</tr>`;
+
+            // One row per clinker type
+            Array.from(clinkerProdsSet).sort().forEach(clinkerProdId=>{
+              const clinkerProd=DB.products.find(p=>p.id===clinkerProdId);
+              const clinkerName=clinkerProd?.name||clinkerProdId;
+              h+=`<tr>
+                <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${clinkerReqColor};font-size:9px">${clinkerName}</td>`;
+              months.forEach(mon=>{
+                const isCol=collapsed.has(mon.ym);
+                const mt=mon.dates.reduce((s,ds)=>{
+                  let totalReq=0;
+                  demandPoints.forEach(dp=>{
+                    const el=demandEls.find(e=>e.id===dp.element_id);
+                    if(!el) return;
+                    (dp.products||[]).forEach(p=>{
+                      const prod=DB.products.find(pr=>pr.id===p.product_id);
+                      if(prod&&(prod.category==='cement_bulk'||prod.category==='cement_packed')){
+                        const cementDemand=_demandRate(el.id,ds)||0;
+                        const recipes=DB.recipes.filter(r=>r.product_id===p.product_id&&r.material_id===clinkerProdId);
+                        recipes.forEach(rec=>{
+                          totalReq+=cementDemand*(parseFloat(rec.pct)||0)/100;
+                        });
+                      }
+                    });
+                  });
+                  return s+totalReq;
+                },0);
+                h+=`<td style="border-left:2px solid rgba(255,157,92,.1);font-size:9px;color:${clinkerReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                if(!isCol){
+                  mon.dates.forEach(ds=>{
+                    let totalReq=0;
+                    demandPoints.forEach(dp=>{
+                      const el=demandEls.find(e=>e.id===dp.element_id);
+                      if(!el) return;
+                      (dp.products||[]).forEach(p=>{
+                        const prod=DB.products.find(pr=>pr.id===p.product_id);
+                        if(prod&&(prod.category==='cement_bulk'||prod.category==='cement_packed')){
+                          const cementDemand=_demandRate(el.id,ds)||0;
+                          const recipes=DB.recipes.filter(r=>r.product_id===p.product_id&&r.material_id===clinkerProdId);
+                          recipes.forEach(rec=>{
+                            totalReq+=cementDemand*(parseFloat(rec.pct)||0)/100;
+                          });
+                        }
+                      });
+                    });
+                    h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${totalReq>0?clinkerReqColor:'rgba(255,157,92,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${totalReq>0?Math.round(totalReq).toLocaleString():''}</td>`;
+                  });
+                }
+              });
+              h+=`</tr>`;
+            });
+          }
+        }
+
+        // ══════════════════════════════════════════════════════════════
+        // SECTION 4: CLINKER INVENTORY (clinker silos, per silo)
+        // ══════════════════════════════════════════════════════════════
+        const clinkerSilos=facEls.filter(e=>e.type==='bulk_silo').filter(s=>{
+          const siloProds=getSiloProducts(s);
+          return siloProds.some(p=>{
+            const prod=DB.products.find(pr=>pr.id===p);
+            return prod&&prod.category==='clinker';
+          });
+        });
+
+        if(clinkerSilos.length>0){
+          const clinkerInvColor='#ff8c42';
+          // Section header
+          h+=`<tr style="background:rgba(255,140,66,.05);border-top:2px solid rgba(255,140,66,.3)">
+            <td style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${clinkerInvColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase">▸ CLINKER INVENTORY</td>`;
+          months.forEach(mon=>{
+            const isCol=collapsed.has(mon.ym);
+            h+=`<td style="border-left:2px solid rgba(255,140,66,.2);font-size:9px;color:${clinkerInvColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)"></td>`;
+            if(!isCol){
+              mon.dates.forEach(ds=>{
+                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}"></td>`;
+              });
+            }
+          });
+          h+=`</tr>`;
+
+          // One row per silo
+          clinkerSilos.forEach(silo=>{
+            const siloMax=parseFloat(silo.props?.max_capacity)||0;
+            h+=`<tr>
+              <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${clinkerInvColor};font-size:9px">${silo.name}
+                <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${siloMax>0?'cap: '+siloMax.toLocaleString()+'t':''}</span>
+              </td>`;
+            months.forEach(mon=>{
+              const isCol=collapsed.has(mon.ym);
+              const mt=mon.dates.reduce((s,ds)=>{
+                const dayIdx=allDates.indexOf(ds);
+                const hist=r?.inventoryHistory?.[silo.id]||[];
+                const v=dayIdx<=0?parseFloat(silo.props?.start_inventory)||0:hist[dayIdx-1]??0;
+                return s+v;
+              },0);
+              const avgMonthly=mt/mon.dates.length;
+              h+=`<td style="border-left:2px solid rgba(255,140,66,.1);font-size:9px;color:${clinkerInvColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${avgMonthly>0?Math.round(avgMonthly).toLocaleString():''}</td>`;
+              if(!isCol){
+                mon.dates.forEach((ds)=>{
+                  const dayIdx=allDates.indexOf(ds);
+                  const hist=r?.inventoryHistory?.[silo.id]||[];
+                  const v=dayIdx<=0?parseFloat(silo.props?.start_inventory)||0:hist[dayIdx-1]??0;
+                  h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${v>0?clinkerInvColor:'rgba(255,140,66,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`;
+                });
+              }
+            });
+            h+=`</tr>`;
+          });
+        }
+
         // ── CLINKER section (kilns) ──────────────────────
         if(node.kilns&&node.kilns.length){
           const clkColor='#ff8c42';
@@ -10342,10 +10619,7 @@ function _saveEditVessel(i){
       v.unload_rate_tph=parseFloat(document.getElementById('ev-rate')?.value)||0;
     }
   }
-  autoSave(); closeModal();
-  statMsg('Vessel call updated — recalculating simulation...');
-  // Recalculate simulation to account for changed quantities and other edits
-  setTimeout(()=>{ runSimulation(); }, 100);
+  autoSave(); closeModal(); renderVesselTable(); vpRender(); statMsg('Vessel call updated');
 }
 
 function railHTML(){
@@ -10484,10 +10758,7 @@ function _saveEditRail(i){
   r.status=document.getElementById('er-status')?.value||r.status;
   // Strip auto-generation marker on any user save — preserves the movement across sim runs
   if(r.notes==='Auto-generated by simulation') r.notes='';
-  autoSave(); closeModal();
-  statMsg('Rail movement updated — recalculating simulation...');
-  // Recalculate simulation to account for changed wagon count and other edits
-  setTimeout(()=>{ runSimulation(); }, 100);
+  autoSave(); closeModal(); renderRailTable(); rpRender(); statMsg('Rail movement updated');
 }
 
 function truckHTML(){
@@ -10532,10 +10803,7 @@ function saveTruck(){
     trips_per_day:cap>0?Math.ceil(rate/cap):0,
     notes:document.getElementById('tk-notes')?.value||'', status:'Planned'
   });
-  autoSave(); closeModal();
-  statMsg('Truck movement added — recalculating simulation...');
-  // Recalculate simulation to account for new truck movement
-  setTimeout(()=>{ runSimulation(); }, 100);
+  autoSave(); closeModal(); renderTruckTable(); statMsg('Truck movement added');
 }
 
 
