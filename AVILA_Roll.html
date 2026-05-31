@@ -14401,10 +14401,23 @@ function loadSaved(){
 document.addEventListener('DOMContentLoaded',async()=>{
   const hasSavedState = loadSaved();
 
+  seedCatalogs();
+
+  // Initialize data sources FIRST (they take priority over seed files)
+  // Data sources will auto-refresh from configured file locations
+  await new Promise(resolve => {
+    (async () => {
+      dsInit();  // init data sources + auto-refresh on load
+      // Give dsInit() a moment to load configured sources
+      await new Promise(r => setTimeout(r, 100));
+      resolve();
+    })();
+  });
+
   // Seed from the bundled server JSON only when localStorage is empty
-  // (first-ever load or after a manual clear). Never overwrite an
-  // existing saved state — that caused user edits to be clobbered on refresh.
-  if(!hasSavedState){
+  // AND no data source is configured (data sources take priority).
+  // Never overwrite an existing saved state or configured data source.
+  if(!hasSavedState && !DB.demand_points.length){
     try{
       const resp=await fetch('./AVILA_Roll_BRS_2026-05-31.json');
       if(resp.ok){
@@ -14422,9 +14435,6 @@ document.addEventListener('DOMContentLoaded',async()=>{
       console.log('Seed JSON not found — starting blank',err);
     }
   }
-
-  seedCatalogs();
-  dsInit();  // init data sources + auto-refresh on load
   document.getElementById('sim-date-lbl').textContent=`Day 0 / ${S.simCfg.horizon}`;
 
   // If facilities exist, select first one
