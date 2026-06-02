@@ -14428,12 +14428,85 @@ function submitRealData(){
     return;
   }
 
-  // Collect all production inputs
+  // Count entries with non-blank values
   const productionInputs=document.querySelectorAll('.rd-product-input[data-type="production"]');
-  let productionCount=0;
+  const inventoryInputs=document.querySelectorAll('.rd-product-input[data-type="inventory"]');
+
+  let hasAnyValue=false;
   productionInputs.forEach(input=>{
-    const volume=parseFloat(input.value);
-    if(volume && volume>0){
+    if(input.value.trim() !== ''){
+      hasAnyValue=true;
+    }
+  });
+  inventoryInputs.forEach(input=>{
+    if(input.value.trim() !== ''){
+      hasAnyValue=true;
+    }
+  });
+
+  if(!hasAnyValue){
+    alert('Please enter at least one value');
+    return;
+  }
+
+  showPreSubmitConfirmation(facId, dateStr);
+}
+
+function showPreSubmitConfirmation(facId, dateStr){
+  const backdrop=document.createElement('div');
+  backdrop.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;';
+
+  const dialog=document.createElement('div');
+  dialog.style.cssText='background:var(--surface);border:1px solid var(--accent);border-radius:8px;padding:24px;max-width:450px;box-shadow:0 8px 32px rgba(0,0,0,0.4);';
+
+  dialog.innerHTML=`
+    <div style="margin-bottom:20px;">
+      <div style="font-size:13px;font-weight:700;margin-bottom:16px;color:var(--text);">Confirm Data Submission</div>
+      <div style="font-size:11px;line-height:1.6;color:var(--text-secondary);margin-bottom:16px;">
+        <p style="margin:0 0 8px 0;">You are about to submit actual operational data for <strong>${dateStr}</strong>.</p>
+        <p style="margin:0;">This will override the simulated forecast values and recalculate all future projections.</p>
+      </div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:8px;">
+      <button id="confirmSubmitBtn" class="btn-pri" style="width:100%;text-align:center;padding:12px;cursor:pointer;font-weight:700;">✓ SUBMIT DATA</button>
+      <button id="cancelBtn" style="width:100%;text-align:center;padding:12px;background:transparent;border:1px solid var(--border);color:var(--text);cursor:pointer;border-radius:4px;font-size:11px;font-weight:700;transition:all .15s;">CANCEL (KEEP EDITING)</button>
+      <button id="closeWithoutBtn" style="width:100%;text-align:center;padding:12px;background:transparent;border:1px solid var(--border);color:var(--text-dim);cursor:pointer;border-radius:4px;font-size:11px;transition:all .15s;">CLOSE WITHOUT UPDATING</button>
+    </div>
+  `;
+
+  backdrop.appendChild(dialog);
+  document.body.appendChild(backdrop);
+
+  document.getElementById('confirmSubmitBtn').onclick=()=>{
+    backdrop.remove();
+    processDataSubmission(facId, dateStr, true);
+  };
+
+  document.getElementById('cancelBtn').onclick=()=>{
+    backdrop.remove();
+  };
+
+  document.getElementById('closeWithoutBtn').onclick=()=>{
+    backdrop.remove();
+    document.querySelectorAll('.rd-product-input').forEach(input=>input.value='');
+    renderRealDataSections();
+  };
+}
+
+function processDataSubmission(facId, dateStr, clearFormAfter){
+  const productionInputs=document.querySelectorAll('.rd-product-input[data-type="production"]');
+  const inventoryInputs=document.querySelectorAll('.rd-product-input[data-type="inventory"]');
+  let productionCount=0;
+  let inventoryCount=0;
+  const updates=[];
+
+  productionInputs.forEach(input=>{
+    const val=input.value.trim();
+    if(val !== ''){
+      const volume=parseFloat(val);
+      if(isNaN(volume)){
+        throw new Error(`Invalid numeric value: ${val}`);
+      }
       const elemId=input.dataset.elem;
       const prodId=input.dataset.prod;
       const existing=DB.real_production_daily.find(r=>r.date===dateStr && r.element_id===elemId && r.product_id===prodId);
@@ -14453,15 +14526,17 @@ function submitRealData(){
         });
       }
       productionCount++;
+      updates.push({type:'production', element:elemId, product:prodId, value:volume});
     }
   });
 
-  // Collect all inventory inputs
-  const inventoryInputs=document.querySelectorAll('.rd-product-input[data-type="inventory"]');
-  let inventoryCount=0;
   inventoryInputs.forEach(input=>{
-    const volume=parseFloat(input.value);
-    if(volume && volume>0){
+    const val=input.value.trim();
+    if(val !== ''){
+      const volume=parseFloat(val);
+      if(isNaN(volume)){
+        throw new Error(`Invalid numeric value: ${val}`);
+      }
       const siloId=input.dataset.elem;
       const prodId=input.dataset.prod;
       const existing=DB.real_inventory_daily.find(r=>r.date===dateStr && r.silo_id===siloId && r.product_id===prodId);
@@ -14481,76 +14556,55 @@ function submitRealData(){
         });
       }
       inventoryCount++;
+      updates.push({type:'inventory', element:siloId, product:prodId, value:volume});
     }
   });
 
-  const totalEntries=productionCount+inventoryCount;
-  if(totalEntries===0){
-    alert('Please enter at least one value');
-    return;
-  }
-
-  // Save and show feedback
   autoSave();
   _demandCacheInvalidate();
 
   const feedbackEl=document.getElementById('submitFeedback');
   const feedbackText=document.getElementById('feedbackText');
-  feedbackText.textContent=`✓ ${totalEntries} entries submitted on ${dateStr}`;
+  const totalEntries=productionCount+inventoryCount;
+  feedbackText.textContent=`✓ ${totalEntries} entries submitted`;
   feedbackEl.style.display='flex';
 
-  // Build submission summary
-  const summaryLines=[];
-  summaryLines.push(`✓ DATA SUBMITTED FOR: ${dateStr}`);
-  summaryLines.push(`Total Entries: ${totalEntries}`);
-  if(productionCount>0) summaryLines.push(`  • Production: ${productionCount}`);
-  if(inventoryCount>0) summaryLines.push(`  • Inventory: ${inventoryCount}`);
-
-  // Re-run simulation to update all views with real data calculations
-  summaryLines.push(`\nUpdating simulation…`);
   setTimeout(async ()=>{
     feedbackEl.style.display='none';
     await runSimulation();
-    showPostSubmitDialog(summaryLines.join('\n'), dateStr, productionInputs, inventoryInputs);
+    showPostSubmitDialog(dateStr, totalEntries, clearFormAfter);
   }, 500);
 }
 
-function showPostSubmitDialog(summary, dateStr, prodInputs, invInputs){
+function showPostSubmitDialog(dateStr, totalEntries, clearFormAfter){
   const backdrop=document.createElement('div');
   backdrop.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;';
 
   const dialog=document.createElement('div');
-  dialog.style.cssText='background:var(--surface);border:1px solid var(--accent);border-radius:8px;padding:24px;max-width:400px;box-shadow:0 8px 32px rgba(0,0,0,0.4);';
+  dialog.style.cssText='background:var(--surface);border:1px solid var(--accent);border-radius:8px;padding:24px;max-width:450px;box-shadow:0 8px 32px rgba(0,0,0,0.4);';
 
   dialog.innerHTML=`
     <div style="margin-bottom:20px;">
-      <div style="font-size:12px;color:var(--green);font-weight:700;margin-bottom:12px;white-space:pre-line;line-height:1.6;">${summary}</div>
+      <div style="font-size:13px;color:var(--green);font-weight:700;margin-bottom:12px;">✓ SUCCESS</div>
+      <div style="font-size:12px;line-height:1.6;color:var(--text);">
+        <p style="margin:0 0 8px 0;">Daily data has been successfully applied to the simulation and all forecasts have been recalculated.</p>
+        <p style="margin:0;font-size:11px;color:var(--text-secondary);">${totalEntries} entries submitted for ${dateStr}</p>
+      </div>
     </div>
     <div style="display:flex;flex-direction:column;gap:8px;">
-      <button id="clearBtn" class="btn-pri" style="width:100%;text-align:center;padding:10px;cursor:pointer;">→ CLEAR & ENTER MORE DATA</button>
-      <button id="exitBtn" class="btn-sec" style="width:100%;text-align:center;padding:10px;cursor:pointer;">CLOSE PANEL</button>
-      <button id="cancelBtn" style="width:100%;text-align:center;padding:10px;background:transparent;border:1px solid var(--border);color:var(--text);cursor:pointer;border-radius:4px;font-size:11px;transition:all .15s;">CANCEL (KEEP FORM)</button>
+      <button id="closeDialogBtn" class="btn-pri" style="width:100%;text-align:center;padding:12px;cursor:pointer;font-weight:700;">CLOSE</button>
     </div>
   `;
 
   backdrop.appendChild(dialog);
   document.body.appendChild(backdrop);
 
-  document.getElementById('clearBtn').onclick=()=>{
-    // Clear all inputs in the form
-    document.querySelectorAll('.rd-product-input').forEach(input=>input.value='');
+  document.getElementById('closeDialogBtn').onclick=()=>{
     backdrop.remove();
-    renderRealDataSections();
-  };
-
-  document.getElementById('exitBtn').onclick=()=>{
-    backdrop.remove();
-    const panel=document.getElementById('realDataPanel');
-    if(panel) panel.style.display='none';
-  };
-
-  document.getElementById('cancelBtn').onclick=()=>{
-    backdrop.remove();
+    if(clearFormAfter){
+      document.querySelectorAll('.rd-product-input').forEach(input=>input.value='');
+      renderRealDataSections();
+    }
   };
 }
 
@@ -14559,10 +14613,17 @@ function saveRealProduction(inputEl){
   const dateStr=S.realDataSelectedDate;
   const elemId=inputEl.dataset.elem;
   const prodId=inputEl.dataset.prod;
-  const volume=parseFloat(inputEl.value);
+  const val=inputEl.value.trim();
 
-  if(!volume || volume<0){
+  if(val === ''){
     deleteRealVal('production',elemId,prodId);
+    return;
+  }
+
+  const volume=parseFloat(val);
+  if(isNaN(volume) || volume<0){
+    inputEl.value='';
+    alert('Please enter a valid non-negative number');
     return;
   }
 
@@ -14592,10 +14653,17 @@ function saveRealInventory(inputEl){
   const dateStr=S.realDataSelectedDate;
   const siloId=inputEl.dataset.elem;
   const prodId=inputEl.dataset.prod;
-  const volume=parseFloat(inputEl.value);
+  const val=inputEl.value.trim();
 
-  if(!volume || volume<0){
+  if(val === ''){
     deleteRealVal('inventory',siloId,prodId);
+    return;
+  }
+
+  const volume=parseFloat(val);
+  if(isNaN(volume) || volume<0){
+    inputEl.value='';
+    alert('Please enter a valid non-negative number');
     return;
   }
 
@@ -14616,6 +14684,7 @@ function saveRealInventory(inputEl){
     });
   }
   autoSave();
+  _demandCacheInvalidate();
   renderRealDataSections();
 }
 
