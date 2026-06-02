@@ -3822,9 +3822,17 @@ function _renderSupplyViewInner(wrap){
   };
 
   // Returns {product_id, capacity_tpd} for element on a given date
-  // Uses the three-tier resolution above
+  // Uses four-tier resolution: ACTUAL > SIM > SCHEDULE > DEFAULT
   const resolveProduction=(el, ds, dayIdx, maintDays)=>{
     if(maintDays.has(ds)) return {product_id:null, capacity_tpd:0};
+
+    // Tier 0: ACTUAL data from real_production_daily (highest priority)
+    const realProduction=DB.real_production_daily.filter(r=>r.date===ds&&r.element_id===el.id);
+    if(realProduction.length>0){
+      const totalActual=realProduction.reduce((sum,r)=>sum+(parseFloat(r.volume_t)||0),0);
+      const firstProd=realProduction[0];
+      return {product_id:firstProd.product_id, capacity_tpd:totalActual, isActual:true};
+    }
 
     // Tier 1: sim results
     if(hasSim&&r.millProductHistory[el.id]){
