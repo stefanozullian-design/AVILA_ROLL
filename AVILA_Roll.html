@@ -14212,7 +14212,7 @@ function renderRealDataSections(){
   // Filter elements by assigned_facility_id (prioritized) or facility_id
   const facElements=DB.elements.filter(e=>(e.assigned_facility_id||e.facility_id)===facId);
   const kilns=facElements.filter(e=>e.type==='kiln');
-  const silos=facElements.filter(e=>e.type==='silo');
+  const silos=facElements.filter(e=>e.type==='bulk_silo'||e.type==='packed_silo');
   const finishMills=facElements.filter(e=>e.type==='finish_mill');
   const packingPlants=facElements.filter(e=>e.type==='packing_plant');
 
@@ -14491,19 +14491,57 @@ function submitRealData(){
   feedbackText.textContent=`✓ ${totalEntries} entries submitted on ${dateStr}`;
   feedbackEl.style.display='flex';
 
-  // Clear input values after successful submit
-  productionInputs.forEach(input=>input.value='');
-  inventoryInputs.forEach(input=>input.value='');
+  // Build submission summary
+  const summaryLines=[];
+  summaryLines.push(`✓ DATA SUBMITTED FOR: ${dateStr}`);
+  summaryLines.push(`Total Entries: ${totalEntries}`);
+  if(productionCount>0) summaryLines.push(`  • Production: ${productionCount}`);
+  if(inventoryCount>0) summaryLines.push(`  • Inventory: ${inventoryCount}`);
 
-  // Hide feedback after 3 seconds
+  // Show post-submit dialog
   setTimeout(()=>{
     feedbackEl.style.display='none';
-  }, 3000);
+    showPostSubmitDialog(summaryLines.join('\n'), dateStr, productionInputs, inventoryInputs);
+  }, 1500);
+}
 
-  // Re-render to show updated state
-  renderRealDataSections();
-  // Re-render supply view if visible
-  if(typeof renderSupplyChainView==='function') renderSupplyChainView();
+function showPostSubmitDialog(summary, dateStr, prodInputs, invInputs){
+  const backdrop=document.createElement('div');
+  backdrop.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;';
+
+  const dialog=document.createElement('div');
+  dialog.style.cssText='background:var(--surface);border:1px solid var(--accent);border-radius:8px;padding:24px;max-width:400px;box-shadow:0 8px 32px rgba(0,0,0,0.4);';
+
+  dialog.innerHTML=`
+    <div style="margin-bottom:20px;">
+      <div style="font-size:12px;color:var(--green);font-weight:700;margin-bottom:12px;white-space:pre-line;line-height:1.6;">${summary}</div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:8px;">
+      <button id="clearBtn" class="btn-pri" style="width:100%;text-align:center;padding:10px;cursor:pointer;">→ CLEAR & ENTER MORE DATA</button>
+      <button id="exitBtn" class="btn-sec" style="width:100%;text-align:center;padding:10px;cursor:pointer;">CLOSE PANEL</button>
+      <button id="cancelBtn" style="width:100%;text-align:center;padding:10px;background:transparent;border:1px solid var(--border);color:var(--text);cursor:pointer;border-radius:4px;font-size:11px;transition:all .15s;">CANCEL (KEEP FORM)</button>
+    </div>
+  `;
+
+  backdrop.appendChild(dialog);
+  document.body.appendChild(backdrop);
+
+  document.getElementById('clearBtn').onclick=()=>{
+    prodInputs.forEach(input=>input.value='');
+    invInputs.forEach(input=>input.value='');
+    backdrop.remove();
+    renderRealDataSections();
+  };
+
+  document.getElementById('exitBtn').onclick=()=>{
+    backdrop.remove();
+    const panel=document.getElementById('realDataPanel');
+    if(panel) panel.style.display='none';
+  };
+
+  document.getElementById('cancelBtn').onclick=()=>{
+    backdrop.remove();
+  };
 }
 
 function saveRealProduction(inputEl){
