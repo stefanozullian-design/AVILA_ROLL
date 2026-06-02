@@ -6383,6 +6383,14 @@ function removeMaintEventFromCalendar(id){
 // falling back to el.props.daily_tonnage (legacy/fixed) only if no
 // demand_values exist for this element at all.
 function _demandRate(elId, dateStr){
+  // PHASE 4: Check REAL DATA first (actual production inputs)
+  const realProduction=(DB.real_production_daily||[]).filter(r=>r.date===dateStr&&r.element_id===elId);
+  if(realProduction.length>0){
+    const realTotal=realProduction.reduce((sum,r)=>sum+(parseFloat(r.volume_t)||0),0);
+    return realTotal;
+  }
+
+  // Fallback to FORECAST data
   const valMap_cache=(_demandRate._cache=_demandRate._cache||{});
   if(!valMap_cache[elId]){
     const el=DB.elements.find(e=>e.id===elId);
@@ -14486,6 +14494,10 @@ function submitRealData(){
   autoSave();
   _demandCacheInvalidate();
 
+  // Refresh all views with updated calculations
+  if(typeof renderSupplyChainView==='function') renderSupplyChainView();
+  if(typeof renderResults==='function') renderResults();
+
   const feedbackEl=document.getElementById('submitFeedback');
   const feedbackText=document.getElementById('feedbackText');
   feedbackText.textContent=`✓ ${totalEntries} entries submitted on ${dateStr}`;
@@ -14531,6 +14543,9 @@ function showPostSubmitDialog(summary, dateStr, prodInputs, invInputs){
     invInputs.forEach(input=>input.value='');
     backdrop.remove();
     renderRealDataSections();
+    // Refresh supply view to show updated calculations
+    if(typeof renderSupplyChainView==='function') renderSupplyChainView();
+    if(typeof renderResults==='function') renderResults();
   };
 
   document.getElementById('exitBtn').onclick=()=>{
