@@ -4147,13 +4147,14 @@ function _renderSupplyViewInner(wrap){
 
           // Helper to get inventory value (checks actual data first, then simulated)
           const getInventoryValue=(siloId, dateStr, startInv)=>{
-            // Check for actual inventory from previous day (ending inv becomes beginning inv)
+            // For date X: display BEGINNING inventory = ENDING of day X-1
+            // So ONLY check previous day's real inventory data
             const prevDate=new Date(dateStr+'T00:00:00');
             prevDate.setDate(prevDate.getDate()-1);
             const prevDateStr=prevDate.toISOString().split('T')[0];
 
-            let realInv=DB.real_inventory_daily.find(ri=>ri.date===dateStr&&ri.silo_id===siloId);
-            if(!realInv) realInv=DB.real_inventory_daily.find(ri=>ri.date===prevDateStr&&ri.silo_id===siloId);
+            // Check ONLY previous day's ending inventory (becomes today's beginning)
+            const realInv=DB.real_inventory_daily.find(ri=>ri.date===prevDateStr&&ri.silo_id===siloId);
 
             if(realInv) return {value:parseFloat(realInv.eod_volume_t)||0, isActual:true};
 
@@ -4184,9 +4185,10 @@ function _renderSupplyViewInner(wrap){
                 mon.dates.forEach((ds)=>{
                   const inv=getInventoryValue(silo.id, ds, siloStart);
                   const v=inv.value;
-                  const cellColor=inv.isActual?'var(--amber)':invColor;
+                  const cellColor=inv.isActual?'var(--real)':invColor;
                   const cellWeight=inv.isActual?'700':'400';
-                  h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${v>0?cellColor:'rgba(0,217,163,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${cellWeight};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`;
+                  const cellClass=inv.isActual?'cell-real':'';
+                  h+=`<td class="sup-day-${mon.ym} ${cellClass}" style="font-size:9px;color:${v>0?cellColor:'rgba(0,217,163,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${cellWeight};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`;
                 });
               }
             });
@@ -4311,9 +4313,23 @@ function _renderSupplyViewInner(wrap){
           });
           h+=`</tr>`;
 
+          // Helper for clinker inventory (same as cement above)
+          const getClkInvValue=(siloId, dateStr, startInv)=>{
+            const prevDate=new Date(dateStr+'T00:00:00');
+            prevDate.setDate(prevDate.getDate()-1);
+            const prevDateStr=prevDate.toISOString().split('T')[0];
+            const realInv=DB.real_inventory_daily.find(ri=>ri.date===prevDateStr&&ri.silo_id===siloId);
+            if(realInv) return {value:parseFloat(realInv.eod_volume_t)||0, isActual:true};
+            const dayIdx=allDates.indexOf(dateStr);
+            const hist=r?.inventoryHistory?.[siloId]||[];
+            const v=dayIdx<=0?parseFloat(startInv)||0:hist[dayIdx-1]??0;
+            return {value:v, isActual:false};
+          };
+
           // One row per silo
           clinkerSilos.forEach(silo=>{
             const siloMax=parseFloat(silo.props?.max_capacity)||0;
+            const siloStart=parseFloat(silo.props?.start_inventory)||0;
             h+=`<tr>
               <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${clinkerInvColor};font-size:9px">${silo.name}
                 <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${siloMax>0?'cap: '+siloMax.toLocaleString()+'t':''}</span>
@@ -4321,19 +4337,19 @@ function _renderSupplyViewInner(wrap){
             months.forEach(mon=>{
               const isCol=collapsed.has(mon.ym);
               const mt=mon.dates.reduce((s,ds)=>{
-                const dayIdx=allDates.indexOf(ds);
-                const hist=r?.inventoryHistory?.[silo.id]||[];
-                const v=dayIdx<=0?parseFloat(silo.props?.start_inventory)||0:hist[dayIdx-1]??0;
-                return s+v;
+                const inv=getClkInvValue(silo.id, ds, siloStart);
+                return s+inv.value;
               },0);
               const avgMonthly=mt/mon.dates.length;
               h+=`<td style="border-left:2px solid rgba(255,140,66,.1);font-size:9px;color:${clinkerInvColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${avgMonthly>0?Math.round(avgMonthly).toLocaleString():''}</td>`;
               if(!isCol){
                 mon.dates.forEach((ds)=>{
-                  const dayIdx=allDates.indexOf(ds);
-                  const hist=r?.inventoryHistory?.[silo.id]||[];
-                  const v=dayIdx<=0?parseFloat(silo.props?.start_inventory)||0:hist[dayIdx-1]??0;
-                  h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${v>0?clinkerInvColor:'rgba(255,140,66,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`;
+                  const inv=getClkInvValue(silo.id, ds, siloStart);
+                  const v=inv.value;
+                  const cellColor=inv.isActual?'var(--real)':clinkerInvColor;
+                  const cellClass=inv.isActual?'cell-real':'';
+                  const cellWeight=inv.isActual?'700':'400';
+                  h+=`<td class="sup-day-${mon.ym} ${cellClass}" style="font-size:9px;color:${v>0?cellColor:'rgba(255,140,66,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${cellWeight};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`;
                 });
               }
             });
