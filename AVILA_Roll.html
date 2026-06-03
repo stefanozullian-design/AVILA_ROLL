@@ -9238,6 +9238,18 @@ function renderDtree(r){
   // Helper: get BOD inventory for a specific day for an element
   // BOD day N = EOD day N-1 = hist[N-2]; day 1 BOD = start_inventory
   const inv=(elId,day)=>{
+    const simStart=new Date(S.simCfg.start_date+'T00:00:00');
+    const currentDate=new Date(simStart.getTime()+(day-1)*864e5);
+    const dateStr=currentDate.toISOString().split('T')[0];
+    const prevDate=new Date(currentDate.getTime()-864e5);
+    const prevDateStr=prevDate.toISOString().split('T')[0];
+
+    // Check for ACTUAL inventory data first
+    let realInv=DB.real_inventory_daily.find(ri=>ri.date===dateStr&&ri.silo_id===elId);
+    if(!realInv) realInv=DB.real_inventory_daily.find(ri=>ri.date===prevDateStr&&ri.silo_id===elId);
+    if(realInv) return parseFloat(realInv.eod_volume_t)||0;
+
+    // Fall back to simulated
     const hist=r.inventoryHistory[elId]||[];
     if(day<=1){
       const el=getEl(elId);
@@ -9248,6 +9260,17 @@ function renderDtree(r){
 
   // Helper: get production rate for a transform element on a day
   const prod=(elId,day)=>{
+    const simStart=new Date(S.simCfg.start_date+'T00:00:00');
+    const currentDate=new Date(simStart.getTime()+(day-1)*864e5);
+    const dateStr=currentDate.toISOString().split('T')[0];
+
+    // Check for ACTUAL production data first
+    const realProduction=DB.real_production_daily.filter(r=>r.date===dateStr&&r.element_id===elId);
+    if(realProduction.length>0){
+      return realProduction.reduce((sum,r)=>sum+(parseFloat(r.volume_t)||0),0);
+    }
+
+    // Fall back to simulated
     const states=r.elementStates[elId]||[];
     const st=states[day-1]||'idle';
     if(st!=='running'&&st!=='rampup') return 0;
@@ -9929,6 +9952,23 @@ function _drawClinkerChart(id, r){
 
   const legendId=id==='dash-clk-chart'?'dash-clk-legend':'clk-chart-legend';
 
+  // Helper to get actual or simulated production for chart
+  const getChartProduction=(elId, dayOffset)=>{
+    const simStart=new Date(S.simCfg.start_date+'T00:00:00');
+    const currentDate=new Date(simStart.getTime()+(dayOffset-1)*864e5);
+    const dateStr=currentDate.toISOString().split('T')[0];
+
+    // Check for ACTUAL production first
+    const realProduction=DB.real_production_daily.filter(rp=>rp.date===dateStr&&rp.element_id===elId);
+    if(realProduction.length>0){
+      return realProduction.reduce((sum,rp)=>sum+(parseFloat(rp.volume_t)||0),0);
+    }
+
+    // Fall back to simulated
+    const st=(r.elementStates[elId]||[])[dayOffset-1]||'idle';
+    return (st==='running'||st==='rampup')?1:0; // Return 1 if running, 0 if idle (will be multiplied by capacity)
+  };
+
   // ── Build production series (kilns) ──
   const prodSeries=[];
   fac.filter(e=>e.type==='kiln').forEach((el,ki)=>{
@@ -9939,16 +9979,27 @@ function _drawClinkerChart(id, r){
         const label=`${el.name}${caps.length>1?' — '+(prod?.name||cap.product_id):''}`;
         const data=[];
         for(let d=startDay;d<=endDay;d++){
-          const st=(r.elementStates[el.id]||[])[d-1]||'idle';
-          data.push((st==='running'||st==='rampup')?(parseFloat(cap.capacity_tpd)||0):0);
+          const actualVal=getChartProduction(el.id, d);
+          // If there's actual data, use it; otherwise use capacity * state
+          if(actualVal>0 && actualVal!==1){
+            data.push(actualVal); // Actual production value
+          } else {
+            const st=(r.elementStates[el.id]||[])[d-1]||'idle';
+            data.push((st==='running'||st==='rampup')?(parseFloat(cap.capacity_tpd)||0):0);
+          }
         }
         prodSeries.push({label, data, col:prodCols[(ki*3+ci)%prodCols.length]});
       });
     } else {
       const data=[];
       for(let d=startDay;d<=endDay;d++){
-        const st=(r.elementStates[el.id]||[])[d-1]||'idle';
-        data.push((st==='running'||st==='rampup')?(parseFloat(el.props.rated_capacity_tpd)||0):0);
+        const actualVal=getChartProduction(el.id, d);
+        if(actualVal>0 && actualVal!==1){
+          data.push(actualVal);
+        } else {
+          const st=(r.elementStates[el.id]||[])[d-1]||'idle';
+          data.push((st==='running'||st==='rampup')?(parseFloat(el.props.rated_capacity_tpd)||0):0);
+        }
       }
       prodSeries.push({label:el.name, data, col:prodCols[ki%prodCols.length]});
     }
@@ -9971,13 +10022,30 @@ function _drawClinkerChart(id, r){
     demSeries.push({label:`Req: ${prod?.name||pid}`, data:Array(days).fill(daily), col:demCols[i%demCols.length]});
   });
 
+  // Helper to get actual or simulated inventory for chart
+  const getChartInventory=(elId, dayOffset)=>{
+    const simStart=new Date(S.simCfg.start_date+'T00:00:00');
+    const currentDate=new Date(simStart.getTime()+(dayOffset-1)*864e5);
+    const dateStr=currentDate.toISOString().split('T')[0];
+    const prevDate=new Date(currentDate.getTime()-864e5);
+    const prevDateStr=prevDate.toISOString().split('T')[0];
+
+    // Check for ACTUAL inventory first (from this date or previous day)
+    let realInv=DB.real_inventory_daily.find(ri=>ri.date===dateStr&&ri.silo_id===elId);
+    if(!realInv) realInv=DB.real_inventory_daily.find(ri=>ri.date===prevDateStr&&ri.silo_id===elId);
+    if(realInv) return parseFloat(realInv.eod_volume_t)||0;
+
+    // Fall back to simulated
+    const h=r.inventoryHistory[elId]||[];
+    return dayOffset>1?(h[dayOffset-2]??0):parseFloat(DB.elements.find(e=>e.id===elId)?.props?.start_inventory)||0;
+  };
+
   // ── Build inventory series (clinker silos, stacked) ──
   const invSeries=[];
   fac.filter(e=>e.type==='bulk_silo'&&isClinkerSilo(e)).forEach((el,i)=>{
     const hist=[];
     for(let d=startDay;d<=endDay;d++){
-      const h=r.inventoryHistory[el.id]||[];
-      hist.push(d>1?(h[d-2]??0):parseFloat(el.props?.start_inventory)||0);
+      hist.push(getChartInventory(el.id, d));
     }
     if(hist.some(v=>v>0))
       invSeries.push({label:el.name, data:hist, col:invCols[i%invCols.length]});
