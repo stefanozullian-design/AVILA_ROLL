@@ -4121,6 +4121,25 @@ function _renderSupplyViewInner(wrap){
           });
           h+=`</tr>`;
 
+          // Helper to get inventory value (checks actual data first, then simulated)
+          const getInventoryValue=(siloId, dateStr, startInv)=>{
+            // Check for actual inventory from previous day (ending inv becomes beginning inv)
+            const prevDate=new Date(dateStr+'T00:00:00');
+            prevDate.setDate(prevDate.getDate()-1);
+            const prevDateStr=prevDate.toISOString().split('T')[0];
+
+            let realInv=DB.real_inventory_daily.find(ri=>ri.date===dateStr&&ri.silo_id===siloId);
+            if(!realInv) realInv=DB.real_inventory_daily.find(ri=>ri.date===prevDateStr&&ri.silo_id===siloId);
+
+            if(realInv) return {value:parseFloat(realInv.eod_volume_t)||0, isActual:true};
+
+            // Fall back to simulated
+            const dayIdx=allDates.indexOf(dateStr);
+            const hist=r?.inventoryHistory?.[siloId]||[];
+            const v=dayIdx<=0?parseFloat(startInv)||0:hist[dayIdx-1]??0;
+            return {value:v, isActual:false};
+          };
+
           // One row per silo
           cementSilos.forEach(silo=>{
             const siloMax=parseFloat(silo.props?.max_capacity)||0;
@@ -4128,22 +4147,22 @@ function _renderSupplyViewInner(wrap){
               <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${invColor};font-size:9px">${silo.name}
                 <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${siloMax>0?'cap: '+siloMax.toLocaleString()+'t':''}</span>
               </td>`;
+            const siloStart=parseFloat(silo.props?.start_inventory)||0;
             months.forEach(mon=>{
               const isCol=collapsed.has(mon.ym);
               const mt=mon.dates.reduce((s,ds)=>{
-                const dayIdx=allDates.indexOf(ds);
-                const hist=r?.inventoryHistory?.[silo.id]||[];
-                const v=dayIdx<=0?parseFloat(silo.props?.start_inventory)||0:hist[dayIdx-1]??0;
-                return s+v;
+                const inv=getInventoryValue(silo.id, ds, siloStart);
+                return s+inv.value;
               },0);
               const avgMonthly=mt/mon.dates.length;
               h+=`<td style="border-left:2px solid rgba(0,217,163,.1);font-size:9px;color:${invColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${avgMonthly>0?Math.round(avgMonthly).toLocaleString():''}</td>`;
               if(!isCol){
                 mon.dates.forEach((ds)=>{
-                  const dayIdx=allDates.indexOf(ds);
-                  const hist=r?.inventoryHistory?.[silo.id]||[];
-                  const v=dayIdx<=0?parseFloat(silo.props?.start_inventory)||0:hist[dayIdx-1]??0;
-                  h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${v>0?invColor:'rgba(0,217,163,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`;
+                  const inv=getInventoryValue(silo.id, ds, siloStart);
+                  const v=inv.value;
+                  const cellColor=inv.isActual?'var(--amber)':invColor;
+                  const cellWeight=inv.isActual?'700':'400';
+                  h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${v>0?cellColor:'rgba(0,217,163,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${cellWeight};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`;
                 });
               }
             });
@@ -8730,8 +8749,21 @@ function renderResultsTable(){
       invCols.forEach(el=>{
         let val=0, isActual=false;
 
-        // Check for ACTUAL inventory data first
-        const realInventory=DB.real_inventory_daily.find(ri=>ri.date===dateStr&&ri.silo_id===el.id);
+        // Check for ACTUAL inventory data — ENDING inventory from PREVIOUS day becomes BEGINNING for today
+        // So for date X, look for real_inventory with date X-1 (that's the ending inv from previous day)
+        const prevDate=new Date(dateStr+'T00:00:00');
+        prevDate.setDate(prevDate.getDate()-1);
+        const prevDateStr=prevDate.toISOString().split('T')[0];
+
+        let realInventory=null;
+        // First check: is there actual inventory for this exact date (ending inventory)?
+        realInventory=DB.real_inventory_daily.find(ri=>ri.date===dateStr&&ri.silo_id===el.id);
+
+        // Second check: if not, check previous day (that becomes today's beginning)
+        if(!realInventory&&day>1){
+          realInventory=DB.real_inventory_daily.find(ri=>ri.date===prevDateStr&&ri.silo_id===el.id);
+        }
+
         if(realInventory){
           val=parseFloat(realInventory.eod_volume_t)||0;
           isActual=true;
@@ -8749,7 +8781,7 @@ function renderResultsTable(){
         const maintEvId=getMaintEventId(el.id, dateStr);
         const cls=maintEvId?'cell-maint':val<=min?'cell-crit':pct<(minPct+10)?'cell-low':pct>95?'cell-ok':isActual?'cell-actual':'';
         const display=maintEvId?maintBadge(maintEvId):Number(val).toLocaleString();
-        h+=`<td class="${cls}" style="${isActual?'font-weight:700':''}">${display}</td>`;
+        h+=`<td class="${cls}" style="${isActual?'font-weight:700;color:var(--amber)':''}">${display}</td>`;
       });
     }
 
