@@ -14560,43 +14560,67 @@ function submitRealData(){
   const productionInputs=document.querySelectorAll('.rd-product-input[data-type="production"]');
   const inventoryInputs=document.querySelectorAll('.rd-product-input[data-type="inventory"]');
 
-  let hasAnyValue=false;
+  let hasAnyNewValue=false;
   productionInputs.forEach(input=>{
     if(input.value.trim() !== ''){
-      hasAnyValue=true;
+      hasAnyNewValue=true;
     }
   });
   inventoryInputs.forEach(input=>{
     if(input.value.trim() !== ''){
-      hasAnyValue=true;
+      hasAnyNewValue=true;
     }
   });
 
-  if(!hasAnyValue){
-    alert('Please enter at least one value');
+  // Check if there are EXISTING actual values for this date (to allow deletion)
+  const hasExistingProduction=DB.real_production_daily.some(r=>r.date===dateStr && r.facility_id===facId);
+  const hasExistingInventory=DB.real_inventory_daily.some(r=>r.date===dateStr && r.facility_id===facId);
+  const hasExistingValues=hasExistingProduction || hasExistingInventory;
+
+  // Allow submission if either: new values to add OR existing values to delete
+  if(!hasAnyNewValue && !hasExistingValues){
+    alert('Please enter at least one value or delete existing values to return to simulated forecasts');
     return;
   }
 
-  showPreSubmitConfirmation(facId, dateStr);
+  showPreSubmitConfirmation(facId, dateStr, hasAnyNewValue, hasExistingValues);
 }
 
-function showPreSubmitConfirmation(facId, dateStr){
+function showPreSubmitConfirmation(facId, dateStr, hasNewValues, hasExistingValues){
   const backdrop=document.createElement('div');
   backdrop.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;';
 
   const dialog=document.createElement('div');
   dialog.style.cssText='background:var(--surface);border:1px solid var(--accent);border-radius:8px;padding:24px;max-width:450px;box-shadow:0 8px 32px rgba(0,0,0,0.4);';
 
+  // Determine action type for messaging
+  const isDeleting=!hasNewValues && hasExistingValues;
+  const isBothAddAndDelete=hasNewValues && hasExistingValues;
+  const isAdding=hasNewValues && !hasExistingValues;
+
+  let actionTitle='Confirm Data Submission';
+  let actionMessage='You are about to submit actual operational data for <strong>${dateStr}</strong>.<br>This will override the simulated forecast values and recalculate all future projections.';
+  let buttonLabel='✓ SUBMIT DATA';
+
+  if(isDeleting){
+    actionTitle='Confirm Data Deletion';
+    actionMessage='You are about to delete all actual data for <strong>${dateStr}</strong>.<br>This will return to simulated forecast values and recalculate all future projections.';
+    buttonLabel='✓ DELETE & RESTORE FORECAST';
+  } else if(isBothAddAndDelete){
+    actionTitle='Confirm Data Update';
+    actionMessage='You are about to update actual data for <strong>${dateStr}</strong>.<br>Some values will be updated, others deleted. All forecasts will be recalculated.';
+    buttonLabel='✓ UPDATE DATA';
+  }
+
   dialog.innerHTML=`
     <div style="margin-bottom:20px;">
-      <div style="font-size:13px;font-weight:700;margin-bottom:16px;color:var(--text);">Confirm Data Submission</div>
+      <div style="font-size:13px;font-weight:700;margin-bottom:16px;color:var(--text);">${actionTitle}</div>
       <div style="font-size:11px;line-height:1.6;color:var(--text-secondary);margin-bottom:16px;">
-        <p style="margin:0 0 8px 0;">You are about to submit actual operational data for <strong>${dateStr}</strong>.</p>
-        <p style="margin:0;">This will override the simulated forecast values and recalculate all future projections.</p>
+        <p style="margin:0 0 8px 0;">${actionMessage}</p>
       </div>
     </div>
     <div style="display:flex;flex-direction:column;gap:8px;">
-      <button id="confirmSubmitBtn" class="btn-pri" style="width:100%;text-align:center;padding:12px;cursor:pointer;font-weight:700;">✓ SUBMIT DATA</button>
+      <button id="confirmSubmitBtn" class="btn-pri" style="width:100%;text-align:center;padding:12px;cursor:pointer;font-weight:700;">${buttonLabel}</button>
       <button id="cancelBtn" style="width:100%;text-align:center;padding:12px;background:transparent;border:1px solid var(--border);color:var(--text);cursor:pointer;border-radius:4px;font-size:11px;font-weight:700;transition:all .15s;">CANCEL (KEEP EDITING)</button>
       <button id="closeWithoutBtn" style="width:100%;text-align:center;padding:12px;background:transparent;border:1px solid var(--border);color:var(--text-dim);cursor:pointer;border-radius:4px;font-size:11px;transition:all .15s;">CLOSE WITHOUT UPDATING</button>
     </div>
@@ -14626,8 +14650,22 @@ function processDataSubmission(facId, dateStr, clearFormAfter){
   const inventoryInputs=document.querySelectorAll('.rd-product-input[data-type="inventory"]');
   let productionCount=0;
   let inventoryCount=0;
+  let deletedCount=0;
   const updates=[];
 
+  // STEP 1: Delete all existing entries for this date/facility (to handle both updates and full deletions)
+  const initialProdCount=DB.real_production_daily.filter(r=>r.date===dateStr && r.facility_id===facId).length;
+  const initialInvCount=DB.real_inventory_daily.filter(r=>r.date===dateStr && r.facility_id===facId).length;
+
+  // Remove all production entries for this date
+  DB.real_production_daily=DB.real_production_daily.filter(r=>!(r.date===dateStr && r.facility_id===facId));
+
+  // Remove all inventory entries for this date
+  DB.real_inventory_daily=DB.real_inventory_daily.filter(r=>!(r.date===dateStr && r.facility_id===facId));
+
+  deletedCount=initialProdCount+initialInvCount;
+
+  // STEP 2: Add new entries from form (only non-blank values)
   productionInputs.forEach(input=>{
     const val=input.value.trim();
     if(val !== ''){
@@ -14637,22 +14675,16 @@ function processDataSubmission(facId, dateStr, clearFormAfter){
       }
       const elemId=input.dataset.elem;
       const prodId=input.dataset.prod;
-      const existing=DB.real_production_daily.find(r=>r.date===dateStr && r.element_id===elemId && r.product_id===prodId);
-      if(existing){
-        existing.volume_t=volume;
-        existing.updated_at=new Date().toISOString();
-      } else {
-        DB.real_production_daily.push({
-          date:dateStr,
-          facility_id:facId,
-          element_id:elemId,
-          product_id:prodId,
-          volume_t:volume,
-          source:'actual',
-          created_at:new Date().toISOString(),
-          updated_at:new Date().toISOString()
-        });
-      }
+      DB.real_production_daily.push({
+        date:dateStr,
+        facility_id:facId,
+        element_id:elemId,
+        product_id:prodId,
+        volume_t:volume,
+        source:'actual',
+        created_at:new Date().toISOString(),
+        updated_at:new Date().toISOString()
+      });
       productionCount++;
       updates.push({type:'production', element:elemId, product:prodId, value:volume});
     }
@@ -14667,22 +14699,16 @@ function processDataSubmission(facId, dateStr, clearFormAfter){
       }
       const siloId=input.dataset.elem;
       const prodId=input.dataset.prod;
-      const existing=DB.real_inventory_daily.find(r=>r.date===dateStr && r.silo_id===siloId && r.product_id===prodId);
-      if(existing){
-        existing.eod_volume_t=volume;
-        existing.updated_at=new Date().toISOString();
-      } else {
-        DB.real_inventory_daily.push({
-          date:dateStr,
-          facility_id:facId,
-          silo_id:siloId,
-          product_id:prodId,
-          eod_volume_t:volume,
-          source:'actual',
-          created_at:new Date().toISOString(),
-          updated_at:new Date().toISOString()
-        });
-      }
+      DB.real_inventory_daily.push({
+        date:dateStr,
+        facility_id:facId,
+        silo_id:siloId,
+        product_id:prodId,
+        eod_volume_t:volume,
+        source:'actual',
+        created_at:new Date().toISOString(),
+        updated_at:new Date().toISOString()
+      });
       inventoryCount++;
       updates.push({type:'inventory', element:siloId, product:prodId, value:volume});
     }
@@ -14694,29 +14720,50 @@ function processDataSubmission(facId, dateStr, clearFormAfter){
   const feedbackEl=document.getElementById('submitFeedback');
   const feedbackText=document.getElementById('feedbackText');
   const totalEntries=productionCount+inventoryCount;
-  feedbackText.textContent=`✓ ${totalEntries} entries submitted`;
+
+  if(totalEntries>0){
+    feedbackText.textContent=`✓ ${totalEntries} entries submitted`;
+  } else if(deletedCount>0){
+    feedbackText.textContent=`✓ ${deletedCount} entries deleted`;
+  } else {
+    feedbackText.textContent=`✓ Submitted`;
+  }
   feedbackEl.style.display='flex';
 
   setTimeout(async ()=>{
     feedbackEl.style.display='none';
     await runSimulation();
-    showPostSubmitDialog(dateStr, totalEntries, clearFormAfter);
+    showPostSubmitDialog(dateStr, totalEntries, clearFormAfter, deletedCount);
   }, 500);
 }
 
-function showPostSubmitDialog(dateStr, totalEntries, clearFormAfter){
+function showPostSubmitDialog(dateStr, totalEntries, clearFormAfter, deletedCount=0){
   const backdrop=document.createElement('div');
   backdrop.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;';
 
   const dialog=document.createElement('div');
   dialog.style.cssText='background:var(--surface);border:1px solid var(--accent);border-radius:8px;padding:24px;max-width:450px;box-shadow:0 8px 32px rgba(0,0,0,0.4);';
 
+  let successMessage='';
+  let detailMessage='';
+
+  if(totalEntries>0){
+    successMessage='Daily data has been successfully applied to the simulation and all forecasts have been recalculated.';
+    detailMessage=`${totalEntries} entries submitted for ${dateStr}`;
+  } else if(deletedCount>0){
+    successMessage='Actual data has been deleted. Simulated forecasts have been restored and recalculated.';
+    detailMessage=`${deletedCount} entries deleted for ${dateStr}`;
+  } else {
+    successMessage='Data has been updated and forecasts have been recalculated.';
+    detailMessage=dateStr;
+  }
+
   dialog.innerHTML=`
     <div style="margin-bottom:20px;">
       <div style="font-size:13px;color:var(--green);font-weight:700;margin-bottom:12px;">✓ SUCCESS</div>
       <div style="font-size:12px;line-height:1.6;color:var(--text);">
-        <p style="margin:0 0 8px 0;">Daily data has been successfully applied to the simulation and all forecasts have been recalculated.</p>
-        <p style="margin:0;font-size:11px;color:var(--text-secondary);">${totalEntries} entries submitted for ${dateStr}</p>
+        <p style="margin:0 0 8px 0;">${successMessage}</p>
+        <p style="margin:0;font-size:11px;color:var(--text-secondary);">${detailMessage}</p>
       </div>
     </div>
     <div style="display:flex;flex-direction:column;gap:8px;">
