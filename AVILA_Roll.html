@@ -3563,6 +3563,10 @@ function executeDeleteElement(elId){
   if(DB.real_shipments_daily)     DB.real_shipments_daily     = DB.real_shipments_daily.filter(r=>r.element_id!==elId);
   if(DB.real_transfers_daily)     DB.real_transfers_daily     = DB.real_transfers_daily.filter(r=>r.element_id!==elId);
   if(DB.forecast_commitments)     DB.forecast_commitments     = DB.forecast_commitments.filter(r=>r.element_id!==elId);
+  // simulation_rules stores element_ids as an array — remove this element from each rule's list
+  if(DB.simulation_rules) DB.simulation_rules.forEach(rule=>{
+    if(Array.isArray(rule.element_ids)) rule.element_ids=rule.element_ids.filter(id=>id!==elId);
+  });
 
   // Remove element itself
   DB.elements = DB.elements.filter(e=>e.id!==elId);
@@ -7066,16 +7070,37 @@ function _planRailShipments(rBase){
         const projAtArrival=Math.max(0, projInvFwd[arrivalDay]+(plannedArrivals[arrivalDay]||0));
         // Skip if terminal will already be at/near capacity on arrival day
         if(projAtArrival>=siloMax*0.95){ usedSwitchDays.add(switchDay); scanFrom=critDay+1; continue; }
-        // Loading rate cap: only load what can be produced in the window since previous switch
+        // Loading rate cap: only count WORKING days in the window since previous switch
+        // working_days: 'weekdays'=Mon-Fri, 'mon_sat'=Mon-Sat, '7_days'=all
+        const workDaysSetting=dp.props.working_days||'weekdays';
+        const nwdSetLocal=new Set((DB.non_working_days||[]).map(n=>n.date));
+        const _isWorkingDay=(dayNum)=>{
+          const dt=new Date(simStart.getTime()+(dayNum-1)*864e5);
+          const dow=(dt.getDay()+6)%7; // Mon=0..Sun=6
+          const dateStr=dt.toISOString().split('T')[0];
+          if(nwdSetLocal.has(dateStr)) return false; // facility holiday
+          if(workDaysSetting==='7_days') return true;
+          if(workDaysSetting==='mon_sat') return dow<=5;
+          return dow<=4; // weekdays default
+        };
+        // Count actual working days available between last switch and this switch
         const prevSw=switchIdx>0?allSwitchDayNums[switchIdx-1]:0;
-        const availLoadDays=Math.max(1, switchDay-Math.max(1,prevSw+1));
+        const rangeStart=Math.max(1, prevSw+1);
+        let availWorkingDays=0;
+        for(let d=rangeStart; d<switchDay; d++) if(_isWorkingDay(d)) availWorkingDays++;
+        const availLoadDays=Math.max(1, availWorkingDays);
         const maxCarsLoadable=Math.floor(availLoadDays*stdCarsDay);
         const maxCarsSilo=Math.floor((siloMax-projAtArrival)/carCapT);
         const carsNeeded=Math.max(1, Math.min(maxCarsSilo, maxCarsLoadable));
 
-        // Verify loading window fits before sim start
+        // Work backward from switchDay counting only working days to find loadStart
         const loadDays=Math.ceil(carsNeeded/stdCarsDay);
-        const loadStart=switchDay-loadDays;
+        let loadStart=switchDay-1;
+        let workingDaysFound=0;
+        while(loadStart>=1 && workingDaysFound<loadDays){
+          if(_isWorkingDay(loadStart)) workingDaysFound++;
+          if(workingDaysFound<loadDays) loadStart--;
+        }
         if(loadStart<1){ usedSwitchDays.add(switchDay); scanFrom=critDay+1; continue; }
 
         // Commit the movement and update the projection
