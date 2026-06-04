@@ -8013,14 +8013,14 @@ function simulate(elements, connections, horizon, includeProposed=false){
       plannedSwitchMap[rm.from_dispatch_id][swDay].push(rm);
     });
 
-  // plannedLoadWindowMap[dpId] = Set<day> — days within the loading window of a Planned/Confirmed move.
-  // Used in Step 6 to restrict loading to planned windows only (prevents continuous over-depletion
-  // of the rail silo between shipments).
+  // plannedLoadWindowMap[dpId] = Set<day> — days within the loading window of any movement.
+  // Includes Proposed so loading is restricted to designated windows regardless of status.
+  // This prevents continuous silo depletion between shipments for all statuses.
   const plannedLoadWindowMap={};
   DB.rail_movements
     .filter(rm=>{
       const st=rm.status||'Planned';
-      return ['Planned','Confirmed'].includes(st)&&rm.from_facility_id===S.facility_id
+      return ['Planned','Confirmed','Proposed'].includes(st)&&rm.from_facility_id===S.facility_id
         &&rm.from_dispatch_id&&rm.load_start_day&&rm.switch_day;
     })
     .forEach(rm=>{
@@ -8573,12 +8573,13 @@ function simulate(elements, connections, horizon, includeProposed=false){
       const carsLoadedByProduct={};
 
       // Load cars on working days.
-      // When Planned/Confirmed moves exist for this dispatch point, restrict loading to
-      // their declared windows (load_start_day..switch_day-1) and skip switch days where
-      // locked dispatch will run. For auto/Proposed-only points, load every working day.
+      // Restrict loading to declared load windows for ALL statuses (Planned, Confirmed, Proposed).
+      // This prevents over-depletion of the rail silo between shipments.
+      // _hasLockedNow: true only on Planned/Confirmed switch days (forces exact dispatch).
+      // _hasAnyWindow: true if any movement (any status) has a load window defined.
       const _hasLockedNow=(plannedSwitchMap[el.id]||{})[day]?.length>0;
-      const _hasAnyLocked=Object.keys(plannedSwitchMap[el.id]||{}).length>0;
-      const _inLoadWindow=!_hasAnyLocked||(plannedLoadWindowMap[el.id]||new Set()).has(day);
+      const _hasAnyWindow=(plannedLoadWindowMap[el.id]||new Set()).size>0;
+      const _inLoadWindow=!_hasAnyWindow||(plannedLoadWindowMap[el.id]||new Set()).has(day);
       if(isWorking&&!_hasLockedNow&&_inLoadWindow&&upSilo){
         const siloState=state[upSilo.id];
         // Include same-day inflow (e.g. FM production into this silo today)
