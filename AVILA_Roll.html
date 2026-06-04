@@ -7677,7 +7677,8 @@ function simulate(elements, connections, horizon, includeProposed=false){
   DB.rail_movements
     .filter(rm=>{
       const st=rm.status||'Planned';
-      const statusOk=st==='Proposed'?includeProposed:['Planned','Confirmed','In Transit'].includes(st);
+      // All statuses contribute to transit/inventory calculations regardless of pass
+      const statusOk=['Planned','Confirmed','In Transit','Proposed'].includes(st);
       if(!statusOk) return false;
       // Inbound: train arriving at this facility
       if(rm.to_facility_id===S.facility_id) return true;
@@ -8186,13 +8187,13 @@ function simulate(elements, connections, horizon, includeProposed=false){
     // railFillTarget[railSiloId] = {tonnes, prodId} for this day only.
     const railFillTarget={};
     {
-      // Always honor Planned/Confirmed fill windows; honor Proposed only in Pass 2
+      // Honor ALL statuses for rail fill — Proposed treated same as Planned/Confirmed
+      // Inventory must be calculated regardless of delivery status
       DB.rail_movements
         .filter(rm=>{
           const st=rm.status||'Planned';
           if(!rm.from_facility_id||rm.from_facility_id!==S.facility_id||!rm.load_start_day) return false;
-          if(st==='Proposed') return includeProposed;
-          return ['Planned','Confirmed'].includes(st);
+          return ['Planned','Confirmed','Proposed'].includes(st);
         })
         .forEach(rm=>{
           if(day<rm.load_start_day||day>=rm.switch_day) return; // not our window
