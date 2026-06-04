@@ -6096,7 +6096,18 @@ function rpRender(){
       }
 
       // Loading per day (all statuses shown)
+      // Only spread loading across WORKING days — skip weekends and non-working days
       const loadMap={}; const dispMap={};
+      const _rpWorkDays=dp.props?.working_days||'weekdays';
+      const _rpNwd=new Set((DB.non_working_days||[]).map(n=>n.date));
+      const _rpIsWorkDay=(dayNum)=>{
+        const dt=new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(dayNum-1)*864e5);
+        const dow=(dt.getDay()+6)%7; // Mon=0..Sun=6
+        if(_rpNwd.has(dt.toISOString().split('T')[0])) return false;
+        if(_rpWorkDays==='7_days') return true;
+        if(_rpWorkDays==='mon_sat') return dow<=5;
+        return dow<=4; // weekdays default
+      };
       myDests.forEach(destFacId=>{
         DB.rail_movements
           .filter(rm=>rm.from_facility_id===S.facility_id&&rm.to_facility_id===destFacId)
@@ -6105,9 +6116,13 @@ function rpRender(){
             if(!sw||!ls) return;
             const st=rm.status||'Planned';
             const cars=parseInt(rm.wagon_count)||0;
-            const daysLoad=sw-ls||1;
+            // Count only working days in the loading window
+            const workingLoadDays=[];
+            for(let d=ls;d<sw;d++) if(_rpIsWorkDay(d)) workingLoadDays.push(d);
+            const daysLoad=workingLoadDays.length||1;
             const cpd=Math.ceil(cars/daysLoad);
-            for(let d=ls;d<sw;d++) loadMap[d]=(loadMap[d]||0)+cpd;
+            // Only assign loading to working days
+            workingLoadDays.forEach(d=>{ loadMap[d]=(loadMap[d]||0)+cpd; });
             if(!dispMap[sw]) dispMap[sw]=[];
             dispMap[sw].push({cars,status:st});
           });
