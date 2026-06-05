@@ -1747,7 +1747,7 @@ function renderLocationTree(){
             </div>
             <div class="tree-children ${facs.length?'':'hidden'}" id="sr-${sub.id}">`;
           facs.forEach(f=>{
-            const elCount=DB.elements.filter(e=>e.facility_id===f.id).length;
+            const elCount=DB.elements.filter(e=>(e.assigned_facility_id||e.facility_id)===f.id).length;
             h+=`<div class="tree-row lvl-facility ${f.type==='terminal'?'terminal':''} ${S.selectedLocNode?.id===f.id?'selected':''}" onclick="selectLocNode('facility','${f.id}',event)">
               <span class="tree-expand leaf"></span>
               <span class="tree-diamond">◆</span>
@@ -1886,7 +1886,7 @@ function renderFacilitiesForNode(type,id){
   wrap.style.display='block';
   if(!facs.length){ tbody.innerHTML=`<tr><td colspan="5" style="color:var(--text-dim);text-align:center;padding:14px">No facilities under this node yet</td></tr>`; return; }
   tbody.innerHTML=facs.map(f=>{
-    const elCount=DB.elements.filter(e=>e.facility_id===f.id).length;
+    const elCount=DB.elements.filter(e=>(e.assigned_facility_id||e.facility_id)===f.id).length;
     const subr=DB.sub_regions.find(s=>s.id===f.sub_region_id);
     return `<tr onclick="openFacilityInTopology('${f.id}',null)">
       <td style="color:${f.type==='plant'?'var(--green)':'var(--blue)'};font-weight:700">${f.name}</td>
@@ -2009,7 +2009,7 @@ function deleteFacility(id,e){
   e?.stopPropagation();
   if(!confirm('Delete this facility and all its elements?')) return;
   DB.facilities=DB.facilities.filter(f=>f.id!==id);
-  DB.elements=DB.elements.filter(e=>e.facility_id!==id);
+  DB.elements=DB.elements.filter(e=>(e.assigned_facility_id||e.facility_id)!==id);
   DB.connections=DB.connections.filter(c=>c.facility_id!==id);
   if(S.facility_id===id){ S.facility_id=null; document.getElementById('stat-fac').textContent='No facility selected'; }
   autoSave(); renderLocationTree(); statMsg('Facility deleted');
@@ -2019,19 +2019,27 @@ function deleteFacility(id,e){
 // FACILITY HELPERS
 // ═══════════════════════════════════════════════════════
 function getFacility(){ return DB.facilities.find(f=>f.id===S.facility_id); }
+
+// Get elements for CANVAS RENDERING (placed on current canvas, regardless of assignment)
 function getFacElements(){ return DB.elements.filter(e=>e.facility_id===S.facility_id); }
+
+// Get elements ASSIGNED TO current facility (regardless of canvas placement)
+// This is the authoritative source for facility-specific analysis and results
+function getFacAssignedElements(){
+  return DB.elements.filter(e=>(e.assigned_facility_id||e.facility_id)===S.facility_id);
+}
+
 function getFacConnections(){ return DB.connections.filter(c=>c.facility_id===S.facility_id); }
 
 // Get effective facility for an element — assigned_facility_id overrides facility_id for results/analysis
 function getElFacility(el){ return el.assigned_facility_id||el.facility_id; }
 
 // Get elements filtered by the active facility filter (for results/analysis views)
-// If facFilter is null, return all elements on the current canvas
-// If facFilter is set, return only elements assigned to that facility
+// Uses assigned facility membership, not canvas placement
 function getResultElements(){
-  const canvasEls=getFacElements();
-  if(!S.facFilter) return canvasEls;
-  return canvasEls.filter(el=>getElFacility(el)===S.facFilter);
+  const assignedEls=getFacAssignedElements();
+  if(!S.facFilter) return assignedEls;
+  return assignedEls.filter(el=>getElFacility(el)===S.facFilter);
 }
 function getEl(id){ return DB.elements.find(e=>e.id===id); }
 
@@ -4320,8 +4328,8 @@ function _renderSupplyViewInner(wrap){
   const regMap=Object.fromEntries(DB.regions.map(r=>[r.id,r]));
   const coMap=Object.fromEntries(DB.countries.map(c=>[c.id,c]));
 
-  // Collect all production elements (kilns + finish mills + packing plants) from the current canvas
-  const allEls=getFacElements();
+  // Collect all production elements (kilns + finish mills + packing plants) assigned to current facility
+  const allEls=getFacAssignedElements();
   const prodEls=allEls.filter(e=>e.type==='kiln'||e.type==='finish_mill'||e.type==='packing_plant');
 
   if(!prodEls.length){
@@ -5755,9 +5763,9 @@ const _rpCharts={};  // active Chart.js instances — destroyed and rebuilt on e
 const _vpCharts={};  // active Chart.js instances for vessel planner
 
 // ── Topology helpers ─────────────────────────────────────────────
-// Get all facilities that have a Rail berth on the current canvas
+// Get all facilities that have a Rail berth assigned to current facility
 function rpGetRailDestinations(){
-  const allEls=getFacElements();
+  const allEls=getFacAssignedElements();
   const facIds=new Set();
   // Primary: scan dispatch_point destination configs (catches new terminals regardless of berth type)
   allEls.filter(e=>e.type==='dispatch_point'&&e.props?.dispatch_type==='Rail')
@@ -5769,9 +5777,9 @@ function rpGetRailDestinations(){
     .filter((f,i,a)=>a.findIndex(x=>x.id===f.id)===i);
 }
 
-// Get rail dispatch points on BRS canvas that can reach a destination
+// Get rail dispatch points assigned to current facility that can reach a destination
 function rpGetOriginsForDest(destFacId){
-  const allEls=getFacElements();
+  const allEls=getFacAssignedElements();
   const allConns=DB.connections.filter(c=>c.facility_id===S.facility_id);
   const results=[];
   allEls.filter(e=>e.type==='dispatch_point'&&e.props?.dispatch_type==='Rail').forEach(dp=>{
@@ -5795,7 +5803,7 @@ function rpGetOriginsForDest(destFacId){
 
 // Get main production silos at origin that feed the RAIL silo (for inventory display)
 function rpGetOriginProdSilos(dpEl){
-  const allEls=getFacElements();
+  const allEls=getFacAssignedElements();
   const allConns=DB.connections.filter(c=>c.facility_id===S.facility_id);
   // Find RAIL silo upstream of dp
   const railSiloId=(allConns.filter(c=>c.to_element_id===dpEl.id))
@@ -5819,7 +5827,7 @@ function rpGetOriginProdSilos(dpEl){
 
 // Get destination silo for a berth
 function rpGetDestSilo(berthEl){
-  const allEls=getFacElements();
+  const allEls=getFacAssignedElements();
   const allConns=DB.connections.filter(c=>c.facility_id===S.facility_id);
   return (allConns.filter(c=>c.from_element_id===berthEl.id))
     .map(c=>allEls.find(e=>e.id===c.to_element_id))
@@ -6951,7 +6959,7 @@ function _planRailShipments(rBase){
 
   const simStart=new Date(S.simCfg.start_date+'T00:00:00');
   const horizon=rBase.simHorizon||S.simCfg.horizon;
-  const allEls=getFacElements();
+  const allEls=getFacAssignedElements();
   // Default target percentages by inventory_objective — same as siloTarget() inside simulate()
   const _objTargetPct={maximize:1.00, meet_demand:0.75, minimize:0.50};
 
@@ -7166,7 +7174,7 @@ function _writeProposedVesselCalls(r){
 
   const simStart=new Date(S.simCfg.start_date+'T00:00:00');
   const horizon=r?.simHorizon||S.simCfg.horizon;
-  const allEls=getFacElements();
+  const allEls=getFacAssignedElements();
   const allConns=getFacConnections();
 
   // Build downstream map
@@ -7481,7 +7489,7 @@ function _nrLoadEquipment(){
 
 async function runSimulation(){
   if(!S.facility_id){alert('Select a facility first.');return;}
-  const els=getFacElements();
+  const els=getFacAssignedElements();
   if(!els.length){alert('Add elements to the topology first.');return;}
 
   // Pre-interpret any rules that don't yet have a structured form
@@ -9118,8 +9126,8 @@ function renderResultsTable(){
   const startDate=new Date(S.simCfg.start_date+'T00:00:00');
   startDate.setDate(startDate.getDate()+startDay-1); // adjust to view window start
 
-  // Define column groups
-  const demandCols=DB.demand_points.filter(d=>d.facility_id===S.facility_id);
+  // Define column groups — use assigned facility membership as source of truth
+  const demandCols=DB.demand_points.filter(d=>(d.assigned_facility_id||d.facility_id)===S.facility_id);
   const storageTypes=['bulk_silo','packed_silo','raw_material_storage','fuel_storage'];
   const transformTypes=['kiln','finish_mill','raw_meal_mill','packing_plant'];
   const invCols=fac.filter(e=>storageTypes.includes(e.type));
@@ -14035,10 +14043,10 @@ function spFcWriteDP(custData, dailyVal){
   if(!fac) return;
   const ct=custData.custType;
   const dp=DB.demand_points.find(dp=>{
-    if(dp.facility_id!==fac.id) return false;
+    if((dp.assigned_facility_id||dp.facility_id)!==fac.id) return false;
     const nm=(dp.element_name||'').toUpperCase();
     return ct==='INT'?nm.includes('INT'):nm.includes('EXT');
-  })||DB.demand_points.find(dp=>dp.facility_id===fac.id);
+  })||DB.demand_points.find(dp=>(dp.assigned_facility_id||dp.facility_id)===fac.id);
   if(!dp||!dailyVal) return;
   dp.daily_tonnage=dailyVal;
   const el=DB.elements.find(e=>e.id===dp.element_id);
