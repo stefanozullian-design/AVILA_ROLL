@@ -15842,5 +15842,453 @@ document.addEventListener('DOMContentLoaded',async()=>{
   }
 });
 </script>
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     DESIGN MODE PANEL — purely additive, zero impact on app logic
+     Activate: Ctrl+Shift+D  |  Pick element: click any visible element
+     ═══════════════════════════════════════════════════════════════════ -->
+<style id="dm-styles">
+#dm-toggle-btn{
+  position:fixed;bottom:14px;left:50%;transform:translateX(-50%);
+  z-index:99998;padding:5px 14px;font-family:monospace;font-size:10px;
+  font-weight:700;letter-spacing:1px;text-transform:uppercase;
+  background:#1a1a2e;color:#a78bfa;border:1px solid #a78bfa;
+  border-radius:20px;cursor:pointer;opacity:.55;transition:opacity .2s;
+  user-select:none;
+}
+#dm-toggle-btn:hover{opacity:1;}
+#dm-toggle-btn.active{background:#a78bfa;color:#1a1a2e;opacity:1;}
+
+#dm-panel{
+  position:fixed;top:60px;right:10px;width:280px;max-height:calc(100vh - 80px);
+  z-index:99999;background:#0f0f1a;border:1px solid #a78bfa;border-radius:6px;
+  display:none;flex-direction:column;overflow:hidden;
+  box-shadow:0 8px 32px rgba(0,0,0,.6);font-family:monospace;font-size:11px;
+}
+#dm-panel.visible{display:flex;}
+
+#dm-header{
+  padding:8px 12px;background:#1a1a2e;border-bottom:1px solid #a78bfa;
+  display:flex;align-items:center;justify-content:space-between;flex-shrink:0;
+}
+#dm-header span{color:#a78bfa;font-weight:700;letter-spacing:1px;font-size:10px;}
+#dm-header-btns{display:flex;gap:6px;align-items:center;}
+#dm-pick-btn{
+  padding:3px 8px;background:transparent;border:1px solid #a78bfa;
+  color:#a78bfa;cursor:pointer;border-radius:3px;font-size:9px;font-family:monospace;
+  font-weight:700;letter-spacing:.5px;transition:all .15s;
+}
+#dm-pick-btn:hover,#dm-pick-btn.active{background:#a78bfa;color:#1a1a2e;}
+#dm-close-btn{
+  background:transparent;border:none;color:#666;cursor:pointer;
+  font-size:14px;line-height:1;padding:0 2px;
+}
+#dm-close-btn:hover{color:#fff;}
+
+#dm-selected-label{
+  padding:6px 12px;font-size:9px;color:#666;background:#0a0a14;
+  border-bottom:1px solid #1e1e30;flex-shrink:0;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+#dm-selected-label span{color:#a78bfa;}
+
+#dm-props{flex:1;overflow-y:auto;padding:8px;}
+
+.dm-group-title{
+  font-size:8px;letter-spacing:1.5px;text-transform:uppercase;
+  color:#555;margin:10px 0 5px;padding-bottom:3px;border-bottom:1px solid #1e1e30;
+}
+.dm-row{display:flex;align-items:center;margin-bottom:5px;gap:6px;}
+.dm-label{color:#888;font-size:9px;width:95px;flex-shrink:0;}
+.dm-input{
+  flex:1;background:#1a1a2e;border:1px solid #2a2a40;color:#e0e0ff;
+  font-family:monospace;font-size:10px;padding:3px 6px;border-radius:3px;
+  outline:none;transition:border-color .15s;min-width:0;
+}
+.dm-input:focus{border-color:#a78bfa;}
+.dm-input:hover{border-color:#4a4a60;}
+.dm-unit{color:#555;font-size:9px;width:16px;text-align:left;}
+
+#dm-footer{
+  padding:8px 12px;background:#0a0a14;border-top:1px solid #1e1e30;
+  flex-shrink:0;display:flex;flex-direction:column;gap:6px;
+}
+#dm-changes-count{font-size:9px;color:#666;}
+#dm-changes-count span{color:#a78bfa;font-weight:700;}
+#dm-footer-btns{display:flex;gap:6px;}
+#dm-export-btn,#dm-clear-btn{
+  flex:1;padding:4px 8px;font-family:monospace;font-size:9px;font-weight:700;
+  letter-spacing:.5px;text-transform:uppercase;cursor:pointer;border-radius:3px;
+  transition:all .15s;
+}
+#dm-export-btn{background:#a78bfa;color:#1a1a2e;border:none;}
+#dm-export-btn:hover{background:#c4b5fd;}
+#dm-clear-btn{background:transparent;border:1px solid #333;color:#666;}
+#dm-clear-btn:hover{border-color:#666;color:#999;}
+
+#dm-export-modal{
+  position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+  z-index:100000;background:#0f0f1a;border:1px solid #a78bfa;border-radius:6px;
+  padding:16px;width:480px;max-width:90vw;display:none;
+  box-shadow:0 16px 48px rgba(0,0,0,.8);font-family:monospace;
+}
+#dm-export-modal.visible{display:block;}
+#dm-export-title{
+  color:#a78bfa;font-size:10px;font-weight:700;letter-spacing:1px;
+  text-transform:uppercase;margin-bottom:10px;display:flex;
+  justify-content:space-between;align-items:center;
+}
+#dm-export-close{
+  background:transparent;border:none;color:#666;cursor:pointer;font-size:14px;
+}
+#dm-export-textarea{
+  width:100%;height:220px;background:#1a1a2e;border:1px solid #2a2a40;
+  color:#e0e0ff;font-family:monospace;font-size:10px;padding:8px;
+  border-radius:3px;resize:none;box-sizing:border-box;
+}
+#dm-export-copy{
+  margin-top:8px;width:100%;padding:6px;background:#a78bfa;color:#1a1a2e;
+  border:none;font-family:monospace;font-size:10px;font-weight:700;
+  letter-spacing:1px;text-transform:uppercase;cursor:pointer;border-radius:3px;
+}
+#dm-export-copy:hover{background:#c4b5fd;}
+#dm-export-note{
+  margin-top:6px;font-size:9px;color:#666;text-align:center;
+}
+
+/* Hover highlight when picking */
+body.dm-picking *:hover{
+  outline:2px dashed #a78bfa !important;
+  outline-offset:1px !important;
+  cursor:crosshair !important;
+}
+/* Selected element highlight */
+.dm-selected-el{
+  outline:2px solid #a78bfa !important;
+  outline-offset:1px !important;
+}
+</style>
+
+<!-- Design Mode HTML (purely additive) -->
+<button id="dm-toggle-btn" title="Toggle Design Mode (Ctrl+Shift+D)">⬡ Design</button>
+
+<div id="dm-panel">
+  <div id="dm-header">
+    <span>⬡ DESIGN MODE</span>
+    <div id="dm-header-btns">
+      <button id="dm-pick-btn" title="Click any element to select it">↖ Pick</button>
+      <button id="dm-close-btn" title="Close">✕</button>
+    </div>
+  </div>
+  <div id="dm-selected-label">No element selected — click <b>↖ Pick</b></div>
+  <div id="dm-props">
+    <div class="dm-group-title">Size</div>
+    <div class="dm-row"><span class="dm-label">Width</span><input class="dm-input" data-prop="width" placeholder="e.g. 200px or 100%"><span class="dm-unit"></span></div>
+    <div class="dm-row"><span class="dm-label">Height</span><input class="dm-input" data-prop="height" placeholder="auto"><span class="dm-unit"></span></div>
+    <div class="dm-row"><span class="dm-label">Min Width</span><input class="dm-input" data-prop="minWidth" placeholder=""><span class="dm-unit"></span></div>
+    <div class="dm-row"><span class="dm-label">Max Width</span><input class="dm-input" data-prop="maxWidth" placeholder=""><span class="dm-unit"></span></div>
+
+    <div class="dm-group-title">Typography</div>
+    <div class="dm-row"><span class="dm-label">Font Size</span><input class="dm-input" data-prop="fontSize" placeholder="e.g. 11px"><span class="dm-unit"></span></div>
+    <div class="dm-row"><span class="dm-label">Font Weight</span><input class="dm-input" data-prop="fontWeight" placeholder="400 / 700"><span class="dm-unit"></span></div>
+    <div class="dm-row"><span class="dm-label">Letter Spacing</span><input class="dm-input" data-prop="letterSpacing" placeholder="e.g. 1px"><span class="dm-unit"></span></div>
+    <div class="dm-row"><span class="dm-label">Color</span><input class="dm-input" data-prop="color" placeholder="e.g. #ff0 or var(--green)"><span class="dm-unit"></span></div>
+    <div class="dm-row"><span class="dm-label">Text Transform</span><input class="dm-input" data-prop="textTransform" placeholder="uppercase / none"><span class="dm-unit"></span></div>
+
+    <div class="dm-group-title">Spacing</div>
+    <div class="dm-row"><span class="dm-label">Padding</span><input class="dm-input" data-prop="padding" placeholder="e.g. 4px 8px"><span class="dm-unit"></span></div>
+    <div class="dm-row"><span class="dm-label">Padding Top</span><input class="dm-input" data-prop="paddingTop" placeholder=""><span class="dm-unit"></span></div>
+    <div class="dm-row"><span class="dm-label">Padding Right</span><input class="dm-input" data-prop="paddingRight" placeholder=""><span class="dm-unit"></span></div>
+    <div class="dm-row"><span class="dm-label">Padding Bottom</span><input class="dm-input" data-prop="paddingBottom" placeholder=""><span class="dm-unit"></span></div>
+    <div class="dm-row"><span class="dm-label">Padding Left</span><input class="dm-input" data-prop="paddingLeft" placeholder=""><span class="dm-unit"></span></div>
+    <div class="dm-row"><span class="dm-label">Margin</span><input class="dm-input" data-prop="margin" placeholder="e.g. 0 auto"><span class="dm-unit"></span></div>
+    <div class="dm-row"><span class="dm-label">Margin Top</span><input class="dm-input" data-prop="marginTop" placeholder=""><span class="dm-unit"></span></div>
+    <div class="dm-row"><span class="dm-label">Margin Right</span><input class="dm-input" data-prop="marginRight" placeholder=""><span class="dm-unit"></span></div>
+    <div class="dm-row"><span class="dm-label">Margin Bottom</span><input class="dm-input" data-prop="marginBottom" placeholder=""><span class="dm-unit"></span></div>
+    <div class="dm-row"><span class="dm-label">Margin Left</span><input class="dm-input" data-prop="marginLeft" placeholder=""><span class="dm-unit"></span></div>
+
+    <div class="dm-group-title">Layout</div>
+    <div class="dm-row"><span class="dm-label">Display</span><input class="dm-input" data-prop="display" placeholder="flex / grid / block"><span class="dm-unit"></span></div>
+    <div class="dm-row"><span class="dm-label">Gap</span><input class="dm-input" data-prop="gap" placeholder="e.g. 8px"><span class="dm-unit"></span></div>
+    <div class="dm-row"><span class="dm-label">Flex Direction</span><input class="dm-input" data-prop="flexDirection" placeholder="row / column"><span class="dm-unit"></span></div>
+    <div class="dm-row"><span class="dm-label">Align Items</span><input class="dm-input" data-prop="alignItems" placeholder="center / start / end"><span class="dm-unit"></span></div>
+    <div class="dm-row"><span class="dm-label">Grid Columns</span><input class="dm-input" data-prop="gridTemplateColumns" placeholder="e.g. 1fr 1fr 2fr"><span class="dm-unit"></span></div>
+    <div class="dm-row"><span class="dm-label">Align Self</span><input class="dm-input" data-prop="alignSelf" placeholder="center / flex-end"><span class="dm-unit"></span></div>
+
+    <div class="dm-group-title">Appearance</div>
+    <div class="dm-row"><span class="dm-label">Background</span><input class="dm-input" data-prop="background" placeholder="e.g. #1a1a2e"><span class="dm-unit"></span></div>
+    <div class="dm-row"><span class="dm-label">Border</span><input class="dm-input" data-prop="border" placeholder="e.g. 1px solid red"><span class="dm-unit"></span></div>
+    <div class="dm-row"><span class="dm-label">Border Radius</span><input class="dm-input" data-prop="borderRadius" placeholder="e.g. 4px"><span class="dm-unit"></span></div>
+    <div class="dm-row"><span class="dm-label">Opacity</span><input class="dm-input" data-prop="opacity" placeholder="0 – 1"><span class="dm-unit"></span></div>
+    <div class="dm-row"><span class="dm-label">Box Shadow</span><input class="dm-input" data-prop="boxShadow" placeholder="e.g. 0 4px 12px #000"><span class="dm-unit"></span></div>
+  </div>
+  <div id="dm-footer">
+    <div id="dm-changes-count">Changes: <span id="dm-count">0</span></div>
+    <div id="dm-footer-btns">
+      <button id="dm-export-btn">↓ Export Changes</button>
+      <button id="dm-clear-btn">✕ Clear All</button>
+    </div>
+  </div>
+</div>
+
+<div id="dm-export-modal">
+  <div id="dm-export-title">
+    <span>Export CSS Changes</span>
+    <button id="dm-export-close">✕</button>
+  </div>
+  <textarea id="dm-export-textarea" readonly></textarea>
+  <button id="dm-export-copy">Copy to Clipboard</button>
+  <div id="dm-export-note">Send these changes to Claude — they will be applied permanently to the HTML file.</div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════
+// DESIGN MODE — Isolated namespace, zero impact on existing app logic
+// ═══════════════════════════════════════════════════════════════════
+(function(){
+  'use strict';
+
+  // ── State ────────────────────────────────────────────────────────
+  const _dm={
+    active:false,
+    picking:false,
+    target:null,
+    changes:new Map(), // key: unique selector → {el, props:{propName:value}}
+    changeCount:0
+  };
+
+  // ── Helpers ──────────────────────────────────────────────────────
+  function _dmSelector(el){
+    if(!el) return '';
+    if(el.id) return '#'+el.id;
+    const tag=el.tagName.toLowerCase();
+    const cls=Array.from(el.classList).filter(c=>!c.startsWith('dm-')).slice(0,2).join('.');
+    const parent=el.parentElement;
+    let base=tag+(cls?'.'+cls:'');
+    if(parent&&parent.id) base='#'+parent.id+' > '+base;
+    const siblings=parent?Array.from(parent.children).filter(c=>c.tagName===el.tagName):[];
+    if(siblings.length>1){
+      const idx=siblings.indexOf(el)+1;
+      base=base+':nth-of-type('+idx+')';
+    }
+    return base;
+  }
+
+  function _dmReadComputed(el){
+    if(!el) return;
+    const cs=getComputedStyle(el);
+    const inputs=document.querySelectorAll('#dm-props .dm-input');
+    inputs.forEach(inp=>{
+      const prop=inp.dataset.prop;
+      // Show current inline style first, then computed
+      const inline=el.style[prop];
+      inp.value=inline||'';
+      inp.placeholder=cs[prop]||'';
+    });
+  }
+
+  function _dmUpdateCount(){
+    let total=0;
+    _dm.changes.forEach(entry=>{total+=Object.keys(entry.props).length;});
+    document.getElementById('dm-count').textContent=total;
+  }
+
+  function _dmGetKey(el){
+    // Use a stable key: id preferred, else position-based
+    if(el.id) return '#'+el.id;
+    return _dmSelector(el)+'__'+Array.from(document.querySelectorAll(el.tagName.toLowerCase()))
+      .indexOf(el);
+  }
+
+  // ── Toggle panel ─────────────────────────────────────────────────
+  function _dmToggle(){
+    _dm.active=!_dm.active;
+    const panel=document.getElementById('dm-panel');
+    const btn=document.getElementById('dm-toggle-btn');
+    panel.classList.toggle('visible',_dm.active);
+    btn.classList.toggle('active',_dm.active);
+    if(!_dm.active) _dmStopPicking();
+  }
+
+  // ── Picking mode ─────────────────────────────────────────────────
+  function _dmStartPicking(){
+    _dm.picking=true;
+    document.body.classList.add('dm-picking');
+    document.getElementById('dm-pick-btn').classList.add('active');
+    document.addEventListener('click',_dmOnPick,true);
+  }
+
+  function _dmStopPicking(){
+    _dm.picking=false;
+    document.body.classList.remove('dm-picking');
+    document.getElementById('dm-pick-btn').classList.remove('active');
+    document.removeEventListener('click',_dmOnPick,true);
+  }
+
+  function _dmOnPick(e){
+    const panel=document.getElementById('dm-panel');
+    const exportModal=document.getElementById('dm-export-modal');
+    // Ignore clicks on our own panel or export modal
+    if(panel.contains(e.target)||exportModal.contains(e.target)) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    // Deselect previous
+    if(_dm.target) _dm.target.classList.remove('dm-selected-el');
+
+    _dm.target=e.target;
+    _dm.target.classList.add('dm-selected-el');
+
+    // Update label
+    const lbl=document.getElementById('dm-selected-label');
+    const tag=e.target.tagName.toLowerCase();
+    const id=e.target.id?'#'+e.target.id:'';
+    const cls=Array.from(e.target.classList).filter(c=>!c.startsWith('dm-')).slice(0,3).join('.');
+    lbl.innerHTML='<span>'+tag+id+(cls?'.'+cls:'')+'</span>';
+
+    // Read current values into inputs
+    _dmReadComputed(_dm.target);
+    _dmStopPicking();
+  }
+
+  // ── Apply CSS change ─────────────────────────────────────────────
+  function _dmApplyProp(prop,value){
+    if(!_dm.target) return;
+    // Apply live
+    _dm.target.style[prop]=value;
+    // Record change
+    const key=_dmGetKey(_dm.target);
+    if(!_dm.changes.has(key)) _dm.changes.set(key,{el:_dm.target,selector:_dmSelector(_dm.target),props:{}});
+    const entry=_dm.changes.get(key);
+    if(value===''||value===null){
+      delete entry.props[prop];
+    } else {
+      entry.props[prop]=value;
+    }
+    // Clean up empty entries
+    if(Object.keys(entry.props).length===0) _dm.changes.delete(key);
+    _dmUpdateCount();
+  }
+
+  // ── Export ───────────────────────────────────────────────────────
+  function _dmBuildExport(){
+    if(_dm.changes.size===0) return '/* No changes recorded */';
+    let out='/* ═══ DESIGN MODE CHANGES ═══ */\n/* Send this to Claude to apply permanently */\n\n';
+    _dm.changes.forEach((entry)=>{
+      const props=entry.props;
+      if(Object.keys(props).length===0) return;
+      out+=entry.selector+' {\n';
+      Object.entries(props).forEach(([prop,val])=>{
+        // Convert camelCase to kebab-case
+        const kebab=prop.replace(/([A-Z])/g,'-$1').toLowerCase();
+        out+='  '+kebab+': '+val+';\n';
+      });
+      out+='}\n\n';
+    });
+    return out;
+  }
+
+  function _dmShowExport(){
+    const txt=_dmBuildExport();
+    document.getElementById('dm-export-textarea').value=txt;
+    document.getElementById('dm-export-modal').classList.add('visible');
+  }
+
+  // ── Clear all changes ────────────────────────────────────────────
+  function _dmClearAll(){
+    _dm.changes.forEach(entry=>{
+      const el=entry.el;
+      Object.keys(entry.props).forEach(prop=>{
+        el.style[prop]='';
+      });
+    });
+    _dm.changes.clear();
+    _dmUpdateCount();
+    if(_dm.target) _dmReadComputed(_dm.target);
+  }
+
+  // ── Wire up events ───────────────────────────────────────────────
+  document.addEventListener('DOMContentLoaded',function(){
+    // Toggle button
+    document.getElementById('dm-toggle-btn').addEventListener('click',_dmToggle);
+
+    // Close button
+    document.getElementById('dm-close-btn').addEventListener('click',function(){
+      _dm.active=false;
+      document.getElementById('dm-panel').classList.remove('visible');
+      document.getElementById('dm-toggle-btn').classList.remove('active');
+      _dmStopPicking();
+    });
+
+    // Pick button
+    document.getElementById('dm-pick-btn').addEventListener('click',function(){
+      if(_dm.picking) _dmStopPicking();
+      else _dmStartPicking();
+    });
+
+    // Property inputs — live update on change
+    document.querySelectorAll('#dm-props .dm-input').forEach(inp=>{
+      inp.addEventListener('input',function(){
+        _dmApplyProp(this.dataset.prop, this.value.trim());
+      });
+      inp.addEventListener('keydown',function(e){
+        // Arrow up/down to nudge numeric values
+        const match=this.value.match(/^(-?[\d.]+)(px|%|em|rem|vw|vh)?$/);
+        if(match&&(e.key==='ArrowUp'||e.key==='ArrowDown')){
+          e.preventDefault();
+          const step=e.shiftKey?10:1;
+          const num=parseFloat(match[1])+(e.key==='ArrowUp'?step:-step);
+          const unit=match[2]||'px';
+          this.value=num+unit;
+          _dmApplyProp(this.dataset.prop, this.value);
+        }
+      });
+    });
+
+    // Export button
+    document.getElementById('dm-export-btn').addEventListener('click',_dmShowExport);
+
+    // Export close
+    document.getElementById('dm-export-close').addEventListener('click',function(){
+      document.getElementById('dm-export-modal').classList.remove('visible');
+    });
+
+    // Copy to clipboard
+    document.getElementById('dm-export-copy').addEventListener('click',function(){
+      const ta=document.getElementById('dm-export-textarea');
+      ta.select();
+      try{ document.execCommand('copy'); }catch(e){ navigator.clipboard?.writeText(ta.value); }
+      this.textContent='✓ Copied!';
+      setTimeout(()=>{ this.textContent='Copy to Clipboard'; },2000);
+    });
+
+    // Clear all
+    document.getElementById('dm-clear-btn').addEventListener('click',function(){
+      if(confirm('Clear all design changes? This will reset all your visual edits.')) _dmClearAll();
+    });
+
+    // Keyboard shortcut Ctrl+Shift+D
+    document.addEventListener('keydown',function(e){
+      if(e.ctrlKey&&e.shiftKey&&e.key==='D'){
+        e.preventDefault();
+        _dmToggle();
+      }
+      // Escape cancels picking or closes panel
+      if(e.key==='Escape'){
+        if(_dm.picking){ _dmStopPicking(); return; }
+        if(_dm.active){ _dmToggle(); }
+      }
+    });
+  });
+
+  // Expose to console for power users
+  window._designMode={
+    toggle:_dmToggle,
+    clear:_dmClearAll,
+    export:()=>{ console.log(_dmBuildExport()); }
+  };
+})();
+</script>
+
 </body>
 </html>
