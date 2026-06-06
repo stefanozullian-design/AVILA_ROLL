@@ -2035,11 +2035,11 @@ function getFacConnections(){ return DB.connections.filter(c=>c.facility_id===S.
 function getElFacility(el){ return el.assigned_facility_id||el.facility_id; }
 
 // Get elements filtered by the active facility filter (for results/analysis views)
-// Uses assigned facility membership, not canvas placement
+// Start with canvas elements, then filter by assigned facility if facFilter is set
 function getResultElements(){
-  const assignedEls=getFacAssignedElements();
-  if(!S.facFilter) return assignedEls;
-  return assignedEls.filter(el=>getElFacility(el)===S.facFilter);
+  const canvasEls=getFacElements();
+  if(!S.facFilter) return canvasEls;
+  return canvasEls.filter(el=>getElFacility(el)===S.facFilter);
 }
 function getEl(id){ return DB.elements.find(e=>e.id===id); }
 
@@ -4328,8 +4328,8 @@ function _renderSupplyViewInner(wrap){
   const regMap=Object.fromEntries(DB.regions.map(r=>[r.id,r]));
   const coMap=Object.fromEntries(DB.countries.map(c=>[c.id,c]));
 
-  // Collect all production elements (kilns + finish mills + packing plants) assigned to current facility
-  const allEls=getFacAssignedElements();
+  // Collect all production elements (kilns + finish mills + packing plants) from current canvas
+  const allEls=getFacElements();
   const prodEls=allEls.filter(e=>e.type==='kiln'||e.type==='finish_mill'||e.type==='packing_plant');
 
   if(!prodEls.length){
@@ -5763,9 +5763,9 @@ const _rpCharts={};  // active Chart.js instances — destroyed and rebuilt on e
 const _vpCharts={};  // active Chart.js instances for vessel planner
 
 // ── Topology helpers ─────────────────────────────────────────────
-// Get all facilities that have a Rail berth assigned to current facility
+// Get all facilities that have a Rail berth on the current canvas
 function rpGetRailDestinations(){
-  const allEls=getFacAssignedElements();
+  const allEls=getFacElements();
   const facIds=new Set();
   // Primary: scan dispatch_point destination configs (catches new terminals regardless of berth type)
   allEls.filter(e=>e.type==='dispatch_point'&&e.props?.dispatch_type==='Rail')
@@ -5777,9 +5777,9 @@ function rpGetRailDestinations(){
     .filter((f,i,a)=>a.findIndex(x=>x.id===f.id)===i);
 }
 
-// Get rail dispatch points assigned to current facility that can reach a destination
+// Get rail dispatch points on current canvas that can reach a destination
 function rpGetOriginsForDest(destFacId){
-  const allEls=getFacAssignedElements();
+  const allEls=getFacElements();
   const allConns=DB.connections.filter(c=>c.facility_id===S.facility_id);
   const results=[];
   allEls.filter(e=>e.type==='dispatch_point'&&e.props?.dispatch_type==='Rail').forEach(dp=>{
@@ -5803,7 +5803,7 @@ function rpGetOriginsForDest(destFacId){
 
 // Get main production silos at origin that feed the RAIL silo (for inventory display)
 function rpGetOriginProdSilos(dpEl){
-  const allEls=getFacAssignedElements();
+  const allEls=getFacElements();
   const allConns=DB.connections.filter(c=>c.facility_id===S.facility_id);
   // Find RAIL silo upstream of dp
   const railSiloId=(allConns.filter(c=>c.to_element_id===dpEl.id))
@@ -5827,7 +5827,7 @@ function rpGetOriginProdSilos(dpEl){
 
 // Get destination silo for a berth
 function rpGetDestSilo(berthEl){
-  const allEls=getFacAssignedElements();
+  const allEls=getFacElements();
   const allConns=DB.connections.filter(c=>c.facility_id===S.facility_id);
   return (allConns.filter(c=>c.from_element_id===berthEl.id))
     .map(c=>allEls.find(e=>e.id===c.to_element_id))
@@ -6959,7 +6959,7 @@ function _planRailShipments(rBase){
 
   const simStart=new Date(S.simCfg.start_date+'T00:00:00');
   const horizon=rBase.simHorizon||S.simCfg.horizon;
-  const allEls=getFacAssignedElements();
+  const allEls=getFacElements();
   // Default target percentages by inventory_objective — same as siloTarget() inside simulate()
   const _objTargetPct={maximize:1.00, meet_demand:0.75, minimize:0.50};
 
@@ -7174,7 +7174,7 @@ function _writeProposedVesselCalls(r){
 
   const simStart=new Date(S.simCfg.start_date+'T00:00:00');
   const horizon=r?.simHorizon||S.simCfg.horizon;
-  const allEls=getFacAssignedElements();
+  const allEls=getFacElements();
   const allConns=getFacConnections();
 
   // Build downstream map
@@ -7489,7 +7489,7 @@ function _nrLoadEquipment(){
 
 async function runSimulation(){
   if(!S.facility_id){alert('Select a facility first.');return;}
-  const els=getFacAssignedElements();
+  const els=getFacElements();
   if(!els.length){alert('Add elements to the topology first.');return;}
 
   // Pre-interpret any rules that don't yet have a structured form
