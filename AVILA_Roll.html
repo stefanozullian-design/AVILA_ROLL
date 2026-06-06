@@ -8038,6 +8038,31 @@ function simulate(elements, connections, horizon, includeProposed=false){
 
   for(let day=1;day<=horizon;day++){
 
+    // ── REAL DATA ANCHOR ─────────────────────────────
+    // At the start of each day, if real_inventory_daily has an EOD entry for
+    // the PREVIOUS simulation day, override the silo's current state.
+    // This anchors the simulation to actual data whenever it is entered,
+    // ensuring subsequent days calculate correctly from real values.
+    if(DB.real_inventory_daily?.length){
+      const prevAnchorDate=new Date(simStart.getTime()+(day-2)*864e5);
+      const prevAnchorStr=prevAnchorDate.toISOString().split('T')[0];
+      elements.filter(e=>e.type==='bulk_silo').forEach(el=>{
+        const realInv=DB.real_inventory_daily.find(ri=>ri.date===prevAnchorStr&&ri.silo_id===el.id);
+        if(realInv){
+          const realVal=parseFloat(realInv.eod_volume_t)||0;
+          state[el.id].inventory=realVal;
+          // Also reset composition to match real inventory
+          const prods=getSiloProducts(el);
+          state[el.id].composition={};
+          if(prods.length===1) state[el.id].composition[prods[0]]=realVal;
+          else if(prods.length>1){
+            const share=realVal/prods.length;
+            prods.forEach(pid=>{ state[el.id].composition[pid]=share; });
+          }
+        }
+      });
+    }
+
     // Per-day flow accumulators
     const siloInflow={};   // siloId → tonnes in
     const siloOutflow={};  // siloId → tonnes out
