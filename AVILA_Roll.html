@@ -6802,160 +6802,171 @@ function rpRenderCharts(){
   const {startDay,endDay}=rpGetRange();
   const days=[]; for(let d=startDay;d<=endDay;d++) days.push(d);
   const labels=days.map(d=>rpDayDate(d).slice(5));
-
   const chartBuilders=[];
 
+  // ── Shared helpers ────────────────────────────────────────────────
+  const mkCanvas=(id,height='180px')=>{
+    const div=document.createElement('div');
+    div.style.cssText=`background:var(--surface2);border-radius:4px;padding:8px 10px;height:${height};position:relative`;
+    const canvas=document.createElement('canvas');
+    canvas.id=id; div.appendChild(canvas); inner.appendChild(div);
+    return canvas;
+  };
+  const baseOpts=(title,showLegend=false)=>({
+    responsive:true,maintainAspectRatio:false,
+    plugins:{
+      title:{display:true,text:title,color:'#8e9ab8',font:{family:'Space Mono',size:8},padding:{top:0,bottom:4}},
+      legend:{display:showLegend,position:'top',
+        labels:{color:'#8e9ab8',font:{family:'Space Mono',size:7},boxWidth:10,padding:6,
+          filter:item=>item.text!=='Cap'&&item.text!=='Floor'}},
+      tooltip:{mode:'index',intersect:false,
+        callbacks:{
+          title:its=>its[0]?.label||'',
+          label:c=>{const v=c.raw;if(v==null||v===0)return '';
+            return `${c.dataset.label}: ${Number(Math.round(v)).toLocaleString()}${c.dataset._u||' t'}`;}
+        }
+      }
+    },
+    scales:{
+      x:{grid:{color:'rgba(255,255,255,.03)'},
+        ticks:{color:'#8e9ab8',font:{family:'Space Mono',size:7},maxTicksLimit:8,autoSkip:true,maxRotation:0}},
+      y:{beginAtZero:true,grid:{color:'rgba(255,255,255,.06)'},
+        ticks:{color:'#8e9ab8',font:{family:'Space Mono',size:7},
+          callback:v=>v>=1000?Math.round(v/100)/10+'k':Math.round(v)}}
+    }
+  });
+
+  const _statusPriority=['In Transit','Unloading','Confirmed','Planned','Proposed','Finished'];
+  const _statusChartColor={
+    'Proposed':  'rgba(142,154,184,.65)',
+    'Planned':   'rgba(255,184,48,.80)',
+    'Confirmed': 'rgba(0,229,160,.80)',
+    'In Transit':'rgba(77,166,255,.80)',
+    'Unloading': 'rgba(56,189,248,.80)',
+    'Finished':  'rgba(142,154,184,.40)',
+  };
+
+  // ── Collect unique dispatch points (multiple dests can share one) ─
+  const seenDpIds=new Set();
+  const uniqueOrigins=[];
+  _rp.dests.forEach(destFacId=>{
+    const origins=rpGetOriginsForDest(destFacId); if(!origins.length) return;
+    const {dp,railSilo}=origins[0];
+    if(!seenDpIds.has(dp.id)){ seenDpIds.add(dp.id); uniqueOrigins.push({dp,railSilo}); }
+  });
+
+  // ── Chart 1 — Origin Rail Silo (one per unique dispatch point) ───
+  uniqueOrigins.forEach(({dp,railSilo},ui)=>{
+    if(!railSilo) return;
+    const siloMax=parseFloat(railSilo.props?.max_capacity)||0;
+    const floor=(parseFloat(railSilo.props?.critical_floor_pct)||10)/100*siloMax;
+    const invData=days.map(d=>{const v=rpInv(railSilo.id,d);return v!==null?v:null;});
+    const cid=`rpc1_${ui}`;
+    const ds=[
+      {label:'Rail Silo',data:invData,borderColor:'#38bdf8',backgroundColor:'rgba(56,189,248,.12)',
+       fill:true,tension:0.2,pointRadius:0,borderWidth:1.5,_u:' t'}
+    ];
+    if(siloMax>0) ds.push({label:'Cap',data:days.map(()=>siloMax),borderColor:'rgba(255,255,255,.18)',borderDash:[5,3],pointRadius:0,borderWidth:1,type:'line',_u:' t'});
+    if(floor>0)   ds.push({label:'Floor',data:days.map(()=>floor),borderColor:'rgba(248,113,113,.65)',borderDash:[3,3],pointRadius:0,borderWidth:1,type:'line',_u:' t'});
+    const canvas=mkCanvas(cid);
+    chartBuilders.push(()=>{_rpCharts[cid]=new Chart(canvas,{type:'line',data:{labels,datasets:ds},options:baseOpts(`RAIL SILO · ${railSilo.name}`)});});
+  });
+
+  // ── Chart 2 — Railyard (one per unique dispatch point) ───────────
+  uniqueOrigins.forEach(({dp},ui)=>{
+    const carCap=parseFloat(dp.props?.car_capacity_t)||50;
+    const hist=S.simResults.railHistory[dp.id]||[];
+    const yardData=days.map(d=>{
+      const h=hist[d-1]; if(!h) return 0;
+      return Object.values(h.carsInYardByProduct||{}).reduce((a,b)=>a+b,0)*carCap;
+    });
+    const dispData=days.map(d=>{
+      const h=hist[d-1]; if(!h) return null;
+      const cars=Object.values(h.dispatchByDest||{}).reduce((a,b)=>a+b,0);
+      return cars>0?cars*carCap:null;
+    });
+    const cid=`rpc2_${ui}`;
+    const canvas=mkCanvas(cid);
+    chartBuilders.push(()=>{
+      _rpCharts[cid]=new Chart(canvas,{type:'bar',data:{labels,datasets:[
+        {label:'In Yard',data:yardData,backgroundColor:'rgba(77,166,255,.45)',borderColor:'#4da6ff',borderWidth:1,_u:' t'},
+        {label:'Dispatched',data:dispData,backgroundColor:'rgba(255,148,51,.75)',borderColor:'#ff9433',borderWidth:1,_u:' t'}
+      ]},options:{...baseOpts(`RAILYARD · ${dp.name}`,true)}});
+    });
+  });
+
+  // ── Chart 3 — Destination Silo (one per selected destination) ────
   _rp.dests.forEach((destFacId,di)=>{
     const origins=rpGetOriginsForDest(destFacId); if(!origins.length) return;
-    const {dp,destCfg,berth,railSilo}=origins[0];
-    const destSilo=rpGetDestSilo(berth); // kept for Chart 4 — full multi-silo rework comes later
+    const {berth}=origins[0];
+    const destSilos=rpGetDestSilos(berth);
+    const visibleSilos=_rp.prodId
+      ? destSilos.filter(s=>getSiloProducts(s).includes(_rp.prodId))
+      : destSilos;
     const destFac=DB.facilities.find(f=>f.id===destFacId);
-    const carCap=parseFloat(dp.props?.car_capacity_t)||50;
-    const transit=parseInt(destCfg?.transit_days)||1;
-    const hist=S.simResults.railHistory[dp.id]||[];
+    const allDemEls=rpGetDestDemEls(destFacId);
+    if(!visibleSilos.length) return;
 
-    const mkCanvas=(id)=>{
-      const div=document.createElement('div');
-      div.style.cssText='background:var(--surface2);border-radius:4px;padding:8px 10px;height:180px;position:relative';
-      const canvas=document.createElement('canvas');
-      canvas.id=id;
-      div.appendChild(canvas);
-      inner.appendChild(div);
-      return canvas;
-    };
-
-    const baseOpts=(title)=>({
-      responsive:true,maintainAspectRatio:false,
-      plugins:{
-        title:{display:true,text:title,color:'#8e9ab8',font:{family:'Space Mono',size:8},padding:{top:0,bottom:4}},
-        legend:{display:false},
-        tooltip:{mode:'index',intersect:false,
-          callbacks:{
-            title:its=>its[0]?.label||'',
-            label:c=>{const v=c.raw; if(v==null||v===0) return '';
-              return `${c.dataset.label}: ${Number(Math.round(v)).toLocaleString()}${c.dataset._u||' t'}`;}
-          }
-        }
-      },
-      scales:{
-        x:{grid:{color:'rgba(255,255,255,.03)'},
-          ticks:{color:'#8e9ab8',font:{family:'Space Mono',size:7},maxTicksLimit:8,autoSkip:true,maxRotation:0}},
-        y:{beginAtZero:true,grid:{color:'rgba(255,255,255,.06)'},
-          ticks:{color:'#8e9ab8',font:{family:'Space Mono',size:7},
-            callback:v=>v>=1000?Math.round(v/100)/10+'k':Math.round(v)}}
-      }
+    const arrHist=S.simResults.berthArrivalHistory?.[berth?.id]||[];
+    const arrData=days.map(d=>arrHist[d-1]||null);
+    const arrivals4=rpPlannedArrivalsForDest(destFacId,berth?.id);
+    const arrBgColors=days.map(d=>{
+      const entries=arrivals4[d]||[];
+      if(!entries.length) return 'rgba(77,166,255,.55)';
+      const domSt=_statusPriority.find(s=>entries.some(e=>e.status===s))||entries[0]?.status||'Planned';
+      return _statusChartColor[domSt]||'rgba(77,166,255,.55)';
     });
 
-    // Chart 1 — Origin Rail Silo Inventory
-    if(railSilo){
-      const siloMax=parseFloat(railSilo.props?.max_capacity)||0;
-      const floor=(parseFloat(railSilo.props?.critical_floor_pct)||10)/100*siloMax;
-      const invData=days.map(d=>{const v=rpInv(railSilo.id,d);return v!==null?v:null;});
-      const cid=`rpc1_${di}`;
-      const canvas=mkCanvas(cid);
-      const ds=[
-        {label:'Rail Silo',data:invData,borderColor:'#38bdf8',backgroundColor:'rgba(56,189,248,.12)',
-         fill:true,tension:0.2,pointRadius:0,borderWidth:1.5,_u:' t'}
-      ];
-      if(siloMax>0) ds.push({label:'Capacity',data:days.map(()=>siloMax),borderColor:'rgba(255,255,255,.18)',borderDash:[5,3],pointRadius:0,borderWidth:1,type:'line',_u:' t'});
-      if(floor>0)   ds.push({label:'Floor',data:days.map(()=>floor),borderColor:'rgba(248,113,113,.65)',borderDash:[3,3],pointRadius:0,borderWidth:1,type:'line',_u:' t'});
-      chartBuilders.push(()=>{_rpCharts[cid]=new Chart(canvas,{type:'line',data:{labels,datasets:ds},options:baseOpts(`RAIL SILO · ${railSilo.name}`)});});
-    }
+    // Color palette — one hue per product silo
+    const _palette=[
+      {line:'#34d399',fill:'rgba(52,211,153,.12)',dem:'rgba(52,211,153,.55)'},
+      {line:'#60a5fa',fill:'rgba(96,165,250,.12)', dem:'rgba(96,165,250,.55)'},
+      {line:'#f472b6',fill:'rgba(244,114,182,.12)',dem:'rgba(244,114,182,.55)'},
+      {line:'#fb923c',fill:'rgba(251,146,60,.12)', dem:'rgba(251,146,60,.55)'},
+      {line:'#a78bfa',fill:'rgba(167,139,250,.12)',dem:'rgba(167,139,250,.55)'},
+      {line:'#fbbf24',fill:'rgba(251,191,36,.12)', dem:'rgba(251,191,36,.55)'},
+    ];
 
-    // Chart 2 — Railyard Accumulation
-    {
-      const yardData=days.map(d=>{
-        const h=hist[d-1]; if(!h) return 0;
-        return Object.values(h.carsInYardByProduct||{}).reduce((a,b)=>a+b,0)*carCap;
-      });
-      const dispData=days.map(d=>{
-        const h=hist[d-1]; if(!h) return null;
-        const cars=Object.values(h.dispatchByDest||{}).reduce((a,b)=>a+b,0);
-        return cars>0?cars*carCap:null;
-      });
-      const cid=`rpc2_${di}`;
-      const canvas=mkCanvas(cid);
-      chartBuilders.push(()=>{
-        _rpCharts[cid]=new Chart(canvas,{type:'bar',data:{labels,datasets:[
-          {label:'In Yard',data:yardData,backgroundColor:'rgba(77,166,255,.45)',borderColor:'#4da6ff',borderWidth:1,_u:' t'},
-          {label:'Dispatched',data:dispData,backgroundColor:'rgba(255,148,51,.75)',borderColor:'#ff9433',borderWidth:1,_u:' t'}
-        ]},options:baseOpts(`RAILYARD · ${dp.name}`)});
-      });
-    }
+    const ds=[
+      {label:'Arrivals',data:arrData,type:'bar',order:10,
+       backgroundColor:arrBgColors,
+       borderColor:arrBgColors.map(c=>c.replace(/[\d.]+\)$/,'1)')),borderWidth:1,_u:' t'}
+    ];
 
-    // Chart 3 — In-Transit Pipeline
-    {
-      const inTransitData=days.map(d=>{
-        let total=0;
-        for(let dep=Math.max(1,d-transit);dep<d;dep++){
-          const h=hist[dep-1]; if(!h) continue;
-          total+=((h.dispatchByDest||{})[destFacId]||0)*carCap;
-        }
-        return total;
-      });
-      const cid=`rpc3_${di}`;
-      const canvas=mkCanvas(cid);
-      chartBuilders.push(()=>{
-        _rpCharts[cid]=new Chart(canvas,{type:'line',data:{labels,datasets:[
-          {label:'In Transit',data:inTransitData,borderColor:'#a78bfa',backgroundColor:'rgba(167,139,250,.15)',
-           fill:true,tension:0.2,pointRadius:0,borderWidth:1.5,_u:' t'}
-        ]},options:baseOpts(`IN TRANSIT → ${destFac?.name||destFacId} (${transit}d)`)});
-      });
-    }
+    visibleSilos.forEach((silo,si)=>{
+      const col=_palette[si%_palette.length];
+      const siloProds=getSiloProducts(silo);
+      const siloMax=parseFloat(silo.props?.max_capacity)||0;
+      const floor=(parseFloat(silo.props?.critical_floor_pct)||10)/100*siloMax;
+      const invData=days.map(d=>{const v=rpInv(silo.id,d);return v!==null?v:null;});
+      const siloDemEls=allDemEls.filter(e=>siloProds.some(pid=>_demElMatchesProd(e,pid)));
+      const demData=days.map(d=>siloDemEls.reduce((s,e)=>s+rpDemand(e.id,d),0));
+      const prodLabel=DB.products.find(p=>p.id===siloProds[0])?.name||siloProds[0]||silo.name;
 
-    // Chart 4 — Destination Silo Inventory
-    if(destSilo){
-      const siloMax=parseFloat(destSilo.props?.max_capacity)||0;
-      const floor=(parseFloat(destSilo.props?.critical_floor_pct)||10)/100*siloMax;
-      const invData=days.map(d=>{const v=rpInv(destSilo.id,d);return v!==null?v:null;});
-      const demEls=rpGetDestDemEls(destFacId);
-      const demData=days.map(d=>demEls.reduce((s,e)=>s+rpDemand(e.id,d),0));
-      const arrHist=S.simResults.berthArrivalHistory[berth?.id]||[];
-      const arrData=days.map(d=>arrHist[d-1]||null);
+      ds.push({label:`Inv · ${prodLabel}`,data:invData,type:'line',order:si+1,
+        borderColor:col.line,backgroundColor:col.fill,
+        fill:true,tension:0.2,pointRadius:0,borderWidth:1.5,_u:' t'});
+      if(demData.some(v=>v>0)) ds.push({label:`Dem · ${prodLabel}`,data:demData,type:'line',order:si+1,
+        borderColor:col.dem,borderDash:[3,3],pointRadius:0,borderWidth:1,_u:' t/d'});
+      if(siloMax>0) ds.push({label:'Cap',data:days.map(()=>siloMax),type:'line',order:20,
+        borderColor:'rgba(255,255,255,.12)',borderDash:[5,3],pointRadius:0,borderWidth:1,_u:' t'});
+      if(floor>0) ds.push({label:'Floor',data:days.map(()=>floor),type:'line',order:20,
+        borderColor:'rgba(248,113,113,.4)',borderDash:[3,3],pointRadius:0,borderWidth:1,_u:' t'});
+    });
 
-      // Per-bar status colors — map each arrival day to the dominant movement status
-      const _statusPriority=['In Transit','Unloading','Confirmed','Planned','Proposed','Finished'];
-      const _statusChartColor={
-        'Proposed':  'rgba(142,154,184,.65)',
-        'Planned':   'rgba(255,184,48,.80)',
-        'Confirmed': 'rgba(0,229,160,.80)',
-        'In Transit':'rgba(77,166,255,.80)',
-        'Unloading': 'rgba(56,189,248,.80)',
-        'Finished':  'rgba(142,154,184,.40)',
-      };
-      const arrivals4=rpPlannedArrivalsForDest(destFacId,berth?.id);
-      const arrBgColors=days.map(d=>{
-        const entries=arrivals4[d]||[];
-        if(!entries.length) return 'rgba(77,166,255,.55)';
-        const domSt=_statusPriority.find(s=>entries.some(e=>e.status===s))||entries[0]?.status||'Planned';
-        return _statusChartColor[domSt]||'rgba(77,166,255,.55)';
-      });
-
-      const cid=`rpc4_${di}`;
-      const _destFacIdCopy=destFacId; // capture for click handler closure
-      const canvas=mkCanvas(cid);
-      const ds=[
-        {label:'Arrivals',data:arrData,type:'bar',backgroundColor:arrBgColors,borderColor:arrBgColors.map(c=>c.replace(/[\d.]+\)$/,'1)')),borderWidth:1,_u:' t'},
-        {label:'Inventory',data:invData,borderColor:'#34d399',backgroundColor:'rgba(52,211,153,.1)',
-         fill:true,tension:0.2,pointRadius:0,borderWidth:1.5,type:'line',_u:' t'},
-        {label:'Demand/d',data:demData,borderColor:'rgba(251,191,36,.6)',borderDash:[2,3],pointRadius:0,borderWidth:1,type:'line',_u:' t/d'}
-      ];
-      if(siloMax>0) ds.push({label:'Max',data:days.map(()=>siloMax),borderColor:'rgba(255,255,255,.15)',borderDash:[5,3],pointRadius:0,borderWidth:1,type:'line',_u:' t'});
-      if(floor>0)   ds.push({label:'Floor',data:days.map(()=>floor),borderColor:'rgba(248,113,113,.55)',borderDash:[3,3],pointRadius:0,borderWidth:1,type:'line',_u:' t'});
-      const chart4Opts={...baseOpts(`DESTINATION · ${destFac?.name||destFacId}`)};
-      chart4Opts.onClick=(evt,active)=>{
-        if(!active.length) return;
-        const idx=active[0].index;
-        const d=days[idx];
-        rpOpenArrivalDialog(_destFacIdCopy, String(d), rpDayDate(d).slice(5));
-      };
-      chart4Opts.onHover=(evt,active)=>{
-        if(evt?.native?.target) evt.native.target.style.cursor=active.length?'pointer':'default';
-      };
-      chartBuilders.push(()=>{
-        _rpCharts[cid]=new Chart(canvas,{type:'bar',data:{labels,datasets:ds},options:chart4Opts});
-      });
-    }
+    const multiProd=visibleSilos.length>1;
+    const cid=`rpc3_${di}`;
+    const _destFacIdCopy=destFacId;
+    const canvas=mkCanvas(cid,multiProd?'220px':'180px');
+    const destOpts={...baseOpts(`DESTINATION · ${destFac?.name||destFacId}`,multiProd)};
+    destOpts.onClick=(evt,active)=>{
+      if(!active.length) return;
+      rpOpenArrivalDialog(_destFacIdCopy,String(days[active[0].index]),rpDayDate(days[active[0].index]).slice(5));
+    };
+    destOpts.onHover=(evt,active)=>{
+      if(evt?.native?.target) evt.native.target.style.cursor=active.length?'pointer':'default';
+    };
+    chartBuilders.push(()=>{_rpCharts[cid]=new Chart(canvas,{type:'bar',data:{labels,datasets:ds},options:destOpts});});
   });
 
   // Build all charts, loading Chart.js on demand if needed
@@ -6965,9 +6976,7 @@ function rpRenderCharts(){
     s.src='https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js';
     s.onload=buildAll;
     document.head.appendChild(s);
-  } else {
-    buildAll();
-  }
+  } else { buildAll(); }
 }
 
 function _rpToggleLegacy(){
