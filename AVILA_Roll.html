@@ -6808,7 +6808,7 @@ function rpRenderCharts(){
   _rp.dests.forEach((destFacId,di)=>{
     const origins=rpGetOriginsForDest(destFacId); if(!origins.length) return;
     const {dp,destCfg,berth,railSilo}=origins[0];
-    const destSilo=rpGetDestSilo(berth);
+    const destSilo=rpGetDestSilo(berth); // kept for Chart 4 — full multi-silo rework comes later
     const destFac=DB.facilities.find(f=>f.id===destFacId);
     const carCap=parseFloat(dp.props?.car_capacity_t)||50;
     const transit=parseInt(destCfg?.transit_days)||1;
@@ -7327,15 +7327,17 @@ function vpRenderCharts(){
       !(e.props?.berth_type||'').toLowerCase().includes('rail'));
 
     berths.forEach((berth,bi)=>{
-      const destSilo=rpGetDestSilo(berth);
-      if(!destSilo) return;
-      const demEls=rpGetDestDemEls(destFacId);
-      const siloMax=parseFloat(destSilo.props?.max_capacity)||0;
-      const floor=(parseFloat(destSilo.props?.critical_floor_pct)||10)/100*siloMax;
-      const invData=days.map(d=>{const v=rpInv(destSilo.id,d);return v!==null?v:null;});
-      const demData=days.map(d=>demEls.reduce((s,e)=>s+rpDemand(e.id,d),0));
+      // Get ALL destination silos for this berth and filter by active product
+      const allDestSilos=rpGetDestSilos(berth);
+      const visibleSilos=_vp.prodId
+        ? allDestSilos.filter(s=>getSiloProducts(s).includes(_vp.prodId))
+        : allDestSilos;
+      if(!visibleSilos.length&&!allDestSilos.length) return;
 
-      // Per-bar data and colors by dominant status — use planned arrival date, not spread unload history
+      const allDemEls=rpGetDestDemEls(destFacId);
+      const _berthIdCopy=berth.id;
+
+      // Arrival data — already filtered by _vp.prodId inside vpPlannedArrivalsForBerth
       const arrivals=vpPlannedArrivalsForBerth(berth.id);
       const arrData=days.map(d=>{
         const entries=arrivals[d]||[];
@@ -7349,31 +7351,66 @@ function vpRenderCharts(){
         return _statusChartColor[domSt]||'rgba(255,184,48,.55)';
       });
 
-      const cid=`vpc1_${di}_${bi}`;
-      const _berthIdCopy=berth.id;
-      const canvas=mkCanvas(cid);
-      const ds=[
-        {label:'Arrivals',data:arrData,type:'bar',backgroundColor:arrBgColors,borderColor:arrBgColors.map(c=>c.replace(/[\d.]+\)$/,'1)')),borderWidth:1,_u:' t'},
-        {label:'Inventory',data:invData,borderColor:'#34d399',backgroundColor:'rgba(52,211,153,.1)',
-         fill:true,tension:0.2,pointRadius:0,borderWidth:1.5,type:'line',_u:' t'},
-        {label:'Demand/d',data:demData,borderColor:'rgba(251,191,36,.6)',borderDash:[2,3],pointRadius:0,borderWidth:1,type:'line',_u:' t/d'}
-      ];
-      if(siloMax>0) ds.push({label:'Max',data:days.map(()=>siloMax),borderColor:'rgba(255,255,255,.15)',borderDash:[5,3],pointRadius:0,borderWidth:1,type:'line',_u:' t'});
-      if(floor>0)   ds.push({label:'Floor',data:days.map(()=>floor),borderColor:'rgba(248,113,113,.55)',borderDash:[3,3],pointRadius:0,borderWidth:1,type:'line',_u:' t'});
+      // One chart per visible silo — each chart shows that silo's inventory + its product demand
+      visibleSilos.forEach((silo,si)=>{
+        const siloProds=getSiloProducts(silo);
+        const siloMax=parseFloat(silo.props?.max_capacity)||0;
+        const floor=(parseFloat(silo.props?.critical_floor_pct)||10)/100*siloMax;
+        const invData=days.map(d=>{const v=rpInv(silo.id,d);return v!==null?v:null;});
 
-      const chartOpts={...baseOpts(`VESSEL BERTH · ${destFac?.name||destFacId} / ${berth.name}`)};
-      chartOpts.onClick=(evt,active)=>{
-        if(!active.length) return;
-        const idx=active[0].index;
-        const d=days[idx];
-        vpOpenArrivalDialog(_berthIdCopy,String(d));
-      };
-      chartOpts.onHover=(evt,active)=>{
-        if(evt?.native?.target) evt.native.target.style.cursor=active.length?'pointer':'default';
-      };
-      chartBuilders.push(()=>{
-        _vpCharts[cid]=new Chart(canvas,{type:'bar',data:{labels,datasets:ds},options:chartOpts});
+        // Demand: only demand points that serve this silo's product(s)
+        const siloDemEls=allDemEls.filter(e=>siloProds.some(pid=>_demElMatchesProd(e,pid)));
+        const demData=days.map(d=>siloDemEls.reduce((s,e)=>s+rpDemand(e.id,d),0));
+
+        const cid=`vpc1_${di}_${bi}_${si}`;
+        const canvas=mkCanvas(cid);
+        const ds=[
+          {label:'Arrivals',data:arrData,type:'bar',backgroundColor:arrBgColors,
+           borderColor:arrBgColors.map(c=>c.replace(/[\d.]+\)$/,'1)')),borderWidth:1,_u:' t'},
+          {label:'Inventory',data:invData,borderColor:'#34d399',backgroundColor:'rgba(52,211,153,.1)',
+           fill:true,tension:0.2,pointRadius:0,borderWidth:1.5,type:'line',_u:' t'},
+          {label:'Demand/d',data:demData,borderColor:'rgba(251,191,36,.6)',borderDash:[2,3],
+           pointRadius:0,borderWidth:1,type:'line',_u:' t/d'}
+        ];
+        if(siloMax>0) ds.push({label:'Max',data:days.map(()=>siloMax),borderColor:'rgba(255,255,255,.15)',borderDash:[5,3],pointRadius:0,borderWidth:1,type:'line',_u:' t'});
+        if(floor>0)   ds.push({label:'Floor',data:days.map(()=>floor),borderColor:'rgba(248,113,113,.55)',borderDash:[3,3],pointRadius:0,borderWidth:1,type:'line',_u:' t'});
+
+        // Chart title: berth name + silo name (so user knows which product this chart is for)
+        const chartTitle=`VESSEL · ${destFac?.name||destFacId} / ${silo.name}`;
+        const chartOpts={...baseOpts(chartTitle)};
+        chartOpts.onClick=(evt,active)=>{
+          if(!active.length) return;
+          const idx=active[0].index;
+          vpOpenArrivalDialog(_berthIdCopy,String(days[idx]));
+        };
+        chartOpts.onHover=(evt,active)=>{
+          if(evt?.native?.target) evt.native.target.style.cursor=active.length?'pointer':'default';
+        };
+        chartBuilders.push(()=>{
+          _vpCharts[cid]=new Chart(canvas,{type:'bar',data:{labels,datasets:ds},options:chartOpts});
+        });
       });
+
+      // If product filter is active but no silos match, still show the arrival chart alone
+      if(_vp.prodId&&!visibleSilos.length){
+        const cid=`vpc1_${di}_${bi}_arr`;
+        const canvas=mkCanvas(cid);
+        const ds=[
+          {label:'Arrivals',data:arrData,type:'bar',backgroundColor:arrBgColors,
+           borderColor:arrBgColors.map(c=>c.replace(/[\d.]+\)$/,'1)')),borderWidth:1,_u:' t'}
+        ];
+        const chartOpts={...baseOpts(`VESSEL · ${destFac?.name||destFacId} / ${berth.name}`)};
+        chartOpts.onClick=(evt,active)=>{
+          if(!active.length) return;
+          vpOpenArrivalDialog(_berthIdCopy,String(days[active[0].index]));
+        };
+        chartOpts.onHover=(evt,active)=>{
+          if(evt?.native?.target) evt.native.target.style.cursor=active.length?'pointer':'default';
+        };
+        chartBuilders.push(()=>{
+          _vpCharts[cid]=new Chart(canvas,{type:'bar',data:{labels,datasets:ds},options:chartOpts});
+        });
+      }
     });
   });
 
