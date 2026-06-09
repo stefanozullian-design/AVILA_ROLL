@@ -996,14 +996,42 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
 
     <!-- SUPPLY / PRODUCTION VIEW -->
     <div id="supply-view" class="view-panel" style="overflow:hidden;background:var(--bg)">
-      <div style="height:40px;background:var(--surface);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 14px;gap:10px;flex-shrink:0">
-        <span style="font-family:var(--mono);font-size:9px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase">Supply &amp; Production Capacity</span>
-        <div class="tb-div"></div>
-        <span style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">Rated daily capacity by equipment — Clinker (kilns) &amp; Cement (finish mills)</span>
-        <div style="margin-left:auto">
-          <button class="tb-btn sec" onclick="supplyScrollToday()">Today</button>
+
+      <!-- ── FILTER BAR ─────────────────────────────────────── -->
+      <div id="sup-filter-bar" style="flex-shrink:0;background:var(--surface);border-bottom:1px solid var(--border);padding:6px 14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <!-- Date presets -->
+        <div style="display:flex;gap:3px">
+          <button class="vw-btn active" id="sup-vw-rom"  onclick="supSetView('rom',this)">ROM</button>
+          <button class="vw-btn"        id="sup-vw-3m"   onclick="supSetView('3m',this)">Next 3M</button>
+          <button class="vw-btn"        id="sup-vw-roy"  onclick="supSetView('roy',this)">ROY</button>
+          <button class="vw-btn"        id="sup-vw-cust" onclick="supSetView('custom',this)">Custom</button>
         </div>
+        <!-- Custom date range (hidden by default) -->
+        <div id="sup-custom-dates" style="display:none;gap:4px;align-items:center">
+          <span style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">From</span>
+          <input type="date" id="sup-from-date" style="padding:3px 6px;background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:9px" onchange="renderSupplyView()">
+          <span style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">To</span>
+          <input type="date" id="sup-to-date" style="padding:3px 6px;background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:9px" onchange="renderSupplyView()">
+        </div>
+        <div class="tb-div"></div>
+        <!-- Facility filter -->
+        <select id="sup-fac-filter" style="padding:3px 8px;background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:9px" onchange="supOnFacChange()">
+          <option value="">All Facilities</option>
+        </select>
+        <!-- Product filter -->
+        <select id="sup-prod-filter" style="padding:3px 8px;background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:9px" onchange="renderSupplyView()">
+          <option value="">All Products</option>
+        </select>
+        <!-- Today button -->
+        <button class="tb-btn sec" style="margin-left:auto;font-size:9px;padding:3px 10px" onclick="supplyScrollToday()">Today</button>
       </div>
+
+      <!-- ── KPI DASHBOARD ──────────────────────────────────── -->
+      <div id="sup-kpi-bar" style="flex-shrink:0;background:var(--bg);border-bottom:2px solid var(--border2);padding:8px 14px;display:flex;gap:10px;align-items:stretch;flex-wrap:wrap">
+        <!-- KPI cards populated by renderSupplyKPIs() -->
+      </div>
+
+      <!-- ── EXISTING TABLE ─────────────────────────────────── -->
       <div style="overflow-x:auto;overflow-y:hidden;height:10px;flex-shrink:0;background:var(--surface);border-bottom:1px solid var(--border)" id="sup-top-scroll">
         <div id="sup-top-inner" style="height:1px"></div>
       </div>
@@ -3763,6 +3791,236 @@ function exportElementsCSV(){
 }
 
 // ═══════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// SUPPLY VIEW — FILTER BAR + KPI DASHBOARD
+// ═══════════════════════════════════════════════════════════════
+
+// State for supply view filters
+if(!window._supView) window._supView={preset:'rom', fromDate:'', toDate:'', facId:'', prodId:''};
+
+function supSetView(preset, btn){
+  window._supView.preset=preset;
+  document.querySelectorAll('#sup-filter-bar .vw-btn').forEach(b=>b.classList.remove('active'));
+  if(btn) btn.classList.add('active');
+  const customDiv=document.getElementById('sup-custom-dates');
+  if(customDiv) customDiv.style.display=preset==='custom'?'flex':'none';
+  renderSupplyView();
+}
+
+function supOnFacChange(){
+  const facId=document.getElementById('sup-fac-filter')?.value||'';
+  window._supView.facId=facId;
+  supPopulateProductFilter(facId);
+  renderSupplyView();
+}
+
+function supPopulateProductFilter(facId){
+  const sel=document.getElementById('sup-prod-filter'); if(!sel) return;
+  // Get products from all production elements in the selected facility
+  const els=facId
+    ? DB.elements.filter(e=>(e.facility_id===facId||e.assigned_facility_id===facId)&&['kiln','finish_mill','packing_plant'].includes(e.type))
+    : DB.elements.filter(e=>['kiln','finish_mill','packing_plant'].includes(e.type));
+  const prodIds=new Set();
+  els.forEach(el=>{
+    DB.element_product_capacities.filter(c=>c.element_id===el.id).forEach(c=>{ if(c.product_id) prodIds.add(c.product_id); });
+  });
+  const cur=sel.value;
+  sel.innerHTML='<option value="">All Products</option>'+
+    [...prodIds].sort().map(pid=>{
+      const p=DB.products.find(pr=>pr.id===pid);
+      return `<option value="${pid}" ${pid===cur?'selected':''}>${p?.name||pid}</option>`;
+    }).join('');
+}
+
+function supInitFilters(){
+  // Populate facility filter — only facilities with kilns, mills, or packing plants
+  const sel=document.getElementById('sup-fac-filter'); if(!sel) return;
+  const qualFacIds=new Set(
+    DB.elements
+      .filter(e=>['kiln','finish_mill','packing_plant'].includes(e.type))
+      .map(e=>e.facility_id||e.assigned_facility_id)
+      .filter(Boolean)
+  );
+  const cur=sel.value;
+  sel.innerHTML='<option value="">All Facilities</option>'+
+    DB.facilities
+      .filter(f=>qualFacIds.has(f.id))
+      .map(f=>`<option value="${f.id}" ${f.id===cur?'selected':''}>${f.name}</option>`)
+      .join('');
+  supPopulateProductFilter(sel.value);
+}
+
+function supGetDateRange(){
+  const v=window._supView||{preset:'rom'};
+  const today=new Date();
+  const simStart=new Date(S.simCfg.start_date+'T00:00:00');
+  const simEnd=new Date(simStart.getTime()+(S.simCfg.horizon||365)*864e5-864e5);
+
+  if(v.preset==='custom'){
+    const f=document.getElementById('sup-from-date')?.value||S.simCfg.start_date;
+    const t=document.getElementById('sup-to-date')?.value||simEnd.toISOString().split('T')[0];
+    return {from:f, to:t};
+  }
+  const todayStr=today.toISOString().split('T')[0];
+  if(v.preset==='rom'){
+    const eom=new Date(today.getFullYear(),today.getMonth()+1,0).toISOString().split('T')[0];
+    return {from:todayStr, to:eom};
+  }
+  if(v.preset==='3m'){
+    const e3m=new Date(today.getFullYear(),today.getMonth()+3,0).toISOString().split('T')[0];
+    return {from:todayStr, to:e3m};
+  }
+  // roy — rest of year
+  const eoy=new Date(today.getFullYear(),11,31).toISOString().split('T')[0];
+  return {from:todayStr, to:eoy};
+}
+
+function renderSupplyKPIs(){
+  const bar=document.getElementById('sup-kpi-bar'); if(!bar) return;
+  const r=S.simResults;
+  const today=new Date();
+  const todayStr=today.toISOString().split('T')[0];
+  const simStart=new Date(S.simCfg.start_date+'T00:00:00');
+  const facId=window._supView?.facId||'';
+  const prodId=window._supView?.prodId||'';
+
+  // Elements in scope
+  const millEls=DB.elements.filter(e=>
+    ['finish_mill','kiln'].includes(e.type)&&
+    (!facId||(e.facility_id===facId||e.assigned_facility_id===facId))
+  );
+
+  // ── MTD Production ─────────────────────────────────────────
+  const mtdStart=new Date(today.getFullYear(),today.getMonth(),1).toISOString().split('T')[0];
+  let mtdActual=0, mtdRated=0;
+  const mtdDates=[];
+  for(let d=new Date(mtdStart+'T00:00:00');d<=today;d=new Date(d.getTime()+864e5))
+    mtdDates.push(d.toISOString().split('T')[0]);
+
+  millEls.forEach(el=>{
+    const caps=DB.element_product_capacities.filter(c=>c.element_id===el.id&&(!prodId||c.product_id===prodId));
+    const ratedMax=caps.reduce((s,c)=>s+(parseFloat(c.capacity_tpd)||0),0);
+    mtdDates.forEach(ds=>{
+      // Actual data
+      const actual=DB.real_production_daily.filter(rp=>rp.date===ds&&rp.element_id===el.id&&(!prodId||rp.product_id===prodId));
+      if(actual.length) mtdActual+=actual.reduce((s,rp)=>s+(parseFloat(rp.volume_t)||0),0);
+      // Rated (skip maintenance days)
+      const isMaint=DB.element_maintenance_events.some(m=>{
+        const sd=new Date(m.start_date+'T00:00:00');
+        const dur=parseInt(m.duration_days)||1;
+        const ed=new Date(sd.getTime()+(dur-1)*864e5);
+        return m.element_id===el.id&&ds>=m.start_date&&ds<=ed.toISOString().split('T')[0];
+      });
+      if(!isMaint) mtdRated+=ratedMax;
+    });
+  });
+
+  // ── Forecasted Full Month ───────────────────────────────────
+  const eomStr=new Date(today.getFullYear(),today.getMonth()+1,0).toISOString().split('T')[0];
+  let forecastRem=0;
+  if(r?.millProductHistory){
+    const tomorrow=new Date(today.getTime()+864e5);
+    for(let d=new Date(tomorrow);d<=new Date(eomStr+'T00:00:00');d=new Date(d.getTime()+864e5)){
+      const ds=d.toISOString().split('T')[0];
+      const dayIdx=Math.round((d-simStart)/864e5);
+      millEls.forEach(el=>{
+        const pid=r.millProductHistory[el.id]?.[dayIdx]||null;
+        if(pid&&(!prodId||pid===prodId)){
+          const cap=DB.element_product_capacities.find(c=>c.element_id===el.id&&c.product_id===pid);
+          forecastRem+=parseFloat(cap?.capacity_tpd)||0;
+        }
+      });
+    }
+  }
+  const fullMonthForecast=mtdActual+forecastRem;
+
+  // ── Effectiveness ───────────────────────────────────────────
+  const effectiveness=mtdRated>0?Math.round(mtdActual/mtdRated*100):null;
+  const effColor=effectiveness==null?'var(--text-dim)':effectiveness>=90?'var(--green)':effectiveness>=75?'var(--amber)':'var(--red)';
+
+  // ── Days of Inventory by Product ───────────────────────────
+  const invByProd=[];
+  const cemSilos=DB.elements.filter(e=>
+    e.type==='bulk_silo'&&
+    (!facId||(e.facility_id===facId||e.assigned_facility_id===facId))
+  );
+  const prodIds=prodId?[prodId]:[...new Set(
+    millEls.flatMap(el=>DB.element_product_capacities.filter(c=>c.element_id===el.id).map(c=>c.product_id))
+  )];
+
+  prodIds.forEach(pid=>{
+    const prod=DB.products.find(p=>p.id===pid); if(!prod) return;
+    if(!['cement_bulk','cement_packed'].includes(prod.category||'')) return;
+    // Current inventory across silos holding this product
+    let inv=0;
+    cemSilos.forEach(silo=>{
+      const siloProds=silo.props?.products||[];
+      if(silo.props?.product_id===pid||siloProds.includes(pid)){
+        if(r?.inventoryHistory?.[silo.id]){
+          const dayOff=Math.round((today-simStart)/864e5);
+          inv+=r.inventoryHistory[silo.id][dayOff-1]??parseFloat(silo.props?.start_inventory)||0;
+        } else {
+          inv+=parseFloat(silo.props?.start_inventory)||0;
+        }
+      }
+    });
+    // Avg daily demand next 30 days
+    const demEls=DB.elements.filter(e=>e.type==='demand_point'&&
+      (!facId||(e.facility_id===facId||e.assigned_facility_id===facId)));
+    let totalDemand=0; let demDays=0;
+    for(let i=0;i<30;i++){
+      const d=new Date(today.getTime()+i*864e5).toISOString().split('T')[0];
+      const dayDem=demEls.reduce((s,el)=>s+(_demandRate(el.id,d)||0),0);
+      if(dayDem>0){ totalDemand+=dayDem; demDays++; }
+    }
+    const avgDailyDem=demDays>0?totalDemand/demDays:0;
+    const daysOfInv=avgDailyDem>0?Math.round(inv/avgDailyDem):null;
+    invByProd.push({pid, name:prod.name||pid, inv:Math.round(inv), days:daysOfInv});
+  });
+
+  // ── Render KPI cards ────────────────────────────────────────
+  const kpiCard=(title,value,sub,color,extra='')=>`
+    <div style="background:var(--surface);border:1px solid var(--border2);border-radius:4px;padding:8px 14px;min-width:140px;flex:1">
+      <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);letter-spacing:1px;text-transform:uppercase;margin-bottom:4px">${title}</div>
+      <div style="font-family:var(--mono);font-size:18px;font-weight:700;color:${color||'var(--text)'}">${value}</div>
+      <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-top:2px">${sub}</div>
+      ${extra}
+    </div>`;
+
+  let html='';
+  html+=kpiCard(
+    'Production MTD',
+    mtdActual>0?Math.round(mtdActual).toLocaleString()+'t':'—',
+    'Actual this month',
+    'var(--green)'
+  );
+  html+=kpiCard(
+    'Full Month Forecast',
+    fullMonthForecast>0?Math.round(fullMonthForecast).toLocaleString()+'t':'—',
+    'Actual + simulated rest',
+    'var(--blue)'
+  );
+  html+=kpiCard(
+    'Effectiveness',
+    effectiveness!=null?effectiveness+'%':'—',
+    'Actual ÷ Rated capacity',
+    effColor
+  );
+
+  // Days of inventory cards
+  invByProd.slice(0,4).forEach(({name,inv,days})=>{
+    const dColor=days==null?'var(--text-dim)':days>=14?'var(--green)':days>=7?'var(--amber)':'var(--red)';
+    html+=kpiCard(
+      'Days Inv · '+name.replace(/[\/\|]/g,' ').slice(0,14),
+      days!=null?days+'d':'—',
+      inv.toLocaleString()+'t on hand',
+      dColor
+    );
+  });
+
+  bar.innerHTML=html;
+}
+
 // CATALOGS
 // ═══════════════════════════════════════════════════════
 function openCatalog(cat){ S.activeCatalog=cat; switchView('catalog'); renderCatalogView(); }
@@ -4329,6 +4587,8 @@ function saveDemandValues(){
 // ═══════════════════════════════════════════════════════
 function renderSupplyView(){
   const wrap=document.getElementById('supply-table-wrap'); if(!wrap) return;
+  supInitFilters();
+  renderSupplyKPIs();
   _renderSupplyViewInner(wrap);
 }
 function _renderSupplyViewInner(wrap){
@@ -4341,11 +4601,13 @@ function _renderSupplyViewInner(wrap){
   const horizon=S.simCfg.horizon||90;
   const todayStr=new Date().toISOString().split('T')[0];
 
-  // Date spine
+  // Date spine — filtered by active view range
+  const {from:filterFrom, to:filterTo}=supGetDateRange();
   const allDates=[];
   for(let d=0;d<horizon;d++){
     const dt=new Date(simStart.getTime()+d*864e5);
-    allDates.push(dt.toISOString().split('T')[0]);
+    const ds=dt.toISOString().split('T')[0];
+    if(ds>=filterFrom&&ds<=filterTo) allDates.push(ds);
   }
 
   // Group by month
