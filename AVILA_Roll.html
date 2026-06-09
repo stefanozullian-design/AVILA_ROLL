@@ -15842,5 +15842,338 @@ document.addEventListener('DOMContentLoaded',async()=>{
   }
 });
 </script>
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     DESIGN MODE PANEL v2 — smarter selectors + !important exports
+     Activate: Ctrl+Shift+D  |  Pick: click any element  |  Esc: cancel
+     Zero impact on app logic — purely additive
+     ═══════════════════════════════════════════════════════════════════ -->
+<style id="dm-styles">
+#dm-toggle-btn{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);z-index:99998;padding:5px 14px;font-family:monospace;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;background:#1a1a2e;color:#a78bfa;border:1px solid #a78bfa;border-radius:20px;cursor:pointer;opacity:.55;transition:opacity .2s;user-select:none;}
+#dm-toggle-btn:hover{opacity:1;}
+#dm-toggle-btn.active{background:#a78bfa;color:#1a1a2e;opacity:1;}
+#dm-panel{position:fixed;top:60px;right:10px;width:285px;max-height:calc(100vh - 80px);z-index:99999;background:#0f0f1a;border:1px solid #a78bfa;border-radius:6px;display:none;flex-direction:column;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,.6);font-family:monospace;font-size:11px;}
+#dm-panel.visible{display:flex;}
+#dm-header{padding:8px 12px;background:#1a1a2e;border-bottom:1px solid #a78bfa;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;}
+#dm-header span{color:#a78bfa;font-weight:700;letter-spacing:1px;font-size:10px;}
+#dm-header-btns{display:flex;gap:6px;align-items:center;}
+#dm-pick-btn{padding:3px 8px;background:transparent;border:1px solid #a78bfa;color:#a78bfa;cursor:pointer;border-radius:3px;font-size:9px;font-family:monospace;font-weight:700;letter-spacing:.5px;transition:all .15s;}
+#dm-pick-btn:hover,#dm-pick-btn.active{background:#a78bfa;color:#1a1a2e;}
+#dm-close-btn{background:transparent;border:none;color:#666;cursor:pointer;font-size:14px;line-height:1;padding:0 2px;}
+#dm-close-btn:hover{color:#fff;}
+#dm-selected-label{padding:5px 12px;font-size:9px;color:#666;background:#0a0a14;border-bottom:1px solid #1e1e30;flex-shrink:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+#dm-selected-label .dm-sel-tag{color:#a78bfa;font-weight:700;}
+#dm-selected-label .dm-sel-path{color:#555;font-size:8px;display:block;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+#dm-props{flex:1;overflow-y:auto;padding:8px;}
+.dm-group-title{font-size:8px;letter-spacing:1.5px;text-transform:uppercase;color:#555;margin:10px 0 5px;padding-bottom:3px;border-bottom:1px solid #1e1e30;}
+.dm-row{display:flex;align-items:center;margin-bottom:5px;gap:6px;}
+.dm-label{color:#888;font-size:9px;width:95px;flex-shrink:0;}
+.dm-input{flex:1;background:#1a1a2e;border:1px solid #2a2a40;color:#e0e0ff;font-family:monospace;font-size:10px;padding:3px 6px;border-radius:3px;outline:none;transition:border-color .15s;min-width:0;}
+.dm-input:focus{border-color:#a78bfa;}
+.dm-input.dm-changed{border-color:#4ade80;color:#4ade80;}
+#dm-footer{padding:8px 12px;background:#0a0a14;border-top:1px solid #1e1e30;flex-shrink:0;display:flex;flex-direction:column;gap:6px;}
+#dm-changes-count{font-size:9px;color:#666;}
+#dm-changes-count span{color:#a78bfa;font-weight:700;}
+#dm-footer-btns{display:flex;gap:6px;}
+#dm-export-btn,#dm-clear-btn{flex:1;padding:4px 8px;font-family:monospace;font-size:9px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;cursor:pointer;border-radius:3px;transition:all .15s;}
+#dm-export-btn{background:#a78bfa;color:#1a1a2e;border:none;}
+#dm-export-btn:hover{background:#c4b5fd;}
+#dm-clear-btn{background:transparent;border:1px solid #333;color:#666;}
+#dm-clear-btn:hover{border-color:#666;color:#999;}
+#dm-export-modal{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:100000;background:#0f0f1a;border:1px solid #a78bfa;border-radius:6px;padding:16px;width:520px;max-width:90vw;display:none;box-shadow:0 16px 48px rgba(0,0,0,.8);font-family:monospace;}
+#dm-export-modal.visible{display:block;}
+#dm-export-title{color:#a78bfa;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;}
+#dm-export-close{background:transparent;border:none;color:#666;cursor:pointer;font-size:14px;}
+#dm-export-note-top{font-size:9px;color:#4ade80;margin-bottom:8px;}
+#dm-export-textarea{width:100%;height:240px;background:#1a1a2e;border:1px solid #2a2a40;color:#e0e0ff;font-family:monospace;font-size:10px;padding:8px;border-radius:3px;resize:none;box-sizing:border-box;}
+#dm-export-copy{margin-top:8px;width:100%;padding:6px;background:#a78bfa;color:#1a1a2e;border:none;font-family:monospace;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;cursor:pointer;border-radius:3px;}
+#dm-export-copy:hover{background:#c4b5fd;}
+#dm-export-note{margin-top:6px;font-size:9px;color:#666;text-align:center;}
+body.dm-picking *:hover{outline:2px dashed #a78bfa !important;outline-offset:1px !important;cursor:crosshair !important;}
+.dm-selected-el{outline:2px solid #4ade80 !important;outline-offset:1px !important;}
+</style>
+
+<button id="dm-toggle-btn" title="Toggle Design Mode (Ctrl+Shift+D)">⬡ Design</button>
+
+<div id="dm-panel">
+  <div id="dm-header">
+    <span>⬡ DESIGN MODE v2</span>
+    <div id="dm-header-btns">
+      <button id="dm-pick-btn" title="Click any element">↖ Pick</button>
+      <button id="dm-close-btn">✕</button>
+    </div>
+  </div>
+  <div id="dm-selected-label">No element selected — click ↖ Pick</div>
+  <div id="dm-props">
+    <div class="dm-group-title">Size</div>
+    <div class="dm-row"><span class="dm-label">Width</span><input class="dm-input" data-prop="width" placeholder="e.g. 200px or 60%"></div>
+    <div class="dm-row"><span class="dm-label">Height</span><input class="dm-input" data-prop="height" placeholder="auto"></div>
+    <div class="dm-row"><span class="dm-label">Min Width</span><input class="dm-input" data-prop="minWidth" placeholder=""></div>
+    <div class="dm-row"><span class="dm-label">Max Width</span><input class="dm-input" data-prop="maxWidth" placeholder=""></div>
+    <div class="dm-group-title">Typography</div>
+    <div class="dm-row"><span class="dm-label">Font Size</span><input class="dm-input" data-prop="fontSize" placeholder="e.g. 11px"></div>
+    <div class="dm-row"><span class="dm-label">Font Weight</span><input class="dm-input" data-prop="fontWeight" placeholder="400 / 700"></div>
+    <div class="dm-row"><span class="dm-label">Letter Spacing</span><input class="dm-input" data-prop="letterSpacing" placeholder="e.g. 1px"></div>
+    <div class="dm-row"><span class="dm-label">Color</span><input class="dm-input" data-prop="color" placeholder="e.g. #ff0 or var(--green)"></div>
+    <div class="dm-row"><span class="dm-label">Text Transform</span><input class="dm-input" data-prop="textTransform" placeholder="uppercase / none"></div>
+    <div class="dm-group-title">Spacing</div>
+    <div class="dm-row"><span class="dm-label">Padding</span><input class="dm-input" data-prop="padding" placeholder="e.g. 4px 8px"></div>
+    <div class="dm-row"><span class="dm-label">Pad Top</span><input class="dm-input" data-prop="paddingTop" placeholder=""></div>
+    <div class="dm-row"><span class="dm-label">Pad Right</span><input class="dm-input" data-prop="paddingRight" placeholder=""></div>
+    <div class="dm-row"><span class="dm-label">Pad Bottom</span><input class="dm-input" data-prop="paddingBottom" placeholder=""></div>
+    <div class="dm-row"><span class="dm-label">Pad Left</span><input class="dm-input" data-prop="paddingLeft" placeholder=""></div>
+    <div class="dm-row"><span class="dm-label">Margin</span><input class="dm-input" data-prop="margin" placeholder="e.g. 0 auto"></div>
+    <div class="dm-row"><span class="dm-label">Margin Top</span><input class="dm-input" data-prop="marginTop" placeholder=""></div>
+    <div class="dm-row"><span class="dm-label">Margin Right</span><input class="dm-input" data-prop="marginRight" placeholder=""></div>
+    <div class="dm-row"><span class="dm-label">Margin Bottom</span><input class="dm-input" data-prop="marginBottom" placeholder=""></div>
+    <div class="dm-row"><span class="dm-label">Margin Left</span><input class="dm-input" data-prop="marginLeft" placeholder=""></div>
+    <div class="dm-group-title">Layout</div>
+    <div class="dm-row"><span class="dm-label">Display</span><input class="dm-input" data-prop="display" placeholder="flex / grid / block"></div>
+    <div class="dm-row"><span class="dm-label">Gap</span><input class="dm-input" data-prop="gap" placeholder="e.g. 8px"></div>
+    <div class="dm-row"><span class="dm-label">Flex Direction</span><input class="dm-input" data-prop="flexDirection" placeholder="row / column"></div>
+    <div class="dm-row"><span class="dm-label">Align Items</span><input class="dm-input" data-prop="alignItems" placeholder="center / start / end"></div>
+    <div class="dm-row"><span class="dm-label">Grid Columns</span><input class="dm-input" data-prop="gridTemplateColumns" placeholder="e.g. 1fr 2fr"></div>
+    <div class="dm-row"><span class="dm-label">Align Self</span><input class="dm-input" data-prop="alignSelf" placeholder="center / flex-end"></div>
+    <div class="dm-group-title">Appearance</div>
+    <div class="dm-row"><span class="dm-label">Background</span><input class="dm-input" data-prop="background" placeholder="e.g. #1a1a2e"></div>
+    <div class="dm-row"><span class="dm-label">Border</span><input class="dm-input" data-prop="border" placeholder="e.g. 1px solid red"></div>
+    <div class="dm-row"><span class="dm-label">Border Radius</span><input class="dm-input" data-prop="borderRadius" placeholder="e.g. 4px"></div>
+    <div class="dm-row"><span class="dm-label">Opacity</span><input class="dm-input" data-prop="opacity" placeholder="0 – 1"></div>
+    <div class="dm-row"><span class="dm-label">Box Shadow</span><input class="dm-input" data-prop="boxShadow" placeholder="0 4px 12px #000"></div>
+  </div>
+  <div id="dm-footer">
+    <div id="dm-changes-count">Changes: <span id="dm-count">0</span> &nbsp;|&nbsp; Elements: <span id="dm-el-count">0</span></div>
+    <div id="dm-footer-btns">
+      <button id="dm-export-btn">↓ Export CSS</button>
+      <button id="dm-clear-btn">✕ Clear All</button>
+    </div>
+  </div>
+</div>
+
+<div id="dm-export-modal">
+  <div id="dm-export-title">
+    <span>Export CSS — Ready to Apply</span>
+    <button id="dm-export-close">✕</button>
+  </div>
+  <div id="dm-export-note-top">✓ All rules use !important — will match exactly what you see on screen</div>
+  <textarea id="dm-export-textarea" readonly></textarea>
+  <button id="dm-export-copy">Copy to Clipboard</button>
+  <div id="dm-export-note">Paste to Claude → applied permanently to your HTML file</div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════
+// DESIGN MODE v2 — smarter selectors, !important exports
+// Isolated namespace — zero impact on existing app logic
+// ═══════════════════════════════════════════════════════════════════
+(function(){
+  'use strict';
+  const _dm={ active:false, picking:false, target:null, changes:new Map() };
+
+  // ── Smart selector: walks up tree to nearest ID ancestor ──────────
+  function _dmSmartSelector(el){
+    if(!el||el===document.body) return 'body';
+    if(el.id) return '#'+el.id;
+
+    // Build child path upward until we hit an ID or body
+    const path=[];
+    let cur=el;
+    let limit=6;
+    while(cur && cur!==document.body && !cur.id && limit-->0){
+      const tag=cur.tagName.toLowerCase();
+      const cls=Array.from(cur.classList)
+        .filter(c=>!c.startsWith('dm-')&&c.length>0).slice(0,2).join('.');
+      const parent=cur.parentElement;
+      let seg=tag+(cls?'.'+cls:'');
+      // Add nth-of-type if siblings of same tag exist
+      if(parent){
+        const sibs=Array.from(parent.children).filter(c=>c.tagName===cur.tagName);
+        if(sibs.length>1){
+          const idx=sibs.indexOf(cur)+1;
+          seg+=':nth-of-type('+idx+')';
+        }
+      }
+      path.unshift(seg);
+      cur=cur.parentElement;
+    }
+    const anchor=cur&&cur.id?'#'+cur.id:(cur===document.body?'body':'');
+    return anchor?(anchor+' '+path.join(' > ')):path.join(' > ');
+  }
+
+  // ── Friendly label for selected element ──────────────────────────
+  function _dmLabel(el){
+    const tag=el.tagName.toLowerCase();
+    const id=el.id?'#'+el.id:'';
+    const cls=Array.from(el.classList).filter(c=>!c.startsWith('dm-')).slice(0,2).join('.');
+    return tag+id+(cls?'.'+cls:'');
+  }
+
+  // ── Read computed values into panel inputs ────────────────────────
+  function _dmReadValues(el){
+    const cs=getComputedStyle(el);
+    document.querySelectorAll('#dm-props .dm-input').forEach(inp=>{
+      const prop=inp.dataset.prop;
+      const inline=el.style[prop];
+      inp.value=inline||'';
+      inp.placeholder=cs[prop]||'';
+      inp.classList.toggle('dm-changed', !!inline);
+    });
+  }
+
+  function _dmUpdateCount(){
+    let props=0;
+    _dm.changes.forEach(e=>{ props+=Object.keys(e.props).length; });
+    document.getElementById('dm-count').textContent=props;
+    document.getElementById('dm-el-count').textContent=_dm.changes.size;
+  }
+
+  // ── Toggle ────────────────────────────────────────────────────────
+  function _dmToggle(){
+    _dm.active=!_dm.active;
+    document.getElementById('dm-panel').classList.toggle('visible',_dm.active);
+    document.getElementById('dm-toggle-btn').classList.toggle('active',_dm.active);
+    if(!_dm.active) _dmStopPicking();
+  }
+
+  // ── Picking ───────────────────────────────────────────────────────
+  function _dmStartPicking(){
+    _dm.picking=true;
+    document.body.classList.add('dm-picking');
+    document.getElementById('dm-pick-btn').classList.add('active');
+    document.addEventListener('click',_dmOnPick,true);
+  }
+  function _dmStopPicking(){
+    _dm.picking=false;
+    document.body.classList.remove('dm-picking');
+    document.getElementById('dm-pick-btn').classList.remove('active');
+    document.removeEventListener('click',_dmOnPick,true);
+  }
+  function _dmOnPick(e){
+    const panel=document.getElementById('dm-panel');
+    const modal=document.getElementById('dm-export-modal');
+    if(panel.contains(e.target)||modal.contains(e.target)) return;
+    e.preventDefault(); e.stopPropagation();
+    if(_dm.target) _dm.target.classList.remove('dm-selected-el');
+    _dm.target=e.target;
+    _dm.target.classList.add('dm-selected-el');
+    const sel=_dmSmartSelector(_dm.target);
+    const lbl=document.getElementById('dm-selected-label');
+    lbl.innerHTML='<span class="dm-sel-tag">'+_dmLabel(_dm.target)+'</span>'
+      +'<span class="dm-sel-path">'+sel+'</span>';
+    _dmReadValues(_dm.target);
+    _dmStopPicking();
+  }
+
+  // ── Apply a CSS change live + record it ───────────────────────────
+  function _dmApply(prop, value){
+    if(!_dm.target) return;
+    // Apply directly as inline style (highest specificity, guaranteed to show)
+    _dm.target.style[prop]=value;
+    // Record with smart selector
+    const sel=_dmSmartSelector(_dm.target);
+    const key=sel+'__'+_dm.target.tagName;
+    if(!_dm.changes.has(key)) _dm.changes.set(key,{el:_dm.target, sel, props:{}});
+    const entry=_dm.changes.get(key);
+    if(value===''||value===null){ delete entry.props[prop]; }
+    else { entry.props[prop]=value; }
+    if(!Object.keys(entry.props).length) _dm.changes.delete(key);
+    _dmUpdateCount();
+    // Highlight input as changed
+    const inp=document.querySelector('#dm-props .dm-input[data-prop="'+prop+'"]');
+    if(inp) inp.classList.toggle('dm-changed', !!value);
+  }
+
+  // ── Build export CSS with !important ─────────────────────────────
+  function _dmBuildExport(){
+    if(!_dm.changes.size) return '/* No changes recorded */';
+    let out='/* ═══ DESIGN MODE EXPORT ═══ */\n'
+          +'/* All rules use !important — will override existing styles */\n'
+          +'/* Send to Claude to apply permanently */\n\n';
+    _dm.changes.forEach(entry=>{
+      const props=entry.props;
+      if(!Object.keys(props).length) return;
+      out+=entry.sel+' {\n';
+      Object.entries(props).forEach(([prop,val])=>{
+        const kebab=prop.replace(/([A-Z])/g,'-$1').toLowerCase();
+        out+='  '+kebab+': '+val+' !important;\n';
+      });
+      out+='}\n\n';
+    });
+    return out;
+  }
+
+  // ── Clear all changes ─────────────────────────────────────────────
+  function _dmClearAll(){
+    _dm.changes.forEach(entry=>{
+      Object.keys(entry.props).forEach(prop=>{ entry.el.style[prop]=''; });
+    });
+    _dm.changes.clear();
+    _dmUpdateCount();
+    if(_dm.target) _dmReadValues(_dm.target);
+    document.querySelectorAll('#dm-props .dm-input').forEach(i=>i.classList.remove('dm-changed'));
+  }
+
+  // ── Wire up events ────────────────────────────────────────────────
+  document.addEventListener('DOMContentLoaded',function(){
+    document.getElementById('dm-toggle-btn').addEventListener('click',_dmToggle);
+    document.getElementById('dm-close-btn').addEventListener('click',function(){
+      _dm.active=false;
+      document.getElementById('dm-panel').classList.remove('visible');
+      document.getElementById('dm-toggle-btn').classList.remove('active');
+      _dmStopPicking();
+    });
+    document.getElementById('dm-pick-btn').addEventListener('click',function(){
+      _dm.picking?_dmStopPicking():_dmStartPicking();
+    });
+
+    // Live update on input change
+    document.querySelectorAll('#dm-props .dm-input').forEach(inp=>{
+      inp.addEventListener('input',function(){ _dmApply(this.dataset.prop,this.value.trim()); });
+      inp.addEventListener('keydown',function(e){
+        const m=this.value.match(/^(-?[\d.]+)(px|%|em|rem|vw|vh)?$/);
+        if(m&&(e.key==='ArrowUp'||e.key==='ArrowDown')){
+          e.preventDefault();
+          const step=e.shiftKey?10:1;
+          const n=parseFloat(m[1])+(e.key==='ArrowUp'?step:-step);
+          const u=m[2]||'px';
+          this.value=n+u;
+          _dmApply(this.dataset.prop,this.value);
+        }
+      });
+    });
+
+    // Export
+    document.getElementById('dm-export-btn').addEventListener('click',function(){
+      document.getElementById('dm-export-textarea').value=_dmBuildExport();
+      document.getElementById('dm-export-modal').classList.add('visible');
+    });
+    document.getElementById('dm-export-close').addEventListener('click',function(){
+      document.getElementById('dm-export-modal').classList.remove('visible');
+    });
+    document.getElementById('dm-export-copy').addEventListener('click',function(){
+      const ta=document.getElementById('dm-export-textarea');
+      ta.select();
+      try{ document.execCommand('copy'); }catch(e){ navigator.clipboard?.writeText(ta.value); }
+      this.textContent='✓ Copied!';
+      setTimeout(()=>{ this.textContent='Copy to Clipboard'; },2000);
+    });
+    document.getElementById('dm-clear-btn').addEventListener('click',function(){
+      if(confirm('Reset all visual changes?')) _dmClearAll();
+    });
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown',function(e){
+      if(e.ctrlKey&&e.shiftKey&&e.key==='D'){ e.preventDefault(); _dmToggle(); }
+      if(e.key==='Escape'){
+        if(_dm.picking){ _dmStopPicking(); return; }
+        if(_dm.active) _dmToggle();
+      }
+    });
+  });
+
+  window._designMode={ toggle:_dmToggle, clear:_dmClearAll, export:()=>console.log(_dmBuildExport()) };
+})();
+</script>
+
 </body>
 </html>
