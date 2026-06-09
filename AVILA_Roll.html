@@ -6115,7 +6115,14 @@ function renderVesselTable(){
   // Track which split vessels are expanded
   if(!window._vcExpanded) window._vcExpanded=new Set();
 
-  tbody.innerHTML=DB.vessel_calls.map((v,i)=>{
+  const _vpProdFilter=_vp?.prodId||'';
+  const _vcVisible=DB.vessel_calls.map((v,i)=>({v,i}))
+    .filter(({v})=>!_vpProdFilter||v.product_id===_vpProdFilter);
+  if(!_vcVisible.length){
+    tbody.innerHTML=`<tr><td colspan="9" style="color:var(--text-dim);text-align:center;padding:14px">No vessel calls match the current product filter</td></tr>`;
+    return;
+  }
+  tbody.innerHTML=_vcVisible.map(({v,i})=>{
     const prod=DB.products.find(p=>p.id===v.product_id);
     const locked=_tsLocked(v.status||'Planned');
     const nextSt=_tsNext(v.status||'Planned');
@@ -6289,6 +6296,15 @@ function rpGetDestDemEls(destFacId){
     (e.assigned_facility_id||e.facility_id)===destFacId);
 }
 
+// Helper: does a demand element serve a given product?
+// Checks DB.demand_points catalog first, falls back to element's own product_id prop
+function _demElMatchesProd(el, prodId){
+  if(!prodId) return true;
+  const dp=(DB.demand_points||[]).find(d=>d.element_id===el.id);
+  if(dp?.products?.length) return dp.products.some(p=>p.product_id===prodId);
+  return (el.props?.product_id||'')=== prodId;
+}
+
 // ── View range ────────────────────────────────────────────────────
 function rpSetView(preset,btn){
   _rp.view=preset;
@@ -6393,6 +6409,7 @@ function rpToggleProd(prodId){
   _rp.prodId=_rp.prodId===prodId?'':prodId;
   rpBuildProdFilter();
   rpRender();
+  renderRailTable();
 }
 
 // ── Demand rate helper ────────────────────────────────────────────
@@ -6539,8 +6556,8 @@ function rpRender(){
       destRows.push(`<tr class="tp-row-unload"><td style="padding-left:14px;color:var(--green);font-size:10px">Rail unload</td>${unldCells}</tr>`);
     }
 
-    // INVENTORY row
-    if(destSilo){
+    // INVENTORY row — only show if silo holds the selected product (or no product filter)
+    if(destSilo&&(!_rp.prodId||getSiloProducts(destSilo).includes(_rp.prodId))){
       const invCells=days.map(d=>{
         const v=rpInv(destSilo.id,d);
         const max=parseFloat(destSilo.props?.max_capacity)||0;
@@ -6552,8 +6569,8 @@ function rpRender(){
       destRows.push(`<tr class="tp-row-inv"><td style="padding-left:14px">${destSilo.name}</td>${invCells}</tr>`);
     }
 
-    // DEMAND rows
-    demEls.forEach(el=>{
+    // DEMAND rows — only show demand points related to the selected product
+    demEls.filter(el=>_demElMatchesProd(el,_rp.prodId)).forEach(el=>{
       const demCells=days.map(d=>{
         const v=rpDemand(el.id,d);
         return `<td style="color:var(--amber)">${v>0?Number(v).toLocaleString():'—'}</td>`;
@@ -6581,8 +6598,9 @@ function rpRender(){
       // Get all selected destinations this dp serves
       const myDests=_rp.dests.filter(fid=>(dp.props?.destinations||[]).find(d=>d.facility_id===fid));
 
-      // Production inventory silos (main cement silos)
-      const prodSilos=rpGetOriginProdSilos(dp);
+      // Production inventory silos (main cement silos) — filtered by selected product
+      const prodSilos=rpGetOriginProdSilos(dp)
+        .filter(s=>!_rp.prodId||getSiloProducts(s).includes(_rp.prodId));
       prodSilos.forEach(silo=>{
         const invCells=days.map(d=>{
           const v=rpInv(silo.id,d);
@@ -6591,8 +6609,8 @@ function rpRender(){
         origRows.push(`<tr class="tp-row-orig-inv"><td style="color:#ff9433">${silo.name}</td>${invCells}</tr>`);
       });
 
-      // RAIL transfer silo inventory
-      if(railSilo){
+      // RAIL transfer silo inventory — filtered by selected product
+      if(railSilo&&(!_rp.prodId||getSiloProducts(railSilo).includes(_rp.prodId))){
         const railCells=days.map(d=>{
           const v=rpInv(railSilo.id,d);
           return `<td style="color:#38bdf8">${v!==null?Number(v).toLocaleString():'—'}</td>`;
@@ -7070,6 +7088,7 @@ function vpToggleProd(prodId){
   _vp.prodId=_vp.prodId===prodId?'':prodId;
   vpBuildProdFilter();
   vpRender();
+  renderVesselTable();
 }
 
 function vpRender(){
@@ -7148,8 +7167,8 @@ function vpRender(){
         destRows.push(`<tr class="tp-row-unload"><td style="padding-left:14px;color:var(--green);font-size:10px">Vessel unload</td>${unldCells}</tr>`);
       }
 
-      // INVENTORY row
-      if(destSilo){
+      // INVENTORY row — only show if silo holds the selected product (or no product filter)
+      if(destSilo&&(!_vp.prodId||getSiloProducts(destSilo).includes(_vp.prodId))){
         const invCells=days.map(d=>{
           const v=rpInv(destSilo.id,d);
           const max=parseFloat(destSilo.props?.max_capacity)||0;
@@ -7161,8 +7180,8 @@ function vpRender(){
         destRows.push(`<tr class="tp-row-inv"><td style="padding-left:14px">${destSilo.name}</td>${invCells}</tr>`);
       }
 
-      // DEMAND rows
-      demEls.forEach(el=>{
+      // DEMAND rows — only show demand points related to the selected product
+      demEls.filter(el=>_demElMatchesProd(el,_vp.prodId)).forEach(el=>{
         const demCells=days.map(d=>{const v=rpDemand(el.id,d);return `<td style="color:var(--amber)">${v>0?Number(v).toLocaleString():'—'}</td>`;}).join('');
         destRows.push(`<tr class="tp-row-dem"><td style="padding-left:14px">${el.name}</td>${demCells}</tr>`);
       });
@@ -7342,8 +7361,10 @@ function renderRailTable(){
   const {startDay,endDay}=rpGetRange();
   const startDate=rpDayDate(startDay);
   const endDate=rpDayDate(endDay);
+  const prodFilter=_rp?.prodId||'';
   const filtered=DB.rail_movements.map((r,i)=>({r,i})).filter(({r})=>{
     if(destFilter.length&&!destFilter.includes(r.to_facility_id)) return false;
+    if(prodFilter&&r.product_id!==prodFilter) return false;
     const dep=r.departure_date||r.date||'';
     if(dep&&dep<startDate) return false;
     if(dep&&dep>endDate) return false;
