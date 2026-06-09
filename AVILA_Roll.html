@@ -989,7 +989,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
           <option value="">All Facilities</option>
         </select>
         <span class="vw-label">Product</span>
-        <select id="dem-prod-filter" style="padding:3px 8px;background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:9px;opacity:.4" onchange="_demOnProdChange()" disabled>
+        <select id="dem-prod-filter" style="padding:3px 8px;background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:9px" onchange="_demOnProdChange()">
           <option value="">All Products</option>
         </select>
         <button class="tb-btn sec" style="margin-left:auto" onclick="_demClearFilters()">✕ Clear</button>
@@ -4313,38 +4313,48 @@ function renderDemandView(){
   const collapsed=window._demColapsed;
   const grpCol=window._demGrpCol;
 
-  // ── Facility + product filter ─────────────────────────────────────────
+  // ── Facility + product filter (bidirectional) ────────────────────────
   if(!window._demFilter) window._demFilter={facId:'',prodId:''};
   const _df=window._demFilter;
+
+  // Build per-facility product map (using the unfiltered allDpEls)
+  const _dfFacProdMap={}; // facId → Set<productId>
+  const _dfAllProdIds=new Set();
+  allDpEls.forEach(el=>{
+    const fId=_facForEl(el);
+    if(!_dfFacProdMap[fId]) _dfFacProdMap[fId]=new Set();
+    const dp=(DB.demand_points||[]).find(d=>d.element_id===el.id);
+    if(dp?.products?.length){
+      dp.products.forEach(p=>{ if(p.product_id){ _dfFacProdMap[fId].add(p.product_id); _dfAllProdIds.add(p.product_id); } });
+    } else if(el.props?.product_id){
+      _dfFacProdMap[fId].add(el.props.product_id); _dfAllProdIds.add(el.props.product_id);
+    }
+  });
+
+  // Facility dropdown — narrows to facilities carrying the selected product (if any)
   const _demFacSel=document.getElementById('dem-fac-filter');
   if(_demFacSel){
-    const _dfFacIds=[...new Set(allDpEls.map(el=>_facForEl(el)))];
-    const _dfFacs=_dfFacIds.map(id=>DB.facilities.find(f=>f.id===id)).filter(Boolean)
+    const allFacIds=[...new Set(allDpEls.map(el=>_facForEl(el)))];
+    const shownFacIds=_df.prodId
+      ? allFacIds.filter(fId=>_dfFacProdMap[fId]?.has(_df.prodId))
+      : allFacIds;
+    const _dfFacs=shownFacIds.map(id=>DB.facilities.find(f=>f.id===id)).filter(Boolean)
       .sort((a,b)=>a.name.localeCompare(b.name));
     _demFacSel.innerHTML=`<option value="">All Facilities</option>`+
       _dfFacs.map(f=>`<option value="${f.id}"${f.id===_df.facId?' selected':''}>${f.name}</option>`).join('');
   }
+
+  // Product dropdown — narrows to products at the selected facility (if any)
   const _demProdSel=document.getElementById('dem-prod-filter');
   if(_demProdSel){
-    if(_df.facId){
-      const _dfFacEls=allDpEls.filter(el=>_facForEl(el)===_df.facId);
-      const _dfProdIds=new Set();
-      _dfFacEls.forEach(el=>{
-        const dp=(DB.demand_points||[]).find(d=>d.element_id===el.id);
-        if(dp?.products?.length) dp.products.forEach(p=>{ if(p.product_id) _dfProdIds.add(p.product_id); });
-        else if(el.props?.product_id) _dfProdIds.add(el.props.product_id);
-      });
-      const _dfProds=[..._dfProdIds].map(id=>DB.products.find(p=>p.id===id)).filter(Boolean)
-        .sort((a,b)=>(a.name||a.id).localeCompare(b.name||b.id));
-      _demProdSel.innerHTML=`<option value="">All Products</option>`+
-        _dfProds.map(p=>`<option value="${p.id}"${p.id===_df.prodId?' selected':''}>${p.name||p.id}</option>`).join('');
-      _demProdSel.disabled=false; _demProdSel.style.opacity='1';
-    } else {
-      _demProdSel.innerHTML='<option value="">All Products</option>';
-      _demProdSel.disabled=true; _demProdSel.style.opacity='.4';
-      _df.prodId='';
-    }
+    const prodIds=_df.facId ? [...(_dfFacProdMap[_df.facId]||[])] : [..._dfAllProdIds];
+    const _dfProds=prodIds.map(id=>DB.products.find(p=>p.id===id)).filter(Boolean)
+      .sort((a,b)=>(a.name||a.id).localeCompare(b.name||b.id));
+    _demProdSel.innerHTML=`<option value="">All Products</option>`+
+      _dfProds.map(p=>`<option value="${p.id}"${p.id===_df.prodId?' selected':''}>${p.name||p.id}</option>`).join('');
+    _demProdSel.disabled=false; _demProdSel.style.opacity='1';
   }
+
   // Apply filters — reassign allDpEls to filtered subset for all table rendering below
   if(_df.facId) allDpEls=allDpEls.filter(el=>_facForEl(el)===_df.facId);
   if(_df.prodId) allDpEls=allDpEls.filter(el=>_demElMatchesProd(el,_df.prodId));
@@ -4619,7 +4629,6 @@ function _demToggleGrp(id){
 function _demOnFacChange(){
   if(!window._demFilter) window._demFilter={facId:'',prodId:''};
   window._demFilter.facId=document.getElementById('dem-fac-filter')?.value||'';
-  window._demFilter.prodId=''; // reset product when facility changes
   renderDemandView();
 }
 function _demOnProdChange(){
