@@ -1484,6 +1484,9 @@ const DB = {
   // Production schedule
   production_schedule: [], // { id, element_id, product_id, date_from, date_to }
 
+  // Manager production campaigns — locked, simulation cannot override
+  production_campaigns: [], // { id, element_id, product_id, start_date, end_date, rate_tpd, notes }
+
   // Simulation rules — natural language rules interpreted by Claude, stored as structured constraints
   simulation_rules: [], // { id, name, facility_ids[], element_ids[], natural_text, structured:{type,params}, date_from, date_to, status:'active'|'disabled'|'conflicted', conflict_ids:[], created_at }
 
@@ -3229,6 +3232,141 @@ function openMaintenanceEventById(id){
   editMaintEvent(id);
 }
 
+// ═══════════════════════════════════════════════════════════════
+// PRODUCTION CAMPAIGN MANAGER
+// ═══════════════════════════════════════════════════════════════
+
+function getActiveCampaign(elId, dateStr){
+  return (DB.production_campaigns||[]).find(c=>
+    c.element_id===elId && dateStr>=c.start_date && dateStr<=c.end_date
+  )||null;
+}
+
+function showCampaignPopup(elId, dateStr){
+  const el=getEl(elId); if(!el) return;
+  const existing=getActiveCampaign(elId, dateStr);
+  const caps=DB.element_product_capacities.filter(c=>c.element_id===elId);
+  if(!caps.length){ statMsg('No products configured for this element'); return; }
+
+  // Product options
+  const prodOpts=caps.map(c=>{
+    const p=DB.products.find(pr=>pr.id===c.product_id);
+    return `<option value="${c.product_id}" data-rate="${c.capacity_tpd}" ${existing?.product_id===c.product_id?'selected':''}>${p?.name||c.product_id} (${c.capacity_tpd} t/d rated)</option>`;
+  }).join('');
+
+  const currentRate=existing?.rate_tpd||(parseFloat(caps[0].capacity_tpd)||0);
+  const fromVal=existing?.start_date||dateStr;
+  const toVal=existing?.end_date||dateStr;
+
+  const html=`
+  <div style="font-family:var(--mono);font-size:9px;min-width:320px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <div>
+        <div style="font-size:11px;font-weight:700;color:${existing?'#4ade80':'var(--text)'}">
+          ${existing?'🔒 Edit Campaign':'+ New Campaign'}
+        </div>
+        <div style="color:var(--text-dim);margin-top:2px">${el.name} · ${dateStr}</div>
+      </div>
+      <button onclick="closeCampaignPopup()" style="background:transparent;border:none;color:var(--text-dim);cursor:pointer;font-size:16px">✕</button>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <div class="fr s1">
+        <div class="ff">
+          <div class="fl">Product</div>
+          <select class="fi" id="camp-product" onchange="document.getElementById('camp-rate').value=this.options[this.selectedIndex].dataset.rate" style="width:100%">${prodOpts}</select>
+        </div>
+      </div>
+      <div class="fr s2">
+        <div class="ff">
+          <div class="fl">Rate (t/d)</div>
+          <input class="fi" id="camp-rate" type="number" value="${currentRate}" min="0" step="10" style="width:100%">
+        </div>
+        <div style="font-size:8px;color:var(--text-dim);align-self:flex-end;padding-bottom:6px">override topology</div>
+      </div>
+      <div class="fr s2">
+        <div class="ff">
+          <div class="fl">From</div>
+          <input class="fi" id="camp-from" type="date" value="${fromVal}" style="width:100%">
+        </div>
+        <div class="ff">
+          <div class="fl">To</div>
+          <input class="fi" id="camp-to" type="date" value="${toVal}" style="width:100%">
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-top:12px;display:flex;gap:8px;justify-content:space-between">
+      ${existing?`<button onclick="deleteCampaignRange('${elId}','${existing.start_date}','${existing.end_date}')"
+        style="padding:5px 10px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid rgba(255,61,90,.5);color:var(--red);cursor:pointer;border-radius:2px">
+        ✕ Delete Campaign</button>`:'<div></div>'}
+      <div style="display:flex;gap:6px">
+        <button onclick="closeCampaignPopup()" style="padding:5px 12px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid var(--border2);color:var(--text-dim);cursor:pointer;border-radius:2px">Cancel</button>
+        <button onclick="applyCampaign('${elId}')" style="padding:5px 14px;font-family:var(--mono);font-size:9px;background:#4ade80;border:none;color:#000;cursor:pointer;font-weight:700;border-radius:2px">🔒 Apply Campaign</button>
+      </div>
+    </div>
+  </div>`;
+
+  // Show in overlay
+  let ov=document.getElementById('camp-overlay');
+  if(!ov){
+    ov=document.createElement('div');
+    ov.id='camp-overlay';
+    ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center';
+    ov.onclick=e=>{ if(e.target===ov) closeCampaignPopup(); };
+    document.body.appendChild(ov);
+  }
+  ov.innerHTML=`<div style="background:var(--surface);border:1px solid #4ade80;padding:18px;border-radius:6px;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.6)">${html}</div>`;
+  ov.style.display='flex';
+}
+
+function closeCampaignPopup(){
+  const ov=document.getElementById('camp-overlay');
+  if(ov) ov.style.display='none';
+}
+
+function applyCampaign(elId){
+  const productId=document.getElementById('camp-product')?.value;
+  const rateTpd=parseFloat(document.getElementById('camp-rate')?.value)||0;
+  const fromDate=document.getElementById('camp-from')?.value;
+  const toDate=document.getElementById('camp-to')?.value;
+
+  if(!productId||!fromDate||!toDate){ statMsg('Please fill all fields'); return; }
+  if(fromDate>toDate){ statMsg('From date must be before To date'); return; }
+
+  // Remove any overlapping campaigns for this element in the date range
+  DB.production_campaigns=(DB.production_campaigns||[]).filter(c=>
+    c.element_id!==elId || c.end_date<fromDate || c.start_date>toDate
+  );
+
+  // Add new campaign
+  DB.production_campaigns.push({
+    id:'camp_'+Date.now(),
+    element_id:elId,
+    product_id:productId,
+    start_date:fromDate,
+    end_date:toDate,
+    rate_tpd:rateTpd,
+    notes:''
+  });
+
+  closeCampaignPopup();
+  autoSave();
+  renderSupplyView();
+  statMsg('Campaign saved — re-run simulation to update projections');
+}
+
+function deleteCampaignRange(elId, startDate, endDate){
+  if(!confirm(`Delete campaign for ${startDate} → ${endDate}?\nSimulation will resume auto-selection for these days.`)) return;
+  DB.production_campaigns=(DB.production_campaigns||[]).filter(c=>
+    !(c.element_id===elId && c.start_date===startDate && c.end_date===endDate)
+  );
+  closeCampaignPopup();
+  autoSave();
+  renderSupplyView();
+  statMsg('Campaign deleted — simulation auto-selection restored');
+}
+
 function updateMaintEvent(){
   const ev=DB.element_maintenance_events.find(m=>m.id===S._editMaintId); if(!ev) return;
   const vals=getMeFormValues();
@@ -3571,6 +3709,7 @@ function executeDeleteElement(elId){
   if(DB.real_shipments_daily)     DB.real_shipments_daily     = DB.real_shipments_daily.filter(r=>r.element_id!==elId);
   if(DB.real_transfers_daily)     DB.real_transfers_daily     = DB.real_transfers_daily.filter(r=>r.element_id!==elId);
   if(DB.forecast_commitments)     DB.forecast_commitments     = DB.forecast_commitments.filter(r=>r.element_id!==elId);
+  if(DB.production_campaigns)     DB.production_campaigns     = DB.production_campaigns.filter(c=>c.element_id!==elId);
   // simulation_rules stores element_ids as an array — remove this element from each rule's list
   if(DB.simulation_rules) DB.simulation_rules.forEach(rule=>{
     if(Array.isArray(rule.element_ids)) rule.element_ids=rule.element_ids.filter(id=>id!==elId);
@@ -4287,6 +4426,17 @@ function _renderSupplyViewInner(wrap){
       return {product_id:firstProd.product_id, capacity_tpd:totalActual, isActual:true};
     }
 
+    // Tier 0.5: Manager campaign — locked, overrides simulation
+    const managerCampaign=(DB.production_campaigns||[]).find(c=>
+      c.element_id===el.id && ds>=c.start_date && ds<=c.end_date
+    );
+    if(managerCampaign){
+      const campRate=parseFloat(managerCampaign.rate_tpd)||0;
+      const fallbackCap=DB.element_product_capacities.find(c=>c.element_id===el.id&&c.product_id===managerCampaign.product_id);
+      const rate=campRate||(parseFloat(fallbackCap?.capacity_tpd)||0);
+      return {product_id:managerCampaign.product_id, capacity_tpd:rate, isCampaign:true};
+    }
+
     // Tier 1: sim results
     if(hasSim&&r.millProductHistory[el.id]){
       const pid=r.millProductHistory[el.id][dayIdx]||null;
@@ -4824,7 +4974,11 @@ function _renderSupplyViewInner(wrap){
                 const res=resolveProduction(el,ds,dayIdx,maintDays);
                 const v=res.capacity_tpd;
                 const prod=DB.products.find(p=>p.id===res.product_id);
-                h+=`<td class="sup-day-${mon.ym}" title="${prod?.name||''}" style="font-size:9px;color:${v>0?clkColor:'rgba(255,61,90,.4)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${maintDays.has(ds)?`<span style="font-size:7px;font-family:var(--mono);color:var(--amber);letter-spacing:.5px;cursor:pointer;font-weight:700;opacity:.9" onclick="openMaintenanceEventById('${maintDays.get(ds)}')">MAINT</span>`:(v>0?Math.round(v).toLocaleString():'0')}</td>`;
+                const isCamp=res.isCampaign;
+                const campBorder=isCamp?'border-left:2px solid #4ade80;border-right:2px solid #4ade80;':'';
+                const lockBadge=isCamp?'<span style="font-size:7px;color:#4ade80;margin-left:2px" title="Manager campaign">🔒</span>':'';
+                const cellTitle=isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name||'');
+                h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="showCampaignPopup('${el.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?clkColor:'rgba(255,61,90,.4)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${campBorder}${tdSty(ds)}">${maintDays.has(ds)?`<span style="font-size:7px;font-family:var(--mono);color:var(--amber);letter-spacing:.5px;cursor:pointer;font-weight:700;opacity:.9" onclick="openMaintenanceEventById('${maintDays.get(ds)}')">MAINT</span>`:(v>0?Math.round(v).toLocaleString()+lockBadge:'0')}</td>`;
               });
             });
             h+=`</tr>`;
@@ -4870,7 +5024,11 @@ function _renderSupplyViewInner(wrap){
                 const v=res.capacity_tpd;
                 const prod=DB.products.find(p=>p.id===res.product_id);
                 const pColor=prod?PRODUCT_CAT_COLORS[prod.category||'']||cemColor:cemColor;
-                h+=`<td class="sup-day-${mon.ym}" title="${prod?.name||''}" style="font-size:9px;color:${v>0?pColor:'rgba(255,61,90,.4)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${maintDays.has(ds)?`<span style="font-size:7px;font-family:var(--mono);color:var(--amber);letter-spacing:.5px;cursor:pointer;font-weight:700;opacity:.9" onclick="openMaintenanceEventById('${maintDays.get(ds)}')">MAINT</span>`:(v>0?Math.round(v).toLocaleString():'0')}</td>`;
+                const isCamp=res.isCampaign;
+                const campBorder=isCamp?'border-left:2px solid #4ade80;border-right:2px solid #4ade80;':'';
+                const lockBadge=isCamp?'<span style="font-size:7px;color:#4ade80;margin-left:2px" title="Manager campaign">🔒</span>':'';
+                const cellTitle=isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name||'');
+                h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="showCampaignPopup('${el.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?pColor:'rgba(255,61,90,.4)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${campBorder}${tdSty(ds)}">${maintDays.has(ds)?`<span style="font-size:7px;font-family:var(--mono);color:var(--amber);letter-spacing:.5px;cursor:pointer;font-weight:700;opacity:.9" onclick="openMaintenanceEventById('${maintDays.get(ds)}')">MAINT</span>`:(v>0?Math.round(v).toLocaleString()+lockBadge:'0')}</td>`;
               });
             });
             h+=`</tr>`;
@@ -8348,6 +8506,62 @@ function simulate(elements, connections, horizon, includeProposed=false){
                 cs.composition[clkProdId]=Math.max(0,(cs.composition[clkProdId]||0)-consumed);
             }
             return; // skip normal routing
+          }
+        }
+      }
+
+      // ── MANAGER CAMPAIGN OVERRIDE ────────────────────────
+      // If a manager campaign is defined for this element+day, force that product/rate
+      {
+        const campDate=new Date(simStartDate.getTime()+(day-1)*864e5).toISOString().split('T')[0];
+        const camp=(DB.production_campaigns||[]).find(c=>
+          c.element_id===mill.id && campDate>=c.start_date && campDate<=c.end_date
+        );
+        if(camp){
+          const campProdId=camp.product_id;
+          const campRate=parseFloat(camp.rate_tpd)||0;
+          const campCap=caps.find(c=>c.product_id===campProdId);
+          const ratedTPD=campRate||(parseFloat(campCap?.capacity_tpd)||0);
+          if(ratedTPD>0){
+            const rampFactor=s.status==='rampup'?s._rampPct||1:1;
+            const tpd=ratedTPD*rampFactor;
+            const clkSiloC=(millProductClinkerMap[mill.id]||{})[campProdId]||null;
+            const recipeC=recipeMap[campProdId]||[];
+            const clkIngC=recipeC.find(ri=>prodMap[ri.material_id]?.category==='clinker'||ri.material_id==='clinker');
+            const clkPctC=clkIngC?clkIngC.pct/100:0;
+            const clkAvailC=clkSiloC?Math.max(0,state[clkSiloC.id]?.inventory||0):Infinity;
+            if(clkPctC>0&&clkAvailC<1){
+              // No clinker — go idle
+              s.status='idle'; r.millProductHistory[mill.id].push(null); return;
+            }
+            s.status=s.status==='rampup'?'rampup':'running';
+            s.currentProduct=campProdId; s.runDays++;
+            r.millProductHistory[mill.id].push(campProdId);
+            const recvSilosC=(millProductSiloMap[mill.id]||{})[campProdId]||[];
+            let remainC=tpd;
+            recvSilosC.forEach(si=>{
+              if(remainC<=0) return;
+              const space=Math.max(0,(state[si.id]?.maxCap||0)-(state[si.id]?.inventory||0));
+              const give=Math.min(remainC,space);
+              if(give>0){
+                siloInflow[si.id]=(siloInflow[si.id]||0)+give;
+                if(!siloSourceTracker[si.id]) siloSourceTracker[si.id]=new Set();
+                siloSourceTracker[si.id].add(mill.id);
+                state[si.id].composition[campProdId]=(state[si.id].composition[campProdId]||0)+give;
+                remainC-=give;
+              }
+            });
+            const actualProd=tpd-remainC;
+            if(clkSiloC&&clkPctC>0){
+              const consumed=actualProd*clkPctC;
+              siloOutflow[clkSiloC.id]=(siloOutflow[clkSiloC.id]||0)+consumed;
+              const clkProdId=getSiloProducts(clkSiloC)[0]||'';
+              const cs=state[clkSiloC.id];
+              if(clkProdId&&cs.composition[clkProdId]!==undefined)
+                cs.composition[clkProdId]=Math.max(0,(cs.composition[clkProdId]||0)-consumed);
+            }
+            totProd+=actualProd;
+            return; // skip normal urgency routing
           }
         }
       }
