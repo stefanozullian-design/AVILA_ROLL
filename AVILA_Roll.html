@@ -7327,90 +7327,123 @@ function vpRenderCharts(){
       !(e.props?.berth_type||'').toLowerCase().includes('rail'));
 
     berths.forEach((berth,bi)=>{
-      // Get ALL destination silos for this berth and filter by active product
       const allDestSilos=rpGetDestSilos(berth);
       const visibleSilos=_vp.prodId
         ? allDestSilos.filter(s=>getSiloProducts(s).includes(_vp.prodId))
         : allDestSilos;
-      if(!visibleSilos.length&&!allDestSilos.length) return;
-
       const allDemEls=rpGetDestDemEls(destFacId);
       const _berthIdCopy=berth.id;
 
-      // Arrival data — already filtered by _vp.prodId inside vpPlannedArrivalsForBerth
+      // Arrival bars — already filtered by _vp.prodId inside vpPlannedArrivalsForBerth
       const arrivals=vpPlannedArrivalsForBerth(berth.id);
       const arrData=days.map(d=>{
         const entries=arrivals[d]||[];
-        if(!entries.length) return null;
-        return entries.reduce((s,e)=>s+e.tonnes,0)||null;
+        return entries.length?entries.reduce((s,e)=>s+e.tonnes,0):null;
       });
       const arrBgColors=days.map(d=>{
         const entries=arrivals[d]||[];
-        if(!entries.length) return 'rgba(255,184,48,.55)';
+        if(!entries.length) return 'rgba(255,184,48,.45)';
         const domSt=_statusPriority.find(s=>entries.some(e=>e.status===s))||entries[0]?.status||'Planned';
-        return _statusChartColor[domSt]||'rgba(255,184,48,.55)';
+        return _statusChartColor[domSt]||'rgba(255,184,48,.45)';
       });
 
-      // One chart per visible silo — each chart shows that silo's inventory + its product demand
+      // Color palette — one entry per silo, inventory line + demand line share same hue
+      const _palette=[
+        {line:'#34d399',fill:'rgba(52,211,153,.12)',dem:'rgba(52,211,153,.55)'},
+        {line:'#60a5fa',fill:'rgba(96,165,250,.12)', dem:'rgba(96,165,250,.55)'},
+        {line:'#f472b6',fill:'rgba(244,114,182,.12)',dem:'rgba(244,114,182,.55)'},
+        {line:'#fb923c',fill:'rgba(251,146,60,.12)', dem:'rgba(251,146,60,.55)'},
+        {line:'#a78bfa',fill:'rgba(167,139,250,.12)',dem:'rgba(167,139,250,.55)'},
+        {line:'#fbbf24',fill:'rgba(251,191,36,.12)', dem:'rgba(251,191,36,.55)'},
+      ];
+
+      // Build one combined dataset array for ALL visible silos
+      const ds=[
+        {label:'Arrivals',data:arrData,type:'bar',order:10,
+         backgroundColor:arrBgColors,
+         borderColor:arrBgColors.map(c=>c.replace(/[\d.]+\)$/,'1)')),
+         borderWidth:1,_u:' t'}
+      ];
+
       visibleSilos.forEach((silo,si)=>{
+        const col=_palette[si%_palette.length];
         const siloProds=getSiloProducts(silo);
         const siloMax=parseFloat(silo.props?.max_capacity)||0;
         const floor=(parseFloat(silo.props?.critical_floor_pct)||10)/100*siloMax;
         const invData=days.map(d=>{const v=rpInv(silo.id,d);return v!==null?v:null;});
-
-        // Demand: only demand points that serve this silo's product(s)
         const siloDemEls=allDemEls.filter(e=>siloProds.some(pid=>_demElMatchesProd(e,pid)));
         const demData=days.map(d=>siloDemEls.reduce((s,e)=>s+rpDemand(e.id,d),0));
+        const prodLabel=DB.products.find(p=>p.id===siloProds[0])?.name||siloProds[0]||silo.name;
 
-        const cid=`vpc1_${di}_${bi}_${si}`;
-        const canvas=mkCanvas(cid);
-        const ds=[
-          {label:'Arrivals',data:arrData,type:'bar',backgroundColor:arrBgColors,
-           borderColor:arrBgColors.map(c=>c.replace(/[\d.]+\)$/,'1)')),borderWidth:1,_u:' t'},
-          {label:'Inventory',data:invData,borderColor:'#34d399',backgroundColor:'rgba(52,211,153,.1)',
-           fill:true,tension:0.2,pointRadius:0,borderWidth:1.5,type:'line',_u:' t'},
-          {label:'Demand/d',data:demData,borderColor:'rgba(251,191,36,.6)',borderDash:[2,3],
-           pointRadius:0,borderWidth:1,type:'line',_u:' t/d'}
-        ];
-        if(siloMax>0) ds.push({label:'Max',data:days.map(()=>siloMax),borderColor:'rgba(255,255,255,.15)',borderDash:[5,3],pointRadius:0,borderWidth:1,type:'line',_u:' t'});
-        if(floor>0)   ds.push({label:'Floor',data:days.map(()=>floor),borderColor:'rgba(248,113,113,.55)',borderDash:[3,3],pointRadius:0,borderWidth:1,type:'line',_u:' t'});
-
-        // Chart title: berth name + silo name (so user knows which product this chart is for)
-        const chartTitle=`VESSEL · ${destFac?.name||destFacId} / ${silo.name}`;
-        const chartOpts={...baseOpts(chartTitle)};
-        chartOpts.onClick=(evt,active)=>{
-          if(!active.length) return;
-          const idx=active[0].index;
-          vpOpenArrivalDialog(_berthIdCopy,String(days[idx]));
-        };
-        chartOpts.onHover=(evt,active)=>{
-          if(evt?.native?.target) evt.native.target.style.cursor=active.length?'pointer':'default';
-        };
-        chartBuilders.push(()=>{
-          _vpCharts[cid]=new Chart(canvas,{type:'bar',data:{labels,datasets:ds},options:chartOpts});
+        ds.push({
+          label:`Inv · ${prodLabel}`,data:invData,type:'line',order:si+1,
+          borderColor:col.line,backgroundColor:col.fill,
+          fill:true,tension:0.2,pointRadius:0,borderWidth:1.5,_u:' t'
+        });
+        if(demData.some(v=>v>0)) ds.push({
+          label:`Dem · ${prodLabel}`,data:demData,type:'line',order:si+1,
+          borderColor:col.dem,borderDash:[3,3],
+          pointRadius:0,borderWidth:1,_u:' t/d'
+        });
+        if(siloMax>0) ds.push({
+          label:'Cap',data:days.map(()=>siloMax),type:'line',order:20,
+          borderColor:col.line.replace(')',',0.2)').replace('rgb','rgba'),
+          borderDash:[5,3],pointRadius:0,borderWidth:1,_u:' t'
+        });
+        if(floor>0) ds.push({
+          label:'Floor',data:days.map(()=>floor),type:'line',order:20,
+          borderColor:'rgba(248,113,113,.4)',borderDash:[3,3],
+          pointRadius:0,borderWidth:1,_u:' t'
         });
       });
 
-      // If product filter is active but no silos match, still show the arrival chart alone
-      if(_vp.prodId&&!visibleSilos.length){
-        const cid=`vpc1_${di}_${bi}_arr`;
-        const canvas=mkCanvas(cid);
-        const ds=[
-          {label:'Arrivals',data:arrData,type:'bar',backgroundColor:arrBgColors,
-           borderColor:arrBgColors.map(c=>c.replace(/[\d.]+\)$/,'1)')),borderWidth:1,_u:' t'}
-        ];
-        const chartOpts={...baseOpts(`VESSEL · ${destFac?.name||destFacId} / ${berth.name}`)};
-        chartOpts.onClick=(evt,active)=>{
+      // Chart options — show legend only when multiple products present
+      const multiProd=visibleSilos.length>1;
+      const cid=`vpc1_${di}_${bi}`;
+      const canvas=mkCanvas(cid);
+      // Make the chart a bit taller when legend is shown
+      canvas.parentElement.style.height=multiProd?'220px':'180px';
+
+      const chartOpts={
+        responsive:true,maintainAspectRatio:false,
+        plugins:{
+          title:{display:true,
+            text:`VESSEL · ${destFac?.name||destFacId} / ${berth.name}${_vp.prodId?(' · '+(_vp.prodId)):''}`,
+            color:'#8e9ab8',font:{family:'Space Mono',size:8},padding:{top:0,bottom:4}},
+          legend:{
+            display:multiProd,position:'top',
+            labels:{color:'#8e9ab8',font:{family:'Space Mono',size:7},
+              boxWidth:10,padding:6,
+              // Hide Cap/Floor from legend to reduce noise
+              filter:item=>item.text!=='Cap'&&item.text!=='Floor'}
+          },
+          tooltip:{mode:'index',intersect:false,
+            callbacks:{
+              title:its=>its[0]?.label||'',
+              label:c=>{const v=c.raw;if(v==null||v===0)return '';
+                return `${c.dataset.label}: ${Number(Math.round(v)).toLocaleString()}${c.dataset._u||' t'}`;}
+            }
+          }
+        },
+        scales:{
+          x:{grid:{color:'rgba(255,255,255,.03)'},
+            ticks:{color:'#8e9ab8',font:{family:'Space Mono',size:7},maxTicksLimit:8,autoSkip:true,maxRotation:0}},
+          y:{beginAtZero:true,grid:{color:'rgba(255,255,255,.06)'},
+            ticks:{color:'#8e9ab8',font:{family:'Space Mono',size:7},
+              callback:v=>v>=1000?Math.round(v/100)/10+'k':Math.round(v)}}
+        },
+        onClick:(evt,active)=>{
           if(!active.length) return;
           vpOpenArrivalDialog(_berthIdCopy,String(days[active[0].index]));
-        };
-        chartOpts.onHover=(evt,active)=>{
+        },
+        onHover:(evt,active)=>{
           if(evt?.native?.target) evt.native.target.style.cursor=active.length?'pointer':'default';
-        };
-        chartBuilders.push(()=>{
-          _vpCharts[cid]=new Chart(canvas,{type:'bar',data:{labels,datasets:ds},options:chartOpts});
-        });
-      }
+        }
+      };
+
+      chartBuilders.push(()=>{
+        _vpCharts[cid]=new Chart(canvas,{type:'bar',data:{labels,datasets:ds},options:chartOpts});
+      });
     });
   });
 
