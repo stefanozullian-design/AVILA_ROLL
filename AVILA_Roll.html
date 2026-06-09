@@ -1019,7 +1019,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
           <option value="">All Facilities</option>
         </select>
         <!-- Product filter -->
-        <select id="sup-prod-filter" style="padding:3px 8px;background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:9px" onchange="renderSupplyView()">
+        <select id="sup-prod-filter" style="padding:3px 8px;background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:9px" onchange="if(!window._supView)window._supView={};window._supView.prodId=this.value;renderSupplyView()">
           <option value="">All Products</option>
         </select>
         <!-- Today button -->
@@ -3808,8 +3808,10 @@ function supSetView(preset, btn){
 }
 
 function supOnFacChange(){
+  if(!window._supView) window._supView={preset:'rom',fromDate:'',toDate:'',facId:'',prodId:''};
   const facId=document.getElementById('sup-fac-filter')?.value||'';
   window._supView.facId=facId;
+  window._supView.prodId='';
   supPopulateProductFilter(facId);
   renderSupplyView();
 }
@@ -4741,8 +4743,21 @@ function _renderSupplyViewInner(wrap){
   const coMap=Object.fromEntries(DB.countries.map(c=>[c.id,c]));
 
   // Collect all production elements (kilns + finish mills + packing plants) from current canvas
+  // Apply facility and product filters from filter bar
+  const _supFacFilter=window._supView?.facId||document.getElementById('sup-fac-filter')?.value||'';
+  const _supProdFilter=window._supView?.prodId||document.getElementById('sup-prod-filter')?.value||'';
   const allEls=getFacElements();
-  const prodEls=allEls.filter(e=>e.type==='kiln'||e.type==='finish_mill'||e.type==='packing_plant');
+  let prodEls=allEls.filter(e=>e.type==='kiln'||e.type==='finish_mill'||e.type==='packing_plant');
+  // Filter by selected facility (assigned_facility_id first)
+  if(_supFacFilter){
+    prodEls=prodEls.filter(e=>(e.assigned_facility_id||e.facility_id)===_supFacFilter);
+  }
+  // Filter by selected product (only show elements that produce the selected product)
+  if(_supProdFilter){
+    prodEls=prodEls.filter(e=>
+      DB.element_product_capacities.some(c=>c.element_id===e.id&&c.product_id===_supProdFilter)
+    );
+  }
 
   if(!prodEls.length){
     wrap.innerHTML=`<div style="font-family:var(--mono);font-size:10px;color:var(--text-dim);padding:30px;text-align:center">No kilns or finish mills in the topology.</div>`;
