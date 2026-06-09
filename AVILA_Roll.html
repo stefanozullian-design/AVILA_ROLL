@@ -10826,45 +10826,60 @@ function renderDtree(r){
     if(cemProdGroup) groups.push(cemProdGroup);
   }
 
-  // ── 7. CEM TRANSFERS / IMPORTS ───────────────────────
-  // A) Rail Dispatch outbound (tonnes, per destination)
-  // B) Imports inbound (grouped by terminal, then by product)
+  // ── 7a. RAIL TRANSFERS (one group per origin facility) ──
+  // For each facility that has Rail dispatch_points in `fac`, create a
+  // separate group "Rail Transfers from <Origin>" with per-destination rows.
   {
-    const transferChildren=[];
-    const allEls=getFacElements(); // all canvas elements for connection lookups
-
-    // ── A. Rail Dispatch (outbound, in tonnes) ──────────
-    fac.filter(e=>e.type==='dispatch_point'&&e.props.dispatch_type==='Rail').forEach(dispEl=>{
-      const rh=r.railHistory?.[dispEl.id]||[];
-      const dests=dispEl.props.destinations||[];
-      const carCap=parseFloat(dispEl.props?.car_capacity_t)||112;
-
-      // Section header: total tonnes dispatched per day
-      transferChildren.push({
-        id:`rail_disp_hdr_${dispEl.id}`, label:'Rail Dispatch',
-        days:days.map(d=>{
-          const cars=Object.values(rh[d-1]?.dispatchByDest||{}).reduce((a,b)=>a+b,0);
-          return cars>0?cars*carCap:null;
-        }),
-        color:C_L1, isRate:false, isSectionHeader:true
-      });
-
-      // Per-destination rows (tonnes)
-      dests.forEach(dest=>{
-        const destFacName=DB.facilities.find(f=>f.id===dest.facility_id)?.name||'?';
-        transferChildren.push({
-          id:`rail_dest_t_${dispEl.id}_${dest.facility_id}`,
-          label:`  → ${destFacName} (${dest.transit_days||1}d transit)`,
-          days:days.map(d=>{
-            const cars=rh[d-1]?.dispatchByDest?.[dest.facility_id]||0;
-            return cars>0?cars*carCap:null;
-          }),
-          color:C_L2, isRate:false
-        });
-      });
+    const allEls=getFacElements();
+    // Group dispatch elements by their origin facility
+    const dispByOrigin={};
+    fac.filter(e=>e.type==='dispatch_point'&&e.props?.dispatch_type==='Rail').forEach(dispEl=>{
+      const origId=dispEl.assigned_facility_id||dispEl.facility_id||S.facility_id;
+      if(!dispByOrigin[origId]) dispByOrigin[origId]=[];
+      dispByOrigin[origId].push(dispEl);
     });
 
-    // ── B. Imports (inbound, by terminal → product) ─────
+    Object.entries(dispByOrigin)
+      .sort(([a],[b])=>(DB.facilities.find(f=>f.id===a)?.name||a)
+                       .localeCompare(DB.facilities.find(f=>f.id===b)?.name||b))
+      .forEach(([origId,dispEls])=>{
+        const origName=DB.facilities.find(f=>f.id===origId)?.name||origId;
+        const railChildren=[];
+
+        dispEls.forEach(dispEl=>{
+          const rh=r.railHistory?.[dispEl.id]||[];
+          const dests=dispEl.props.destinations||[];
+          const carCap=parseFloat(dispEl.props?.car_capacity_t)||112;
+          dests.forEach(dest=>{
+            const destFacName=DB.facilities.find(f=>f.id===dest.facility_id)?.name||'?';
+            railChildren.push({
+              id:`rail_dest_t_${dispEl.id}_${dest.facility_id}`,
+              label:`  → ${destFacName} (${dest.transit_days||1}d transit)`,
+              days:days.map(d=>{
+                const cars=rh[d-1]?.dispatchByDest?.[dest.facility_id]||0;
+                return cars>0?cars*carCap:null;
+              }),
+              color:C_L1, isRate:false
+            });
+          });
+        });
+
+        if(!railChildren.length) return;
+        const totals=days.map((_,i)=>railChildren.reduce((s,c)=>s+(c.days[i]||0),0));
+        if(!totals.some(v=>v>0)) return;
+        groups.push({
+          id:`cem_rail_from_${origId}`,
+          label:`Rail Transfers from ${origName}`,
+          color:C_L0, children:railChildren, totals
+        });
+      });
+  }
+
+  // ── 7b. IMPORTS (inbound by terminal → product) ──────
+  {
+    const allEls=getFacElements();
+    const importChildren=[];
+
     // Group berths in `fac` by their terminal facility
     const berthsByTerminal={};
     fac.filter(e=>e.type==='berth').forEach(berth=>{
@@ -10874,16 +10889,13 @@ function renderDtree(r){
     });
 
     Object.entries(berthsByTerminal)
-      .sort(([a],[b])=>{
-        const na=DB.facilities.find(f=>f.id===a)?.name||a;
-        const nb=DB.facilities.find(f=>f.id===b)?.name||b;
-        return na.localeCompare(nb);
-      })
+      .sort(([a],[b])=>(DB.facilities.find(f=>f.id===a)?.name||a)
+                       .localeCompare(DB.facilities.find(f=>f.id===b)?.name||b))
       .forEach(([termId,berths])=>{
         const termName=DB.facilities.find(f=>f.id===termId)?.name||termId;
 
-        // Aggregate per-product unload across all silos downstream of all berths in this terminal
-        const prodUnload={}; // prodId -> array of daily tonnes
+        // Aggregate per-product unload across all silos downstream of berths in this terminal
+        const prodUnload={}; // prodId -> days array of cumulative tonnes
         berths.forEach(berth=>{
           const downSilos=allEls.filter(e=>e.type==='bulk_silo'&&
             DB.connections.some(c=>c.from_element_id===berth.id&&c.to_element_id===e.id));
@@ -10905,13 +10917,13 @@ function renderDtree(r){
         if(!termTotals.some(v=>v>0)) return;
 
         // Terminal header row
-        transferChildren.push({
+        importChildren.push({
           id:`import_term_${termId}`, label:termName,
           days:termTotals,
           color:C_L1, isRate:true, isSectionHeader:true
         });
 
-        // Per-product rows, sorted by product name
+        // Per-product rows, sorted alphabetically
         Object.entries(prodUnload)
           .sort(([a],[b])=>{
             const na=a==='__unknown__'?'ZZZ':DB.products.find(p=>p.id===a)?.name||a;
@@ -10920,7 +10932,7 @@ function renderDtree(r){
           })
           .forEach(([pid,arr])=>{
             const prodName=pid==='__unknown__'?'(Other)':DB.products.find(p=>p.id===pid)?.name||pid;
-            transferChildren.push({
+            importChildren.push({
               id:`import_prod_${termId}_${pid}`,
               label:`  ${prodName}`,
               days:arr.map(v=>v>0?Math.round(v*10)/10:null),
@@ -10929,9 +10941,12 @@ function renderDtree(r){
           });
       });
 
-    if(transferChildren.length)
-      groups.push({id:'cem_transfers',label:'CEM Transfers / Imports',color:C_L0,
-        children:transferChildren,totals:days.map(()=>null)});
+    if(importChildren.length){
+      const importTotals=days.map((_,i)=>
+        importChildren.filter(c=>c.isSectionHeader).reduce((s,c)=>s+(c.days[i]||0),0));
+      groups.push({id:'cem_imports',label:'Imports',color:C_L0,
+        children:importChildren,totals:importTotals});
+    }
   }
 
   // ── RENDER TABLE ──
