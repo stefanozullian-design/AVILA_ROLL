@@ -6352,18 +6352,21 @@ function rpToggleDest(facId,ev){
 
 // ── Rail product filter ───────────────────────────────────────────
 function rpGetRailProducts(){
+  // Only show products that are relevant to the currently-selected destination(s)
+  if(!_rp.dests.length) return [];
   const allEls=getFacElements();
   const prodIds=new Set();
-  // From existing rail movements involving current facility
-  DB.rail_movements
-    .filter(r=>r.from_facility_id===S.facility_id||r.to_facility_id===S.facility_id)
-    .forEach(r=>{ if(r.product_id) prodIds.add(r.product_id); });
-  // From element_product_capacities for this facility's production/silo elements
-  allEls.filter(e=>['kiln','finish_mill','bulk_silo','dispatch_point'].includes(e.type))
-    .forEach(el=>{
-      DB.element_product_capacities.filter(c=>c.element_id===el.id)
-        .forEach(c=>{ if(c.product_id) prodIds.add(c.product_id); });
+  // Source 1: accepted_products listed in dispatch point destination configs
+  allEls.filter(e=>e.type==='dispatch_point'&&e.props?.dispatch_type==='Rail')
+    .forEach(dp=>{
+      (dp.props?.destinations||[])
+        .filter(d=>_rp.dests.includes(d.facility_id))
+        .forEach(d=>(d.accepted_products||[]).forEach(pid=>{ if(pid) prodIds.add(pid); }));
     });
+  // Source 2: products on existing rail movements going TO selected destinations
+  DB.rail_movements
+    .filter(rm=>_rp.dests.includes(rm.to_facility_id))
+    .forEach(rm=>{ if(rm.product_id) prodIds.add(rm.product_id); });
   return [...prodIds]
     .map(id=>DB.products.find(p=>p.id===id))
     .filter(Boolean)
@@ -7015,23 +7018,33 @@ function vpToggleDest(facId,ev){
 
 // ── Vessel product filter ─────────────────────────────────────────
 function vpGetVesselProducts(){
+  // Only show products that are relevant to the currently-selected destination(s)
+  if(!_vp.dests.length) return [];
   const allEls=getFacElements();
+  const allConns=DB.connections.filter(c=>c.facility_id===S.facility_id);
   const prodIds=new Set();
-  // Berths at current facility
-  const berthIds=new Set(allEls.filter(e=>e.type==='berth').map(e=>e.id));
-  // From existing vessel calls at these berths
+  // Berths assigned to the selected destination facilities (non-rail berths)
+  const destBerthIds=new Set(
+    allEls.filter(e=>e.type==='berth'&&
+      !(e.props?.berth_type||'').toLowerCase().includes('rail')&&
+      _vp.dests.includes(e.assigned_facility_id||e.facility_id))
+    .map(e=>e.id)
+  );
+  if(!destBerthIds.size) return [];
+  // Source 1: products on existing vessel_calls at those berths
   DB.vessel_calls.forEach(vc=>{
     if(!vc.product_id) return;
-    const atBerth=berthIds.has(vc.berth_element_id)||
-      (vc.legs||[]).some(l=>berthIds.has(l.berth_element_id));
+    const atBerth=destBerthIds.has(vc.berth_element_id)||
+      (vc.legs||[]).some(l=>destBerthIds.has(l.berth_element_id));
     if(atBerth) prodIds.add(vc.product_id);
   });
-  // From element_product_capacities for this facility's elements
-  allEls.filter(e=>['kiln','finish_mill','bulk_silo','berth'].includes(e.type))
-    .forEach(el=>{
-      DB.element_product_capacities.filter(c=>c.element_id===el.id)
-        .forEach(c=>{ if(c.product_id) prodIds.add(c.product_id); });
+  // Source 2: products from silos connected downstream of those berths
+  [...destBerthIds].forEach(berthId=>{
+    allConns.filter(c=>c.from_element_id===berthId).forEach(c=>{
+      const silo=allEls.find(e=>e.id===c.to_element_id&&e.type==='bulk_silo');
+      if(silo) getSiloProducts(silo).forEach(pid=>{ if(pid) prodIds.add(pid); });
     });
+  });
   return [...prodIds]
     .map(id=>DB.products.find(p=>p.id===id))
     .filter(Boolean)
