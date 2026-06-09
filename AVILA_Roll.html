@@ -5008,35 +5008,61 @@ function _renderSupplyViewInner(wrap){
         const demandPoints=DB.demand_points.filter(dp=>demandEls.some(el=>el.id===dp.element_id));
 
         // ══════════════════════════════════════════════════════════════
-        // SECTION 1: PRODUCT REQUIREMENTS (from demand points)
+        // SECTION 1: TOTAL NEED (direct demand + rail loading in tonnes)
         // ══════════════════════════════════════════════════════════════
-
-        if(demandPoints.length>0){
+        {
           const prodReqColor='#4da6ff';
-          // Get unique products demanded
+          // Collect unique products from demand points at this facility
           const productsSet=new Set();
           demandPoints.forEach(dp=>{
-            (dp.products||[]).forEach(p=>{
-              productsSet.add(p.product_id);
+            (dp.products||[]).forEach(p=>{ productsSet.add(p.product_id); });
+          });
+          // Also add products from rail dispatch points at this facility
+          const dispEls=facEls.filter(e=>e.type==='dispatch_point'&&e.props?.dispatch_type==='Rail');
+          dispEls.forEach(dispEl=>{
+            if(r?.railHistory?.[dispEl.id]){
+              r.railHistory[dispEl.id].forEach(entry=>{
+                Object.keys(entry?.carsLoadedByProduct||{}).forEach(pid=>productsSet.add(pid));
+              });
+            }
+            (dispEl.props?.destinations||[]).forEach(dest=>{
+              (dest.accepted_products||[]).forEach(pid=>productsSet.add(pid));
             });
           });
+
+          // Helper: total need for a product on a given date
+          // = local direct demand + (rail cars loaded × car_capacity_t)
+          const totalNeed=(prodId, ds)=>{
+            const dpts=demandPoints.filter(dp=>dp.products?.some(p=>p.product_id===prodId));
+            const directDemand=dpts.reduce((sum,dp)=>{
+              const el=demandEls.find(e=>e.id===dp.element_id);
+              return sum+(_demandRate(el.id,ds)||0);
+            },0);
+            const dayIdx=allDates.indexOf(ds);
+            const railLoad=dispEls.reduce((sum,dispEl)=>{
+              if(dayIdx<0) return sum;
+              const rh=r?.railHistory?.[dispEl.id]||[];
+              const cars=rh[dayIdx]?.carsLoadedByProduct?.[prodId]||0;
+              const carCap=parseFloat(dispEl.props?.car_capacity_t)||112;
+              return sum+cars*carCap;
+            },0);
+            return directDemand+railLoad;
+          };
 
           if(productsSet.size>0){
             // Section header row
             h+=`<tr style="background:rgba(77,166,255,.05);border-top:2px solid rgba(77,166,255,.3)">
-              <td style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${prodReqColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase">▸ PRODUCT REQUIREMENTS</td>`;
+              <td style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${prodReqColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase">▸ TOTAL NEED <span style="font-size:7px;opacity:.6;font-weight:400;margin-left:4px">direct demand + rail loading</span></td>`;
             months.forEach(mon=>{
               const isCol=collapsed.has(mon.ym);
               h+=`<td style="border-left:2px solid rgba(77,166,255,.2);font-size:9px;color:${prodReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)"></td>`;
-              if(!isCol){
-                mon.dates.forEach(ds=>{
-                  h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}"></td>`;
-                });
-              }
+              if(!isCol) mon.dates.forEach(ds=>{
+                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}"></td>`;
+              });
             });
             h+=`</tr>`;
 
-            // One row per product
+            // One row per product: total need
             Array.from(productsSet).sort().forEach(prodId=>{
               const prod=DB.products.find(p=>p.id===prodId);
               const prodName=prod?.name||prodId;
@@ -5044,25 +5070,12 @@ function _renderSupplyViewInner(wrap){
                 <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${prodReqColor};font-size:9px">${prodName}</td>`;
               months.forEach(mon=>{
                 const isCol=collapsed.has(mon.ym);
-                const mt=mon.dates.reduce((s,ds)=>{
-                  const dpts=demandPoints.filter(dp=>dp.products&&dp.products.some(p=>p.product_id===prodId));
-                  const demand=dpts.reduce((sum,dp)=>{
-                    const el=demandEls.find(e=>e.id===dp.element_id);
-                    return sum+(_demandRate(el.id,ds)||0);
-                  },0);
-                  return s+demand;
-                },0);
+                const mt=mon.dates.reduce((s,ds)=>s+totalNeed(prodId,ds),0);
                 h+=`<td style="border-left:2px solid rgba(77,166,255,.1);font-size:9px;color:${prodReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
-                if(!isCol){
-                  mon.dates.forEach(ds=>{
-                    const dpts=demandPoints.filter(dp=>dp.products&&dp.products.some(p=>p.product_id===prodId));
-                    const v=dpts.reduce((sum,dp)=>{
-                      const el=demandEls.find(e=>e.id===dp.element_id);
-                      return sum+(_demandRate(el.id,ds)||0);
-                    },0);
-                    h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${v>0?prodReqColor:'rgba(77,166,255,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
-                  });
-                }
+                if(!isCol) mon.dates.forEach(ds=>{
+                  const v=totalNeed(prodId,ds);
+                  h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${v>0?prodReqColor:'rgba(77,166,255,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
+                });
               });
               h+=`</tr>`;
             });
@@ -10814,113 +10827,107 @@ function renderDtree(r){
   }
 
   // ── 7. CEM TRANSFERS / IMPORTS ───────────────────────
-  // Covers both: outbound rail (dispatch points in fac) and
-  // inbound arrivals (berths in fac, whether rail or vessel).
+  // A) Rail Dispatch outbound (tonnes, per destination)
+  // B) Imports inbound (grouped by terminal, then by product)
   {
     const transferChildren=[];
+    const allEls=getFacElements(); // all canvas elements for connection lookups
 
-    // Outbound rail dispatch (BRS-type plant with dispatch_point)
+    // ── A. Rail Dispatch (outbound, in tonnes) ──────────
     fac.filter(e=>e.type==='dispatch_point'&&e.props.dispatch_type==='Rail').forEach(dispEl=>{
       const rh=r.railHistory?.[dispEl.id]||[];
       const dests=dispEl.props.destinations||[];
-      const switchDays2=dispEl.props.switch_days||[];
-      const upSiloEl=DB.connections.filter(c=>c.to_element_id===dispEl.id)
-        .map(c=>getEl(c.from_element_id)).find(e=>e&&e.type==='bulk_silo');
-      const allProdIds=new Set();
-      rh.forEach(entry=>Object.keys(entry.carsLoadedByProduct||{}).forEach(pid=>allProdIds.add(pid)));
-      if(upSiloEl) getSiloProducts(upSiloEl).forEach(pid=>allProdIds.add(pid));
-      const prodList=[...allProdIds].map(pid=>({id:pid,name:DB.products.find(p=>p.id===pid)?.name||pid}));
+      const carCap=parseFloat(dispEl.props?.car_capacity_t)||112;
 
+      // Section header: total tonnes dispatched per day
       transferChildren.push({
-        id:`rail_silo_hdr_${dispEl.id}`, label:upSiloEl?.name||'Transfer Silo',
+        id:`rail_disp_hdr_${dispEl.id}`, label:'Rail Dispatch',
         days:days.map(d=>{
-          if(!upSiloEl) return null;
-          const hist=r.inventoryHistory[upSiloEl.id]||[];
-          return d<=1?parseFloat(upSiloEl.props?.start_inventory)||0:hist[d-2]??null;
+          const cars=Object.values(rh[d-1]?.dispatchByDest||{}).reduce((a,b)=>a+b,0);
+          return cars>0?cars*carCap:null;
         }),
         color:C_L1, isRate:false, isSectionHeader:true
       });
-      prodList.forEach(pr=>{
+
+      // Per-destination rows (tonnes)
+      dests.forEach(dest=>{
+        const destFacName=DB.facilities.find(f=>f.id===dest.facility_id)?.name||'?';
         transferChildren.push({
-          id:`rail_silo_prod_${dispEl.id}_${pr.id}`, label:`  ${pr.name}`,
-          days:days.map(d=>{const v=rh[d-1]?.siloCompositionByProduct?.[pr.id];return v>0?v:null;}),
+          id:`rail_dest_t_${dispEl.id}_${dest.facility_id}`,
+          label:`  → ${destFacName} (${dest.transit_days||1}d transit)`,
+          days:days.map(d=>{
+            const cars=rh[d-1]?.dispatchByDest?.[dest.facility_id]||0;
+            return cars>0?cars*carCap:null;
+          }),
           color:C_L2, isRate:false
         });
       });
-      transferChildren.push({
-        id:`rail_loading_hdr_${dispEl.id}`, label:'Rail Loading',
-        days:days.map(d=>Object.values(rh[d-1]?.carsLoadedByProduct||{}).reduce((a,b)=>a+b,0)||null),
-        color:C_L1, isRate:false, isSectionHeader:true, unit:'cars'
-      });
-      prodList.forEach(pr=>{
-        transferChildren.push({
-          id:`rail_load_${dispEl.id}_${pr.id}`, label:`  Loading — ${pr.name}`,
-          days:days.map(d=>{const v=rh[d-1]?.carsLoadedByProduct?.[pr.id]||0;return v>0?v:null;}),
-          color:C_L2, isRate:false, unit:'cars'
-        });
-      });
-      transferChildren.push({
-        id:`rail_yard_hdr_${dispEl.id}`, label:'Rail Yard — Cars Available',
-        days:days.map(d=>{const t=Object.values(rh[d-1]?.carsInYardByProduct||{}).reduce((a,b)=>a+b,0);return t>0?t:null;}),
-        color:C_L1, isRate:false, isSectionHeader:true, unit:'cars'
-      });
-      prodList.forEach(pr=>{
-        transferChildren.push({
-          id:`rail_yard_${dispEl.id}_${pr.id}`, label:`  Available — ${pr.name}`,
-          days:days.map(d=>{const v=rh[d-1]?.carsInYardByProduct?.[pr.id]||0;return v>0?v:null;}),
-          color:C_L2, isRate:false, unit:'cars'
-        });
-      });
-      transferChildren.push({
-        id:`rail_disp_hdr_${dispEl.id}`, label:'Rail Dispatch',
-        days:days.map(d=>{const t=Object.values(rh[d-1]?.dispatchByDest||{}).reduce((a,b)=>a+b,0);return t>0?t:null;}),
-        color:C_L1, isRate:false, isSectionHeader:true, unit:'cars'
-      });
-      dests.forEach(dest=>{
-        const facName=DB.facilities.find(f=>f.id===dest.facility_id)?.name||'?';
-        transferChildren.push({
-          id:`rail_dest_${dispEl.id}_${dest.facility_id}`, label:`  → ${facName} (${dest.transit_days||1}d transit)`,
-          days:days.map(d=>{
-            const sd2=new Date(S.simCfg.start_date+'T00:00:00');
-            sd2.setDate(sd2.getDate()+(d-1));
-            if(!switchDays2.includes((sd2.getDay()+6)%7)) return null;
-            const v=rh[d-1]?.dispatchByDest?.[dest.facility_id]||0;
-            return v>0?v:null;
-          }),
-          color:C_L2, isRate:false, unit:'cars'
-        });
-      });
     });
 
-    // Inbound arrivals — berths in fac (terminals: rail or vessel berths)
+    // ── B. Imports (inbound, by terminal → product) ─────
+    // Group berths in `fac` by their terminal facility
+    const berthsByTerminal={};
     fac.filter(e=>e.type==='berth').forEach(berth=>{
-      const hasArr=(r.vesselArrivalHistory?.[berth.id]||[]).some(v=>v>0)||
-                   (r.berthArrivalHistory?.[berth.id]||[]).some(v=>v>0)||
-                   (r.siloUnloadHistory?.[berth.id]||[]).some(v=>v>0);
-      const downSilos=getFacElements().filter(e=>e.type==='bulk_silo'&&
-        DB.connections.some(c=>c.from_element_id===berth.id&&c.to_element_id===e.id));
-      const hasUnload=downSilos.some(s=>(r.siloUnloadHistory?.[s.id]||[]).some(v=>v>0));
-      if(!hasArr&&!hasUnload) return;
-      const isShip=(berth.props?.berth_type||'')!=='Rail Berth'&&berth.name.includes('SHIP');
-      const bLabel=isShip?`⚓ ${berth.name}`:`⇩ ${berth.name}`;
-      transferChildren.push({
-        id:`berth_hdr_${berth.id}`, label:bLabel,
-        days:days.map(d=>{
-          const v=(r.vesselArrivalHistory?.[berth.id]||[])[d-1]||
-                  (r.berthArrivalHistory?.[berth.id]||[])[d-1]||0;
-          return v>0?v:null;
-        }),
-        color:C_L1, isRate:false, isSectionHeader:true
-      });
-      downSilos.forEach(silo=>{
-        const unloadData=days.map(d=>{const v=(r.siloUnloadHistory?.[silo.id]||[])[d-1]||0;return v>0?v:null;});
-        if(unloadData.some(v=>v!==null))
-          transferChildren.push({
-            id:`unload_${silo.id}`, label:`  ⇩ ${silo.name} (t/d)`,
-            days:unloadData, color:C_L2, isRate:true
+      const termId=berth.assigned_facility_id||berth.facility_id||S.facility_id;
+      if(!berthsByTerminal[termId]) berthsByTerminal[termId]=[];
+      berthsByTerminal[termId].push(berth);
+    });
+
+    Object.entries(berthsByTerminal)
+      .sort(([a],[b])=>{
+        const na=DB.facilities.find(f=>f.id===a)?.name||a;
+        const nb=DB.facilities.find(f=>f.id===b)?.name||b;
+        return na.localeCompare(nb);
+      })
+      .forEach(([termId,berths])=>{
+        const termName=DB.facilities.find(f=>f.id===termId)?.name||termId;
+
+        // Aggregate per-product unload across all silos downstream of all berths in this terminal
+        const prodUnload={}; // prodId -> array of daily tonnes
+        berths.forEach(berth=>{
+          const downSilos=allEls.filter(e=>e.type==='bulk_silo'&&
+            DB.connections.some(c=>c.from_element_id===berth.id&&c.to_element_id===e.id));
+          downSilos.forEach(silo=>{
+            const unloadArr=days.map(d=>(r.siloUnloadHistory?.[silo.id]||[])[d-1]||0);
+            if(!unloadArr.some(v=>v>0)) return;
+            const prods=getSiloProducts(silo);
+            const prodKeys=prods.length?prods:['__unknown__'];
+            const share=1/prodKeys.length;
+            prodKeys.forEach(pid=>{
+              if(!prodUnload[pid]) prodUnload[pid]=days.map(()=>0);
+              unloadArr.forEach((v,i)=>{ prodUnload[pid][i]+=v*share; });
+            });
+          });
+        });
+
+        if(!Object.keys(prodUnload).length) return;
+        const termTotals=days.map((_,i)=>Object.values(prodUnload).reduce((s,a)=>s+a[i],0));
+        if(!termTotals.some(v=>v>0)) return;
+
+        // Terminal header row
+        transferChildren.push({
+          id:`import_term_${termId}`, label:termName,
+          days:termTotals,
+          color:C_L1, isRate:true, isSectionHeader:true
+        });
+
+        // Per-product rows, sorted by product name
+        Object.entries(prodUnload)
+          .sort(([a],[b])=>{
+            const na=a==='__unknown__'?'ZZZ':DB.products.find(p=>p.id===a)?.name||a;
+            const nb=b==='__unknown__'?'ZZZ':DB.products.find(p=>p.id===b)?.name||b;
+            return na.localeCompare(nb);
+          })
+          .forEach(([pid,arr])=>{
+            const prodName=pid==='__unknown__'?'(Other)':DB.products.find(p=>p.id===pid)?.name||pid;
+            transferChildren.push({
+              id:`import_prod_${termId}_${pid}`,
+              label:`  ${prodName}`,
+              days:arr.map(v=>v>0?Math.round(v*10)/10:null),
+              color:C_L2, isRate:true
+            });
           });
       });
-    });
 
     if(transferChildren.length)
       groups.push({id:'cem_transfers',label:'CEM Transfers / Imports',color:C_L0,
