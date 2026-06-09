@@ -299,6 +299,7 @@ select.pi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
 .tp-header-right{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
 .tp-dest-chip{padding:3px 10px;font-family:var(--mono);font-size:9px;cursor:pointer;border:1px solid var(--border2);color:var(--text-dim);background:var(--surface2);transition:all .15s;white-space:nowrap;user-select:none;}
 .tp-dest-chip.active{border-color:var(--blue);color:var(--blue);background:rgba(77,166,255,.1);}
+.tp-prod-chip.active-prod{border-color:var(--amber);color:var(--amber);background:rgba(255,184,48,.1);}
 .tp-section-hdr{font-family:var(--mono);font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim);padding:4px 0 6px;border-bottom:1px solid var(--border2);margin-bottom:0;}
 .tp-table-wrap{overflow-x:auto;max-width:100%;}
 .tp-table{border-collapse:collapse;font-family:var(--mono);font-size:10px;white-space:nowrap;}
@@ -1206,9 +1207,15 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
                 <button class="vw-btn"         onclick="vpSetView('eoy',this)">Rest of Year</button>
                 <span class="vw-range-lbl" id="vp-range-lbl"></span>
               </div>
-              <div class="tp-header-right">
-                <span class="vw-label">Destination</span>
-                <div id="vp-dest-filter" style="display:flex;gap:3px;flex-wrap:wrap"></div>
+              <div class="tp-header-right" style="flex-direction:column;align-items:flex-end;gap:5px">
+                <div style="display:flex;align-items:center;gap:6px">
+                  <span class="vw-label">Destination</span>
+                  <div id="vp-dest-filter" style="display:flex;gap:3px;flex-wrap:wrap"></div>
+                </div>
+                <div style="display:flex;align-items:center;gap:6px">
+                  <span class="vw-label">Product</span>
+                  <div id="vp-prod-filter" style="display:flex;gap:3px;flex-wrap:wrap"></div>
+                </div>
               </div>
             </div>
             <div id="vp-charts-section" style="display:none;margin-bottom:16px">
@@ -1257,9 +1264,15 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
                 <button class="vw-btn"         id="rp-vw-eoy"    onclick="rpSetView('eoy',this)">Rest of Year</button>
                 <span class="vw-range-lbl" id="rp-range-lbl"></span>
               </div>
-              <div class="tp-header-right">
-                <span class="vw-label">Destination</span>
-                <div id="rp-dest-filter" style="display:flex;gap:3px;flex-wrap:wrap"></div>
+              <div class="tp-header-right" style="flex-direction:column;align-items:flex-end;gap:5px">
+                <div style="display:flex;align-items:center;gap:6px">
+                  <span class="vw-label">Destination</span>
+                  <div id="rp-dest-filter" style="display:flex;gap:3px;flex-wrap:wrap"></div>
+                </div>
+                <div style="display:flex;align-items:center;gap:6px">
+                  <span class="vw-label">Product</span>
+                  <div id="rp-prod-filter" style="display:flex;gap:3px;flex-wrap:wrap"></div>
+                </div>
               </div>
             </div>
             <!-- Charts section: rendered by rpRenderCharts() after a simulation run -->
@@ -6193,6 +6206,7 @@ function advanceLegStatus(vesselId, legIdx){
 const _rp={
   view:'sim',        // current view preset
   dests:[],          // selected destination facility IDs (multi)
+  prodId:'',         // selected product ID (single, '' = all)
 };
 const _rpCharts={};  // active Chart.js instances — destroyed and rebuilt on each rpRender()
 const _vpCharts={};  // active Chart.js instances for vessel planner
@@ -6331,8 +6345,51 @@ function rpToggleDest(facId,ev){
     _rp.dests=_rp.dests.length===1&&_rp.dests[0]===facId?[]:[facId];
   }
   rpBuildDestFilter();
+  rpBuildProdFilter();
   rpRender();
   renderRailTable();
+}
+
+// ── Rail product filter ───────────────────────────────────────────
+function rpGetRailProducts(){
+  const allEls=getFacElements();
+  const prodIds=new Set();
+  // From existing rail movements involving current facility
+  DB.rail_movements
+    .filter(r=>r.from_facility_id===S.facility_id||r.to_facility_id===S.facility_id)
+    .forEach(r=>{ if(r.product_id) prodIds.add(r.product_id); });
+  // From element_product_capacities for this facility's production/silo elements
+  allEls.filter(e=>['kiln','finish_mill','bulk_silo','dispatch_point'].includes(e.type))
+    .forEach(el=>{
+      DB.element_product_capacities.filter(c=>c.element_id===el.id)
+        .forEach(c=>{ if(c.product_id) prodIds.add(c.product_id); });
+    });
+  return [...prodIds]
+    .map(id=>DB.products.find(p=>p.id===id))
+    .filter(Boolean)
+    .filter((p,i,a)=>a.findIndex(x=>x.id===p.id)===i)
+    .sort((a,b)=>(a.name||a.id).localeCompare(b.name||b.id));
+}
+
+function rpBuildProdFilter(){
+  const bar=document.getElementById('rp-prod-filter'); if(!bar) return;
+  const prods=rpGetRailProducts();
+  if(!prods.length){
+    bar.innerHTML='<span style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">—</span>';
+    return;
+  }
+  // If current selection no longer exists, clear it
+  if(_rp.prodId&&!prods.find(p=>p.id===_rp.prodId)) _rp.prodId='';
+  bar.innerHTML=prods.map(p=>`
+    <div class="tp-dest-chip tp-prod-chip ${_rp.prodId===p.id?'active-prod':''}"
+         onclick="rpToggleProd('${p.id}')">${p.name||p.id}</div>
+  `).join('');
+}
+
+function rpToggleProd(prodId){
+  _rp.prodId=_rp.prodId===prodId?'':prodId;
+  rpBuildProdFilter();
+  rpRender();
 }
 
 // ── Demand rate helper ────────────────────────────────────────────
@@ -6358,6 +6415,7 @@ function rpPlannedArrivalsForDest(destFacId,berthId){
   const map={};
   DB.rail_movements
     .filter(rm=>rm.to_facility_id===destFacId)
+    .filter(rm=>!_rp.prodId||rm.product_id===_rp.prodId)
     .forEach(rm=>{
       const st=rm.status||'Planned';
       let depDay=null;
@@ -6404,6 +6462,7 @@ function rpRender(){
     return;
   }
   rpBuildDestFilter();
+  rpBuildProdFilter();
   const {startDay,endDay}=rpGetRange();
   const days=[];
   for(let d=startDay;d<=endDay;d++) days.push(d);
@@ -6554,6 +6613,7 @@ function rpRender(){
       myDests.forEach(destFacId=>{
         DB.rail_movements
           .filter(rm=>rm.from_facility_id===S.facility_id&&rm.to_facility_id===destFacId)
+          .filter(rm=>!_rp.prodId||rm.product_id===_rp.prodId)
           .forEach(rm=>{
             const sw=rm.switch_day; const ls=rm.load_start_day;
             if(!sw||!ls) return;
@@ -6872,12 +6932,12 @@ function _rpToggleLegacy(){
 // ══════════════════════════════════════════════════════════════════
 // TRANSPORT PLANNER — Vessel Schedule
 // ══════════════════════════════════════════════════════════════════
-const _vp={view:'sim',dests:[]};
+const _vp={view:'sim',dests:[],prodId:''};
 
 function vpPlannedArrivalsForBerth(berthId){
   // Returns {day:[{tonnes,status,idx}]} — all vessel_calls at this berth, all statuses
   const map={};
-  DB.vessel_calls.forEach((vc,idx)=>{
+  DB.vessel_calls.filter(vc=>!_vp.prodId||vc.product_id===_vp.prodId).forEach((vc,idx)=>{
     const st=vc.status||'Planned';
     if(vc.legs&&vc.legs.length>0){
       vc.legs.filter(l=>l.berth_element_id===berthId&&l.arrival_date&&S.simCfg.start_date).forEach(l=>{
@@ -6949,6 +7009,53 @@ function vpToggleDest(facId,ev){
     _vp.dests=_vp.dests.length===1&&_vp.dests[0]===facId?[]:[facId];
   }
   vpBuildDestFilter();
+  vpBuildProdFilter();
+  vpRender();
+}
+
+// ── Vessel product filter ─────────────────────────────────────────
+function vpGetVesselProducts(){
+  const allEls=getFacElements();
+  const prodIds=new Set();
+  // Berths at current facility
+  const berthIds=new Set(allEls.filter(e=>e.type==='berth').map(e=>e.id));
+  // From existing vessel calls at these berths
+  DB.vessel_calls.forEach(vc=>{
+    if(!vc.product_id) return;
+    const atBerth=berthIds.has(vc.berth_element_id)||
+      (vc.legs||[]).some(l=>berthIds.has(l.berth_element_id));
+    if(atBerth) prodIds.add(vc.product_id);
+  });
+  // From element_product_capacities for this facility's elements
+  allEls.filter(e=>['kiln','finish_mill','bulk_silo','berth'].includes(e.type))
+    .forEach(el=>{
+      DB.element_product_capacities.filter(c=>c.element_id===el.id)
+        .forEach(c=>{ if(c.product_id) prodIds.add(c.product_id); });
+    });
+  return [...prodIds]
+    .map(id=>DB.products.find(p=>p.id===id))
+    .filter(Boolean)
+    .filter((p,i,a)=>a.findIndex(x=>x.id===p.id)===i)
+    .sort((a,b)=>(a.name||a.id).localeCompare(b.name||b.id));
+}
+
+function vpBuildProdFilter(){
+  const bar=document.getElementById('vp-prod-filter'); if(!bar) return;
+  const prods=vpGetVesselProducts();
+  if(!prods.length){
+    bar.innerHTML='<span style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">—</span>';
+    return;
+  }
+  if(_vp.prodId&&!prods.find(p=>p.id===_vp.prodId)) _vp.prodId='';
+  bar.innerHTML=prods.map(p=>`
+    <div class="tp-dest-chip tp-prod-chip ${_vp.prodId===p.id?'active-prod':''}"
+         onclick="vpToggleProd('${p.id}')">${p.name||p.id}</div>
+  `).join('');
+}
+
+function vpToggleProd(prodId){
+  _vp.prodId=_vp.prodId===prodId?'':prodId;
+  vpBuildProdFilter();
   vpRender();
 }
 
@@ -6959,6 +7066,7 @@ function vpRender(){
     return;
   }
   vpBuildDestFilter();
+  vpBuildProdFilter();
   const {startDay,endDay}=vpGetRange();
   const days=[];
   for(let d=startDay;d<=endDay;d++) days.push(d);
