@@ -6673,9 +6673,11 @@ function rpPlannedArrivalsForDest(destFacId,berthId){
 // Planned loading at origin per day
 function rpPlannedLoadingForDest(destFacId){
   const map={};
+  const _simStart=S.simCfg?.start_date||'';
   DB.rail_movements
     .filter(rm=>rm.from_facility_id===S.facility_id&&rm.to_facility_id===destFacId
-      &&['Planned','Confirmed'].includes(rm.status||''))
+      &&['Planned','Confirmed'].includes(rm.status||'')
+      &&(!rm.departure_date||!_simStart||rm.departure_date>=_simStart))
     .forEach(rm=>{
       const sw=rm.switch_day; const ls=rm.load_start_day;
       if(!sw||!ls) return;
@@ -6871,6 +6873,7 @@ function rpRender(){
         DB.rail_movements
           .filter(rm=>rm.from_facility_id===S.facility_id&&rm.to_facility_id===destFacId)
           .filter(rm=>!_rp.prodId||rm.product_id===_rp.prodId)
+          .filter(rm=>!rm.departure_date||rm.departure_date>=S.simCfg.start_date)
           .forEach(rm=>{
             const sw=rm.switch_day; const ls=rm.load_start_day;
             if(!sw||!ls) return;
@@ -8934,6 +8937,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
   DB.rail_movements
     .filter(rm=>{
       const st=rm.status||'Planned';
+      if(rm.departure_date&&rm.departure_date<S.simCfg.start_date) return false;
       return ['Planned','Confirmed','Proposed'].includes(st)&&rm.from_facility_id===S.facility_id
         &&rm.from_dispatch_id&&rm.load_start_day&&rm.switch_day;
     })
@@ -9134,6 +9138,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
         .filter(rm=>{
           const st=rm.status||'Planned';
           if(!rm.from_facility_id||rm.from_facility_id!==S.facility_id||!rm.load_start_day) return false;
+          if(rm.departure_date&&rm.departure_date<S.simCfg.start_date) return false;
           return ['Planned','Confirmed','Proposed'].includes(st);
         })
         .forEach(rm=>{
@@ -9168,7 +9173,12 @@ function simulate(elements, connections, horizon, includeProposed=false){
       // ── RAIL FILL HARD OVERRIDE ──────────────────────────
       // If a planned shipment requires this mill to fill the RAIL silo today,
       // bypass urgency selection and route directly to RAIL with day-split logic.
-      const railOverride=(()=>{
+      // Manager campaigns take absolute priority — skip rail fill when a campaign is active.
+      const _campDateRail=new Date(simStartDate.getTime()+(day-1)*864e5).toISOString().split('T')[0];
+      const _hasCampaign=(DB.production_campaigns||[]).some(c=>
+        c.element_id===mill.id&&_campDateRail>=c.start_date&&_campDateRail<=c.end_date
+      );
+      const railOverride=_hasCampaign?null:(()=>{
         for(const [railSiloId,target] of Object.entries(railFillTarget)){
           const railSilo=elMap[railSiloId]; if(!railSilo) continue;
           if(!(dn[mill.id]||[]).includes(railSiloId)) continue;
