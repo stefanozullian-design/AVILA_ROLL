@@ -1044,6 +1044,9 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
         <!-- KPI cards populated by renderSupplyKPIs() -->
       </div>
 
+      <!-- ── CAMPAIGN CAPACITY WARNINGS ──────────────────── -->
+      <div id="sup-campaign-warnings" style="flex-shrink:0"></div>
+
       <!-- ── EXISTING TABLE ─────────────────────────────────── -->
       <div style="overflow-x:auto;overflow-y:hidden;height:10px;flex-shrink:0;background:var(--surface);border-bottom:1px solid var(--border)" id="sup-top-scroll">
         <div id="sup-top-inner" style="height:1px"></div>
@@ -3409,6 +3412,113 @@ function applyCampaign(elId){
   statMsg('Campaign saved — re-run simulation to update projections');
 }
 
+// Apply a shorter end-date to an existing campaign (called from warning banner)
+function _shortenCampaign(campId, newEndDate){
+  const camp=(DB.production_campaigns||[]).find(c=>c.id===campId);
+  if(!camp) return;
+  camp.end_date=newEndDate;
+  autoSave();
+  renderSupplyView();
+  statMsg('Campaign shortened to '+newEndDate+' — re-run simulation to update projections');
+}
+
+// Scan production campaigns against sim inventory history and render overflow warnings
+function _renderSupCampaignWarnings(){
+  const el=document.getElementById('sup-campaign-warnings');
+  if(!el) return;
+  const r=S.simResults;
+  const camps=DB.production_campaigns||[];
+  if(!camps.length||!r?.inventoryHistory){el.innerHTML='';return;}
+
+  const simStart=new Date(S.simCfg.start_date+'T00:00:00');
+  const horizon=S.simCfg.horizon||365;
+  // day-index lookup: dateStr -> 0-based index
+  const dateIdx={};
+  for(let i=0;i<horizon;i++){
+    const d=new Date(simStart); d.setDate(d.getDate()+i);
+    dateIdx[d.toISOString().split('T')[0]]=i;
+  }
+
+  const allEls=getFacElements();
+  const warnings=[];
+
+  camps.forEach(camp=>{
+    const millEl=allEls.find(e=>e.id===camp.element_id);
+    if(!millEl) return;
+
+    // Direct downstream bulk silos that accept this product
+    const downIds=DB.connections
+      .filter(c=>c.from_element_id===camp.element_id)
+      .map(c=>c.to_element_id);
+    const targetSilos=allEls.filter(e=>
+      downIds.includes(e.id)&&e.type==='bulk_silo'&&
+      getSiloProducts(e).includes(camp.product_id)
+    );
+
+    targetSilos.forEach(silo=>{
+      const maxCap=parseFloat(silo.props?.max_capacity)||0;
+      if(!maxCap) return;
+      const hist=r.inventoryHistory[silo.id]||[];
+
+      // Walk every calendar day in the campaign date range
+      const campDays=[];
+      let cur=new Date(camp.start_date+'T00:00:00');
+      const end=new Date(camp.end_date+'T00:00:00');
+      while(cur<=end){
+        campDays.push(cur.toISOString().split('T')[0]);
+        cur.setDate(cur.getDate()+1);
+      }
+      if(!campDays.length) return;
+
+      // Find first day where end-of-day inventory hits ≥97% capacity
+      let overflowDate=null;
+      let lastEffective=campDays[0];
+      for(const ds of campDays){
+        const idx=dateIdx[ds];
+        if(idx===undefined) continue;
+        const eod=hist[idx]??0;
+        if(eod>=maxCap*0.97){
+          if(!overflowDate) overflowDate=ds;
+        } else {
+          lastEffective=ds;
+        }
+      }
+
+      // Only warn if overflow happens BEFORE the campaign end date
+      if(overflowDate && overflowDate<camp.end_date){
+        const wastedDays=campDays.filter(d=>d>=overflowDate).length;
+        const productName=DB.products.find(p=>p.id===camp.product_id)?.name||camp.product_id;
+        warnings.push({
+          campId:camp.id, elementId:camp.element_id,
+          millName:millEl.name, productName, siloName:silo.name,
+          campStart:camp.start_date, campEnd:camp.end_date,
+          overflowDate, recommendedEnd:lastEffective, wastedDays
+        });
+      }
+    });
+  });
+
+  if(!warnings.length){el.innerHTML='';return;}
+
+  el.innerHTML=warnings.map(w=>`
+    <div style="display:flex;align-items:center;gap:10px;background:rgba(255,177,0,.07);border-left:3px solid var(--amber);border-bottom:1px solid rgba(255,177,0,.15);padding:6px 14px">
+      <span style="color:var(--amber);font-size:12px;flex-shrink:0">⚠</span>
+      <span style="font-family:var(--mono);font-size:9px;color:var(--text);flex:1">
+        Campaign <b style="color:var(--amber)">${w.millName}</b> → <b style="color:var(--amber)">${w.productName}</b>
+        (${w.campStart} → ${w.campEnd}):
+        <b>${w.siloName}</b> reaches capacity on <b style="color:var(--amber)">${w.overflowDate}</b>
+        — <b>${w.wastedDays}</b> day${w.wastedDays===1?'':'s'} of production wasted.
+        Recommend ending on <b>${w.recommendedEnd}</b> instead.
+      </span>
+      <button class="tb-btn sec" style="font-size:8px;padding:2px 10px;white-space:nowrap;flex-shrink:0"
+        onclick="_shortenCampaign('${w.campId}','${w.recommendedEnd}')">
+        Apply ${w.recommendedEnd}
+      </button>
+      <button style="background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:11px;padding:2px 4px;flex-shrink:0"
+        onclick="this.closest('[style]').remove()">✕</button>
+    </div>`).join('');
+}
+
 function deleteCampaignRange(elId, startDate, endDate){
   if(!confirm(`Delete campaign for ${startDate} → ${endDate}?\nSimulation will resume auto-selection for these days.`)) return;
   DB.production_campaigns=(DB.production_campaigns||[]).filter(c=>
@@ -4686,6 +4796,7 @@ function renderSupplyView(){
   const wrap=document.getElementById('supply-table-wrap'); if(!wrap) return;
   supInitFilters();
   renderSupplyKPIs();
+  _renderSupCampaignWarnings();
   _renderSupplyViewInner(wrap);
 }
 function _renderSupplyViewInner(wrap){
