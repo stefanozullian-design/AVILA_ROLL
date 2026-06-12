@@ -15389,15 +15389,20 @@ async function spIngestFile(buf, fileName){
   }
 
   const wb = XLSX.read(buf, {type:'array', cellDates:false, raw:true});
-  const sheetName = wb.SheetNames.find(n=>n==='RealShip') || wb.SheetNames.find(n=>n==='SalesConsolidated') || wb.SheetNames[0];
+  const sheetName = wb.SheetNames.find(n=>n==='RealShip')
+    || wb.SheetNames.find(n=>n==='SalesConsolidated')
+    || wb.SheetNames.find(n=>n==='Shipping History Cement')
+    || wb.SheetNames[0];
   const ws  = wb.Sheets[sheetName];
   const raw = XLSX.utils.sheet_to_json(ws, {raw:false, defval:''});
   if(!raw.length) throw new Error('Sheet is empty');
 
   const cols = Object.keys(raw[0]);
-  const isNew = cols.includes('Abrev') && cols.includes('Volume*');
-  const isOld = cols.includes('ORIGIN') && cols.includes('Volume');
-  if(!isNew && !isOld) throw new Error('Unrecognised column format');
+  // "CEMEX SAP export" format: INV_ROLL_NAME + Report Qty + Delivery Date
+  const isCEMEX = cols.includes('INV_ROLL_NAME') && cols.includes('Report Qty') && cols.includes('Delivery Date');
+  const isNew   = !isCEMEX && cols.includes('Abrev') && cols.includes('Volume*');
+  const isOld   = !isCEMEX && !isNew && cols.includes('ORIGIN') && cols.includes('Volume');
+  if(!isCEMEX && !isNew && !isOld) throw new Error('Unrecognised column format — expected INV_ROLL_NAME/Report Qty/Delivery Date, or Abrev/Volume*, or ORIGIN/Volume');
 
   function normDate(v){
     if(!v && v!==0) return null;
@@ -15418,21 +15423,41 @@ async function spIngestFile(buf, fileName){
   const origins=new Set(), products=new Set();
 
   raw.forEach(r=>{
-    const vol  = parseFloat(isNew ? r['Volume*'] : r['Volume']) || 0;
-    if(vol<=0){ skipped++; return; }
-    const date = normDate(r['Date']);
+    let vol, date, product, origin, custType, shipTo, shipToName, rep;
+
+    if(isCEMEX){
+      // SAP export: INV_ROLL_NAME = "BRS/DEM/BRS_IL(12)/BLK/INT"
+      // origin = first segment, custType = last segment (INT|EXT)
+      vol = parseFloat(r['Report Qty']) || 0;
+      if(vol <= 0){ skipped++; return; }
+      date = normDate(r['Delivery Date']);
+      const invRoll = (r['INV_ROLL_NAME'] || '').trim();
+      if(!invRoll || invRoll.toUpperCase()==='N/A' || invRoll.startsWith('N/A/')){ skipped++; return; }
+      const parts  = invRoll.split('/');
+      origin    = parts[0] || '';
+      custType  = (['INT','EXT'].includes(parts[parts.length-1]) ? parts[parts.length-1] : 'EXT');
+      product   = invRoll;
+      shipTo    = String(r['Ship-To'] || '').trim();
+      shipToName= (r['Ship-To Name'] || '').trim();
+      rep       = (r['SalesRep'] || '—').trim();
+    } else {
+      vol = parseFloat(isNew ? r['Volume*'] : r['Volume']) || 0;
+      if(vol <= 0){ skipped++; return; }
+      date    = normDate(r['Date']);
+      product = (isNew ? r['Demand Point'] : r['product']||r['Name Inv Roll']||'').trim();
+      if(!product || product.toUpperCase()==='N/A' || product.startsWith('N/A/')){ skipped++; return; }
+      origin    = (isNew ? r['Abrev'] : r['ORIGIN'] || '').trim();
+      custType  = (r['Customer Type'] || 'EXT').trim();
+      shipTo    = String(r['Ship-To'] || '').trim();
+      shipToName= (r['Ship-To Name'] || '').trim();
+      rep       = (isNew ? r['SH Sales Manager'] : r['Sales Manager'] || '—').trim();
+    }
+
     if(!date){ skipped++; return; }
-    // Skip rows with invalid demand point string (N/A, empty)
-    const product = (isNew ? r['Demand Point'] : r['product']||r['Name Inv Roll']||'').trim();
-    if(!product || product.toUpperCase()==='N/A' || product.startsWith('N/A/')) { skipped++; return; }
+    if(!product || product.toUpperCase()==='N/A' || product.startsWith('N/A/')){ skipped++; return; }
     if(date<dateMin) dateMin=date;
     if(date>dateMax) dateMax=date;
-    const origin    = (isNew ? r['Abrev']           : r['ORIGIN']                  ||'').trim();
-    const custType  = (r['Customer Type']||'EXT').trim();
-    const shipTo    = String(r['Ship-To']||'').trim();
-    const shipToName= (r['Ship-To Name']||'').trim();
-    const rep       = (isNew ? r['SH Sales Manager'] : r['Sales Manager']||'—').trim();
-    const key       = `${date}|${origin}|${product}|${custType}|${shipTo}`;
+    const key = `${date}|${origin}|${product}|${custType}|${shipTo}`;
     if(!aggMap[key]) aggMap[key]={date,origin,product,customer_type:custType,
       ship_to:parseInt(shipTo)||0,ship_to_name:shipToName,sales_manager:rep,volume:0};
     aggMap[key].volume += vol;
