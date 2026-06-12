@@ -8946,6 +8946,15 @@ function simulate(elements, connections, horizon, includeProposed=false){
       for(let d=rm.load_start_day;d<rm.switch_day;d++) plannedLoadWindowMap[rm.from_dispatch_id].add(d);
     });
 
+  // Build real production lookup: elementId → dateStr → [{product_id, volume_t}]
+  const realProdMap={};
+  (DB.real_production_daily||[]).forEach(rp=>{
+    if(!rp.element_id||!rp.date) return;
+    if(!realProdMap[rp.element_id]) realProdMap[rp.element_id]={};
+    if(!realProdMap[rp.element_id][rp.date]) realProdMap[rp.element_id][rp.date]=[];
+    realProdMap[rp.element_id][rp.date].push(rp);
+  });
+
   for(let day=1;day<=horizon;day++){
 
     // ── REAL DATA ANCHOR ─────────────────────────────
@@ -9023,6 +9032,20 @@ function simulate(elements, connections, horizon, includeProposed=false){
     elements.filter(e=>e.type==='kiln').forEach(el=>{
       const s=state[el.id];
       if(s.status==='maintenance') return;
+
+      // ── REAL PRODUCTION ANCHOR (kilns) ────────────────
+      const _kilnDate=new Date(simStartDate.getTime()+(day-1)*864e5).toISOString().split('T')[0];
+      const _kilnReal=realProdMap[el.id]?.[_kilnDate];
+      if(_kilnReal?.length){
+        const downClkA=(dn[el.id]||[]).map(id=>elMap[id]).filter(e=>e&&isClinkerSilo(e));
+        s.status='running'; s.runDays++;
+        _kilnReal.forEach(rp=>{
+          const vol=parseFloat(rp.volume_t)||0; if(!vol) return;
+          const silo=downClkA.find(cs=>getSiloProducts(cs).includes(rp.product_id));
+          if(silo) siloInflow[silo.id]=(siloInflow[silo.id]||0)+vol;
+        });
+        return;
+      }
 
       const caps=capMap[el.id]||[];
       if(!caps.length){ s.status='idle'; return; }
@@ -9170,13 +9193,41 @@ function simulate(elements, connections, horizon, includeProposed=false){
       const caps=capMap[mill.id]||[];
       if(!caps.length){ s.status='idle'; r.millProductHistory[mill.id].push(null); return; }
 
+      // ── REAL PRODUCTION ANCHOR (finish mills) ────────────
+      // _campDateRail is computed just below — reuse by computing once here.
+      const _millDate=new Date(simStartDate.getTime()+(day-1)*864e5).toISOString().split('T')[0];
+      const _millReal=realProdMap[mill.id]?.[_millDate];
+      if(_millReal?.length){
+        // Use actual production volumes; route to most-urgent downstream silo per product.
+        s.status='running'; s.runDays++;
+        let _recorded=false;
+        _millReal.forEach(rp=>{
+          const vol=parseFloat(rp.volume_t)||0; if(!vol) return;
+          if(!_recorded){ r.millProductHistory[mill.id].push(rp.product_id); _recorded=true; }
+          const prodSilos=(millProductSiloMap[mill.id]||{})[rp.product_id]||[];
+          let bestSilo=null, bestU=-1;
+          prodSilos.forEach(si=>{
+            if(state[si.id]?.inventory>=(state[si.id]?.maxCap||0)*0.98) return;
+            const u=urgency(si.id,mill.id);
+            if(u>bestU){ bestU=u; bestSilo=si; }
+          });
+          if(bestSilo){
+            siloInflow[bestSilo.id]=(siloInflow[bestSilo.id]||0)+vol;
+            if(!siloSourceTracker[bestSilo.id]) siloSourceTracker[bestSilo.id]=new Set();
+            siloSourceTracker[bestSilo.id].add(mill.id);
+            state[bestSilo.id].composition[rp.product_id]=(state[bestSilo.id].composition[rp.product_id]||0)+vol;
+          }
+        });
+        if(!_recorded) r.millProductHistory[mill.id].push(null);
+        return;
+      }
+
       // ── RAIL FILL HARD OVERRIDE ──────────────────────────
       // If a planned shipment requires this mill to fill the RAIL silo today,
       // bypass urgency selection and route directly to RAIL with day-split logic.
       // Manager campaigns take absolute priority — skip rail fill when a campaign is active.
-      const _campDateRail=new Date(simStartDate.getTime()+(day-1)*864e5).toISOString().split('T')[0];
       const _hasCampaign=(DB.production_campaigns||[]).some(c=>
-        c.element_id===mill.id&&_campDateRail>=c.start_date&&_campDateRail<=c.end_date
+        c.element_id===mill.id&&_millDate>=c.start_date&&_millDate<=c.end_date
       );
       const railOverride=_hasCampaign?null:(()=>{
         for(const [railSiloId,target] of Object.entries(railFillTarget)){
@@ -15111,7 +15162,7 @@ async function spHandleFile(input){
 const DS_SLOTS = [
   { id:'topology',       label:'Topology JSON',    description:'AVILA_Roll_BRS_2026-05-06.json — facility topology, demand points, products, and recipes', handler:'dsIngestTopology', dbKey:'_topology' },
   { id:'realSales',      label:'Real Sales',       description:'IR_RealSales.xlsx — actual shipment records', handler:'spIngestFile',  dbKey:'real_shipments_daily' },
-  { id:'realProduction', label:'Real Production',  description:'Production actuals by terminal and product',  handler:'dsIngestProduction', dbKey:'real_production_daily' },
+  { id:'realProduction', label:'Real Production',  description:'ProductionReal.xlsx — SAP export with DATE, EQUIPMENT, MATERIAL CODE, PRODUCTION columns. EQUIPMENT must match element names (e.g. BROSFM01, BROSKL02). MATERIAL CODE matched via product material_code field.', handler:'dsIngestProduction', dbKey:'real_production_daily' },
   { id:'transportCost',  label:'Transport Cost',   description:'Freight and logistics cost matrix',            handler:'dsIngestTransport',  dbKey:'transport_costs' },
   { id:'custom',         label:'Custom',           description:'User-defined data file',                       handler:'dsIngestCustom',     dbKey:'custom_data' },
 ];
@@ -15242,10 +15293,15 @@ async function dsRefreshSlot(id, showErrors=true){
       fileSize:  file.size,
       lastLoaded:new Date().toISOString().slice(0,16).replace('T',' '),
       rowCount:  result.rowCount || 0,
+      matched:   result.matched  ?? null,
+      dateMin:   result.dateMin  ?? null,
+      dateMax:   result.dateMax  ?? null,
+      warnings:  result.warnings ?? null,
       error:     null,
     };
     dsSaveMeta();
     dsUpdateSlotUI(id, 'ok');
+    if(result.warnings?.length) result.warnings.forEach(w=>statMsg('⚠ '+w));
 
   }catch(err){
     DS.meta[id] = { ...(DS.meta[id]||{}), error: err.message, lastLoaded: DS.meta[id]?.lastLoaded||null };
@@ -15519,8 +15575,106 @@ async function dsIngestTopology(buf, name){
   }
 }
 
+// ── Real Production ingest ────────────────────────────
+// Reads SAP production export: DATE, EQUIPMENT, MATERIAL CODE, PRODUCTION
+// EQUIPMENT must match an element name (finish_mill or kiln).
+// MATERIAL CODE is matched to DB.products via material_code field (exact then numeric fallback).
+async function dsIngestProduction(buf, name){
+  if(typeof XLSX === 'undefined'){
+    await new Promise((res,rej)=>{
+      const s=document.createElement('script');
+      s.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+      s.onload=res; s.onerror=rej; document.head.appendChild(s);
+    });
+  }
+
+  const wb = XLSX.read(buf, {type:'array', cellDates:false, raw:true});
+  const ws  = wb.Sheets[wb.SheetNames[0]];
+  const raw = XLSX.utils.sheet_to_json(ws, {raw:false, defval:''});
+  if(!raw.length) throw new Error('Production file is empty');
+
+  const cols = Object.keys(raw[0]);
+  if(!cols.includes('DATE') || !cols.includes('EQUIPMENT') || !cols.includes('MATERIAL CODE') || !cols.includes('PRODUCTION'))
+    throw new Error('Unrecognised column format — expected DATE, EQUIPMENT, MATERIAL CODE, PRODUCTION');
+
+  // Build equipment → element lookup (finish_mill + kiln)
+  const equipMap = {};
+  (DB.elements||[]).filter(e=>['finish_mill','kiln','raw_meal_mill'].includes(e.type))
+    .forEach(e=>{ equipMap[e.name] = e.id; });
+
+  // Build material_code → product_id lookup (exact match first)
+  const matExact = {};
+  const matNumeric = {};
+  (DB.products||[]).forEach(p=>{
+    const mc = (p.material_code||'').trim();
+    if(!mc) return;
+    matExact[mc] = p.id;
+    // Numeric fallback: strip "NNNN-" facility prefix, then leading zeros
+    const num = mc.replace(/^\d{4}-0*/,'').replace(/^0+/,'') || mc;
+    if(!matNumeric[num]) matNumeric[num] = p.id;
+  });
+
+  function normDate(v){
+    if(!v && v!==0) return null;
+    const s = String(v).trim();
+    if(/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0,10);
+    // MM/DD/YYYY
+    if(/^\d{1,2}\/\d{1,2}\/\d{4}/.test(s)){
+      const p=s.split('/'); return `${p[2]}-${p[0].padStart(2,'0')}-${p[1].padStart(2,'0')}`;
+    }
+    const d=new Date(s); return isNaN(d)?null:d.toISOString().split('T')[0];
+  }
+
+  let matched=0, skipped=0, unmatchedEquip=new Set(), unmatchedMat=new Set();
+  let dateMin='9999', dateMax='0000';
+  // Aggregate same element+product+date into one row
+  const aggMap={};
+
+  raw.forEach(r=>{
+    const vol = parseFloat(r['PRODUCTION']) || 0;
+    if(vol <= 0){ skipped++; return; }
+    const date = normDate(r['DATE']);
+    if(!date){ skipped++; return; }
+
+    const equip = (r['EQUIPMENT']||'').trim();
+    const elId  = equipMap[equip];
+    if(!elId){ unmatchedEquip.add(equip); skipped++; return; }
+
+    const matRaw = (r['MATERIAL CODE']||'').trim();
+    let prodId = matExact[matRaw];
+    if(!prodId){
+      const num = matRaw.replace(/^\d{4}-0*/,'').replace(/^0+/,'') || matRaw;
+      prodId = matNumeric[num];
+    }
+    if(!prodId){ unmatchedMat.add(matRaw); skipped++; return; }
+
+    if(date<dateMin) dateMin=date;
+    if(date>dateMax) dateMax=date;
+    const key=`${date}|${elId}|${prodId}`;
+    if(!aggMap[key]) aggMap[key]={date,element_id:elId,element_name:equip,product_id:prodId,volume_t:0,source:'file'};
+    aggMap[key].volume_t += vol;
+    matched++;
+  });
+
+  DB.real_production_daily = Object.values(aggMap).map(r=>({...r,volume_t:Math.round(r.volume_t*10)/10}));
+
+  const result = {
+    rowCount: raw.length, matched, skipped,
+    dateMin, dateMax,
+    warnings: []
+  };
+  if(unmatchedEquip.size)
+    result.warnings.push(`Equipment not matched to elements: ${[...unmatchedEquip].join(', ')}`);
+  if(unmatchedMat.size)
+    result.warnings.push(`Material codes not matched to products: ${[...unmatchedMat].join(', ')}`);
+
+  // Trigger Supply view refresh so it picks up the real data immediately
+  if(S.view==='supply') renderSupplyView();
+  autoSave();
+  return result;
+}
+
 // ── Stub handlers for future file types ───────────────
-async function dsIngestProduction(buf, name){ return {rowCount:0}; }
 async function dsIngestTransport(buf, name){  return {rowCount:0}; }
 async function dsIngestCustom(buf, name){     return {rowCount:0}; }
 
@@ -15542,7 +15696,12 @@ function dsUpdateSlotUI(id, state, errMsg=''){
   if(state==='loading'){
     statusHtml=`<span style="color:var(--blue);font-size:8px">↻ Refreshing…</span>`;
   } else if(state==='ok'){
-    statusHtml=`<span style="color:var(--green);font-size:8px">✓ ${meta.rowCount?.toLocaleString()||0} rows · ${meta.lastLoaded||''}</span>`;
+    const _rowInfo = meta.matched!=null
+      ? `${meta.matched.toLocaleString()} records matched`
+      : `${meta.rowCount?.toLocaleString()||0} rows`;
+    const _dateInfo = (meta.dateMin && meta.dateMax) ? ` · ${meta.dateMin} → ${meta.dateMax}` : '';
+    const _warnInfo = meta.warnings?.length ? ` · <span style="color:var(--amber)">⚠ ${meta.warnings.length} warning(s)</span>` : '';
+    statusHtml=`<span style="color:var(--green);font-size:8px">✓ ${_rowInfo}${_dateInfo} · ${meta.lastLoaded||''}</span>${_warnInfo}`;
   } else if(state==='error'){
     statusHtml=`<span style="color:var(--red);font-size:8px">✗ ${errMsg||meta.error||'Error'}</span>`;
   } else {
