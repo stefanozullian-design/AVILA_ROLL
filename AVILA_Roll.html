@@ -6780,35 +6780,45 @@ function rpRender(){
     const arrivals=rpPlannedArrivalsForDest(destFacId,berth?.id);
 
     // Destination group header
-    const _colspan=days.length+1;
+    const _colspan=days.length+months.length+1;
     destRows.push(`<tr><td colspan="${_colspan}" style="background:rgba(77,166,255,.07);color:#4da6ff;font-family:var(--mono);font-size:8px;padding:3px 8px;letter-spacing:.06em;border-top:1px solid rgba(77,166,255,.18)">▸ ${destFac?.name||destFacId}</td></tr>`);
 
     // TRANSF/ARRIVAL row — clickable, color-coded by movement status
     const _statusPriority=['In Transit','Unloading','Confirmed','Planned','Proposed','Finished'];
-    const arrCells=days.map(d=>{
-      const entries=arrivals[d]||[];
-      const ds=rpDayDate(d);
-      let cls='tp-cell-clickable';
-      let val='—';
-      if(entries.length>0){
-        const totalTonnes=entries.reduce((s,e)=>s+e.tonnes,0);
-        const domSt=_statusPriority.find(s=>entries.some(e=>e.status===s))||entries[0].status;
-        const col=_tsGet(domSt).color;
-        cls+=' tp-cell-planned';
-        val=`<span style="color:${col}">${Number(totalTonnes).toLocaleString()}t</span>`;
-      }
-      return `<td class="${cls}" onclick="rpOpenArrivalDialog('${destFacId}','${d}','${ds}')" title="Click to add/edit arrival">${val}</td>`;
+    const arrCells=months.map(mon=>{
+      const monT=mon.days.reduce((s,d)=>s+(arrivals[d]||[]).reduce((t,e)=>t+e.tonnes,0),0);
+      const mTd=`<td style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString()+'t':'—'}</td>`;
+      return mTd+mon.days.map(d=>{
+        const entries=arrivals[d]||[];
+        const ds=rpDayDate(d);
+        let cls='tp-cell-clickable';
+        let val='—';
+        if(entries.length>0){
+          const totalTonnes=entries.reduce((s,e)=>s+e.tonnes,0);
+          const domSt=_statusPriority.find(s=>entries.some(e=>e.status===s))||entries[0].status;
+          const col=_tsGet(domSt).color;
+          cls+=' tp-cell-planned';
+          val=`<span style="color:${col}">${Number(totalTonnes).toLocaleString()}t</span>`;
+        }
+        const tSty=_tpTdSty(d);
+        return `<td class="${cls}"${tSty?` style="${tSty}"`:''}  onclick="rpOpenArrivalDialog('${destFacId}','${d}','${ds}')" title="Click to add/edit arrival">${val}</td>`;
+      }).join('');
     }).join('');
     destRows.push(`<tr class="tp-row-arrival"><td style="padding-left:10px">TRANSF/ARRIVAL</td>${arrCells}</tr>`);
 
     // RAIL UNLOAD row — daily volume unloaded from the rail berth into the terminal silo
     if(berth&&S.simResults?.berthUnloadHistory?.[berth.id]){
       const unldHist=S.simResults.berthUnloadHistory[berth.id];
-      const unldCells=days.map(d=>{
-        const v=unldHist[d-1]||0;
-        return `<td style="color:var(--green);font-size:10px">${v>0?Number(v).toLocaleString()+'t':'—'}</td>`;
+      const unldCells=months.map(mon=>{
+        const monT=mon.days.reduce((s,d)=>s+(unldHist[d-1]||0),0);
+        const mTd=`<td style="${_mTdSty}color:var(--real)">${monT>0?Number(Math.round(monT)).toLocaleString()+'t':'—'}</td>`;
+        return mTd+mon.days.map(d=>{
+          const v=unldHist[d-1]||0;
+          const tSty=_tpTdSty(d);
+          return `<td style="color:var(--real);font-size:10px;${tSty}">${v>0?Number(v).toLocaleString()+'t':'—'}</td>`;
+        }).join('');
       }).join('');
-      destRows.push(`<tr class="tp-row-unload"><td style="padding-left:14px;color:var(--green);font-size:10px">Rail unload</td>${unldCells}</tr>`);
+      destRows.push(`<tr class="tp-row-unload"><td style="padding-left:14px;color:var(--real);font-size:10px">Rail unload</td>${unldCells}</tr>`);
     }
 
     // INVENTORY + DEMAND rows — grouped by product
@@ -6821,22 +6831,32 @@ function rpRender(){
     _activeProdIds.forEach(pid=>{
       // Inventory row(s) for this product
       destSilos.filter(s=>getSiloProducts(s).includes(pid)).forEach(silo=>{
-        const invCells=days.map(d=>{
-          const v=rpInv(silo.id,d);
-          const max=parseFloat(silo.props?.max_capacity)||0;
-          const floor=(parseFloat(silo.props?.critical_floor_pct)||0)/100*max;
-          let style='';
-          if(v!==null&&v<=floor&&floor>0) style=' style="color:var(--red)"';
-          return `<td${style}>${v!==null?Number(v).toLocaleString():'—'}</td>`;
+        const invCells=months.map(mon=>{
+          const lastV=rpInv(silo.id,mon.days[mon.days.length-1]);
+          const mTd=`<td style="${_mTdSty}color:var(--text-dim)">${lastV!==null?Number(Math.round(lastV)).toLocaleString():'—'}</td>`;
+          return mTd+mon.days.map(d=>{
+            const v=rpInv(silo.id,d);
+            const max=parseFloat(silo.props?.max_capacity)||0;
+            const floor=(parseFloat(silo.props?.critical_floor_pct)||0)/100*max;
+            const crit=v!==null&&v<=floor&&floor>0;
+            const tSty=_tpTdSty(d);
+            const baseSty=(crit?'color:var(--red);':'')+tSty;
+            return `<td${baseSty?` style="${baseSty}"`:''}>${v!==null?Number(v).toLocaleString():'—'}</td>`;
+          }).join('');
         }).join('');
         destRows.push(`<tr class="tp-row-inv"><td style="padding-left:14px">${silo.name}</td>${invCells}</tr>`);
       });
       // Demand rows for this product
       demEls.filter(el=>_demElMatchesProd(el,pid)&&!_shownDemIds.has(el.id)).forEach(el=>{
         _shownDemIds.add(el.id);
-        const demCells=days.map(d=>{
-          const v=rpDemand(el.id,d);
-          return `<td style="color:var(--amber)">${v>0?Number(v).toLocaleString():'—'}</td>`;
+        const demCells=months.map(mon=>{
+          const monT=mon.days.reduce((s,d)=>s+rpDemand(el.id,d),0);
+          const mTd=`<td style="${_mTdSty}color:var(--simulated)">${monT>0?Number(Math.round(monT)).toLocaleString():'—'}</td>`;
+          return mTd+mon.days.map(d=>{
+            const v=rpDemand(el.id,d);
+            const tSty=_tpTdSty(d);
+            return `<td style="color:var(--simulated);${tSty}">${v>0?Number(v).toLocaleString():'—'}</td>`;
+          }).join('');
         }).join('');
         destRows.push(`<tr class="tp-row-dem"><td style="padding-left:14px">${el.name}</td>${demCells}</tr>`);
       });
@@ -6844,9 +6864,14 @@ function rpRender(){
     // Demand points not matched to any product silo (only when no product filter)
     if(!_rp.prodId){
       demEls.filter(el=>!_shownDemIds.has(el.id)).forEach(el=>{
-        const demCells=days.map(d=>{
-          const v=rpDemand(el.id,d);
-          return `<td style="color:var(--amber)">${v>0?Number(v).toLocaleString():'—'}</td>`;
+        const demCells=months.map(mon=>{
+          const monT=mon.days.reduce((s,d)=>s+rpDemand(el.id,d),0);
+          const mTd=`<td style="${_mTdSty}color:var(--simulated)">${monT>0?Number(Math.round(monT)).toLocaleString():'—'}</td>`;
+          return mTd+mon.days.map(d=>{
+            const v=rpDemand(el.id,d);
+            const tSty=_tpTdSty(d);
+            return `<td style="color:var(--simulated);${tSty}">${v>0?Number(v).toLocaleString():'—'}</td>`;
+          }).join('');
         }).join('');
         destRows.push(`<tr class="tp-row-dem"><td style="padding-left:14px">${el.name}</td>${demCells}</tr>`);
       });
@@ -6876,18 +6901,28 @@ function rpRender(){
       const prodSilos=rpGetOriginProdSilos(dp)
         .filter(s=>!_rp.prodId||getSiloProducts(s).includes(_rp.prodId));
       prodSilos.forEach(silo=>{
-        const invCells=days.map(d=>{
-          const v=rpInv(silo.id,d);
-          return `<td>${v!==null?Number(v).toLocaleString():'—'}</td>`;
+        const invCells=months.map(mon=>{
+          const lastV=rpInv(silo.id,mon.days[mon.days.length-1]);
+          const mTd=`<td style="${_mTdSty}color:var(--text-dim)">${lastV!==null?Number(Math.round(lastV)).toLocaleString():'—'}</td>`;
+          return mTd+mon.days.map(d=>{
+            const v=rpInv(silo.id,d);
+            const tSty=_tpTdSty(d);
+            return `<td${tSty?` style="${tSty}"`:''}>${v!==null?Number(v).toLocaleString():'—'}</td>`;
+          }).join('');
         }).join('');
         origRows.push(`<tr class="tp-row-orig-inv"><td style="color:#ff9433">${silo.name}</td>${invCells}</tr>`);
       });
 
       // RAIL transfer silo inventory — filtered by selected product
       if(railSilo&&(!_rp.prodId||getSiloProducts(railSilo).includes(_rp.prodId))){
-        const railCells=days.map(d=>{
-          const v=rpInv(railSilo.id,d);
-          return `<td style="color:#38bdf8">${v!==null?Number(v).toLocaleString():'—'}</td>`;
+        const railCells=months.map(mon=>{
+          const lastV=rpInv(railSilo.id,mon.days[mon.days.length-1]);
+          const mTd=`<td style="${_mTdSty}color:#38bdf8">${lastV!==null?Number(Math.round(lastV)).toLocaleString():'—'}</td>`;
+          return mTd+mon.days.map(d=>{
+            const v=rpInv(railSilo.id,d);
+            const tSty=_tpTdSty(d);
+            return `<td style="color:#38bdf8;${tSty}">${v!==null?Number(v).toLocaleString():'—'}</td>`;
+          }).join('');
         }).join('');
         origRows.push(`<tr class="tp-row-rail-silo"><td style="color:#38bdf8">${railSilo.name}</td>${railCells}</tr>`);
       }
@@ -6927,23 +6962,37 @@ function rpRender(){
           });
       });
 
-      const loadCells=days.map(d=>{
-        const cars=loadMap[d]||0;
-        let cls=rpIsSwitch(d,switchDays)?' class="tp-col-switch"':'';
-        return `<td${cls}>${cars>0?`${cars} cars`:'—'}</td>`;
+      const loadCells=months.map(mon=>{
+        const monC=mon.days.reduce((s,d)=>s+(loadMap[d]||0),0);
+        const mTd=`<td style="${_mTdSty}">${monC>0?monC+' cars':'—'}</td>`;
+        return mTd+mon.days.map(d=>{
+          const cars=loadMap[d]||0;
+          const sw=rpIsSwitch(d,switchDays);
+          const tSty=_tpTdSty(d);
+          const clsA=sw?' class="tp-col-switch"':'';
+          const styA=tSty?` style="${tSty}"`:'';
+          return `<td${clsA}${styA}>${cars>0?`${cars} cars`:'—'}</td>`;
+        }).join('');
       }).join('');
       origRows.push(`<tr class="tp-row-loading"><td style="color:#4da6ff">  ↑ Loading (cars/d)</td>${loadCells}</tr>`);
 
       // Dispatch on switch days — color-coded by movement status
       const _dOrder=['In Transit','Confirmed','Planned','Proposed'];
-      const dispCells=days.map(d=>{
-        const entries=dispMap[d]||[];
-        let cls=rpIsSwitch(d,switchDays)?` class="tp-col-switch"`:'';
-        if(!entries.length) return `<td${cls}>—</td>`;
-        const totalCars=entries.reduce((s,e)=>s+e.cars,0);
-        const domSt=_dOrder.find(s=>entries.some(e=>e.status===s))||entries[0].status;
-        const col=_tsGet(domSt).color;
-        return `<td${cls}><span style="color:${col}">${totalCars} cars</span></td>`;
+      const dispCells=months.map(mon=>{
+        const monC=mon.days.reduce((s,d)=>s+(dispMap[d]||[]).reduce((t,e)=>t+e.cars,0),0);
+        const mTd=`<td style="${_mTdSty}">${monC>0?monC+' cars':'—'}</td>`;
+        return mTd+mon.days.map(d=>{
+          const entries=dispMap[d]||[];
+          const sw=rpIsSwitch(d,switchDays);
+          const tSty=_tpTdSty(d);
+          const clsA=sw?' class="tp-col-switch"':'';
+          const styA=tSty?` style="${tSty}"`:'';
+          if(!entries.length) return `<td${clsA}${styA}>—</td>`;
+          const totalCars=entries.reduce((s,e)=>s+e.cars,0);
+          const domSt=_dOrder.find(s=>entries.some(e=>e.status===s))||entries[0].status;
+          const col=_tsGet(domSt).color;
+          return `<td${clsA}${styA}><span style="color:${col}">${totalCars} cars</span></td>`;
+        }).join('');
       }).join('');
       origRows.push(`<tr class="tp-row-dispatch"><td style="color:#ff9433">  ⇒ Dispatch (switch day)</td>${dispCells}</tr>`);
     });
@@ -7400,12 +7449,19 @@ function vpRender(){
   }
   vpRenderCharts();
 
-  const thHtml=`<th>Element</th>`+days.map(d=>{
-    const ds=vpDayDate(d).slice(5);
-    let cls='';
-    if(rpIsSat(d)) cls=' class="tp-col-sat"';
-    else if(rpIsSun(d)) cls=' class="tp-col-sun"';
-    return `<th${cls} title="Day ${d}">${ds}</th>`;
+  const todayStr=new Date().toISOString().split('T')[0];
+  const months=(()=>{const mons=[];days.forEach(d=>{const ds=vpDayDate(d);const ym=ds.slice(0,7);if(!mons.length||mons[mons.length-1].ym!==ym){const dt=new Date(ds+'T00:00:00');mons.push({ym,label:dt.toLocaleString('en-US',{month:'short',year:'2-digit'}),days:[]});}mons[mons.length-1].days.push(d);});return mons;})();
+  const _mTdSty='background:rgba(255,184,48,.06);border-left:2px solid rgba(255,184,48,.2);font-weight:700;color:var(--amber);text-align:right;padding:3px 8px;';
+  const _tpTdSty=d=>vpDayDate(d)===todayStr?'border-left:2px solid var(--green);border-right:2px solid var(--green);':'';
+  const thHtml=`<th>Element</th>`+months.map(mon=>{
+    const dayThs=mon.days.map(d=>{
+      const ds=vpDayDate(d);const isToday=ds===todayStr;
+      const cls=rpIsSat(d)?'tp-col-sat':rpIsSun(d)?'tp-col-sun':'';
+      const clsA=cls?` class="${cls}"`:'';
+      const styA=isToday?` style="border-left:2px solid var(--green);border-right:2px solid var(--green);color:var(--green)"`:' style=""';
+      return `<th${clsA}${styA} title="Day ${d}">${ds.slice(5)}</th>`;
+    }).join('');
+    return `<th style="border-left:2px solid rgba(255,184,48,.35);color:var(--amber);font-size:8px;font-weight:700;text-align:center;padding:4px 6px;position:sticky;top:0;background:var(--surface2)">${mon.label}</th>${dayThs}`;
   }).join('');
   document.getElementById('vp-dest-thead-row').innerHTML=thHtml;
   document.getElementById('vp-orig-thead-row').innerHTML=thHtml;
@@ -7422,33 +7478,43 @@ function vpRender(){
       const demEls=rpGetDestDemEls(destFacId);
       const arrivals=vpPlannedArrivalsForBerth(berth.id);
 
-      const _colspan=days.length+1;
+      const _colspan=days.length+months.length+1;
       destRows.push(`<tr><td colspan="${_colspan}" style="background:rgba(255,184,48,.06);color:var(--amber);font-family:var(--mono);font-size:8px;padding:3px 8px;letter-spacing:.06em;border-top:1px solid rgba(255,184,48,.15)">▸ ${destFac?.name||destFacId} / ${berth.name}</td></tr>`);
 
       // VESSEL/ARRIVAL row — clickable, color-coded by dominant status
-      const arrCells=days.map(d=>{
-        const entries=arrivals[d]||[];
-        let cls='tp-cell-clickable';
-        let val='—';
-        if(entries.length>0){
-          const totalTonnes=entries.reduce((s,e)=>s+e.tonnes,0);
-          const domSt=_statusPriority.find(s=>entries.some(e=>e.status===s))||entries[0].status;
-          const col=_tsGet(domSt).color;
-          cls+=' tp-cell-planned';
-          val=`<span style="color:${col}">${Number(totalTonnes).toLocaleString()}t</span>`;
-        }
-        return `<td class="${cls}" onclick="vpOpenArrivalDialog('${berth.id}','${d}')" title="Click to add/edit vessel arrival">${val}</td>`;
+      const arrCells=months.map(mon=>{
+        const monT=mon.days.reduce((s,d)=>s+(arrivals[d]||[]).reduce((t,e)=>t+e.tonnes,0),0);
+        const mTd=`<td style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString()+'t':'—'}</td>`;
+        return mTd+mon.days.map(d=>{
+          const entries=arrivals[d]||[];
+          let cls='tp-cell-clickable';
+          let val='—';
+          if(entries.length>0){
+            const totalTonnes=entries.reduce((s,e)=>s+e.tonnes,0);
+            const domSt=_statusPriority.find(s=>entries.some(e=>e.status===s))||entries[0].status;
+            const col=_tsGet(domSt).color;
+            cls+=' tp-cell-planned';
+            val=`<span style="color:${col}">${Number(totalTonnes).toLocaleString()}t</span>`;
+          }
+          const tSty=_tpTdSty(d);
+          return `<td class="${cls}"${tSty?` style="${tSty}"`:''}  onclick="vpOpenArrivalDialog('${berth.id}','${d}')" title="Click to add/edit vessel arrival">${val}</td>`;
+        }).join('');
       }).join('');
       destRows.push(`<tr class="tp-row-arrival"><td style="padding-left:10px">VESSEL/ARRIVAL</td>${arrCells}</tr>`);
 
       // VESSEL UNLOAD row — daily volume unloaded from the berth into the terminal silo
       if(S.simResults?.berthUnloadHistory?.[berth.id]){
         const unldHist=S.simResults.berthUnloadHistory[berth.id];
-        const unldCells=days.map(d=>{
-          const v=unldHist[d-1]||0;
-          return `<td style="color:var(--green);font-size:10px">${v>0?Number(v).toLocaleString()+'t':'—'}</td>`;
+        const unldCells=months.map(mon=>{
+          const monT=mon.days.reduce((s,d)=>s+(unldHist[d-1]||0),0);
+          const mTd=`<td style="${_mTdSty}color:var(--real)">${monT>0?Number(Math.round(monT)).toLocaleString()+'t':'—'}</td>`;
+          return mTd+mon.days.map(d=>{
+            const v=unldHist[d-1]||0;
+            const tSty=_tpTdSty(d);
+            return `<td style="color:var(--real);font-size:10px;${tSty}">${v>0?Number(v).toLocaleString()+'t':'—'}</td>`;
+          }).join('');
         }).join('');
-        destRows.push(`<tr class="tp-row-unload"><td style="padding-left:14px;color:var(--green);font-size:10px">Vessel unload</td>${unldCells}</tr>`);
+        destRows.push(`<tr class="tp-row-unload"><td style="padding-left:14px;color:var(--real);font-size:10px">Vessel unload</td>${unldCells}</tr>`);
       }
 
       // INVENTORY + DEMAND rows — grouped by product
@@ -7459,27 +7525,40 @@ function vpRender(){
       _vtActiveProdIds.forEach(pid=>{
         // Inventory row(s) for this product
         destSilos.filter(s=>getSiloProducts(s).includes(pid)).forEach(silo=>{
-          const invCells=days.map(d=>{
-            const v=rpInv(silo.id,d);
-            const max=parseFloat(silo.props?.max_capacity)||0;
-            const floor=(parseFloat(silo.props?.critical_floor_pct)||0)/100*max;
-            let style='';
-            if(v!==null&&v<=floor&&floor>0) style=' style="color:var(--red)"';
-            return `<td${style}>${v!==null?Number(v).toLocaleString():'—'}</td>`;
+          const invCells=months.map(mon=>{
+            const lastV=rpInv(silo.id,mon.days[mon.days.length-1]);
+            const mTd=`<td style="${_mTdSty}color:var(--text-dim)">${lastV!==null?Number(Math.round(lastV)).toLocaleString():'—'}</td>`;
+            return mTd+mon.days.map(d=>{
+              const v=rpInv(silo.id,d);
+              const max=parseFloat(silo.props?.max_capacity)||0;
+              const floor=(parseFloat(silo.props?.critical_floor_pct)||0)/100*max;
+              const crit=v!==null&&v<=floor&&floor>0;
+              const tSty=_tpTdSty(d);
+              const baseSty=(crit?'color:var(--red);':'')+tSty;
+              return `<td${baseSty?` style="${baseSty}"`:''}>${v!==null?Number(v).toLocaleString():'—'}</td>`;
+            }).join('');
           }).join('');
           destRows.push(`<tr class="tp-row-inv"><td style="padding-left:14px">${silo.name}</td>${invCells}</tr>`);
         });
         // Demand rows for this product
         demEls.filter(el=>_demElMatchesProd(el,pid)&&!_vtShownDemIds.has(el.id)).forEach(el=>{
           _vtShownDemIds.add(el.id);
-          const demCells=days.map(d=>{const v=rpDemand(el.id,d);return `<td style="color:var(--amber)">${v>0?Number(v).toLocaleString():'—'}</td>`;}).join('');
+          const demCells=months.map(mon=>{
+            const monT=mon.days.reduce((s,d)=>s+rpDemand(el.id,d),0);
+            const mTd=`<td style="${_mTdSty}color:var(--simulated)">${monT>0?Number(Math.round(monT)).toLocaleString():'—'}</td>`;
+            return mTd+mon.days.map(d=>{const v=rpDemand(el.id,d);const tSty=_tpTdSty(d);return `<td style="color:var(--simulated);${tSty}">${v>0?Number(v).toLocaleString():'—'}</td>`;}).join('');
+          }).join('');
           destRows.push(`<tr class="tp-row-dem"><td style="padding-left:14px">${el.name}</td>${demCells}</tr>`);
         });
       });
       // Demand points not matched to any product silo (only when no product filter)
       if(!_vp.prodId){
         demEls.filter(el=>!_vtShownDemIds.has(el.id)).forEach(el=>{
-          const demCells=days.map(d=>{const v=rpDemand(el.id,d);return `<td style="color:var(--amber)">${v>0?Number(v).toLocaleString():'—'}</td>`;}).join('');
+          const demCells=months.map(mon=>{
+            const monT=mon.days.reduce((s,d)=>s+rpDemand(el.id,d),0);
+            const mTd=`<td style="${_mTdSty}color:var(--simulated)">${monT>0?Number(Math.round(monT)).toLocaleString():'—'}</td>`;
+            return mTd+mon.days.map(d=>{const v=rpDemand(el.id,d);const tSty=_tpTdSty(d);return `<td style="color:var(--simulated);${tSty}">${v>0?Number(v).toLocaleString():'—'}</td>`;}).join('');
+          }).join('');
           destRows.push(`<tr class="tp-row-dem"><td style="padding-left:14px">${el.name}</td>${demCells}</tr>`);
         });
       }
