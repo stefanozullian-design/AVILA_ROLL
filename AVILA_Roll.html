@@ -484,6 +484,15 @@ select.pi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
 #chat-in::placeholder{color:var(--text-dim);}
 #chat-send{padding:0 9px;background:var(--blue);color:var(--bg);border:none;font-family:var(--mono);font-size:9px;font-weight:700;cursor:pointer;transition:all .15s;align-self:stretch;}
 #chat-send:hover{box-shadow:0 0 10px var(--blue);}
+#chat-key-area{padding:6px 8px 8px;border-top:1px solid var(--border);background:var(--surface2);flex-shrink:0;}
+#chat-key-lbl{font-family:var(--mono);font-size:7px;letter-spacing:1px;text-transform:uppercase;color:var(--text-dim);margin-bottom:5px;}
+#chat-key-row{display:flex;gap:4px;}
+#chat-key-in{flex:1;background:var(--bg);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:8px;padding:3px 6px;outline:none;}
+#chat-key-in:focus{border-color:var(--blue);}
+#chat-key-btn{padding:0 8px;background:var(--blue);color:var(--bg);border:none;font-family:var(--mono);font-size:8px;font-weight:700;cursor:pointer;white-space:nowrap;}
+#chat-key-set{font-family:var(--mono);font-size:8px;color:var(--green);display:none;align-items:center;justify-content:space-between;}
+#chat-key-clr{color:var(--text-dim);cursor:pointer;}
+#chat-key-clr:hover{color:var(--red);}
 .typing-dots{display:flex;gap:3px;padding:3px 0;}
 .typing-dots span{width:4px;height:4px;border-radius:50%;background:var(--blue);animation:tp 1.2s infinite;}
 .typing-dots span:nth-child(2){animation-delay:.2s;}
@@ -1470,6 +1479,14 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
   <div id="chat-in-area">
     <textarea id="chat-in" placeholder="Ask anything..." onkeydown="chatKey(event)"></textarea>
     <button id="chat-send" onclick="sendChat()">Send</button>
+  </div>
+  <div id="chat-key-area">
+    <div id="chat-key-lbl">Anthropic API Key</div>
+    <div id="chat-key-row">
+      <input id="chat-key-in" type="password" placeholder="sk-ant-..." autocomplete="off"/>
+      <button id="chat-key-btn" onclick="saveApiKey()">Set Key</button>
+    </div>
+    <div id="chat-key-set"><span>Key set ✓</span><span id="chat-key-clr" onclick="clearApiKey()">[clear]</span></div>
   </div>
 </div>
 
@@ -13228,9 +13245,14 @@ Respond with: {"type":"...", "params":{...}, "plain_summary":"one sentence descr
 
       const resp=await fetch('https://api.anthropic.com/v1/messages',{
         method:'POST',
-        headers:{'Content-Type':'application/json'},
+        headers:{
+          'Content-Type':'application/json',
+          'x-api-key':getApiKey(),
+          'anthropic-version':'2023-06-01',
+          'anthropic-dangerous-direct-browser-access':'true'
+        },
         body:JSON.stringify({
-          model:'claude-sonnet-4-20250514',
+          model:'claude-haiku-4-5-20251001',
           max_tokens:300,
           system:systemPrompt,
           messages:[{role:'user',content:`Equipment: ${elContext}\nRule: "${rule.natural_text}"`}]
@@ -16125,6 +16147,7 @@ function toggleChat(){
   S.chatCollapsed=!S.chatCollapsed;
   document.getElementById('chat-panel').classList.toggle('open',!S.chatCollapsed);
   document.getElementById('ai-fab')?.classList.toggle('active',!S.chatCollapsed);
+  if(!S.chatCollapsed) updateKeyUI();
 }
 
 // ── REAL DATA INPUT PANEL ──────────────────────────────
@@ -16735,15 +16758,44 @@ function hideTip(){document.getElementById('tooltip').style.display='none';docum
 // ═══════════════════════════════════════════════════════
 function chatKey(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChat();}}
 
+function getApiKey(){return localStorage.getItem('avila_api_key')||'';}
+function saveApiKey(){
+  const k=document.getElementById('chat-key-in').value.trim();
+  if(!k) return;
+  localStorage.setItem('avila_api_key',k);
+  document.getElementById('chat-key-in').value='';
+  updateKeyUI();
+  addMsg('agent','API key saved. Ready to assist!');
+}
+function clearApiKey(){
+  localStorage.removeItem('avila_api_key');
+  updateKeyUI();
+}
+function updateKeyUI(){
+  const k=getApiKey();
+  const row=document.getElementById('chat-key-row');
+  const set=document.getElementById('chat-key-set');
+  if(row) row.style.display=k?'none':'flex';
+  if(set) set.style.display=k?'flex':'none';
+}
+
 async function sendChat(){
   const inp=document.getElementById('chat-in');
   const msg=inp.value.trim(); if(!msg) return;
+  const apiKey=getApiKey();
+  if(!apiKey){addMsg('agent','Enter your Anthropic API key in the field below first.');return;}
   inp.value=''; addMsg('user',msg); showTyping();
   try{
     const ctx=buildCtx();
     const res=await fetch('https://api.anthropic.com/v1/messages',{
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1000,
+      method:'POST',
+      headers:{
+        'Content-Type':'application/json',
+        'x-api-key':apiKey,
+        'anthropic-version':'2023-06-01',
+        'anthropic-dangerous-direct-browser-access':'true'
+      },
+      body:JSON.stringify({model:'claude-haiku-4-5-20251001',max_tokens:1000,
         system:`You are AVILA Roll, an AI simulation agent for cement production planning.
 Database tables: macro_regions, countries, regions, sub_regions, facilities, elements, connections, products, recipes, raw_materials, fuels, element_maintenance_events, element_product_capacities, vessel_calls, rail_movements, truck_movements, transport_links, in_transit_inventory, demand_points, simulation_runs, simulation_stop_events. Element types: raw_material_storage, fuel_storage, bulk_silo (replaces clinker_silo/cement_silo/homo_silo — color by product category), packed_silo, raw_meal_mill, kiln, finish_mill, packing_plant, berth, dispatch_point (truck=no constraint same-day; rail=car accumulation with switch days and transit lag), demand_point, supply_source. Products have category: clinker, raw_meal, cement_bulk, cement_packed, additive. Kiln product capacities include capacity_tpd, specific_heat_kcal_kg, raw_meal_ratio per clinker product. Rail dispatch points have: car_capacity_t, std_loading_cars_day, max_loading_cars_day, working_days, switch_days (array of 0-6 Mon-Sun), transit_days.
 Be concise, specific, reference table names and element names precisely. ${ctx}`,
@@ -16751,8 +16803,9 @@ Be concise, specific, reference table names and element names precisely. ${ctx}`
     });
     const data=await res.json();
     hideTyping();
+    if(data.error){addMsg('agent',`Error: ${data.error.message}`);return;}
     addMsg('agent',data.content?.map(c=>c.text||'').join('')||'Unable to process.');
-  }catch(e){hideTyping();addMsg('agent','Connection error.');}
+  }catch(e){hideTyping();addMsg('agent',`Connection error: ${e.message}`);}
 }
 
 function buildCtx(){
