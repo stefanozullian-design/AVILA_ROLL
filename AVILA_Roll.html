@@ -484,15 +484,7 @@ select.pi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
 #chat-in::placeholder{color:var(--text-dim);}
 #chat-send{padding:0 9px;background:var(--blue);color:var(--bg);border:none;font-family:var(--mono);font-size:9px;font-weight:700;cursor:pointer;transition:all .15s;align-self:stretch;}
 #chat-send:hover{box-shadow:0 0 10px var(--blue);}
-#chat-key-area{padding:6px 8px 8px;border-top:1px solid var(--border);background:var(--surface2);flex-shrink:0;}
-#chat-key-lbl{font-family:var(--mono);font-size:7px;letter-spacing:1px;text-transform:uppercase;color:var(--text-dim);margin-bottom:5px;}
-#chat-key-row{display:flex;gap:4px;}
-#chat-key-in{flex:1;background:var(--bg);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:8px;padding:3px 6px;outline:none;}
-#chat-key-in:focus{border-color:var(--blue);}
-#chat-key-btn{padding:0 8px;background:var(--blue);color:var(--bg);border:none;font-family:var(--mono);font-size:8px;font-weight:700;cursor:pointer;white-space:nowrap;}
-#chat-key-set{font-family:var(--mono);font-size:8px;color:var(--green);display:none;align-items:center;justify-content:space-between;}
-#chat-key-clr{color:var(--text-dim);cursor:pointer;}
-#chat-key-clr:hover{color:var(--red);}
+#chat-key-area{padding:6px 10px 7px;border-top:1px solid var(--border);background:var(--surface2);flex-shrink:0;}
 .typing-dots{display:flex;gap:3px;padding:3px 0;}
 .typing-dots span{width:4px;height:4px;border-radius:50%;background:var(--blue);animation:tp 1.2s infinite;}
 .typing-dots span:nth-child(2){animation-delay:.2s;}
@@ -1481,12 +1473,8 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
     <button id="chat-send" onclick="sendChat()">Send</button>
   </div>
   <div id="chat-key-area">
-    <div id="chat-key-lbl">Anthropic API Key</div>
-    <div id="chat-key-row">
-      <input id="chat-key-in" type="password" placeholder="sk-ant-..." autocomplete="off"/>
-      <button id="chat-key-btn" onclick="saveApiKey()">Set Key</button>
-    </div>
-    <div id="chat-key-set"><span>Key set ✓</span><span id="chat-key-clr" onclick="clearApiKey()">[clear]</span></div>
+    <div id="chat-key-set" style="display:none;font-family:var(--mono);font-size:8px;color:var(--green)">✓ AI connected</div>
+    <div id="chat-key-row" style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">⚠ No API key — <span onclick="jumpToAiConfig()" style="color:var(--blue);cursor:pointer;text-decoration:underline">Configure in Settings</span></div>
   </div>
 </div>
 
@@ -12843,6 +12831,7 @@ function simCfgHTML(){
       Rules <span style="background:${activeRules.length?'var(--amber)':'var(--border2)'};color:var(--bg);font-size:8px;padding:1px 5px;border-radius:8px;margin-left:4px">${activeRules.length}</span>
     </button>
     <button style="${tabSty(false)}" id="cfg-tab-datasources" onclick="_cfgTab('datasources')">Data Sources</button>
+    <button style="${tabSty(false)}" id="cfg-tab-ai" onclick="_cfgTab('ai')">AI Agent</button>
   </div>
 
   <!-- SETTINGS PANEL -->
@@ -12904,6 +12893,11 @@ function simCfgHTML(){
   <!-- DATA SOURCES PANEL -->
   <div id="cfg-panel-datasources" style="display:none;max-height:480px;overflow-y:auto">
     ${dsCfgPanelHTML()}
+  </div>
+
+  <!-- AI AGENT PANEL -->
+  <div id="cfg-panel-ai" style="display:none;max-height:480px;overflow-y:auto">
+    ${aiCfgPanelHTML()}
   </div>`;
 }
 
@@ -12919,11 +12913,13 @@ function _cfgTab(tab){
   document.getElementById('cfg-panel-settings-footer').style.display=tab==='settings'?'':'none';
   document.getElementById('cfg-panel-rules').style.display=tab==='rules'?'':'none';
   document.getElementById('cfg-panel-datasources').style.display=tab==='datasources'?'':'none';
+  document.getElementById('cfg-panel-ai').style.display=tab==='ai'?'':'none';
   const tabStyActive=`padding:7px 16px;font-family:var(--mono);font-size:10px;cursor:pointer;border:none;background:transparent;border-bottom:2px solid var(--green);color:var(--green);letter-spacing:.5px;text-transform:uppercase`;
   const tabStyInactive=`padding:7px 16px;font-family:var(--mono);font-size:10px;cursor:pointer;border:none;background:transparent;border-bottom:2px solid transparent;color:var(--text-dim);letter-spacing:.5px;text-transform:uppercase`;
   document.getElementById('cfg-tab-settings').style.cssText=tab==='settings'?tabStyActive:tabStyInactive;
   document.getElementById('cfg-tab-rules').style.cssText=tab==='rules'?tabStyActive:tabStyInactive;
   document.getElementById('cfg-tab-datasources').style.cssText=tab==='datasources'?tabStyActive:tabStyInactive;
+  document.getElementById('cfg-tab-ai').style.cssText=tab==='ai'?tabStyActive:tabStyInactive;
 }
 
 function _renderRulesList(){
@@ -15944,6 +15940,94 @@ function dsCfgPanelHTML(){
 }
 
 
+// ── AI Agent config panel HTML ──
+function aiCfgPanelHTML(){
+  const keySet=!!getApiKey();
+  const model=localStorage.getItem('avila_ai_model')||'claude-haiku-4-5-20251001';
+  const row=(label,content)=>`
+    <div style="display:grid;grid-template-columns:140px 1fr;align-items:start;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)">
+      <div style="font-family:var(--mono);font-size:9px;color:var(--text-dim);padding-top:2px">${label}</div>
+      <div>${content}</div>
+    </div>`;
+  return `<div style="padding:14px 16px">
+    <div style="font-family:var(--mono);font-size:9px;color:var(--text-dim);margin-bottom:14px;line-height:1.7">
+      Connect AVILA Roll to Anthropic's Claude API for AI-assisted planning. Your key is stored only in this browser and sent directly to Anthropic — never to any other server.
+    </div>
+    ${row('API Key',`
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <div style="display:flex;gap:6px;align-items:center" id="ai-key-input-row" ${keySet?'style="display:none!important"':''}>
+          <input id="ai-cfg-key-in" type="password" placeholder="sk-ant-api03-..." autocomplete="off"
+            style="flex:1;background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:9px;padding:5px 8px;outline:none"/>
+          <button class="btn-pri" onclick="aiSaveKey()" style="white-space:nowrap;padding:5px 12px">Set Key</button>
+        </div>
+        <div id="ai-key-set-row" style="display:${keySet?'flex':'none'};align-items:center;gap:10px">
+          <span style="font-family:var(--mono);font-size:9px;color:var(--green)">✓ API key configured</span>
+          <button class="btn-sec" onclick="aiClearKey()" style="padding:3px 8px;font-size:8px">Clear</button>
+        </div>
+      </div>`)}
+    ${row('Model',`
+      <div style="display:flex;flex-direction:column;gap:4px">
+        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;padding:6px;border:1px solid ${model==='claude-haiku-4-5-20251001'?'var(--green)':'var(--border2)'};background:${model==='claude-haiku-4-5-20251001'?'var(--green-faint)':'transparent'}" onclick="aiSetModel('claude-haiku-4-5-20251001')">
+          <input type="radio" name="ai-model" value="claude-haiku-4-5-20251001" ${model==='claude-haiku-4-5-20251001'?'checked':''} style="margin-top:1px;accent-color:var(--green)"/>
+          <div><div style="font-family:var(--mono);font-size:9px;color:var(--text);font-weight:700">Haiku 4.5 — Fast</div>
+          <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-top:2px">Best for quick questions. Very low cost (~$0.001/message).</div></div>
+        </label>
+        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;padding:6px;border:1px solid ${model==='claude-sonnet-4-6'?'var(--green)':'var(--border2)'};background:${model==='claude-sonnet-4-6'?'var(--green-faint)':'transparent'}" onclick="aiSetModel('claude-sonnet-4-6')">
+          <input type="radio" name="ai-model" value="claude-sonnet-4-6" ${model==='claude-sonnet-4-6'?'checked':''} style="margin-top:1px;accent-color:var(--green)"/>
+          <div><div style="font-family:var(--mono);font-size:9px;color:var(--text);font-weight:700">Sonnet 4.6 — Smart</div>
+          <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-top:2px">Better reasoning for complex planning analysis.</div></div>
+        </label>
+      </div>`)}
+    ${row('Connection',`
+      <div style="display:flex;align-items:center;gap:10px">
+        <button class="btn-sec" onclick="aiTestConnection()" style="padding:5px 12px">Test Connection</button>
+        <span id="ai-test-result" style="font-family:var(--mono);font-size:8px;color:var(--text-dim)"></span>
+      </div>`)}
+  </div>`;
+}
+
+async function aiTestConnection(){
+  const key=getApiKey();
+  const resultEl=document.getElementById('ai-test-result');
+  if(!key){resultEl.style.color='var(--amber)';resultEl.textContent='No API key set.';return;}
+  resultEl.style.color='var(--text-dim)';resultEl.textContent='Testing…';
+  try{
+    const res=await fetch('https://api.anthropic.com/v1/messages',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body:JSON.stringify({model:'claude-haiku-4-5-20251001',max_tokens:10,messages:[{role:'user',content:'ping'}]})
+    });
+    const data=await res.json();
+    if(data.error){resultEl.style.color='var(--red)';resultEl.textContent='Error: '+data.error.message;}
+    else{resultEl.style.color='var(--green)';resultEl.textContent='✓ Connected';}
+  }catch(e){resultEl.style.color='var(--red)';resultEl.textContent='Failed: '+e.message;}
+}
+
+function aiSaveKey(){
+  const k=document.getElementById('ai-cfg-key-in')?.value.trim();
+  if(!k) return;
+  localStorage.setItem('avila_api_key',k);
+  document.getElementById('ai-cfg-key-in').value='';
+  document.getElementById('ai-key-input-row').style.display='none';
+  document.getElementById('ai-key-set-row').style.display='flex';
+  updateKeyUI();
+  const el=document.getElementById('ai-test-result');
+  if(el){el.style.color='var(--green)';el.textContent='Key saved.';}
+}
+
+function aiClearKey(){
+  localStorage.removeItem('avila_api_key');
+  document.getElementById('ai-key-input-row').style.display='flex';
+  document.getElementById('ai-key-set-row').style.display='none';
+  updateKeyUI();
+}
+
+function aiSetModel(m){
+  localStorage.setItem('avila_ai_model',m);
+  // Re-render just the model rows by re-rendering the whole AI panel
+  renderCfgPanel('ai');
+}
+
 // ═══════════════════════════════════════════════════════
 // ACTUALS → DEMAND GRID
 // ═══════════════════════════════════════════════════════
@@ -16759,34 +16843,28 @@ function hideTip(){document.getElementById('tooltip').style.display='none';docum
 function chatKey(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChat();}}
 
 function getApiKey(){return localStorage.getItem('avila_api_key')||'';}
-function saveApiKey(){
-  const k=document.getElementById('chat-key-in').value.trim();
-  if(!k) return;
-  localStorage.setItem('avila_api_key',k);
-  document.getElementById('chat-key-in').value='';
-  updateKeyUI();
-  addMsg('agent','API key saved. Ready to assist!');
-}
-function clearApiKey(){
-  localStorage.removeItem('avila_api_key');
-  updateKeyUI();
-}
 function updateKeyUI(){
   const k=getApiKey();
   const row=document.getElementById('chat-key-row');
   const set=document.getElementById('chat-key-set');
-  if(row) row.style.display=k?'none':'flex';
-  if(set) set.style.display=k?'flex':'none';
+  if(row) row.style.display=k?'none':'block';
+  if(set) set.style.display=k?'block':'none';
+}
+function jumpToAiConfig(){
+  toggleChat();
+  switchTopSection('configuration');
+  renderCfgPanel('ai');
 }
 
 async function sendChat(){
   const inp=document.getElementById('chat-in');
   const msg=inp.value.trim(); if(!msg) return;
   const apiKey=getApiKey();
-  if(!apiKey){addMsg('agent','Enter your Anthropic API key in the field below first.');return;}
+  if(!apiKey){addMsg('agent','No API key set — click "Configure in Settings" below.');return;}
   inp.value=''; addMsg('user',msg); showTyping();
   try{
     const ctx=buildCtx();
+    const model=localStorage.getItem('avila_ai_model')||'claude-haiku-4-5-20251001';
     const res=await fetch('https://api.anthropic.com/v1/messages',{
       method:'POST',
       headers:{
@@ -16795,7 +16873,7 @@ async function sendChat(){
         'anthropic-version':'2023-06-01',
         'anthropic-dangerous-direct-browser-access':'true'
       },
-      body:JSON.stringify({model:'claude-haiku-4-5-20251001',max_tokens:1000,
+      body:JSON.stringify({model,max_tokens:1000,
         system:`You are AVILA Roll, an AI simulation agent for cement production planning.
 Database tables: macro_regions, countries, regions, sub_regions, facilities, elements, connections, products, recipes, raw_materials, fuels, element_maintenance_events, element_product_capacities, vessel_calls, rail_movements, truck_movements, transport_links, in_transit_inventory, demand_points, simulation_runs, simulation_stop_events. Element types: raw_material_storage, fuel_storage, bulk_silo (replaces clinker_silo/cement_silo/homo_silo — color by product category), packed_silo, raw_meal_mill, kiln, finish_mill, packing_plant, berth, dispatch_point (truck=no constraint same-day; rail=car accumulation with switch days and transit lag), demand_point, supply_source. Products have category: clinker, raw_meal, cement_bulk, cement_packed, additive. Kiln product capacities include capacity_tpd, specific_heat_kcal_kg, raw_meal_ratio per clinker product. Rail dispatch points have: car_capacity_t, std_loading_cars_day, max_loading_cars_day, working_days, switch_days (array of 0-6 Mon-Sun), transit_days.
 Be concise, specific, reference table names and element names precisely. ${ctx}`,
