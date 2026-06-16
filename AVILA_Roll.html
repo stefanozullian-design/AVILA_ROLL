@@ -3846,11 +3846,14 @@ function renderSupplyKPIs(){
       const ds=d.toISOString().split('T')[0];
       const dayIdx=Math.round((d-simStart)/864e5);
       millEls.forEach(el=>{
-        const pid=r.millProductHistory[el.id]?.[dayIdx]||null;
-        if(pid&&(!prodId||pid===prodId)){
-          const cap=DB.element_product_capacities.find(c=>c.element_id===el.id&&c.product_id===pid);
-          forecastRem+=parseFloat(cap?.capacity_tpd)||0;
-        }
+        const _ph=r.millProductHistory[el.id]?.[dayIdx]||null;
+        const _pids=Array.isArray(_ph)?_ph:(_ph?[_ph]:[]);
+        _pids.forEach(pid=>{
+          if(!prodId||pid===prodId){
+            const cap=DB.element_product_capacities.find(c=>c.element_id===el.id&&c.product_id===pid);
+            forecastRem+=parseFloat(cap?.capacity_tpd)||0;
+          }
+        });
       });
     }
   }
@@ -4694,10 +4697,12 @@ function _renderSupplyViewInner(wrap){
 
     // Tier 1: sim results
     if(hasSim&&r.millProductHistory[el.id]){
-      const pid=r.millProductHistory[el.id][dayIdx]||null;
-      if(pid!==undefined){
+      const _ph=r.millProductHistory[el.id][dayIdx];
+      if(_ph!==undefined){
+        // May be array (multi-product real day) or single string or null
+        const pid=Array.isArray(_ph)?(_ph[0]||null):(_ph||null);
         const cap=DB.element_product_capacities.find(c=>c.element_id===el.id&&c.product_id===pid);
-        return {product_id:pid, capacity_tpd:pid?parseFloat(cap?.capacity_tpd)||0:0};
+        return {product_id:pid, capacity_tpd:pid?parseFloat(cap?.capacity_tpd)||0:0, multiProduct:Array.isArray(_ph)&&_ph.length>1?_ph:null};
       }
     }
 
@@ -8746,11 +8751,18 @@ function simulate(elements, connections, horizon, includeProposed=false){
 
   // Build real production lookup: elementId → dateStr → [{product_id, volume_t}]
   const realProdMap={};
+  // Track date coverage per element: if a date falls within [min,max] for an element
+  // but has no record, it means zero production (not "unknown"), so the simulation
+  // must not fall through to scheduled/simulated values for that day.
+  const realProdCoverage={}; // elementId → {min:'YYYY-MM-DD', max:'YYYY-MM-DD'}
   (DB.real_production_daily||[]).forEach(rp=>{
     if(!rp.element_id||!rp.date) return;
     if(!realProdMap[rp.element_id]) realProdMap[rp.element_id]={};
     if(!realProdMap[rp.element_id][rp.date]) realProdMap[rp.element_id][rp.date]=[];
     realProdMap[rp.element_id][rp.date].push(rp);
+    const cov=realProdCoverage[rp.element_id];
+    if(!cov) realProdCoverage[rp.element_id]={min:rp.date,max:rp.date};
+    else{ if(rp.date<cov.min) cov.min=rp.date; if(rp.date>cov.max) cov.max=rp.date; }
   });
 
   for(let day=1;day<=horizon;day++){
@@ -8834,6 +8846,11 @@ function simulate(elements, connections, horizon, includeProposed=false){
       // ── REAL PRODUCTION ANCHOR (kilns) ────────────────
       const _kilnDate=new Date(simStartDate.getTime()+(day-1)*864e5).toISOString().split('T')[0];
       const _kilnReal=realProdMap[el.id]?.[_kilnDate];
+      const _kilnCov=realProdCoverage[el.id];
+      // Date is within the real data coverage window but has no record → zero production
+      if(_kilnCov&&_kilnDate>=_kilnCov.min&&_kilnDate<=_kilnCov.max&&!_kilnReal?.length){
+        s.status='idle'; return;
+      }
       if(_kilnReal?.length){
         const downClkA=(dn[el.id]||[]).map(id=>elMap[id]).filter(e=>e&&isClinkerSilo(e));
         s.status='running'; s.runDays++;
@@ -8995,13 +9012,19 @@ function simulate(elements, connections, horizon, includeProposed=false){
       // _campDateRail is computed just below — reuse by computing once here.
       const _millDate=new Date(simStartDate.getTime()+(day-1)*864e5).toISOString().split('T')[0];
       const _millReal=realProdMap[mill.id]?.[_millDate];
+      const _millCov=realProdCoverage[mill.id];
+      // Date is within real data coverage window but no record → zero production
+      if(_millCov&&_millDate>=_millCov.min&&_millDate<=_millCov.max&&!_millReal?.length){
+        s.status='idle'; r.millProductHistory[mill.id].push(null); return;
+      }
       if(_millReal?.length){
-        // Use actual production volumes; route to most-urgent downstream silo per product.
+        // Use actual production volumes; route each product to its downstream silo.
+        // A mill can produce multiple products in one day — all are routed correctly.
         s.status='running'; s.runDays++;
-        let _recorded=false;
+        const _producedProds=[];
         _millReal.forEach(rp=>{
           const vol=parseFloat(rp.volume_t)||0; if(!vol) return;
-          if(!_recorded){ r.millProductHistory[mill.id].push(rp.product_id); _recorded=true; }
+          _producedProds.push(rp.product_id);
           const prodSilos=(millProductSiloMap[mill.id]||{})[rp.product_id]||[];
           let bestSilo=null, bestU=-1;
           prodSilos.forEach(si=>{
@@ -9016,7 +9039,8 @@ function simulate(elements, connections, horizon, includeProposed=false){
             state[bestSilo.id].composition[rp.product_id]=(state[bestSilo.id].composition[rp.product_id]||0)+vol;
           }
         });
-        if(!_recorded) r.millProductHistory[mill.id].push(null);
+        // Store all products produced today; consumers read [0] for display, full array for multi-product days
+        r.millProductHistory[mill.id].push(_producedProds.length>0?_producedProds:null);
         return;
       }
 
@@ -10161,7 +10185,8 @@ function renderResultsTable(){
         } else if(isRunning){
           // Fall back to simulated capacity
           if(el.type==='finish_mill'&&r.millProductHistory?.[el.id]){
-            const activeProd=r.millProductHistory[el.id][day-1];
+            const _ph=r.millProductHistory[el.id][day-1];
+            const activeProd=Array.isArray(_ph)?(_ph[0]||null):(_ph||null);
             if(activeProd){
               const cap=caps.find(c=>c.product_id===activeProd);
               rate=cap?.capacity_tpd||0;
@@ -10639,7 +10664,8 @@ function renderDtree(r){
     if(!el) return 0;
     // Finish mills: use only the active product's capacity
     if(el.type==='finish_mill'&&r.millProductHistory?.[elId]){
-      const activeProd=r.millProductHistory[elId][day-1];
+      const _ph=r.millProductHistory[elId][day-1];
+      const activeProd=Array.isArray(_ph)?(_ph[0]||null):(_ph||null);
       if(activeProd){
         const cap=DB.element_product_capacities.find(c=>c.element_id===elId&&c.product_id===activeProd);
         return cap?.capacity_tpd||0;
