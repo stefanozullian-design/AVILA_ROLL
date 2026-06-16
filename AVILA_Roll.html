@@ -289,6 +289,8 @@ select.pi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
 .dpc-loc{font-family:var(--mono);font-size:9px;color:var(--text-dim);}
 .demand-row{display:grid;grid-template-columns:90px 110px 100px 120px 1fr;gap:10px;align-items:center;padding:6px 0;border-bottom:1px solid var(--border);}
 .demand-row.hdr{font-family:var(--mono);font-size:8px;color:var(--text-dim);letter-spacing:1px;text-transform:uppercase;}
+.dem-fc-cell{border-radius:2px;transition:background .1s;}
+.dem-fc-cell:hover{background:rgba(255,184,48,.12)!important;outline:1px solid rgba(255,184,48,.35);}
 
 /* ── SCHEDULES ── */
 #schedules-view{overflow-y:auto;background:var(--bg);}
@@ -869,7 +871,6 @@ select.fi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
         </div>
         <div style="margin-left:auto;display:flex;gap:6px">
           <button class="tb-btn sec" onclick="demandScrollToday()">Today</button>
-          <button class="tb-btn" onclick="saveDemandValues()" style="background:var(--green);color:var(--bg)">↓ Save Forecast</button>
         </div>
       </div>
       <!-- Demand filter bar -->
@@ -4441,7 +4442,7 @@ function renderDemandView(){
           // Demand point row (no product rows beneath)
           h+=`<tr style="background:rgba(76,175,80,.05)">
             <td style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:var(--green);font-size:9px;font-weight:600" title="${el.name}">
-              ${el.name}<button class="sp-fb-btn" onclick="event.stopPropagation();openSpForecastBuilder(${JSON.stringify([el.id]).replaceAll('"','&quot;')},${JSON.stringify(el.name).replaceAll('"','&quot;')})" title="⚙ Forecast Builder">⚙</button>
+              ${el.name}
             </td>`;
           months.forEach(mon=>{
             const isCol=collapsed.has(mon.ym);
@@ -4457,9 +4458,10 @@ function renderDemandView(){
               h+=`<td class="dem-day-${mon.ym}" style="padding:1px 2px;border-bottom:1px solid var(--border);border-right:1px solid rgba(255,255,255,.03);${tdSty(ds)}">
                 ${isActual
                   ? `<div style="width:50px;font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;color:${cellColor};background:${cellBg}" title="Actual shipment data">${v?Math.round(v*10)/10:''}</div>`
-                  : `<input class="dem-cell" data-el="${el.id}" data-date="${ds}" value="${v||''}"
-                      ${isNwd?'disabled title="Non-working day"':''}
-                      style="width:50px;background:${cellBg};border:none;color:${cellColor};font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;outline:none">`
+                  : `<div class="dem-fc-cell" data-el="${el.id}" data-date="${ds}"
+                      onclick="event.stopPropagation();openDemandBuilder('${el.id}','${ds}')"
+                      title="Click to open Forecast Builder from ${ds}"
+                      style="width:50px;cursor:pointer;background:${cellBg};color:${cellColor};font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;${isNwd?'opacity:.35;pointer-events:none;':''}">${v?Math.round(v*10)/10:''}</div>`
                 }
               </td>`;
             });
@@ -5370,7 +5372,7 @@ function supplyScrollToday(){
 }
 
 // ── Demand Builder modal ─────────────────────────────────
-function openDemandBuilder(elId){
+function openDemandBuilder(elId, startDate){
   const allDpEls=(DB.elements||[]).filter(e=>e.type==='demand_point');
   if(!allDpEls.length){statMsg('No demand points in topology');return;}
 
@@ -5412,7 +5414,7 @@ function openDemandBuilder(elId){
   const initSoldTo=uniq(actForDp,'ship_to_name');
   const initShipTo=uniq(actForDp,'ship_to');
 
-  const simStart=S.simCfg.start_date||new Date().toISOString().split('T')[0];
+  const simStart=startDate||S.simCfg.start_date||new Date().toISOString().split('T')[0];
   const nwdCount=(DB.non_working_days||[]).length;
 
   const pi='background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:10px;padding:5px 7px;outline:none;width:100%';
