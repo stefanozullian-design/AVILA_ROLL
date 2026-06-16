@@ -6495,13 +6495,21 @@ function rpRender(){
     destRows.push(`<tr class="tp-row-arrival"><td style="padding-left:10px">TRANSF/ARRIVAL</td>${arrCells}</tr>`);
 
     // RAIL UNLOAD row — daily volume unloaded from the rail berth into the terminal silo
+    // When a product filter is active, only show unloads into silos carrying that product.
     if(berth&&S.simResults?.berthUnloadHistory?.[berth.id]){
-      const unldHist=S.simResults.berthUnloadHistory[berth.id];
+      const _rUnldSilos=_rp.prodId
+        ?destSilos.filter(s=>getSiloProducts(s).includes(_rp.prodId))
+        :destSilos;
+      const _rUsePerSilo=_rp.prodId&&_rUnldSilos.length>0&&S.simResults.siloUnloadHistory;
+      const unldHist=_rUsePerSilo?null:S.simResults.berthUnloadHistory[berth.id];
+      const _rGetUnld=d=>_rUsePerSilo
+        ?_rUnldSilos.reduce((s,sl)=>(s+(S.simResults.siloUnloadHistory[sl.id]?.[d-1]||0)),0)
+        :(unldHist?.[d-1]||0);
       const unldCells=months.map(mon=>{
-        const monT=mon.days.reduce((s,d)=>s+(unldHist[d-1]||0),0);
+        const monT=mon.days.reduce((s,d)=>s+_rGetUnld(d),0);
         const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString()+'t':'—'}</td>`;
         return mTd+mon.days.map(d=>{
-          const v=unldHist[d-1]||0;
+          const v=_rGetUnld(d);
           const tSty=_tpTdSty(d);
           return `<td style="color:var(--real);font-size:10px;${tSty}">${v>0?Number(v).toLocaleString()+'t':'—'}</td>`;
         }).join('');
@@ -7191,13 +7199,24 @@ function vpRender(){
       destRows.push(`<tr class="tp-row-arrival"><td style="padding-left:10px">VESSEL/ARRIVAL</td>${arrCells}</tr>`);
 
       // VESSEL UNLOAD row — daily volume unloaded from the berth into the terminal silo
+      // When a product filter is active, only show unloads into silos carrying that product.
       if(S.simResults?.berthUnloadHistory?.[berth.id]){
-        const unldHist=S.simResults.berthUnloadHistory[berth.id];
+        // Determine which silo unload histories to sum (product-filtered or all)
+        const _unldSilos=_vp.prodId
+          ?destSilos.filter(s=>getSiloProducts(s).includes(_vp.prodId))
+          :destSilos;
+        const _usePerSilo=_vp.prodId&&_unldSilos.length>0&&S.simResults.siloUnloadHistory;
+        const unldHist=_usePerSilo
+          ?null  // will sum per-silo below
+          :S.simResults.berthUnloadHistory[berth.id];
+        const _getUnld=d=>_usePerSilo
+          ?_unldSilos.reduce((s,sl)=>(s+(S.simResults.siloUnloadHistory[sl.id]?.[d-1]||0)),0)
+          :(unldHist?.[d-1]||0);
         const unldCells=months.map(mon=>{
-          const monT=mon.days.reduce((s,d)=>s+(unldHist[d-1]||0),0);
+          const monT=mon.days.reduce((s,d)=>s+_getUnld(d),0);
           const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString()+'t':'—'}</td>`;
           return mTd+mon.days.map(d=>{
-            const v=unldHist[d-1]||0;
+            const v=_getUnld(d);
             const tSty=_tpTdSty(d);
             return `<td style="color:var(--real);font-size:10px;${tSty}">${v>0?Number(v).toLocaleString()+'t':'—'}</td>`;
           }).join('');
