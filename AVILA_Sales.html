@@ -903,18 +903,6 @@ function spBuildDateSpine(){
 
 // ── Build org hierarchy tree from filtered rows ───────
 function spBuildOrgTree(rows){
-  const facMap=Object.fromEntries(DB.facilities.map(f=>[f.id,f]));
-  const subMap=Object.fromEntries(DB.sub_regions.map(s=>[s.id,s]));
-  const regMap=Object.fromEntries(DB.regions.map(r=>[r.id,r]));
-  const origFacIdx={};
-  DB.facilities.forEach(f=>{
-    const n=(f.name||'').toUpperCase(); if(n) origFacIdx[n]=f.id;
-    const c=(f.code||'').toUpperCase(); if(c) origFacIdx[c]=f.id;
-  });
-  const getFacId=orig=>{
-    const up=(orig||'').toUpperCase();
-    return origFacIdx[up]||DB.facilities.find(f=>up.includes((f.name||'').toUpperCase())||(f.name||'').toUpperCase().includes(up))?.id||null;
-  };
   const dpEls=(DB.elements||[]).filter(e=>e.type==='demand_point');
   const dpNameIdx={};
   dpEls.forEach(el=>{
@@ -932,35 +920,30 @@ function spBuildOrgTree(rows){
     node.histVol+=(r.volume||0);
     if(r.date&&r.date>=cutoffStr) node.recentVol+=(r.volume||0);
   };
+  // Global per-DP volume across all customers — denominator for cascade fallback
+  const dpGlobalHistVol={};
   const tree={};
   rows.forEach(r=>{
-    const facId=getFacId(r.origin), fac=facId?facMap[facId]:null;
-    const sub=fac?subMap[fac.sub_region_id]:null, reg=sub?regMap[sub.region_id]:null;
     const dpEl=getDpEl(r.product);
-    const regId =reg ?reg.id  :'__noreg';
-    const subId =sub ?sub.id  :`__nosub_${regId}`;
-    const facKey=fac ?fac.id  :`__nofac_${(r.origin||'').replace(/\W/g,'_')}`;
-    const dpKey =dpEl?dpEl.id :`__nodp_${(r.product||'').replace(/\W/g,'_')}`;
+    const dpKey=dpEl?dpEl.id:`__nodp_${(r.product||'').replace(/\W/g,'_')}`;
+    dpGlobalHistVol[dpKey]=(dpGlobalHistVol[dpKey]||0)+(r.volume||0);
     const soldTo=spExtractSoldTo(r.ship_to_name||'—'), shipTo=r.ship_to_name||'—';
-    if(!tree[regId]) tree[regId]={id:regId,name:reg?reg.name:'Unknown Region',actMap:{},histVol:0,recentVol:0,dpElIdSet:new Set(),subs:{}};
-    upd(tree[regId],r); if(dpEl) tree[regId].dpElIdSet.add(dpEl.id);
-    if(!tree[regId].subs[subId]) tree[regId].subs[subId]={id:subId,name:sub?sub.name:r.origin||'Unknown',actMap:{},histVol:0,recentVol:0,dpElIdSet:new Set(),facs:{}};
-    upd(tree[regId].subs[subId],r); if(dpEl) tree[regId].subs[subId].dpElIdSet.add(dpEl.id);
-    if(!tree[regId].subs[subId].facs[facKey]) tree[regId].subs[subId].facs[facKey]={id:facKey,name:fac?fac.name:r.origin||'Unknown Plant',actMap:{},histVol:0,recentVol:0,dpElIdSet:new Set(),dps:{}};
-    upd(tree[regId].subs[subId].facs[facKey],r); if(dpEl) tree[regId].subs[subId].facs[facKey].dpElIdSet.add(dpEl.id);
-    if(!tree[regId].subs[subId].facs[facKey].dps[dpKey]) tree[regId].subs[subId].facs[facKey].dps[dpKey]={id:dpKey,name:dpEl?dpEl.name:r.product||'Unknown DP',dpElId:dpEl?.id||null,actMap:{},histVol:0,recentVol:0,soldtos:{}};
-    upd(tree[regId].subs[subId].facs[facKey].dps[dpKey],r);
-    if(!tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo]) tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo]={name:soldTo,actMap:{},histVol:0,recentVol:0,shiptos:{}};
-    upd(tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo],r);
-    if(!tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo].shiptos[shipTo]) tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo].shiptos[shipTo]={name:shipTo,actMap:{},histVol:0,recentVol:0};
-    upd(tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo].shiptos[shipTo],r);
+
+    if(!tree[soldTo]) tree[soldTo]={id:soldTo,name:soldTo,actMap:{},histVol:0,recentVol:0,dpElIdSet:new Set(),shiptos:{}};
+    upd(tree[soldTo],r); if(dpEl) tree[soldTo].dpElIdSet.add(dpEl.id);
+
+    if(!tree[soldTo].shiptos[shipTo]) tree[soldTo].shiptos[shipTo]={id:shipTo,name:shipTo,actMap:{},histVol:0,recentVol:0,dpElIdSet:new Set(),dps:{}};
+    upd(tree[soldTo].shiptos[shipTo],r); if(dpEl) tree[soldTo].shiptos[shipTo].dpElIdSet.add(dpEl.id);
+
+    if(!tree[soldTo].shiptos[shipTo].dps[dpKey]) tree[soldTo].shiptos[shipTo].dps[dpKey]={id:dpKey,name:dpEl?dpEl.name:(r.product||'Unknown DP'),dpElId:dpEl?.id||null,actMap:{},histVol:0,recentVol:0};
+    upd(tree[soldTo].shiptos[shipTo].dps[dpKey],r);
   });
-  // Convert per-node dpElIdSets → arrays for fbBtn and renderCells
-  Object.values(tree).forEach(reg=>{
-    reg.dpElIds=[...reg.dpElIdSet];
-    Object.values(reg.subs).forEach(sub=>{
-      sub.dpElIds=[...sub.dpElIdSet];
-      Object.values(sub.facs).forEach(fac=>{ fac.dpElIds=[...fac.dpElIdSet]; });
+  // Convert per-node dpElIdSets → arrays for fbBtn and renderCells; stamp global DP denominator
+  Object.values(tree).forEach(so=>{
+    so.dpElIds=[...so.dpElIdSet];
+    Object.values(so.shiptos).forEach(st=>{
+      st.dpElIds=[...st.dpElIdSet];
+      Object.values(st.dps).forEach(dp=>{ dp.dpGlobalHistVol=dpGlobalHistVol[dp.id]||dp.histVol||1; });
     });
   });
   return tree;
@@ -1045,7 +1028,7 @@ function spRenderTable(skipThead=false){
       }
     });
     thead.innerHTML=`<tr>
-      <th class="th-lbl" style="vertical-align:bottom;padding-bottom:8px;border-right:2px solid var(--border2);font-size:8px" rowspan="2">Region / Sub-Region / Plant / Demand Point / Sold To / Ship To</th>
+      <th class="th-lbl" style="vertical-align:bottom;padding-bottom:8px;border-right:2px solid var(--border2);font-size:8px" rowspan="2">Sold To / Ship To / Demand Point</th>
       ${h1}
     </tr><tr>${h2}</tr>`;
   }
@@ -1109,62 +1092,35 @@ function spRenderTable(skipThead=false){
 
   const sortObjs=obj=>Object.values(obj).sort((a,b)=>(a.name||'').localeCompare(b.name||''));
 
-  // ── Render tree rows ──
+  // ── Render tree rows: Sold To (L0) → Ship To (L1) → Demand Point (L2) ──
   let h='';
-  sortObjs(orgTree).forEach(reg=>{
-    const rKey='reg_'+reg.id.replace(/\W/g,'_'), rCol=!!SP.collapsed[rKey];
-    h+=`<tr class="sp-row-l0" data-sp-key="${rKey}" data-sp-depth="0" onclick="spToggle('${rKey}')" style="cursor:pointer">
+  sortObjs(orgTree).forEach(so=>{
+    const soKey='so_'+so.id.replace(/\W/g,'_'), soCol=!!SP.collapsed[soKey];
+    h+=`<tr class="sp-row-l0" data-sp-key="${soKey}" data-sp-depth="0" onclick="spToggle('${soKey}')" style="cursor:pointer">
       <td class="td-lbl" style="border-right:2px solid var(--border2)">
-        <span class="sp-toggle">${rCol?'▸':'▾'}</span><strong>${reg.name}</strong>${fbBtn(reg.dpElIds,reg.name)}
-      </td>${renderCells(reg.actMap,reg.histVol,reg.recentVol,null,reg.dpElIds)}</tr>`;
-    if(rCol) return;
+        <span class="sp-toggle">${soCol?'▸':'▾'}</span><strong>${so.name}</strong>${fbBtn(so.dpElIds,so.name)}
+      </td>${renderCells(so.actMap,so.histVol,so.recentVol,null,so.dpElIds)}</tr>`;
+    if(soCol) return;
 
-    sortObjs(reg.subs).forEach(sub=>{
-      const sKey='sub_'+sub.id.replace(/\W/g,'_'), sCol=!!SP.collapsed[sKey];
-      h+=`<tr class="sp-row-l1" data-sp-key="${sKey}" data-sp-depth="1" onclick="spToggle('${sKey}')" style="cursor:pointer">
+    sortObjs(so.shiptos).forEach(st=>{
+      const stKey='st_'+soKey+'_'+st.id.replace(/\W/g,'_'), stCol=!!SP.collapsed[stKey];
+      h+=`<tr class="sp-row-l1" data-sp-key="${stKey}" data-sp-depth="1" onclick="spToggle('${stKey}')" style="cursor:pointer">
         <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:18px">
-          <span class="sp-toggle">${sCol?'▸':'▾'}</span><strong>${sub.name}</strong>${fbBtn(sub.dpElIds,sub.name)}
-        </td>${renderCells(sub.actMap,sub.histVol,sub.recentVol,null,sub.dpElIds)}</tr>`;
-      if(sCol) return;
+          <span class="sp-toggle">${stCol?'▸':'▾'}</span><strong>${st.name}</strong>${fbBtn(st.dpElIds,st.name)}
+        </td>${renderCells(st.actMap,st.histVol,st.recentVol,null,st.dpElIds)}</tr>`;
+      if(stCol) return;
 
-      sortObjs(sub.facs).forEach(fac=>{
-        const fKey='fac_'+fac.id.replace(/\W/g,'_'), fCol=!!SP.collapsed[fKey];
-        h+=`<tr class="sp-row-l2" data-sp-key="${fKey}" data-sp-depth="2" onclick="spToggle('${fKey}')" style="cursor:pointer">
-          <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:30px">
-            <span class="sp-toggle">${fCol?'▸':'▾'}</span><strong>${fac.name}</strong>${fbBtn(fac.dpElIds,fac.name)}
-          </td>${renderCells(fac.actMap,fac.histVol,fac.recentVol,null,fac.dpElIds)}</tr>`;
-        if(fCol) return;
-
-        sortObjs(fac.dps).forEach(dp=>{
-          const dpKey='dp_'+dp.id.replace(/\W/g,'_'), dpCol=!!SP.collapsed[dpKey];
-          const dpElIds=dp.dpElId?[dp.dpElId]:[];
-          h+=`<tr class="sp-row-l3" data-sp-key="${dpKey}" data-sp-depth="3" onclick="spToggle('${dpKey}')" style="cursor:pointer">
-            <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:42px">
-              <span class="sp-toggle">${dpCol?'▸':'▾'}</span>${dp.name}${fbBtn(dpElIds,dp.name)}
-            </td>${renderCells(dp.actMap,dp.histVol,dp.recentVol,dp.dpElId,null)}</tr>`;
-          if(dpCol) return;
-
-          sortObjs(dp.soldtos).forEach(so=>{
-            const soKey='so_'+dpKey+'_'+so.name.replace(/\W/g,'_'), soCol=!!SP.collapsed[soKey];
-            const soShipTos=Object.keys(so.shiptos);
-            h+=`<tr class="sp-row-l4" data-sp-key="${soKey}" data-sp-depth="4" onclick="spToggle('${soKey}')" style="cursor:pointer">
-              <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:54px">
-                <span class="sp-toggle">${soCol?'▸':'▾'}</span>${so.name}
-              </td>${renderCells(so.actMap,so.histVol,so.recentVol,dp.dpElId,null,soShipTos,dp.histVol||1)}</tr>`;
-            if(soCol) return;
-
-            sortObjs(so.shiptos).forEach(st=>{
-              h+=`<tr class="sp-row-l5" data-sp-depth="5">
-                <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:66px;font-size:7px">${st.name}</td>
-                ${renderCells(st.actMap,st.histVol,st.recentVol,dp.dpElId,null,[st.name],dp.histVol||1)}</tr>`;
-            });
-          });
-        });
+      sortObjs(st.dps).forEach(dp=>{
+        const dpElIds=dp.dpElId?[dp.dpElId]:[];
+        h+=`<tr class="sp-row-l2" data-sp-depth="2">
+          <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:30px;font-size:7px">
+            ${dp.name}${fbBtn(dpElIds,dp.name)}
+          </td>${renderCells(dp.actMap,dp.histVol,dp.recentVol,dp.dpElId,null,[st.name],dp.dpGlobalHistVol)}</tr>`;
       });
     });
   });
 
-  if(!h) h=`<tr><td colspan="20" class="sp-no-data">No org hierarchy match — check that Origins in the Excel match facility names in your org structure</td></tr>`;
+  if(!h) h=`<tr><td colspan="20" class="sp-no-data">No data for current filters</td></tr>`;
   tbody.innerHTML=h;
 }
 
@@ -1817,9 +1773,9 @@ function spExpandAll(expand){
   SP.collapsed={};
   SP._userExpanded={};
   if(!expand){
-    // Collapse all region rows — use cached tree if available
+    // Collapse all Sold To rows — use cached tree if available
     const orgTree=SP._tree||spBuildOrgTree(SP.filteredRows);
-    Object.keys(orgTree).forEach(k=>{ SP.collapsed['reg_'+k.replace(/\W/g,'_')]=true; });
+    Object.keys(orgTree).forEach(k=>{ SP.collapsed['so_'+k.replace(/\W/g,'_')]=true; });
   }
   spRenderTable(true);
 }
