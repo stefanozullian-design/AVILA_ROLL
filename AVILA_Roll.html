@@ -8320,8 +8320,10 @@ function simulate(elements, connections, horizon, includeProposed=false){
       state[el.id].yardByProduct={}; // {productId: cars} — accumulated in yard since last switch
     }
     if(el.type==='berth'){
-      state[el.id].berthQueue={};    // {productId: tonnes} — stock waiting to unload
-      state[el.id].vesselPending=[]; // [{productId, quantity_t, name, rateTPH}] — vessels waiting for berth
+      state[el.id].berthQueue={};      // synced from vesselAtBerth each day
+      state[el.id].vesselAtBerth=null; // {name, productId, remainingTonnes, rateTPH} — vessel currently docked
+      state[el.id].vesselOffshore=[];  // [{name, productId, remainingTonnes, rateTPH}] — waiting offshore
+      state[el.id].vesselPending=state[el.id].vesselOffshore; // alias for any legacy reads
       state[el.id].currentVessel=null;
       r.berthArrivalHistory[el.id]=[];
       r.berthUnloadHistory[el.id]=[];
@@ -9627,42 +9629,112 @@ function simulate(elements, connections, horizon, includeProposed=false){
     });
 
     // ── STEP 6b: BERTH ARRIVALS & UNLOADING ──────────────
-    // Order of operations matters:
-    // 1. If a ship berth queue is empty, load the NEXT pending vessel that already arrived
-    //    in a previous day (not today's). This starts unloading the day AFTER arrival.
-    // 2. Add today's vessel arrivals to vesselPending (will unload from tomorrow).
-    // 3. Rail transit arrivals go straight to berthQueue (same-day processing).
-    // 4. Unload from berthQueue at rate limit → downstream silo.
+    // Order of operations:
+    // B. Add today's arrivals to the offshore queue (vesselOffshore).
+    // A. For each ship berth: handle preemption, silo-full vacating, and docking.
+    //    Vessel at berth → berthQueue (for unloading step). Berth switches products
+    //    freely: when a silo is full the vessel vacates so another product can dock.
+    // C. Rail transit arrivals → berthQueue (same-day).
+    // D. Unload berthQueue at design rate or not at all (last-tons exception applies).
 
     const berthArrivedToday={};
 
-    // Step A: Promote yesterday's pending vessels to berthQueue (they arrived before today)
-    elements.filter(e=>e.type==='berth'&&(e.props.berth_type||'Ship Berth')==='Ship Berth').forEach(berth=>{
-      const bs=state[berth.id];
-      const queued=Object.values(bs.berthQueue||{}).reduce((a,b)=>a+b,0);
-      if(queued<=0&&(bs.vesselPending||[]).length>0){
-        const next=bs.vesselPending.shift();
-        bs.currentVessel=next.name;
-        bs.currentVesselRate=next.rateTPH;
-        bs.berthQueue[next.productId]=(bs.berthQueue[next.productId]||0)+next.quantity_t;
-        // Note: arrival history was already marked in Step B on the actual arrival day — don't re-mark here
-      }
-      const nowQueued=Object.values(bs.berthQueue||{}).reduce((a,b)=>a+b,0);
-      if(nowQueued<=0) bs.currentVessel=null;
-    });
-
-    // Step B: Add today's vessel arrivals to vesselPending — they start unloading tomorrow
+    // Step B: Add today's vessel arrivals to offshore queue
     (vesselArrivalsByDay[day]||[]).forEach(arr=>{
       const bs=state[arr.berthId]; if(!bs) return;
-      bs.vesselPending.push({productId:arr.productId, quantity_t:arr.quantity_t, rateTPH:arr.rateTPH, name:arr.name});
-      // Record arrival tonnage for the arrival history (shown on arrival day)
+      bs.vesselOffshore.push({name:arr.name, productId:arr.productId, remainingTonnes:arr.quantity_t, rateTPH:arr.rateTPH});
+      // Record arrival tonnage for display (shown on arrival day)
       const downSilosForArrival=(dn[arr.berthId]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='bulk_silo');
       const arrivalSilo=downSilosForArrival.find(s=>getSiloProducts(s).includes(arr.productId))
         ||downSilosForArrival[0];
       if(arrivalSilo&&r.vesselArrivalHistory[arrivalSilo.id]!==undefined){
-        const bs2=state[arr.berthId];
-        if(!bs2._vesselArrivalBySilo) bs2._vesselArrivalBySilo={};
-        bs2._vesselArrivalBySilo[arrivalSilo.id]=(bs2._vesselArrivalBySilo[arrivalSilo.id]||0)+arr.quantity_t;
+        if(!bs._vesselArrivalBySilo) bs._vesselArrivalBySilo={};
+        bs._vesselArrivalBySilo[arrivalSilo.id]=(bs._vesselArrivalBySilo[arrivalSilo.id]||0)+arr.quantity_t;
+      }
+    });
+
+    // Step A: Berth management — dock/undock ship berths based on silo space and priority
+    elements.filter(e=>e.type==='berth'&&(e.props.berth_type||'Ship Berth')==='Ship Berth').forEach(berth=>{
+      const bs=state[berth.id];
+      const berthRateTPH=parseFloat(berth.props.max_unload_rate_tph)||99999;
+      const simPts=parseFloat(berth.props.simultaneous_points)||1;
+      const downSilosB=(dn[berth.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='bulk_silo');
+
+      const findSiloB=(productId)=>{
+        let s=downSilosB.find(s=>getSiloProducts(s).includes(productId));
+        if(!s) s=downSilosB.find(s=>(state[s.id]?.inventory||0)<(state[s.id]?.maxCap||Infinity)*0.99);
+        return s||downSilosB[0]||null;
+      };
+
+      const siloSpaceB=(silo)=>{
+        if(!silo||!state[silo.id]) return 0;
+        const inv=state[silo.id].inventory||0;
+        const max=state[silo.id].maxCap||Infinity;
+        // Use siloInflow already committed this day (e.g. from mills) and demand drain
+        const inflowing=siloInflow[silo.id]||0;
+        const draining=todayDemandPull[silo.id]||0;
+        return Math.max(0,max-inv-inflowing+draining);
+      };
+
+      const vesselDailyCap=(v)=>{
+        const eff=v.rateTPH>0?Math.min(v.rateTPH,berthRateTPH):berthRateTPH;
+        return eff*24*simPts;
+      };
+
+      const wantToUnload=(v)=>Math.min(vesselDailyCap(v),v.remainingTonnes);
+
+      // A vessel's product silo is "critical" when inventory is at or below the critical floor
+      const isProductCritical=(productId)=>{
+        const silo=findSiloB(productId);
+        if(!silo||!state[silo.id]) return false;
+        const inv=state[silo.id].inventory||0;
+        const max=state[silo.id].maxCap||1;
+        const floor=(parseFloat(silo.props?.critical_floor_pct)||0)/100*max;
+        return floor>0&&inv<=floor;
+      };
+
+      // Preemption: an offshore vessel's product is critical → current vessel yields berth
+      if(bs.vesselAtBerth&&bs.vesselOffshore.length>0){
+        const critIdx=bs.vesselOffshore.findIndex(v=>
+          v.productId!==bs.vesselAtBerth.productId&&isProductCritical(v.productId));
+        if(critIdx>=0){
+          bs.vesselOffshore.unshift(bs.vesselAtBerth); // return interrupted vessel to front
+          bs.vesselAtBerth=null;
+        }
+      }
+
+      // Silo-full check: if current vessel's silo can't accept today's load, vessel vacates
+      if(bs.vesselAtBerth){
+        const silo=findSiloB(bs.vesselAtBerth.productId);
+        if(siloSpaceB(silo)<wantToUnload(bs.vesselAtBerth)){
+          bs.vesselOffshore.unshift(bs.vesselAtBerth); // waits offshore, first in line to return
+          bs.vesselAtBerth=null;
+        }
+      }
+
+      // Dock next candidate if berth is empty
+      if(!bs.vesselAtBerth&&bs.vesselOffshore.length>0){
+        // Critical products get priority
+        let dockIdx=bs.vesselOffshore.findIndex(v=>isProductCritical(v.productId));
+        if(dockIdx<0) dockIdx=0;
+        const candidate=bs.vesselOffshore[dockIdx];
+        const silo=findSiloB(candidate.productId);
+        if(silo&&siloSpaceB(silo)>=wantToUnload(candidate)){
+          bs.vesselOffshore.splice(dockIdx,1);
+          bs.vesselAtBerth=candidate;
+        }
+        // else: all candidates blocked by full silos — berth stays empty this day
+      }
+
+      // Sync compat fields used by Step D unloading
+      if(bs.vesselAtBerth){
+        bs.berthQueue={[bs.vesselAtBerth.productId]:bs.vesselAtBerth.remainingTonnes};
+        bs.currentVessel=bs.vesselAtBerth.name;
+        bs.currentVesselRate=bs.vesselAtBerth.rateTPH;
+      } else {
+        bs.berthQueue={};
+        bs.currentVessel=null;
+        bs.currentVesselRate=0;
       }
     });
 
@@ -9741,32 +9813,22 @@ function simulate(elements, connections, horizon, includeProposed=false){
         const simPoints=parseFloat(berth.props.simultaneous_points)||1;
         dailyCap=trucksDay*truckCap*simPoints;
       } else {
-        // Ship Berth: use vessel-specific rate if set and lower than berth max
+        // Ship Berth: min of berth max rate and vessel-specific rate
         const berthRateTPH=parseFloat(berth.props.max_unload_rate_tph)||99999;
-        const vesselRateTPH=bs.currentVesselRate>0?parseFloat(bs.currentVesselRate):Infinity;
-        const effectiveTPH=Math.min(berthRateTPH,vesselRateTPH);
+        const vesselRateTPH=bs.currentVesselRate>0?Math.min(parseFloat(bs.currentVesselRate),berthRateTPH):berthRateTPH;
         const simPoints=parseFloat(berth.props.simultaneous_points)||1;
-        dailyCap=effectiveTPH*24*simPoints;
+        dailyCap=vesselRateTPH*24*simPoints;
       }
 
-      // Find the downstream bulk_silo that accepts the vessel's product.
-      // For ship berths with a specific vessel product, prefer the product-matched silo.
-      // Fall back to first available silo with space if no exact match found.
-      const downSilos=(dn[berth.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='bulk_silo');
-      // Determine the vessel's product (single product in berthQueue)
+      // Target for today: full design rate, or whatever remains (last-tons exception)
+      const wantToUnload=Math.min(dailyCap,queued);
+
+      // Find destination silo — Step A already matched vessel to silo; re-derive here for safety
       const vesselProdId=Object.keys(bs.berthQueue).find(pid=>(bs.berthQueue[pid]||0)>0);
-      let downSilo=null;
-      if(vesselProdId){
-        // First try: silo explicitly configured for this product
-        downSilo=downSilos.find(s=>{
-          const prods=getSiloProducts(s);
-          return prods.length>0&&prods.includes(vesselProdId);
-        });
-      }
-      // Second try: any silo with space (handles untyped silos)
-      if(!downSilo) downSilo=downSilos.find(s=>(state[s.id]?.inventory||0)<(state[s.id]?.maxCap||Infinity)*0.99);
-      // Last resort: first downstream silo
-      if(!downSilo) downSilo=downSilos[0];
+      const downSilosD=(dn[berth.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='bulk_silo');
+      let downSilo=vesselProdId
+        ?downSilosD.find(s=>getSiloProducts(s).includes(vesselProdId))||downSilosD[0]
+        :downSilosD[0];
       if(!downSilo){ bs.status='blocked'; r.berthUnloadHistory[berth.id].push(0); return; }
 
       const siloInv=state[downSilo.id]?.inventory||0;
@@ -9775,35 +9837,40 @@ function simulate(elements, connections, horizon, includeProposed=false){
       const expectedDrainToday=todayDemandPull[downSilo.id]||0;
       const siloSpace=Math.max(0,siloMax-siloInv-alreadyInflowing+expectedDrainToday);
 
-      const canUnload=Math.min(dailyCap,queued,siloSpace);
-      if(canUnload<=0){
-        bs.status=siloSpace<=0?'blocked':'idle';
+      // Full-rate-or-nothing: unload only if silo can accept the full target amount
+      if(siloSpace<wantToUnload){
+        bs.status='blocked';
         r.berthUnloadHistory[berth.id].push(0);
         return;
       }
 
-      // Deduct from berth queue proportionally by product, add to silo inflow + composition
-      const ratio=canUnload/queued;
+      const canUnload=wantToUnload;
+
+      // Deduct from berth queue, add to silo inflow + composition
       Object.keys(bs.berthQueue).forEach(pid=>{
-        const deduct=(bs.berthQueue[pid]||0)*ratio;
+        const deduct=bs.berthQueue[pid]||0;
         if(deduct<0.001) return;
-        bs.berthQueue[pid]=Math.max(0,(bs.berthQueue[pid]||0)-deduct);
-        siloInflow[downSilo.id]=(siloInflow[downSilo.id]||0)+deduct;
-        state[downSilo.id].composition[pid]=(state[downSilo.id].composition[pid]||0)+deduct;
+        const actual=Math.min(deduct,canUnload); // single-product vessel: deduct = canUnload
+        bs.berthQueue[pid]=Math.max(0,deduct-actual);
+        siloInflow[downSilo.id]=(siloInflow[downSilo.id]||0)+actual;
+        state[downSilo.id].composition[pid]=(state[downSilo.id].composition[pid]||0)+actual;
       });
+
+      // Keep vesselAtBerth.remainingTonnes in sync
+      if(bs.vesselAtBerth) bs.vesselAtBerth.remainingTonnes=Math.max(0,(bs.vesselAtBerth.remainingTonnes||0)-canUnload);
+
       r.berthUnloadHistory[berth.id].push(Math.round(canUnload));
       bs.status='running';
       bs.runDays=(bs.runDays||0)+1;
-      // Record daily unload amount against the specific silo (retroactively update today's slot)
       if(r.siloUnloadHistory[downSilo.id]!==undefined){
         const lastIdx=r.siloUnloadHistory[downSilo.id].length-1;
         if(lastIdx>=0) r.siloUnloadHistory[downSilo.id][lastIdx]=(r.siloUnloadHistory[downSilo.id][lastIdx]||0)+Math.round(canUnload);
       }
 
-      // If queue is now empty, vessel has finished unloading — clear vessel state.
-      // The next pending vessel (if any) will be promoted by Step A tomorrow.
+      // Vessel finished — clear from berth; next vessel docks tomorrow via Step A
       const afterQueued=Object.values(bs.berthQueue).reduce((a,b)=>a+b,0);
       if(afterQueued<0.1){
+        bs.vesselAtBerth=null;
         bs.currentVessel=null;
         bs.currentVesselRate=0;
       }
