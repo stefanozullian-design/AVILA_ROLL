@@ -5046,8 +5046,8 @@ function _renderSupplyViewInner(wrap){
               },0);
               const avgMonthly=mt/mon.dates.length;
               const avgPct=siloMax>0?avgMonthly/siloMax:null;
-              const avgBorderColor=avgPct===null?'rgba(0,217,163,.1)':avgPct<0||avgPct>1?'var(--red)':avgPct<0.25||avgPct>0.75?'var(--amber)':'var(--green)';
-              h+=`<td style="border-left:2px solid ${avgBorderColor};font-size:9px;color:${invColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${avgMonthly>0?Math.round(avgMonthly).toLocaleString():''}</td>`;
+              const avgBg=avgPct===null?'':avgPct<0||avgPct>1?'background:rgba(255,61,90,.12);':avgPct<0.25||avgPct>0.75?'background:rgba(255,184,48,.10);':'background:rgba(0,217,163,.06);';
+              h+=`<td style="border-left:2px solid rgba(0,217,163,.1);font-size:9px;color:${invColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${avgBg}">${avgMonthly>0?Math.round(avgMonthly).toLocaleString():''}</td>`;
               if(!isCol){
                 mon.dates.forEach((ds)=>{
                   const inv=getInventoryValue(silo.id, ds, siloStart);
@@ -5055,16 +5055,15 @@ function _renderSupplyViewInner(wrap){
                   // Text colour: green = real/actual data, fuchsia = simulated/future
                   const isReal=inv.isActual||(ds<=todayStr);
                   const textColor=isReal?'var(--real)':'#f0f';
-                  // Border colour: capacity level gauge
-                  let borderColor='transparent';
+                  // Background tint: capacity level gauge (subtle wash, doesn't compete with borders)
+                  let bgTint='';
                   if(siloMax>0){
                     const pct=v/siloMax;
-                    if(v<0||pct>1) borderColor='var(--red)';
-                    else if(pct<0.25||pct>0.75) borderColor='var(--amber)';
-                    else borderColor='var(--green)';
+                    if(v<0||pct>1) bgTint='background:rgba(255,61,90,.12);';
+                    else if(pct<0.25||pct>0.75) bgTint='background:rgba(255,184,48,.10);';
+                    else bgTint='background:rgba(0,217,163,.06);';
                   }
-                  const borderSty=siloMax>0?`outline:1px solid ${borderColor};outline-offset:-2px;`:'';
-                  h+=`<td class="sup-day-${mon.ym} ${inv.isActual?'cell-real':''}" style="font-size:9px;color:${v>0?textColor:'rgba(0,217,163,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${inv.isActual?'700':'400'};${borderSty}${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
+                  h+=`<td class="sup-day-${mon.ym} ${inv.isActual?'cell-real':''}" style="font-size:9px;color:${v>0?textColor:'rgba(0,217,163,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${inv.isActual?'700':'400'};${bgTint}${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
                 });
               }
             });
@@ -5112,10 +5111,14 @@ function _renderSupplyViewInner(wrap){
                 const prod=DB.products.find(p=>p.id===res.product_id);
                 const pColor=prod?PRODUCT_CAT_COLORS[prod.category||'']||cemColor:cemColor;
                 const isCamp=res.isCampaign;
-                const campBorder=isCamp?'border-left:2px solid #4ade80;border-right:2px solid #4ade80;':'';
+                // Left stripe: product color (campaign overrides with green)
+                const stripeColor=isCamp?'#4ade80':prod?pColor:'transparent';
+                const stripeSty=`border-left:3px solid ${v>0?stripeColor:'transparent'};`;
                 const lockBadge=isCamp?'<span style="font-size:7px;color:#4ade80;margin-left:2px" title="Manager campaign">🔒</span>':'';
+                // Small dot before number to reinforce product identity
+                const dot=prod&&v>0?`<span style="display:inline-block;width:5px;height:5px;border-radius:50%;background:${pColor};margin-right:3px;opacity:.75;vertical-align:middle"></span>`:'';
                 const cellTitle=isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name||'');
-                h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();showCampaignPopup('${el.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?pColor:'rgba(255,61,90,.4)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${campBorder}${tdSty(ds)}">${maintDays.has(ds)?`<span style="font-size:7px;font-family:var(--mono);color:var(--amber);letter-spacing:.5px;cursor:pointer;font-weight:700;opacity:.9" onclick="event.stopPropagation();openMaintenanceEventById('${maintDays.get(ds)}')">MAINT</span>`:(v>0?Math.round(v).toLocaleString()+lockBadge:'0')}</td>`;
+                h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();showCampaignPopup('${el.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?pColor:'rgba(255,61,90,.4)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${stripeSty}${tdSty(ds)}">${maintDays.has(ds)?`<span style="font-size:7px;font-family:var(--mono);color:var(--amber);letter-spacing:.5px;cursor:pointer;font-weight:700;opacity:.9" onclick="event.stopPropagation();openMaintenanceEventById('${maintDays.get(ds)}')">MAINT</span>`:(v>0?dot+Math.round(v).toLocaleString()+lockBadge:'0')}</td>`;
               });
             });
             h+=`</tr>`;
