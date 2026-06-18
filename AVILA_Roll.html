@@ -5045,15 +5045,26 @@ function _renderSupplyViewInner(wrap){
                 return s+inv.value;
               },0);
               const avgMonthly=mt/mon.dates.length;
-              h+=`<td style="border-left:2px solid rgba(0,217,163,.1);font-size:9px;color:${invColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${avgMonthly>0?Math.round(avgMonthly).toLocaleString():''}</td>`;
+              const avgPct=siloMax>0?avgMonthly/siloMax:null;
+              const avgBorderColor=avgPct===null?'rgba(0,217,163,.1)':avgPct<0||avgPct>1?'var(--red)':avgPct<0.25||avgPct>0.75?'var(--amber)':'var(--green)';
+              h+=`<td style="border-left:2px solid ${avgBorderColor};font-size:9px;color:${invColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${avgMonthly>0?Math.round(avgMonthly).toLocaleString():''}</td>`;
               if(!isCol){
                 mon.dates.forEach((ds)=>{
                   const inv=getInventoryValue(silo.id, ds, siloStart);
                   const v=inv.value;
-                  const cellColor=inv.isActual?'var(--real)':invColor;
-                  const cellWeight=inv.isActual?'700':'400';
-                  const cellClass=inv.isActual?'cell-real':'';
-                  h+=`<td class="sup-day-${mon.ym} ${cellClass}" style="font-size:9px;color:${v>0?cellColor:'rgba(0,217,163,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${cellWeight};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
+                  // Text colour: green = real/actual data, fuchsia = simulated/future
+                  const isReal=inv.isActual||(ds<=todayStr);
+                  const textColor=isReal?'var(--real)':'#f0f';
+                  // Border colour: capacity level gauge
+                  let borderColor='transparent';
+                  if(siloMax>0){
+                    const pct=v/siloMax;
+                    if(v<0||pct>1) borderColor='var(--red)';
+                    else if(pct<0.25||pct>0.75) borderColor='var(--amber)';
+                    else borderColor='var(--green)';
+                  }
+                  const borderSty=siloMax>0?`outline:1px solid ${borderColor};outline-offset:-2px;`:'';
+                  h+=`<td class="sup-day-${mon.ym} ${inv.isActual?'cell-real':''}" style="font-size:9px;color:${v>0?textColor:'rgba(0,217,163,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${inv.isActual?'700':'400'};${borderSty}${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
                 });
               }
             });
@@ -9817,6 +9828,12 @@ function simulate(elements, connections, horizon, includeProposed=false){
       });
     });
 
+    // Push today's zero slot for siloUnloadHistory BEFORE the berth unload step,
+    // so Step D's retroactive lastIdx update lands on today's slot (not yesterday's).
+    elements.filter(e=>e.type==='bulk_silo').forEach(el=>{
+      if(r.siloUnloadHistory[el.id]!==undefined) r.siloUnloadHistory[el.id].push(0);
+    });
+
     elements.filter(e=>e.type==='berth').forEach(berth=>{
       const bs=state[berth.id];
       // Record arrivals for this berth today
@@ -9981,8 +9998,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
         }
       });
       if(r.vesselArrivalHistory[el.id]!==undefined) r.vesselArrivalHistory[el.id].push(vesselQty);
-      // Silo unload: push 0 slot (retroactively updated by berth unload step above)
-      if(r.siloUnloadHistory[el.id]!==undefined) r.siloUnloadHistory[el.id].push(0);
+      // siloUnloadHistory slot was already pushed before the berth unload step (retroactive update lands on correct day)
     });
 
     // Apply flows, then record END-of-day inventory for display.
