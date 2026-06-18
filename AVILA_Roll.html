@@ -8218,6 +8218,17 @@ function _nrLoadEquipment(){
   });
 }
 
+let _simRunning=false, _simDebounceTimer=null;
+function _scheduleSimRun(delay=600){
+  if(!S.facility_id) return;
+  clearTimeout(_simDebounceTimer);
+  _simDebounceTimer=setTimeout(async()=>{
+    if(_simRunning) return;
+    _simRunning=true;
+    try{ await runSimulation(); } catch(e){ console.error('Auto-sim error',e); } finally{ _simRunning=false; }
+  },delay);
+}
+
 async function runSimulation(){
   if(!S.facility_id){alert('Select a facility first.');return;}
   const els=getFacElements();
@@ -12065,7 +12076,7 @@ function showModalContent(html){
   document.getElementById('modal-content').innerHTML=html;
   document.getElementById('modal-overlay').classList.add('active');
 }
-function closeModal(){ document.getElementById('modal-overlay').classList.remove('active'); }
+function closeModal(){ document.getElementById('modal-overlay').classList.remove('active'); _scheduleSimRun(); }
 function overlayClick(e){ if(e.target===document.getElementById('modal-overlay')) closeModal(); }
 
 function rawMatHTML(){ return `
@@ -14730,6 +14741,7 @@ async function dsAutoRefreshAll(){
     .filter(s => DS.handles[s.id])
     .map(s => dsRefreshSlot(s.id, false));
   await Promise.allSettled(promises);
+  _scheduleSimRun(1200);
   // Update UI if Configure modal is open
   dsRefreshConfigUI();
   // Update Sales page status
@@ -15114,6 +15126,9 @@ document.addEventListener('DOMContentLoaded',async()=>{
     canvas.addEventListener('mousemove', (e) => onCanvasMove(e));
     canvas.addEventListener('mouseup', (e) => onCanvasUp(e));
   }
+
+  // Auto-run simulation after initial load (give data sources time to load)
+  _scheduleSimRun(2000);
 });
 </script>
 
