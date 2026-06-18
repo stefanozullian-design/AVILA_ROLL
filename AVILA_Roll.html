@@ -7169,107 +7169,125 @@ function vpRender(){
     const berths=getFacElements().filter(e=>e.type==='berth'&&
       (e.assigned_facility_id||e.facility_id)===destFacId&&
       !(e.props?.berth_type||'').toLowerCase().includes('rail'));
-    berths.forEach(berth=>{
-      const destSilos=rpGetDestSilos(berth);
-      const demEls=rpGetDestDemEls(destFacId);
-      const arrivals=vpPlannedArrivalsForBerth(berth.id);
 
-      const _colspan=days.length+months.length+1;
-      destRows.push(`<tr><td colspan="${_colspan}" style="background:rgba(255,184,48,.06);color:var(--amber);font-family:var(--mono);font-size:8px;padding:3px 8px;letter-spacing:.06em;border-top:1px solid rgba(255,184,48,.15)">▸ ${destFac?.name||destFacId} / ${berth.name}</td></tr>`);
+    // Collect all silos, products and demand elements across all berths for this facility
+    const allDestSilos=[...new Map(berths.flatMap(b=>rpGetDestSilos(b)).map(s=>[s.id,s])).values()];
+    const demEls=rpGetDestDemEls(destFacId);
+    const allProdIds=[...new Set(allDestSilos.flatMap(s=>getSiloProducts(s)).filter(Boolean))];
+    const activeProdIds=_vp.prodId?allProdIds.filter(pid=>pid===_vp.prodId):allProdIds;
 
-      // VESSEL/ARRIVAL row — clickable, color-coded by dominant status
-      const arrCells=months.map(mon=>{
-        const monT=mon.days.reduce((s,d)=>s+(arrivals[d]||[]).reduce((t,e)=>t+e.tonnes,0),0);
-        const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString()+'t':'—'}</td>`;
-        return mTd+mon.days.map(d=>{
-          const entries=arrivals[d]||[];
-          let cls='tp-cell-clickable';
-          let val='—';
-          if(entries.length>0){
-            const totalTonnes=entries.reduce((s,e)=>s+e.tonnes,0);
-            const domSt=_statusPriority.find(s=>entries.some(e=>e.status===s))||entries[0].status;
-            const col=_tsGet(domSt).color;
-            cls+=' tp-cell-planned';
-            val=`<span style="color:${col}">${Number(totalTonnes).toLocaleString()}t</span>`;
-          }
-          const tSty=_tpTdSty(d);
-          return `<td class="${cls}"${tSty?` style="${tSty}"`:''}  onclick="vpOpenArrivalDialog('${berth.id}','${d}')" title="Click to add/edit vessel arrival">${val}</td>`;
+    const _colspan=days.length+months.length+1;
+
+    // ── Facility header ──────────────────────────────────────────────
+    destRows.push(`<tr><td colspan="${_colspan}" style="background:rgba(255,184,48,.10);color:var(--amber);font-family:var(--mono);font-size:9px;font-weight:700;padding:5px 10px;letter-spacing:.08em;border-top:2px solid rgba(255,184,48,.3)">▸ ${destFac?.name||destFacId}</td></tr>`);
+
+    // ── Per-product block ────────────────────────────────────────────
+    activeProdIds.forEach(pid=>{
+      const prod=DB.products.find(p=>p.id===pid);
+      const prodName=prod?.name||pid;
+      const prodSilos=allDestSilos.filter(s=>getSiloProducts(s).includes(pid));
+
+      // Product sub-header
+      destRows.push(`<tr><td colspan="${_colspan}" style="background:rgba(120,120,200,.07);color:var(--text-dim);font-family:var(--mono);font-size:8px;padding:2px 18px;letter-spacing:.06em;border-top:1px solid var(--border2)">  ${prodName}</td></tr>`);
+
+      // ── INVENTORY rows ───────────────────────────────────────────
+      prodSilos.forEach(silo=>{
+        const invCells=months.map(mon=>{
+          const lastV=rpInv(silo.id,mon.days[mon.days.length-1]);
+          const mTd=`<td class="logi-mcol" style="${_mTdSty}">${lastV!==null?Number(Math.round(lastV)).toLocaleString():'—'}</td>`;
+          return mTd+mon.days.map(d=>{
+            const v=rpInv(silo.id,d);
+            const max=parseFloat(silo.props?.max_capacity)||0;
+            const floor=(parseFloat(silo.props?.critical_floor_pct)||0)/100*max;
+            const crit=v!==null&&v<=floor&&floor>0;
+            const tSty=_tpTdSty(d);
+            const baseSty=(crit?'color:var(--red);':'')+tSty;
+            return `<td${baseSty?` style="${baseSty}"`:''}>${v!==null?Number(v).toLocaleString():'—'}</td>`;
+          }).join('');
         }).join('');
-      }).join('');
-      destRows.push(`<tr class="tp-row-arrival"><td style="padding-left:10px">VESSEL/ARRIVAL</td>${arrCells}</tr>`);
+        destRows.push(`<tr class="tp-row-inv"><td style="padding-left:22px;font-size:10px">INVENTORY · ${silo.name}</td>${invCells}</tr>`);
+      });
 
-      // VESSEL UNLOAD row — daily volume unloaded from the berth into the terminal silo
-      // When a product filter is active, only show unloads into silos carrying that product.
-      if(S.simResults?.berthUnloadHistory?.[berth.id]){
-        // Determine which silo unload histories to sum (product-filtered or all)
-        const _unldSilos=_vp.prodId
-          ?destSilos.filter(s=>getSiloProducts(s).includes(_vp.prodId))
-          :destSilos;
-        const _usePerSilo=_vp.prodId&&_unldSilos.length>0&&S.simResults.siloUnloadHistory;
-        const unldHist=_usePerSilo
-          ?null  // will sum per-silo below
-          :S.simResults.berthUnloadHistory[berth.id];
-        const _getUnld=d=>_usePerSilo
-          ?_unldSilos.reduce((s,sl)=>(s+(S.simResults.siloUnloadHistory[sl.id]?.[d-1]||0)),0)
-          :(unldHist?.[d-1]||0);
-        const unldCells=months.map(mon=>{
-          const monT=mon.days.reduce((s,d)=>s+_getUnld(d),0);
+      // ── VESSEL ARRIVAL rows (one per berth that handles this product) ──
+      berths.forEach(berth=>{
+        const berthSilosForProd=rpGetDestSilos(berth).filter(s=>getSiloProducts(s).includes(pid));
+        if(!berthSilosForProd.length) return; // berth doesn't serve this product
+        const arrivals=vpPlannedArrivalsForBerth(berth.id);
+        // Filter arrivals to only those for this product
+        const prodArrivals={};
+        DB.vessel_calls.filter(vc=>vc.product_id===pid).forEach((vc,idx)=>{
+          const st=vc.status||'Planned';
+          if(vc.legs&&vc.legs.length>0){
+            vc.legs.filter(l=>l.berth_element_id===berth.id&&l.arrival_date&&S.simCfg.start_date).forEach(l=>{
+              const arrDay=Math.round((new Date(l.arrival_date)-new Date(S.simCfg.start_date+'T00:00:00'))/864e5)+1;
+              if(!prodArrivals[arrDay]) prodArrivals[arrDay]=[];
+              prodArrivals[arrDay].push({tonnes:parseFloat(l.quantity_t)||0,status:st,idx});
+            });
+          } else if(vc.berth_element_id===berth.id&&vc.arrival_date&&S.simCfg.start_date){
+            const arrDay=Math.round((new Date(vc.arrival_date)-new Date(S.simCfg.start_date+'T00:00:00'))/864e5)+1;
+            if(!prodArrivals[arrDay]) prodArrivals[arrDay]=[];
+            prodArrivals[arrDay].push({tonnes:parseFloat(vc.quantity_t)||parseFloat(vc.total_quantity_t)||0,status:st,idx});
+          }
+        });
+        const arrCells=months.map(mon=>{
+          const monT=mon.days.reduce((s,d)=>s+(prodArrivals[d]||[]).reduce((t,e)=>t+e.tonnes,0),0);
           const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString()+'t':'—'}</td>`;
           return mTd+mon.days.map(d=>{
-            const v=_getUnld(d);
+            const entries=prodArrivals[d]||[];
+            let cls='tp-cell-clickable';
+            let val='—';
+            if(entries.length>0){
+              const totalTonnes=entries.reduce((s,e)=>s+e.tonnes,0);
+              const domSt=_statusPriority.find(s=>entries.some(e=>e.status===s))||entries[0].status;
+              const col=_tsGet(domSt).color;
+              cls+=' tp-cell-planned';
+              val=`<span style="color:${col}">${Number(totalTonnes).toLocaleString()}t</span>`;
+            }
             const tSty=_tpTdSty(d);
-            return `<td style="color:var(--real);font-size:10px;${tSty}">${v>0?Number(v).toLocaleString()+'t':'—'}</td>`;
+            return `<td class="${cls}"${tSty?` style="${tSty}"`:''}  onclick="vpOpenArrivalDialog('${berth.id}','${d}')" title="Click to add/edit vessel arrival">${val}</td>`;
           }).join('');
         }).join('');
-        destRows.push(`<tr class="tp-row-unload"><td style="padding-left:14px;color:var(--real);font-size:10px">Vessel unload</td>${unldCells}</tr>`);
-      }
+        destRows.push(`<tr class="tp-row-arrival"><td style="padding-left:22px;font-size:10px">VESSEL ARRIVAL · ${berth.name}</td>${arrCells}</tr>`);
 
-      // INVENTORY + DEMAND rows — grouped by product
-      const _vtProdIds=[...new Set(destSilos.flatMap(s=>getSiloProducts(s)).filter(Boolean))];
-      const _vtActiveProdIds=_vp.prodId?_vtProdIds.filter(pid=>pid===_vp.prodId):_vtProdIds;
-      const _vtShownDemIds=new Set();
-
-      _vtActiveProdIds.forEach(pid=>{
-        // Inventory row(s) for this product
-        destSilos.filter(s=>getSiloProducts(s).includes(pid)).forEach(silo=>{
-          const invCells=months.map(mon=>{
-            const lastV=rpInv(silo.id,mon.days[mon.days.length-1]);
-            const mTd=`<td class="logi-mcol" style="${_mTdSty}">${lastV!==null?Number(Math.round(lastV)).toLocaleString():'—'}</td>`;
+        // ── VESSEL UNLOAD row for this berth × product ───────────
+        if(S.simResults?.siloUnloadHistory){
+          const _getUnld=d=>berthSilosForProd.reduce((s,sl)=>(s+(S.simResults.siloUnloadHistory[sl.id]?.[d-1]||0)),0);
+          const unldCells=months.map(mon=>{
+            const monT=mon.days.reduce((s,d)=>s+_getUnld(d),0);
+            const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString()+'t':'—'}</td>`;
             return mTd+mon.days.map(d=>{
-              const v=rpInv(silo.id,d);
-              const max=parseFloat(silo.props?.max_capacity)||0;
-              const floor=(parseFloat(silo.props?.critical_floor_pct)||0)/100*max;
-              const crit=v!==null&&v<=floor&&floor>0;
+              const v=_getUnld(d);
               const tSty=_tpTdSty(d);
-              const baseSty=(crit?'color:var(--red);':'')+tSty;
-              return `<td${baseSty?` style="${baseSty}"`:''}>${v!==null?Number(v).toLocaleString():'—'}</td>`;
+              return `<td style="color:var(--real);font-size:10px;${tSty}">${v>0?Number(v).toLocaleString()+'t':'—'}</td>`;
             }).join('');
           }).join('');
-          destRows.push(`<tr class="tp-row-inv"><td style="padding-left:14px">${silo.name}</td>${invCells}</tr>`);
-        });
-        // Demand rows for this product
-        demEls.filter(el=>_demElMatchesProd(el,pid)&&!_vtShownDemIds.has(el.id)).forEach(el=>{
-          _vtShownDemIds.add(el.id);
-          const demCells=months.map(mon=>{
-            const monT=mon.days.reduce((s,d)=>s+rpDemand(el.id,d),0);
-            const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString():'—'}</td>`;
-            return mTd+mon.days.map(d=>{const v=rpDemand(el.id,d);const tSty=_tpTdSty(d);return `<td style="color:var(--simulated);${tSty}">${v>0?Number(v).toLocaleString():'—'}</td>`;}).join('');
-          }).join('');
-          destRows.push(`<tr class="tp-row-dem"><td style="padding-left:14px">${el.name}</td>${demCells}</tr>`);
-        });
+          destRows.push(`<tr class="tp-row-unload"><td style="padding-left:22px;color:var(--real);font-size:10px">VESSEL UNLOAD · ${berth.name}</td>${unldCells}</tr>`);
+        }
       });
-      // Demand points not matched to any product silo (only when no product filter)
-      if(!_vp.prodId){
-        demEls.filter(el=>!_vtShownDemIds.has(el.id)).forEach(el=>{
-          const demCells=months.map(mon=>{
-            const monT=mon.days.reduce((s,d)=>s+rpDemand(el.id,d),0);
-            const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString():'—'}</td>`;
-            return mTd+mon.days.map(d=>{const v=rpDemand(el.id,d);const tSty=_tpTdSty(d);return `<td style="color:var(--simulated);${tSty}">${v>0?Number(v).toLocaleString():'—'}</td>`;}).join('');
-          }).join('');
-          destRows.push(`<tr class="tp-row-dem"><td style="padding-left:14px">${el.name}</td>${demCells}</tr>`);
-        });
-      }
+
+      // ── DEMAND rows for this product ─────────────────────────────
+      demEls.filter(el=>_demElMatchesProd(el,pid)).forEach(el=>{
+        const demCells=months.map(mon=>{
+          const monT=mon.days.reduce((s,d)=>s+rpDemand(el.id,d),0);
+          const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString():'—'}</td>`;
+          return mTd+mon.days.map(d=>{const v=rpDemand(el.id,d);const tSty=_tpTdSty(d);return `<td style="color:var(--simulated);${tSty}">${v>0?Number(v).toLocaleString():'—'}</td>`;}).join('');
+        }).join('');
+        destRows.push(`<tr class="tp-row-dem"><td style="padding-left:22px;color:var(--simulated);font-size:10px">DEMAND · ${el.name}</td>${demCells}</tr>`);
+      });
     });
+
+    // Demand points not matched to any product (only when no product filter active)
+    if(!_vp.prodId){
+      const shownDemIds=new Set(activeProdIds.flatMap(pid=>demEls.filter(el=>_demElMatchesProd(el,pid)).map(el=>el.id)));
+      demEls.filter(el=>!shownDemIds.has(el.id)).forEach(el=>{
+        const demCells=months.map(mon=>{
+          const monT=mon.days.reduce((s,d)=>s+rpDemand(el.id,d),0);
+          const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString():'—'}</td>`;
+          return mTd+mon.days.map(d=>{const v=rpDemand(el.id,d);const tSty=_tpTdSty(d);return `<td style="color:var(--simulated);${tSty}">${v>0?Number(v).toLocaleString():'—'}</td>`;}).join('');
+        }).join('');
+        destRows.push(`<tr class="tp-row-dem"><td style="padding-left:22px;color:var(--simulated);font-size:10px">DEMAND · ${el.name}</td>${demCells}</tr>`);
+      });
+    }
   });
   document.getElementById('vp-dest-tbody').innerHTML=destRows.join('');
   document.getElementById('vp-orig-tbody').innerHTML=
