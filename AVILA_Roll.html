@@ -9717,27 +9717,26 @@ function simulate(elements, connections, horizon, includeProposed=false){
         }
       }
 
-      // Silo-full check: if current vessel's silo can't accept today's load, vessel vacates
-      if(bs.vesselAtBerth){
+      // Silo-full check: if the silo is completely full (zero space) AND another product
+      // is waiting offshore, the current vessel vacates so the other product can dock.
+      // "Nearly full" is handled by Step D (full-rate-or-nothing): the vessel stays
+      // docked and simply waits until enough space is available to unload a full batch.
+      if(bs.vesselAtBerth&&bs.vesselOffshore.length>0){
         const silo=findSiloB(bs.vesselAtBerth.productId);
-        if(siloSpaceB(silo)<wantToUnload(bs.vesselAtBerth)){
-          bs.vesselOffshore.unshift(bs.vesselAtBerth); // waits offshore, first in line to return
+        if(siloSpaceB(silo)<=0){
+          bs.vesselOffshore.unshift(bs.vesselAtBerth);
           bs.vesselAtBerth=null;
         }
       }
 
-      // Dock next candidate if berth is empty
+      // Dock next candidate if berth is empty.
+      // Docking decision is independent of silo space — a vessel docks as soon as
+      // the berth is free (critical products first, then FIFO). Whether unloading
+      // actually happens today is decided in Step D (full-rate-or-nothing rule).
       if(!bs.vesselAtBerth&&bs.vesselOffshore.length>0){
-        // Critical products get priority
         let dockIdx=bs.vesselOffshore.findIndex(v=>isProductCritical(v.productId));
         if(dockIdx<0) dockIdx=0;
-        const candidate=bs.vesselOffshore[dockIdx];
-        const silo=findSiloB(candidate.productId);
-        if(silo&&siloSpaceB(silo)>=wantToUnload(candidate)){
-          bs.vesselOffshore.splice(dockIdx,1);
-          bs.vesselAtBerth=candidate;
-        }
-        // else: all candidates blocked by full silos — berth stays empty this day
+        bs.vesselAtBerth=bs.vesselOffshore.splice(dockIdx,1)[0];
       }
 
       // Sync compat fields used by Step D unloading
