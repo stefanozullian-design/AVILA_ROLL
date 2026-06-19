@@ -2166,7 +2166,22 @@ function renderProps(id){
   const t=ET[el.type];
   document.getElementById('props-type-lbl').textContent=t.label;
 
-  let h=`<div class="pg"><div class="pg-title">Identity</div>
+  const isActive=el.props?.active!==false;
+  const activeToggle=`
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px 8px;border-bottom:1px solid var(--border2);margin-bottom:4px">
+      <span style="font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:.05em;color:${isActive?'var(--green)':'var(--red)'}">
+        ${isActive?'● ACTIVE':'○ INACTIVE'}
+      </span>
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none">
+        <span style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">Active</span>
+        <div onclick="(function(){const el=getEl('${id}');if(!el)return;el.props.active=el.props.active===false;autoSave();renderProps('${id}');renderDemandView&&renderDemandView();renderSupplyView&&renderSupplyView();})()"
+          style="position:relative;width:32px;height:17px;border-radius:9px;background:${isActive?'var(--green)':'rgba(255,255,255,.15)'};transition:background .2s;cursor:pointer;flex-shrink:0">
+          <div style="position:absolute;top:2px;left:${isActive?'17px':'2px'};width:13px;height:13px;border-radius:50%;background:#fff;transition:left .2s"></div>
+        </div>
+      </label>
+    </div>`;
+
+  let h=activeToggle+`<div class="pg"><div class="pg-title">Identity</div>
     <div class="pf"><div class="pl">Name</div><input class="pi" id="pp-name" value="${el.name}"></div>
     <div class="pf"><div class="pl">Assigned Facility</div>
       <select class="pi" id="pp-assigned-fac">
@@ -4242,7 +4257,7 @@ function saveProduct(){
 
 function renderDemandView(){
   const wrap=document.getElementById('demand-table-wrap'); if(!wrap) return;
-  let allDpEls=getFacElements().filter(e=>e.type==='demand_point');
+  let allDpEls=getFacElements().filter(e=>e.type==='demand_point'&&e.props?.active!==false);
   const _facForEl=el=>el.assigned_facility_id||el.facility_id||S.facility_id;
   if(!allDpEls.length||!S.simCfg.start_date){
     wrap.innerHTML=`<div style="font-family:var(--mono);font-size:10px;color:var(--text-dim);padding:30px;text-align:center">
@@ -4986,7 +5001,7 @@ function _renderSupplyViewInner(wrap){
         // ║ sees only its own demand points, silos, and equipment.       ║
         // ╚══════════════════════════════════════════════════════════════╝
         const facEls=getFacElements().filter(e=>(e.assigned_facility_id||e.facility_id)===node.id);
-        const demandEls=facEls.filter(e=>e.type==='demand_point');
+        const demandEls=facEls.filter(e=>e.type==='demand_point'&&e.props?.active!==false);
         const demandPoints=DB.demand_points.filter(dp=>demandEls.some(el=>el.id===dp.element_id));
 
         // ══════════════════════════════════════════════════════════════
@@ -5611,7 +5626,7 @@ function supplyScrollToday(){
 
 // ── Demand Builder modal ─────────────────────────────────
 function openDemandBuilder(elId, startDate){
-  const allDpEls=(DB.elements||[]).filter(e=>e.type==='demand_point');
+  const allDpEls=(DB.elements||[]).filter(e=>e.type==='demand_point'&&e.props?.active!==false);
   if(!allDpEls.length){statMsg('No demand points in topology');return;}
 
   const facMap=Object.fromEntries((DB.facilities||[]).map(f=>[f.id,f]));
@@ -5824,7 +5839,7 @@ function _fbLivePreview(){
 
 function _fbCascadeReg(){
   const regId=document.getElementById('fb-f-reg')?.value||'';
-  const allDpEls=(DB.elements||[]).filter(e=>e.type==='demand_point');
+  const allDpEls=(DB.elements||[]).filter(e=>e.type==='demand_point'&&e.props?.active!==false);
   const facMap=Object.fromEntries((DB.facilities||[]).map(f=>[f.id,f]));
   const subMap=Object.fromEntries((DB.sub_regions||[]).map(s=>[s.id,s]));
   const regMap=Object.fromEntries((DB.regions||[]).map(r=>[r.id,r]));
@@ -5843,7 +5858,7 @@ function _fbCascadeReg(){
 function _fbCascadeSub(){
   const regId=document.getElementById('fb-f-reg')?.value||'';
   const subId=document.getElementById('fb-f-sub')?.value||'';
-  const allDpEls=(DB.elements||[]).filter(e=>e.type==='demand_point');
+  const allDpEls=(DB.elements||[]).filter(e=>e.type==='demand_point'&&e.props?.active!==false);
   const facMap=Object.fromEntries((DB.facilities||[]).map(f=>[f.id,f]));
   const facs=[...new Map(allDpEls.filter(e=>(!regId||e._fbRegId===regId)&&(!subId||e._fbSubId===subId)&&e._fbFacId).map(e=>[e._fbFacId,facMap[e._fbFacId]])).values()].sort((a,b)=>a.name.localeCompare(b.name));
   const facSel=document.getElementById('fb-f-fac');
@@ -5855,7 +5870,7 @@ function _fbCascadeFac(){
   const regId=document.getElementById('fb-f-reg')?.value||'';
   const subId=document.getElementById('fb-f-sub')?.value||'';
   const facId=document.getElementById('fb-f-fac')?.value||'';
-  const allDpEls=(DB.elements||[]).filter(e=>e.type==='demand_point');
+  const allDpEls=(DB.elements||[]).filter(e=>e.type==='demand_point'&&e.props?.active!==false);
   const dps=allDpEls.filter(e=>(!regId||e._fbRegId===regId)&&(!subId||e._fbSubId===subId)&&(!facId||e._fbFacId===facId)).sort((a,b)=>a.name.localeCompare(b.name));
   const dpSel=document.getElementById('fb-el-id');
   dpSel.innerHTML=`<option value="">All</option>`+dps.map(e=>`<option value="${e.id}">${e.name}</option>`).join('');
@@ -5888,7 +5903,7 @@ function _fbGetDpSplit(shipTo){
   if(!actRows.length) return null;
   const volByProd={};
   actRows.forEach(r=>{ volByProd[(r.product||'').trim().toUpperCase()]=(volByProd[(r.product||'').trim().toUpperCase()]||0)+(parseFloat(r.volume)||0); });
-  const allDpEls=(DB.elements||[]).filter(e=>e.type==='demand_point');
+  const allDpEls=(DB.elements||[]).filter(e=>e.type==='demand_point'&&e.props?.active!==false);
   const dpNameIdx=Object.fromEntries(allDpEls.map(el=>[(el.name||'').trim().toUpperCase(),el]));
   const parts=Object.entries(volByProd).map(([prod,vol])=>{const el=dpNameIdx[prod];return el?{elId:el.id,name:el.name,vol}:null;}).filter(Boolean);
   if(!parts.length) return null;
@@ -6020,7 +6035,7 @@ function _fbApply(){
 
   // ── Multi-DP path: no specific DP selected → apply to all DPs in selected facility ──
   if(!elId){
-    const dpEls=(DB.elements||[]).filter(e=>e.type==='demand_point'&&
+    const dpEls=(DB.elements||[]).filter(e=>e.type==='demand_point'&&e.props?.active!==false&&
       (facId?(e.assigned_facility_id||e.facility_id)===facId:true));
     if(!dpEls.length){ document.getElementById('fb-msg').textContent='Select a Demand Point or Facility first.'; return; }
     const sel=document.getElementById('fb-el-id');
@@ -6457,7 +6472,7 @@ function rpGetDestSilos(berthEl){
 
 // Get demand element for a destination facility
 function rpGetDestDemEls(destFacId){
-  return getFacElements().filter(e=>e.type==='demand_point'&&
+  return getFacElements().filter(e=>e.type==='demand_point'&&e.props?.active!==false&&
     (e.assigned_facility_id||e.facility_id)===destFacId);
 }
 
@@ -8008,7 +8023,7 @@ function _planRailShipments(rBase){
         :(invHist[d-2]??invHist[invHist.length-1]??0);
 
       // Daily demand at destination — search all DB.elements for cross-facility terminals
-      const termDemEls=DB.elements.filter(e=>e.type==='demand_point'&&
+      const termDemEls=DB.elements.filter(e=>e.type==='demand_point'&&e.props?.active!==false&&
         (e.assigned_facility_id||e.facility_id)===facId);
       const getDemand=d=>{
         const dt=new Date(simStart.getTime()+(d-1)*864e5);
@@ -8773,7 +8788,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
   // Build demandSiloMap FIRST so we can use it for product fallback.
   // Walks upstream from each demand_point element to collect all feeding bulk_silos.
   const demandSiloMap={}; // demandPointId → Set<siloId>
-  elements.filter(e=>e.type==='demand_point').forEach(dpEl=>{
+  elements.filter(e=>e.type==='demand_point'&&e.props?.active!==false).forEach(dpEl=>{
     const silos=new Set();
     const visited=new Set([dpEl.id]);
     const queue=[dpEl.id];
@@ -8797,7 +8812,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
   //   if no products are configured, or none match any upstream silo,
   //   infer products from the upstream silos found in demandSiloMap.
   const demandPoints=elements
-    .filter(e=>e.type==='demand_point')
+    .filter(e=>e.type==='demand_point'&&e.props?.active!==false)
     .map(el=>{
       const dp=DB.demand_points.find(d=>d.element_id===el.id||d.id===`dp_el_${el.id}`);
       const assignedFac=el.assigned_facility_id||el.facility_id||S.facility_id;
