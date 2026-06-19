@@ -5393,6 +5393,141 @@ function _renderSupplyViewInner(wrap){
           });
         }
 
+        // ══════════════════════════════════════════════════════════════
+        // SECTION 5: PACKING (packing plants)
+        // ══════════════════════════════════════════════════════════════
+        const packEls=facEls.filter(e=>e.type==='packing_plant');
+        if(packEls.length){
+          const pkColor='#c084fc';
+          h+=`<tr style="background:rgba(192,132,252,.04);border-top:2px solid rgba(192,132,252,.25)">
+            <td style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${pkColor};font-size:8px;letter-spacing:.5px;font-weight:700">PACKING</td>`;
+          months.forEach(mon=>{
+            const isCol=collapsed.has(mon.ym);
+            const mt=grpMonTotal(packEls,mon);
+            h+=`<td style="border-left:2px solid rgba(192,132,252,.2);font-size:9px;color:#fff;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+            if(!isCol) mon.dates.forEach(ds=>{
+              const dayIdx=allDates.indexOf(ds);
+              const v=grpDailyTotal(packEls,ds,dayIdx);
+              h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:#fff;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
+            });
+          });
+          h+=`</tr>`;
+
+          packEls.forEach(el=>{
+            const maintDays=maintSetFor(el.id);
+            const caps=DB.element_product_capacities.filter(c=>c.element_id===el.id);
+            const maxSingleCap=caps.length?Math.max(...caps.map(c=>parseFloat(c.capacity_tpd)||0)):0;
+            h+=`<tr>
+              <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${pkColor};font-size:9px">${el.name}
+                <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${maxSingleCap>0?maxSingleCap.toLocaleString()+' t/d rated':''}</span>
+              </td>`;
+            months.forEach(mon=>{
+              const isCol=collapsed.has(mon.ym);
+              const mt=mon.dates.reduce((s,ds)=>{
+                const dayIdx=allDates.indexOf(ds);
+                return s+resolveProduction(el,ds,dayIdx,maintDays).capacity_tpd;
+              },0);
+              h+=`<td style="border-left:2px solid rgba(192,132,252,.15);font-size:9px;color:${pkColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+              if(!isCol) mon.dates.forEach(ds=>{
+                const dayIdx=allDates.indexOf(ds);
+                const res=resolveProduction(el,ds,dayIdx,maintDays);
+                const v=res.capacity_tpd;
+                const prod=DB.products.find(p=>p.id===res.product_id);
+                const pColor=prod?PRODUCT_CAT_COLORS[prod.category||'']||pkColor:pkColor;
+                const isCamp=res.isCampaign;
+                const lockBadge=isCamp?'<span style="font-size:7px;color:#4ade80;margin-left:2px" title="Manager campaign">🔒</span>':'';
+                const dot=prod&&v>0?`<span style="display:inline-block;width:5px;height:5px;border-radius:50%;background:${pColor};margin-right:3px;opacity:.8;vertical-align:middle"></span>`:'';
+                const isReal=res.isActual||(ds<=todayStr);
+                const numColor=v>0?(isReal?'var(--real)':'#f0f'):'rgba(192,132,252,.3)';
+                h+=`<td class="sup-day-${mon.ym}" title="${prod?.name||''}" onclick="event.stopPropagation();showCampaignPopup('${el.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${numColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${maintDays.has(ds)?`<span style="font-size:7px;font-family:var(--mono);color:var(--amber);letter-spacing:.5px;cursor:pointer;font-weight:700;opacity:.9" onclick="event.stopPropagation();openMaintenanceEventById('${maintDays.get(ds)}')">MAINT</span>`:(v>0?dot+Math.round(v).toLocaleString()+lockBadge:'0')}</td>`;
+              });
+            });
+            h+=`</tr>`;
+          });
+        }
+
+        // ══════════════════════════════════════════════════════════════
+        // SECTION 6: RAIL LOADING (dispatch_point Rail elements)
+        // Shows simulated cars loaded + actual from real_rail_daily.
+        // Clicking a cell opens the real data entry dialog.
+        // ══════════════════════════════════════════════════════════════
+        const railDispEls=facEls.filter(e=>e.type==='dispatch_point'&&(e.props?.dispatch_type||'')===('Rail'));
+        if(railDispEls.length){
+          const rlColor='#67e8f9'; // cyan
+          h+=`<tr style="background:rgba(103,232,249,.04);border-top:2px solid rgba(103,232,249,.25)">
+            <td style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${rlColor};font-size:8px;letter-spacing:.5px;font-weight:700">RAIL LOADING</td>`;
+          months.forEach(mon=>{
+            const isCol=collapsed.has(mon.ym);
+            // Monthly total: sum of simulated cars across all dispatch points
+            const monSimCars=mon.dates.reduce((s,ds)=>{
+              const dayIdx=allDates.indexOf(ds);
+              return s+railDispEls.reduce((t,dp)=>{
+                const entry=(r?.railHistory?.[dp.id]||[])[dayIdx]||{};
+                return t+Object.values(entry.carsLoadedByProduct||{}).reduce((a,b)=>a+b,0);
+              },0);
+            },0);
+            h+=`<td style="border-left:2px solid rgba(103,232,249,.2);font-size:9px;color:#fff;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${monSimCars>0?Math.round(monSimCars).toLocaleString():''}</td>`;
+            if(!isCol) mon.dates.forEach(ds=>{
+              h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:#fff;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}"></td>`;
+            });
+          });
+          h+=`</tr>`;
+
+          railDispEls.forEach(dp=>{
+            // Simulated loading row
+            h+=`<tr>
+              <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${rlColor};font-size:9px">${dp.name}
+                <span style="color:var(--text-dim);font-size:8px;margin-left:4px">simulated cars</span>
+              </td>`;
+            months.forEach(mon=>{
+              const isCol=collapsed.has(mon.ym);
+              const monCars=mon.dates.reduce((s,ds)=>{
+                const dayIdx=allDates.indexOf(ds);
+                const entry=(r?.railHistory?.[dp.id]||[])[dayIdx]||{};
+                return s+Object.values(entry.carsLoadedByProduct||{}).reduce((a,b)=>a+b,0);
+              },0);
+              h+=`<td style="border-left:2px solid rgba(103,232,249,.1);font-size:9px;color:${rlColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${monCars>0?Math.round(monCars).toLocaleString():''}</td>`;
+              if(!isCol) mon.dates.forEach(ds=>{
+                const dayIdx=allDates.indexOf(ds);
+                const entry=(r?.railHistory?.[dp.id]||[])[dayIdx]||{};
+                const cars=Object.values(entry.carsLoadedByProduct||{}).reduce((a,b)=>a+b,0);
+                const isReal=ds<=todayStr;
+                const numColor=isReal?'var(--real)':'#f0f';
+                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${cars>0?numColor:'rgba(103,232,249,.25)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${cars>0?cars:''}</td>`;
+              });
+            });
+            h+=`</tr>`;
+
+            // Actual cars row — from real_rail_daily, editable
+            const facId=node.id;
+            h+=`<tr>
+              <td style="${stickyLeft('var(--surface)',node.depth+3,'border-bottom:1px solid var(--border),')}color:var(--real);font-size:9px;font-style:italic">actual cars loaded</td>`;
+            months.forEach(mon=>{
+              const isCol=collapsed.has(mon.ym);
+              const monActual=mon.dates.reduce((s,ds)=>{
+                const rows=DB.real_rail_daily.filter(r=>r.date===ds&&r.facility_id===facId&&r.type==='loading');
+                return s+rows.reduce((t,r)=>t+(parseFloat(r.cars)||0),0);
+              },0);
+              h+=`<td style="border-left:2px solid rgba(103,232,249,.1);font-size:9px;color:var(--real);font-weight:700;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${monActual>0?Math.round(monActual).toLocaleString():''}</td>`;
+              if(!isCol) mon.dates.forEach(ds=>{
+                const rows=DB.real_rail_daily.filter(row=>row.date===ds&&row.facility_id===facId&&row.type==='loading');
+                const actual=rows.reduce((t,row)=>t+(parseFloat(row.cars)||0),0);
+                const hasActual=actual>0;
+                // Compare actual vs simulated
+                const dayIdx=allDates.indexOf(ds);
+                const simEntry=(r?.railHistory?.[dp.id]||[])[dayIdx]||{};
+                const simCars=Object.values(simEntry.carsLoadedByProduct||{}).reduce((a,b)=>a+b,0);
+                const diff=hasActual&&simCars>0?actual-simCars:0;
+                const diffColor=diff>0?'var(--green)':diff<0?'var(--red)':'';
+                const cellSty=`font-size:9px;color:${hasActual?'var(--real)':'rgba(0,217,163,.25)'};font-weight:${hasActual?'700':'400'};text-align:right;padding:3px 5px;border-bottom:1px solid var(--border);cursor:pointer;${tdSty(ds)}`;
+                const diffBadge=diff!==0?`<span style="font-size:7px;color:${diffColor};margin-left:2px">${diff>0?'+':''}${diff}</span>`:'';
+                h+=`<td class="sup-day-${mon.ym}" style="${cellSty}" onclick="(function(){const rdp=document.getElementById('real-data-panel');if(rdp)rdp.style.display='flex';const df=document.getElementById('rd-facility');if(df){df.value='${facId}';onRealDataFacilityChange('${facId}');}const dd=document.getElementById('rd-date');if(dd){dd.value='${ds}';onRealDataDateChange('${ds}');}})();" title="Click to enter actual rail loading">${hasActual?actual+diffBadge:'—'}</td>`;
+              });
+            });
+            h+=`</tr>`;
+          });
+        }
+
       }
     } else {
       // Region / sub-region header
