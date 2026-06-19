@@ -5482,79 +5482,71 @@ function _renderSupplyViewInner(wrap){
 
         // ══════════════════════════════════════════════════════════════
         // SECTION 6: RAIL LOADING (dispatch_point Rail elements)
-        // Shows simulated cars loaded + actual from real_rail_daily.
-        // Clicking a cell opens the real data entry dialog.
+        // Shows planned wagons from DB.rail_movements + actual from real_rail_daily.
+        // Clicking an actual cell opens the Daily Data panel for that date/facility.
         // ══════════════════════════════════════════════════════════════
         const railDispEls=facEls.filter(e=>e.type==='dispatch_point'&&(e.props?.dispatch_type||'')===('Rail'));
         if(railDispEls.length){
           const rlColor='#67e8f9'; // cyan
+
+          // Helper: planned wagons for a dispatch point on a given date
+          const plannedCars=(dpId,ds)=>DB.rail_movements
+            .filter(rm=>rm.from_dispatch_id===dpId&&rm.departure_date===ds&&rm.status!=='Finished')
+            .reduce((s,rm)=>s+(parseFloat(rm.wagon_count)||0),0);
+
+          // Section header — monthly totals from planned
           h+=`<tr style="background:rgba(103,232,249,.04);border-top:2px solid rgba(103,232,249,.25)">
             <td style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${rlColor};font-size:8px;letter-spacing:.5px;font-weight:700">RAIL LOADING</td>`;
           months.forEach(mon=>{
             const isCol=collapsed.has(mon.ym);
-            // Monthly total: sum of simulated cars across all dispatch points
-            const monSimCars=mon.dates.reduce((s,ds)=>{
-              const dayIdx=allDates.indexOf(ds);
-              return s+railDispEls.reduce((t,dp)=>{
-                const entry=(r?.railHistory?.[dp.id]||[])[dayIdx]||{};
-                return t+Object.values(entry.carsLoadedByProduct||{}).reduce((a,b)=>a+b,0);
-              },0);
-            },0);
-            h+=`<td style="border-left:2px solid rgba(103,232,249,.2);font-size:9px;color:#fff;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${monSimCars>0?Math.round(monSimCars).toLocaleString():''}</td>`;
+            const monPlanned=mon.dates.reduce((s,ds)=>
+              s+railDispEls.reduce((t,dp)=>t+plannedCars(dp.id,ds),0),0);
+            h+=`<td style="border-left:2px solid rgba(103,232,249,.2);font-size:9px;color:#fff;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${monPlanned>0?Math.round(monPlanned).toLocaleString():''}</td>`;
             if(!isCol) mon.dates.forEach(ds=>{
-              h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:#fff;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}"></td>`;
+              const total=railDispEls.reduce((t,dp)=>t+plannedCars(dp.id,ds),0);
+              h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:#fff;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${total>0?total:''}</td>`;
             });
           });
           h+=`</tr>`;
 
           railDispEls.forEach(dp=>{
-            // Simulated loading row
+            const facId=node.id;
+
+            // ── PLANNED cars row (from DB.rail_movements) ──
             h+=`<tr>
               <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${rlColor};font-size:9px">${dp.name}
-                <span style="color:var(--text-dim);font-size:8px;margin-left:4px">simulated cars</span>
+                <span style="color:var(--text-dim);font-size:8px;margin-left:4px">planned cars</span>
               </td>`;
             months.forEach(mon=>{
               const isCol=collapsed.has(mon.ym);
-              const monCars=mon.dates.reduce((s,ds)=>{
-                const dayIdx=allDates.indexOf(ds);
-                const entry=(r?.railHistory?.[dp.id]||[])[dayIdx]||{};
-                return s+Object.values(entry.carsLoadedByProduct||{}).reduce((a,b)=>a+b,0);
-              },0);
+              const monCars=mon.dates.reduce((s,ds)=>s+plannedCars(dp.id,ds),0);
               h+=`<td style="border-left:2px solid rgba(103,232,249,.1);font-size:9px;color:${rlColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${monCars>0?Math.round(monCars).toLocaleString():''}</td>`;
               if(!isCol) mon.dates.forEach(ds=>{
-                const dayIdx=allDates.indexOf(ds);
-                const entry=(r?.railHistory?.[dp.id]||[])[dayIdx]||{};
-                const cars=Object.values(entry.carsLoadedByProduct||{}).reduce((a,b)=>a+b,0);
+                const cars=plannedCars(dp.id,ds);
                 const isReal=ds<=todayStr;
                 const numColor=isReal?'var(--real)':'#f0f';
-                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${cars>0?numColor:'rgba(103,232,249,.25)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${cars>0?cars:''}</td>`;
+                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${cars>0?numColor:'rgba(103,232,249,.2)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${cars>0?cars:''}</td>`;
               });
             });
             h+=`</tr>`;
 
-            // Actual cars row — from real_rail_daily, editable
-            const facId=node.id;
+            // ── ACTUAL cars row (from real_rail_daily, editable) ──
             h+=`<tr>
               <td style="${stickyLeft('var(--surface)',node.depth+3,'border-bottom:1px solid var(--border),')}color:var(--real);font-size:9px;font-style:italic">actual cars loaded</td>`;
             months.forEach(mon=>{
               const isCol=collapsed.has(mon.ym);
               const monActual=mon.dates.reduce((s,ds)=>{
-                const rows=DB.real_rail_daily.filter(r=>r.date===ds&&r.facility_id===facId&&r.type==='loading');
-                return s+rows.reduce((t,r)=>t+(parseFloat(r.cars)||0),0);
+                return s+DB.real_rail_daily.filter(row=>row.date===ds&&row.facility_id===facId&&row.type==='loading').reduce((t,row)=>t+(parseFloat(row.cars)||0),0);
               },0);
               h+=`<td style="border-left:2px solid rgba(103,232,249,.1);font-size:9px;color:var(--real);font-weight:700;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${monActual>0?Math.round(monActual).toLocaleString():''}</td>`;
               if(!isCol) mon.dates.forEach(ds=>{
-                const rows=DB.real_rail_daily.filter(row=>row.date===ds&&row.facility_id===facId&&row.type==='loading');
-                const actual=rows.reduce((t,row)=>t+(parseFloat(row.cars)||0),0);
+                const actual=DB.real_rail_daily.filter(row=>row.date===ds&&row.facility_id===facId&&row.type==='loading').reduce((t,row)=>t+(parseFloat(row.cars)||0),0);
                 const hasActual=actual>0;
-                // Compare actual vs simulated
-                const dayIdx=allDates.indexOf(ds);
-                const simEntry=(r?.railHistory?.[dp.id]||[])[dayIdx]||{};
-                const simCars=Object.values(simEntry.carsLoadedByProduct||{}).reduce((a,b)=>a+b,0);
-                const diff=hasActual&&simCars>0?actual-simCars:0;
+                const planned=plannedCars(dp.id,ds);
+                const diff=hasActual&&planned>0?actual-planned:0;
                 const diffColor=diff>0?'var(--green)':diff<0?'var(--red)':'';
-                const cellSty=`font-size:9px;color:${hasActual?'var(--real)':'rgba(0,217,163,.25)'};font-weight:${hasActual?'700':'400'};text-align:right;padding:3px 5px;border-bottom:1px solid var(--border);cursor:pointer;${tdSty(ds)}`;
                 const diffBadge=diff!==0?`<span style="font-size:7px;color:${diffColor};margin-left:2px">${diff>0?'+':''}${diff}</span>`:'';
+                const cellSty=`font-size:9px;color:${hasActual?'var(--real)':'rgba(0,217,163,.2)'};font-weight:${hasActual?'700':'400'};text-align:right;padding:3px 5px;border-bottom:1px solid var(--border);cursor:pointer;${tdSty(ds)}`;
                 h+=`<td class="sup-day-${mon.ym}" style="${cellSty}" onclick="(function(){const rdp=document.getElementById('real-data-panel');if(rdp)rdp.style.display='flex';const df=document.getElementById('rd-facility');if(df){df.value='${facId}';onRealDataFacilityChange('${facId}');}const dd=document.getElementById('rd-date');if(dd){dd.value='${ds}';onRealDataDateChange('${ds}');}})();" title="Click to enter actual rail loading">${hasActual?actual+diffBadge:'—'}</td>`;
               });
             });
