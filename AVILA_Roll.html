@@ -3068,6 +3068,32 @@ function getActiveCampaign(elId, dateStr){
   )||null;
 }
 
+function _campRollingAvg(elId, dateStr, days){
+  // Compute average daily production for this element over the last `days` days ending on dateStr
+  const endDate=new Date(dateStr+'T00:00:00');
+  let total=0, count=0;
+  for(let i=0;i<days;i++){
+    const d=new Date(endDate.getTime()-i*864e5);
+    const ds=d.toISOString().split('T')[0];
+    const rows=DB.real_production_daily.filter(r=>r.date===ds&&r.element_id===elId);
+    if(rows.length>0){
+      total+=rows.reduce((s,r)=>s+(parseFloat(r.volume_t)||0),0);
+      count++;
+    }
+  }
+  return count>0?Math.round(total/count):null;
+}
+
+function _campApplyAvg(elId, dateStr, days){
+  const avg=_campRollingAvg(elId, dateStr, days);
+  if(avg===null){ statMsg(`No real production data found for last ${days} days`); return; }
+  document.getElementById('camp-rate').value=avg;
+  // Highlight the active chip
+  document.querySelectorAll('.camp-avg-chip').forEach(c=>c.classList.remove('active'));
+  const chip=document.getElementById(`camp-avg-${days}`);
+  if(chip){ chip.style.background='rgba(0,217,163,.25)'; chip.style.borderColor='var(--green)'; chip.style.color='var(--green)'; }
+}
+
 function showCampaignPopup(elId, dateStr){
   const el=getEl(elId); if(!el) return;
   const existing=getActiveCampaign(elId, dateStr);
@@ -3109,6 +3135,22 @@ function showCampaignPopup(elId, dateStr){
           <input class="fi" id="camp-rate" type="number" value="${currentRate}" min="0" step="10" style="width:100%">
         </div>
         <div style="font-size:8px;color:var(--text-dim);align-self:flex-end;padding-bottom:6px">override topology</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+        <span style="color:var(--text-dim);font-size:8px;white-space:nowrap">Rolling avg:</span>
+        ${[5,10,15,30].map(d=>{
+          const avg=_campRollingAvg(elId,dateStr,d);
+          const hasData=avg!==null;
+          return `<button id="camp-avg-${d}" class="camp-avg-chip"
+            onclick="_campApplyAvg('${elId}','${dateStr}',${d})"
+            ${!hasData?'disabled':''}
+            style="padding:3px 8px;font-family:var(--mono);font-size:8px;background:transparent;
+              border:1px solid ${hasData?'rgba(0,217,163,.4)':'var(--border2)'};
+              color:${hasData?'rgba(0,217,163,.8)':'var(--text-dim)'};
+              cursor:${hasData?'pointer':'default'};border-radius:10px;white-space:nowrap">
+            ${d}d${hasData?` · ${avg.toLocaleString()}t`:''}
+          </button>`;
+        }).join('')}
       </div>
       <div class="fr s2">
         <div class="ff">
