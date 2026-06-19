@@ -2949,6 +2949,27 @@ function maintModalHTML(ev, elementId){
         <input class="fi" id="me-notes" value="${ev?.notes||''}" placeholder="Optional">
       </div></div>
     </div>
+    ${(()=>{
+      const eId=elementId||ev?.element_id;
+      const existing=(DB.element_maintenance_events||[]).filter(m=>m.element_id===eId).sort((a,b)=>a.start_date>b.start_date?1:-1);
+      if(!eId||!existing.length) return '';
+      const rows=existing.map(m=>{
+        const isActive=S._editMaintId===m.id||ev?.id===m.id;
+        const typeLabel=m.type==='recurring'?`↻ every ${m.frequency_days}d`:'once';
+        return `<div style="display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:3px;background:${isActive?'rgba(255,184,48,.1)':'transparent'};border:1px solid ${isActive?'rgba(255,184,48,.3)':'var(--border2)'};margin-bottom:4px">
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:700;color:${isActive?'var(--amber)':'var(--text)'};font-size:9px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${m.name||'(unnamed)'}</div>
+            <div style="color:var(--text-dim);font-size:8px;margin-top:1px">${m.start_date} · ${m.duration_days}d · ${typeLabel}</div>
+          </div>
+          <button onclick="editMaintEvent('${m.id}')" style="padding:3px 8px;font-family:var(--mono);font-size:8px;background:transparent;border:1px solid var(--border2);color:var(--text-dim);cursor:pointer;border-radius:2px;white-space:nowrap">✎ Edit</button>
+          <button onclick="deleteMaintEvent('${m.id}')" style="padding:3px 8px;font-family:var(--mono);font-size:8px;background:transparent;border:1px solid rgba(255,61,90,.4);color:var(--red);cursor:pointer;border-radius:2px;white-space:nowrap">✕</button>
+        </div>`;
+      }).join('');
+      return `<div style="border-top:1px solid var(--border2);margin-top:4px;padding:10px 16px 0">
+        <div style="font-size:8px;font-weight:700;letter-spacing:.06em;color:var(--text-dim);text-transform:uppercase;margin-bottom:8px">Existing Events for this Element</div>
+        ${rows}
+      </div>`;
+    })()}
     <div class="modal-footer">
       <button class="btn-sec" onclick="closeModal()">Cancel</button>
       <button class="btn-pri btn-amber" onclick="${isEdit?'updateMaintEvent()':'saveMaintEvent()'}">${isEdit?'Save Changes':'Add Event'}</button>
@@ -3050,6 +3071,19 @@ function editMaintEvent(id){
   setTimeout(()=>{
     (ev.rampup_profile||[]).forEach((v,i)=>{const inp=document.getElementById(`ru-${i+1}`);if(inp) inp.value=v;});
   },60);
+}
+
+function deleteMaintEvent(id){
+  if(!confirm('Delete this maintenance event?')) return;
+  const idx=DB.element_maintenance_events.findIndex(m=>m.id===id);
+  if(idx<0) return;
+  const elId=DB.element_maintenance_events[idx].element_id;
+  DB.element_maintenance_events.splice(idx,1);
+  autoSave();
+  // Re-open the modal for the same element so the list refreshes
+  openMaintModal(elId);
+  renderMaintenanceCalendar(); updateStatusBar();
+  statMsg('Maintenance event deleted');
 }
 
 // Called from clickable MAINT badge in supply view
