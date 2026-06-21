@@ -2239,6 +2239,35 @@ const PRODUCT_CAT_COLORS={
   '':          '#2a3550'   // unassigned — border only
 };
 
+// Small glyph per product category — signals the TYPE of product being produced in a cell.
+const PRODUCT_CAT_ICONS={
+  raw_meal:    '▲',   // raw material
+  clinker:     '◆',   // clinker
+  cement_bulk: '●',   // bulk cement
+  cement_packed:'■',  // packed cement
+  additive:    '✦',   // additive / SCM
+  '':          '·'    // unassigned
+};
+// Returns a tiny colored icon span for a product's category ('' if no product).
+function prodCatIcon(prod){
+  if(!prod) return '';
+  const cat=prod.category||'';
+  const icon=PRODUCT_CAT_ICONS[cat]||PRODUCT_CAT_ICONS[''];
+  const color=PRODUCT_CAT_COLORS[cat]||PRODUCT_CAT_COLORS[''];
+  return `<span style="font-size:7px;margin-right:3px;color:${color};vertical-align:middle" title="${cat||'unassigned'}">${icon}</span>`;
+}
+// Inventory level color code: red (critical low / overflow), amber (low), orange (near full), green (healthy).
+// Based on % of silo max capacity; falls back to neutral green when no capacity is set.
+function invLevelColor(value, maxCap){
+  if(!maxCap||maxCap<=0) return '#00d9a3';
+  const pct=value/maxCap*100;
+  if(pct<10) return '#ff3d5a';   // critical low — stockout risk
+  if(pct<25) return '#ffb830';   // low — amber warning
+  if(pct>95) return '#ff3d5a';   // overflow risk — red
+  if(pct>85) return '#ff8c42';   // near full — orange
+  return '#00d9a3';              // healthy — green
+}
+
 function getProductCategory(productId){
   const p=DB.products.find(x=>x.id===productId);
   return p?.category||'';
@@ -5101,7 +5130,16 @@ function _renderSupplyViewInner(wrap){
     `position:sticky;left:0;z-index:2;background:${bg};border-right:1px solid var(--border2);padding:4px 10px 4px ${indentPx(depth)+10}px;${extra}`;
 
   const leftW=260;
-  let h=`<table style="border-collapse:collapse;font-family:var(--mono);font-size:9px;white-space:nowrap;min-width:max-content">
+  const _legIcon=(cat,label)=>`<span style="display:inline-flex;align-items:center;gap:3px"><span style="color:${PRODUCT_CAT_COLORS[cat]};font-size:8px">${PRODUCT_CAT_ICONS[cat]}</span>${label}</span>`;
+  const _legSw=(color,label)=>`<span style="display:inline-flex;align-items:center;gap:3px"><span style="width:9px;height:9px;background:${color};border-radius:1px;display:inline-block"></span>${label}</span>`;
+  let h=`<div style="display:flex;flex-wrap:wrap;gap:14px;padding:5px 10px;font-family:var(--mono);font-size:8px;color:var(--text-dim);background:var(--surface);border-bottom:1px solid var(--border);align-items:center">
+    <span style="color:var(--text);letter-spacing:.5px">PRODUCT:</span>
+    ${_legIcon('cement_bulk','Cement bulk')}${_legIcon('cement_packed','Cement packed')}${_legIcon('clinker','Clinker')}${_legIcon('raw_meal','Raw meal')}${_legIcon('additive','Additive')}
+    <span style="width:1px;height:11px;background:var(--border2);margin:0 2px"></span>
+    <span style="color:var(--text);letter-spacing:.5px">INVENTORY:</span>
+    ${_legSw('#ff3d5a','Critical / overflow')}${_legSw('#ffb830','Low (&lt;25%)')}${_legSw('#ff8c42','Near full (&gt;85%)')}${_legSw('#00d9a3','Healthy')}
+  </div>
+  <table style="border-collapse:collapse;font-family:var(--mono);font-size:9px;white-space:nowrap;min-width:max-content">
   <thead><tr>
     <th style="position:sticky;left:0;z-index:5;background:var(--surface2);color:var(--text-dim);font-size:8px;letter-spacing:1px;text-transform:uppercase;padding:6px 10px;border-bottom:2px solid var(--border2);border-right:1px solid var(--border2);text-align:left;min-width:${leftW}px">Equipment / Capacity (t/d)</th>`;
 
@@ -5316,10 +5354,11 @@ function _renderSupplyViewInner(wrap){
                 mon.dates.forEach((ds)=>{
                   const inv=getInventoryValue(silo.id, ds, siloStart);
                   const v=inv.value;
-                  const cellColor=inv.isActual?'var(--real)':invColor;
+                  const lvlColor=invLevelColor(v, siloMax);
                   const cellWeight=inv.isActual?'700':'400';
                   const cellClass=inv.isActual?'cell-real':'';
-                  h+=`<td class="sup-day-${mon.ym} ${cellClass}" style="font-size:9px;color:${v>0?cellColor:'rgba(0,217,163,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${cellWeight};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
+                  const lvlTitle=siloMax>0?`${Math.round(v/siloMax*100)}% of ${siloMax.toLocaleString()}t capacity${inv.isActual?' · actual':''}`:'';
+                  h+=`<td class="sup-day-${mon.ym} ${cellClass}" title="${lvlTitle}" style="font-size:9px;color:${v>0?lvlColor:'rgba(0,217,163,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${cellWeight};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
                 });
               }
             });
@@ -5370,7 +5409,7 @@ function _renderSupplyViewInner(wrap){
                 const campBorder=isCamp?'border-left:2px solid #4ade80;border-right:2px solid #4ade80;':'';
                 const lockBadge=isCamp?'<span style="font-size:7px;color:#4ade80;margin-left:2px" title="Manager campaign">🔒</span>':'';
                 const cellTitle=isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name||'');
-                h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();showCampaignPopup('${el.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?pColor:'rgba(255,61,90,.4)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${campBorder}${tdSty(ds)}">${maintDays.has(ds)?`<span style="font-size:7px;font-family:var(--mono);color:var(--amber);letter-spacing:.5px;cursor:pointer;font-weight:700;opacity:.9" onclick="event.stopPropagation();openMaintenanceEventById('${maintDays.get(ds)}')">MAINT</span>`:(v>0?Math.round(v).toLocaleString()+lockBadge:'0')}</td>`;
+                h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();showCampaignPopup('${el.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?pColor:'rgba(255,61,90,.4)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${campBorder}${tdSty(ds)}">${maintDays.has(ds)?`<span style="font-size:7px;font-family:var(--mono);color:var(--amber);letter-spacing:.5px;cursor:pointer;font-weight:700;opacity:.9" onclick="event.stopPropagation();openMaintenanceEventById('${maintDays.get(ds)}')">MAINT</span>`:(v>0?prodCatIcon(prod)+Math.round(v).toLocaleString()+lockBadge:'0')}</td>`;
               });
             });
             h+=`</tr>`;
@@ -5580,7 +5619,7 @@ function _renderSupplyViewInner(wrap){
                 const campBorder=isCamp?'border-left:2px solid #4ade80;border-right:2px solid #4ade80;':'';
                 const lockBadge=isCamp?'<span style="font-size:7px;color:#4ade80;margin-left:2px" title="Manager campaign">🔒</span>':'';
                 const cellTitle=isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name||'');
-                h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();showCampaignPopup('${el.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?clkColor:'rgba(255,61,90,.4)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${campBorder}${tdSty(ds)}">${maintDays.has(ds)?`<span style="font-size:7px;font-family:var(--mono);color:var(--amber);letter-spacing:.5px;cursor:pointer;font-weight:700;opacity:.9" onclick="event.stopPropagation();openMaintenanceEventById('${maintDays.get(ds)}')">MAINT</span>`:(v>0?Math.round(v).toLocaleString()+lockBadge:'0')}</td>`;
+                h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();showCampaignPopup('${el.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?clkColor:'rgba(255,61,90,.4)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${campBorder}${tdSty(ds)}">${maintDays.has(ds)?`<span style="font-size:7px;font-family:var(--mono);color:var(--amber);letter-spacing:.5px;cursor:pointer;font-weight:700;opacity:.9" onclick="event.stopPropagation();openMaintenanceEventById('${maintDays.get(ds)}')">MAINT</span>`:(v>0?prodCatIcon(prod)+Math.round(v).toLocaleString()+lockBadge:'0')}</td>`;
               });
             });
             h+=`</tr>`;
