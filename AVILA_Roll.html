@@ -2256,6 +2256,18 @@ function prodCatIcon(prod){
   const color=PRODUCT_CAT_COLORS[cat]||PRODUCT_CAT_COLORS[''];
   return `<span style="font-size:7px;margin-right:3px;color:${color};vertical-align:middle" title="${cat||'unassigned'}">${icon}</span>`;
 }
+// Distinct glyph + colour per SPECIFIC product (e.g. MIA_IL(08) vs MIA_IL(11)), not by category.
+// Colour reuses spProdColor so it matches the Sales Performance view.
+const PROD_ICON_GLYPHS=['●','◆','■','▲','★','⬢','◐','✦','◣','⬟','❖','◥','▰','◑','◢','⬣'];
+const _prodIconGlyphMap={};
+function prodIcon(prod){
+  if(!prod) return '';
+  const key=prod.name||prod.id||'';
+  if(!(_prodIconGlyphMap[key]>=0)) _prodIconGlyphMap[key]=Object.keys(_prodIconGlyphMap).length % PROD_ICON_GLYPHS.length;
+  const glyph=PROD_ICON_GLYPHS[_prodIconGlyphMap[key]];
+  const color=(typeof spProdColor==='function')?spProdColor(key,false):(PRODUCT_CAT_COLORS[prod.category||'']||'#888');
+  return `<span style="font-size:7px;margin-right:3px;color:${color};vertical-align:middle" title="${prod.name||''}">${glyph}</span>`;
+}
 // Inventory level color code: red (critical low / overflow), amber (low), orange (near full), green (healthy).
 // Based on % of silo max capacity; falls back to neutral green when no capacity is set.
 function invLevelColor(value, maxCap){
@@ -5130,11 +5142,15 @@ function _renderSupplyViewInner(wrap){
     `position:sticky;left:0;z-index:2;background:${bg};border-right:1px solid var(--border2);padding:4px 10px 4px ${indentPx(depth)+10}px;${extra}`;
 
   const leftW=260;
-  const _legIcon=(cat,label)=>`<span style="display:inline-flex;align-items:center;gap:3px"><span style="color:${PRODUCT_CAT_COLORS[cat]};font-size:8px">${PRODUCT_CAT_ICONS[cat]}</span>${label}</span>`;
   const _legSw=(color,label)=>`<span style="display:inline-flex;align-items:center;gap:3px"><span style="width:9px;height:9px;background:${color};border-radius:1px;display:inline-block"></span>${label}</span>`;
+  // Per-product legend: products these mills/kilns can produce
+  const _legProdIds=new Set();
+  DB.element_product_capacities.filter(c=>prodEls.some(e=>e.id===c.element_id)).forEach(c=>_legProdIds.add(c.product_id));
+  const _legProds=[..._legProdIds].map(id=>DB.products.find(p=>p.id===id)).filter(Boolean).sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+  const _legProdHTML=_legProds.map(p=>`<span style="display:inline-flex;align-items:center;gap:2px">${prodIcon(p)}${p.name}</span>`).join('');
   let h=`<div style="display:flex;flex-wrap:wrap;gap:14px;padding:5px 10px;font-family:var(--mono);font-size:8px;color:var(--text-dim);background:var(--surface);border-bottom:1px solid var(--border);align-items:center">
     <span style="color:var(--text);letter-spacing:.5px">PRODUCT:</span>
-    ${_legIcon('cement_bulk','Cement bulk')}${_legIcon('cement_packed','Cement packed')}${_legIcon('clinker','Clinker')}${_legIcon('raw_meal','Raw meal')}${_legIcon('additive','Additive')}
+    ${_legProdHTML||'<span style="opacity:.6">none</span>'}
     <span style="width:1px;height:11px;background:var(--border2);margin:0 2px"></span>
     <span style="color:var(--text);letter-spacing:.5px">INVENTORY:</span>
     ${_legSw('#ff3d5a','Critical / overflow')}${_legSw('#ffb830','Low (&lt;25%)')}${_legSw('#ff8c42','Near full (&gt;85%)')}${_legSw('#00d9a3','Healthy')}
@@ -5409,7 +5425,7 @@ function _renderSupplyViewInner(wrap){
                 const campBorder=isCamp?'border-left:2px solid #4ade80;border-right:2px solid #4ade80;':'';
                 const lockBadge=isCamp?'<span style="font-size:7px;color:#4ade80;margin-left:2px" title="Manager campaign">🔒</span>':'';
                 const cellTitle=isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name||'');
-                h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();showCampaignPopup('${el.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?pColor:'rgba(255,61,90,.4)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${campBorder}${tdSty(ds)}">${maintDays.has(ds)?`<span style="font-size:7px;font-family:var(--mono);color:var(--amber);letter-spacing:.5px;cursor:pointer;font-weight:700;opacity:.9" onclick="event.stopPropagation();openMaintenanceEventById('${maintDays.get(ds)}')">MAINT</span>`:(v>0?prodCatIcon(prod)+Math.round(v).toLocaleString()+lockBadge:'0')}</td>`;
+                h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();showCampaignPopup('${el.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?pColor:'rgba(255,61,90,.4)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${campBorder}${tdSty(ds)}">${maintDays.has(ds)?`<span style="font-size:7px;font-family:var(--mono);color:var(--amber);letter-spacing:.5px;cursor:pointer;font-weight:700;opacity:.9" onclick="event.stopPropagation();openMaintenanceEventById('${maintDays.get(ds)}')">MAINT</span>`:(v>0?prodIcon(prod)+Math.round(v).toLocaleString()+lockBadge:'0')}</td>`;
               });
             });
             h+=`</tr>`;
@@ -5619,7 +5635,7 @@ function _renderSupplyViewInner(wrap){
                 const campBorder=isCamp?'border-left:2px solid #4ade80;border-right:2px solid #4ade80;':'';
                 const lockBadge=isCamp?'<span style="font-size:7px;color:#4ade80;margin-left:2px" title="Manager campaign">🔒</span>':'';
                 const cellTitle=isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name||'');
-                h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();showCampaignPopup('${el.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?clkColor:'rgba(255,61,90,.4)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${campBorder}${tdSty(ds)}">${maintDays.has(ds)?`<span style="font-size:7px;font-family:var(--mono);color:var(--amber);letter-spacing:.5px;cursor:pointer;font-weight:700;opacity:.9" onclick="event.stopPropagation();openMaintenanceEventById('${maintDays.get(ds)}')">MAINT</span>`:(v>0?prodCatIcon(prod)+Math.round(v).toLocaleString()+lockBadge:'0')}</td>`;
+                h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();showCampaignPopup('${el.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?clkColor:'rgba(255,61,90,.4)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${campBorder}${tdSty(ds)}">${maintDays.has(ds)?`<span style="font-size:7px;font-family:var(--mono);color:var(--amber);letter-spacing:.5px;cursor:pointer;font-weight:700;opacity:.9" onclick="event.stopPropagation();openMaintenanceEventById('${maintDays.get(ds)}')">MAINT</span>`:(v>0?prodIcon(prod)+Math.round(v).toLocaleString()+lockBadge:'0')}</td>`;
               });
             });
             h+=`</tr>`;
