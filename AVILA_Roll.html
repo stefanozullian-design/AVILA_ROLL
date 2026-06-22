@@ -10373,9 +10373,27 @@ function simulate(elements, connections, horizon, includeProposed=false){
       const expectedDrainToday=todayDemandPull[downSilo.id]||0;
       const siloSpace=Math.max(0,siloMax-siloInv-alreadyInflowing+expectedDrainToday);
 
-      const canUnload=Math.min(dailyCap,queued,siloSpace);
+      // Ship berths: ALL-OR-NOTHING daily discharge — unload a full day at the defined rate,
+      // or nothing. If a full day's discharge would push the silo over max, the vessel waits
+      // at anchorage (0 unloaded) until demand frees enough space, then returns and resumes
+      // at the rate (the remainder unloads once it fits). Rail/Truck keep partial top-off.
+      const isShipBerth=berthType==='Ship Berth';
+      let canUnload;
+      if(isShipBerth){
+        const fullDaily=Math.min(dailyCap,queued);
+        if(siloSpace>=fullDaily)   canUnload=fullDaily;             // full day's discharge fits
+        else if(fullDaily>siloMax) canUnload=Math.max(0,siloSpace); // anti-deadlock: a day's rate exceeds total silo capacity
+        else                       canUnload=0;                     // not enough space → anchorage
+      } else {
+        canUnload=Math.min(dailyCap,queued,siloSpace);
+      }
       if(canUnload<=0){
-        bs.status=siloSpace<=0?'blocked':'idle';
+        if(isShipBerth&&queued>0){
+          bs.status='anchorage';
+          logStop(berth.id,berth.name,day,'anchorage',`Silo ${downSilo.name} full — vessel ${bs.currentVessel||''} at anchorage, ${Math.round(queued).toLocaleString()}t remaining`);
+        } else {
+          bs.status=siloSpace<=0?'blocked':'idle';
+        }
         r.berthUnloadHistory[berth.id].push(0);
         return;
       }
