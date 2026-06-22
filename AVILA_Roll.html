@@ -10317,6 +10317,42 @@ function simulate(elements, connections, horizon, includeProposed=false){
       // Record arrivals for this berth today
       r.berthArrivalHistory[berth.id].push(Math.round(berthArrivedToday[berth.id]||0));
 
+      // ── Ship-berth YIELD: if the berthed vessel is blocked (its silo can't take a full
+      //    day's discharge) but a pending vessel's silo CAN, the blocked vessel steps back
+      //    to anchorage and yields the berth so a full silo doesn't starve later vessels
+      //    whose silos have space (and may be heading to stockout).
+      if((berth.props.berth_type||'Ship Berth')==='Ship Berth'){
+        const _pickSilo=(productId)=>{
+          const ds=(dn[berth.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='bulk_silo');
+          let s=productId?ds.find(x=>{const p=getSiloProducts(x);return p.length>0&&p.includes(productId);}):null;
+          if(!s) s=ds.find(x=>(state[x.id]?.inventory||0)<(state[x.id]?.maxCap||Infinity)*0.99);
+          if(!s) s=ds[0];
+          return s||null;
+        };
+        const _canFullDay=(productId,qty,rateTPH)=>{
+          const sil=_pickSilo(productId); if(!sil) return false;
+          const berthTPH=parseFloat(berth.props.max_unload_rate_tph)||99999;
+          const vTPH=rateTPH>0?parseFloat(rateTPH):Infinity;
+          const cap=Math.min(berthTPH,vTPH)*24*(parseFloat(berth.props.simultaneous_points)||1);
+          const fullDaily=Math.min(cap,qty);
+          const inv=state[sil.id]?.inventory||0, max=state[sil.id]?.maxCap||Infinity;
+          const space=Math.max(0,max-inv-(siloInflow[sil.id]||0)+(todayDemandPull[sil.id]||0));
+          return space>=fullDaily || fullDaily>max;
+        };
+        const curProd=Object.keys(bs.berthQueue||{}).find(pid=>(bs.berthQueue[pid]||0)>0);
+        if(curProd && !_canFullDay(curProd,bs.berthQueue[curProd],bs.currentVesselRate) && (bs.vesselPending||[]).length){
+          const idx=bs.vesselPending.findIndex(p=>(p.quantity_t||0)>0 && _canFullDay(p.productId,p.quantity_t,p.rateTPH));
+          if(idx>=0){
+            const demoted={productId:curProd, quantity_t:bs.berthQueue[curProd], rateTPH:bs.currentVesselRate, name:bs.currentVessel};
+            const incoming=bs.vesselPending.splice(idx,1)[0];
+            bs.vesselPending.unshift(demoted);
+            bs.berthQueue={}; bs.berthQueue[incoming.productId]=(incoming.quantity_t||0);
+            bs.currentVessel=incoming.name; bs.currentVesselRate=incoming.rateTPH;
+            logStop(berth.id,berth.name,day,'berth_yield',`${demoted.name||'vessel'} yielded berth (silo full) → ${incoming.name||'vessel'} berthed to unload`);
+          }
+        }
+      }
+
       const queued=Object.values(bs.berthQueue||{}).reduce((a,b)=>a+b,0);
       if(queued<=0){
         if(bs.status!=='maintenance') bs.status='idle';
