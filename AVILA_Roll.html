@@ -5434,18 +5434,24 @@ function _renderSupplyViewInner(wrap){
                 const prod=DB.products.find(p=>p.id===res.product_id);
                 const isMaint=maintDays.has(ds);
                 const isCamp=res.isCampaign;
-                // Gantt bar: each day cell is a full-width colour block (colour = product);
-                // adjacent same-product days merge into one continuous run. The product
-                // name + rate is printed once at the start of each run and overflows along it.
+                const isReal=!!res.isActual && v>0;
+                const barColor=prod?((typeof spProdColor==='function')?spProdColor(prod.name||prod.id,false):(PRODUCT_CAT_COLORS[prod.category||'']||cemColor)):cemColor;
+                const clickFn=isMaint?`openMaintenanceEventById('${maintDays.get(ds)}')`:`showCampaignPopup('${el.id}','${ds}')`;
+                // REAL value (from file or daily-data input): show the tonnage colour-coded by
+                // product, no Gantt bar and no product-name label (the colour already signals it).
+                if(isReal){
+                  _gPrev='__real';
+                  h+=`<td class="sup-day-${mon.ym}" title="${(prod?.name||'')} · ${Math.round(v)} t/d · actual" onclick="event.stopPropagation();${clickFn}" style="cursor:pointer;font-size:9px;color:${barColor};font-weight:700;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${Math.round(v).toLocaleString()}</td>`;
+                  return;
+                }
+                // FORECAST / maintenance: Gantt bar — colour = product, label once per run.
                 const runKey=isMaint?'__m':(v>0?(res.product_id||'__p'):'__idle');
                 const isRunStart=(!isMaint&&v>0&&runKey!==_gPrev);
                 _gPrev=runKey;
-                const barColor=prod?((typeof spProdColor==='function')?spProdColor(prod.name||prod.id,false):(PRODUCT_CAT_COLORS[prod.category||'']||cemColor)):cemColor;
                 const maintBg='repeating-linear-gradient(45deg,#5f5e5a,#5f5e5a 3px,#383836 3px,#383836 6px)';
                 const barBg=isMaint?maintBg:(v>0?barColor:'transparent');
                 const campMark=(isCamp&&!isMaint)?'border-top:2px solid #4ade80;':'';
                 const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name?`${prod.name} · ${Math.round(v)} t/d`:'Idle'));
-                const clickFn=isMaint?`openMaintenanceEventById('${maintDays.get(ds)}')`:`showCampaignPopup('${el.id}','${ds}')`;
                 const lblName=(typeof spShortProd==='function')?spShortProd(prod?.name||''):(prod?.name||'');
                 const label=isRunStart?`<span style="position:absolute;left:5px;top:0;line-height:16px;white-space:nowrap;font-family:var(--mono);font-size:9px;font-weight:700;color:${_barTextColor(barColor)};pointer-events:none">${lblName} · ${Math.round(v).toLocaleString()}${isCamp?' 🔒':''}</span>`:'';
                 const zpos=isRunStart?'position:relative;z-index:2;':'';
