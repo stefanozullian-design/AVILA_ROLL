@@ -7621,12 +7621,12 @@ function vpPlannedArrivalsForBerth(berthId){
       vc.legs.filter(l=>l.berth_element_id===berthId&&l.arrival_date&&S.simCfg.start_date).forEach(l=>{
         const arrDay=Math.round((new Date(l.arrival_date)-new Date(S.simCfg.start_date+'T00:00:00'))/864e5)+1;
         if(!map[arrDay]) map[arrDay]=[];
-        map[arrDay].push({tonnes:parseFloat(l.quantity_t)||0,status:st,idx});
+        map[arrDay].push({tonnes:parseFloat(l.quantity_t)||0,status:st,idx,product_id:l.product_id||vc.product_id||null});
       });
     } else if(vc.berth_element_id===berthId&&vc.arrival_date&&S.simCfg.start_date){
       const arrDay=Math.round((new Date(vc.arrival_date)-new Date(S.simCfg.start_date+'T00:00:00'))/864e5)+1;
       if(!map[arrDay]) map[arrDay]=[];
-      map[arrDay].push({tonnes:parseFloat(vc.quantity_t)||parseFloat(vc.total_quantity_t)||0,status:st,idx});
+      map[arrDay].push({tonnes:parseFloat(vc.quantity_t)||parseFloat(vc.total_quantity_t)||0,status:st,idx,product_id:vc.product_id||null});
     }
   });
   return map;
@@ -7805,48 +7805,68 @@ function vpRender(){
       const _colspan=days.length+months.length+1;
       destRows.push(`<tr><td colspan="${_colspan}" style="background:rgba(255,184,48,.06);color:var(--amber);font-family:var(--mono);font-size:8px;padding:3px 8px;letter-spacing:.06em;border-top:1px solid rgba(255,184,48,.15)">▸ ${destFac?.name||destFacId} / ${berth.name}</td></tr>`);
 
-      // VESSEL/ARRIVAL row — clickable, color-coded by dominant status
-      const arrCells=months.map(mon=>{
-        const monT=mon.days.reduce((s,d)=>s+(arrivals[d]||[]).reduce((t,e)=>t+e.tonnes,0),0);
-        const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString()+'t':'—'}</td>`;
-        return mTd+mon.days.map(d=>{
-          const entries=arrivals[d]||[];
-          let cls='tp-cell-clickable';
-          let val='—';
-          if(entries.length>0){
-            const totalTonnes=entries.reduce((s,e)=>s+e.tonnes,0);
-            const domSt=_statusPriority.find(s=>entries.some(e=>e.status===s))||entries[0].status;
-            const col=_tsGet(domSt).color;
-            cls+=' tp-cell-planned';
-            val=`<span style="color:${col}">${Number(totalTonnes).toLocaleString()}t</span>`;
-          }
-          const tSty=_tpTdSty(d);
-          return `<td class="${cls}"${tSty?` style="${tSty}"`:''}  onclick="vpOpenArrivalDialog('${berth.id}','${d}')" title="Click to add/edit vessel arrival">${val}</td>`;
-        }).join('');
-      }).join('');
-      destRows.push(`<tr class="tp-row-arrival"><td style="padding-left:10px">VESSEL/ARRIVAL</td>${arrCells}</tr>`);
-
-      // VESSEL UNLOAD row — daily volume unloaded from the berth into the terminal silo
-      if(S.simResults?.berthUnloadHistory?.[berth.id]){
-        const unldHist=S.simResults.berthUnloadHistory[berth.id];
-        const unldCells=months.map(mon=>{
-          const monT=mon.days.reduce((s,d)=>s+(unldHist[d-1]||0),0);
-          const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString()+'t':'—'}</td>`;
-          return mTd+mon.days.map(d=>{
-            const v=unldHist[d-1]||0;
-            const tSty=_tpTdSty(d);
-            return `<td style="color:var(--real);font-size:10px;${tSty}">${v>0?Number(v).toLocaleString()+'t':'—'}</td>`;
-          }).join('');
-        }).join('');
-        destRows.push(`<tr class="tp-row-unload"><td style="padding-left:14px;color:var(--real);font-size:10px">Vessel unload</td>${unldCells}</tr>`);
-      }
-
-      // INVENTORY + DEMAND rows — grouped by product
-      const _vtProdIds=[...new Set(destSilos.flatMap(s=>getSiloProducts(s)).filter(Boolean))];
+      // Products at this berth — union of downstream silo products and products that actually arrive.
+      // Vessel arrivals are now shown one row PER PRODUCT (no mixing) to avoid confusion.
+      const _arrProdIds=[...new Set(Object.values(arrivals).flat().map(e=>e.product_id).filter(Boolean))];
+      const _vtProdIds=[...new Set([...destSilos.flatMap(s=>getSiloProducts(s)).filter(Boolean),..._arrProdIds])];
       const _vtActiveProdIds=_vp.prodId?_vtProdIds.filter(pid=>pid===_vp.prodId):_vtProdIds;
       const _vtShownDemIds=new Set();
+      const _suh=S.simResults?.siloUnloadHistory;
 
+      // Renders the VESSEL ARRIVAL row (filtered) + its per-product VESSEL UNLOAD row
+      const _pushArrUnload=(pid,label,filterFn)=>{
+        const arrCells=months.map(mon=>{
+          const monT=mon.days.reduce((s,d)=>s+(arrivals[d]||[]).filter(filterFn).reduce((t,e)=>t+e.tonnes,0),0);
+          const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString()+'t':'—'}</td>`;
+          return mTd+mon.days.map(d=>{
+            const entries=(arrivals[d]||[]).filter(filterFn);
+            let cls='tp-cell-clickable',val='—';
+            if(entries.length>0){
+              const totalTonnes=entries.reduce((s,e)=>s+e.tonnes,0);
+              const domSt=_statusPriority.find(s=>entries.some(e=>e.status===s))||entries[0].status;
+              cls+=' tp-cell-planned';
+              val=`<span style="color:${_tsGet(domSt).color}">${Number(totalTonnes).toLocaleString()}t</span>`;
+            }
+            const tSty=_tpTdSty(d);
+            return `<td class="${cls}"${tSty?` style="${tSty}"`:''} onclick="vpOpenArrivalDialog('${berth.id}','${d}')" title="Click to add/edit vessel arrival">${val}</td>`;
+          }).join('');
+        }).join('');
+        destRows.push(`<tr class="tp-row-arrival"><td style="padding-left:10px">${label}</td>${arrCells}</tr>`);
+        const prodSilos=pid?destSilos.filter(s=>getSiloProducts(s).includes(pid)):[];
+        if(_suh&&prodSilos.length){
+          const unldCells=months.map(mon=>{
+            const monT=mon.days.reduce((s,d)=>s+prodSilos.reduce((t,si)=>t+((_suh[si.id]||[])[d-1]||0),0),0);
+            const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString()+'t':'—'}</td>`;
+            return mTd+mon.days.map(d=>{
+              const v=prodSilos.reduce((t,si)=>t+((_suh[si.id]||[])[d-1]||0),0);
+              const tSty=_tpTdSty(d);
+              return `<td style="color:var(--real);font-size:10px;${tSty}">${v>0?Number(Math.round(v)).toLocaleString()+'t':'—'}</td>`;
+            }).join('');
+          }).join('');
+          destRows.push(`<tr class="tp-row-unload"><td style="padding-left:14px;color:var(--real);font-size:10px">Vessel unload</td>${unldCells}</tr>`);
+        }
+      };
+
+      // Fallback: arrivals with no product info (legacy) → single aggregated arrival + berth-total unload
+      if(!_vtActiveProdIds.length){
+        if(Object.keys(arrivals).length){
+          _pushArrUnload(null,'VESSEL/ARRIVAL',()=>true);
+          if(S.simResults?.berthUnloadHistory?.[berth.id]){
+            const unldHist=S.simResults.berthUnloadHistory[berth.id];
+            const unldCells=months.map(mon=>{
+              const monT=mon.days.reduce((s,d)=>s+(unldHist[d-1]||0),0);
+              const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString()+'t':'—'}</td>`;
+              return mTd+mon.days.map(d=>{const v=unldHist[d-1]||0;const tSty=_tpTdSty(d);return `<td style="color:var(--real);font-size:10px;${tSty}">${v>0?Number(v).toLocaleString()+'t':'—'}</td>`;}).join('');
+            }).join('');
+            destRows.push(`<tr class="tp-row-unload"><td style="padding-left:14px;color:var(--real);font-size:10px">Vessel unload</td>${unldCells}</tr>`);
+          }
+        }
+      }
+
+      // INVENTORY + DEMAND rows — grouped by product (arrival + unload shown per product on top)
       _vtActiveProdIds.forEach(pid=>{
+        const pName=DB.products.find(p=>p.id===pid)?.name||pid;
+        _pushArrUnload(pid,`▸ ${pName} — vessel arrival`,e=>e.product_id===pid);
         // Inventory row(s) for this product
         destSilos.filter(s=>getSiloProducts(s).includes(pid)).forEach(silo=>{
           const invCells=months.map(mon=>{
