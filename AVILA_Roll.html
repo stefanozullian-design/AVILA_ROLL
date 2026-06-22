@@ -3387,21 +3387,25 @@ function getActiveCampaign(elId, dateStr){
   )||null;
 }
 
-function showCampaignPopup(elId, dateStr){
+function showCampaignPopup(elId, dateStr, runStart, runEnd, runProduct){
   const el=getEl(elId); if(!el) return;
   const existing=getActiveCampaign(elId, dateStr);
   const caps=DB.element_product_capacities.filter(c=>c.element_id===elId);
   if(!caps.length){ statMsg('No products configured for this element'); return; }
 
+  // Pre-fill from the saved campaign if any, otherwise from the clicked Gantt run.
+  const selProd=existing?.product_id||runProduct||caps[0].product_id;
+
   // Product options
   const prodOpts=caps.map(c=>{
     const p=DB.products.find(pr=>pr.id===c.product_id);
-    return `<option value="${c.product_id}" data-rate="${c.capacity_tpd}" ${existing?.product_id===c.product_id?'selected':''}>${p?.name||c.product_id} (${c.capacity_tpd} t/d rated)</option>`;
+    return `<option value="${c.product_id}" data-rate="${c.capacity_tpd}" ${selProd===c.product_id?'selected':''}>${p?.name||c.product_id} (${c.capacity_tpd} t/d rated)</option>`;
   }).join('');
 
-  const currentRate=existing?.rate_tpd||(parseFloat(caps[0].capacity_tpd)||0);
-  const fromVal=existing?.start_date||dateStr;
-  const toVal=existing?.end_date||dateStr;
+  const selCap=caps.find(c=>c.product_id===selProd);
+  const currentRate=existing?.rate_tpd||(parseFloat(selCap?.capacity_tpd)||parseFloat(caps[0].capacity_tpd)||0);
+  const fromVal=existing?.start_date||runStart||dateStr;
+  const toVal=existing?.end_date||runEnd||dateStr;
 
   const html=`
   <div style="font-family:var(--mono);font-size:9px;min-width:320px">
@@ -3502,7 +3506,8 @@ function applyCampaign(elId){
   closeCampaignPopup();
   autoSave();
   renderSupplyView();
-  statMsg('Campaign saved — re-run simulation to update projections');
+  statMsg('Campaign saved — running simulation…');
+  if(typeof runSimulation==='function') runSimulation();
 }
 
 // Apply a shorter end-date to an existing campaign (called from warning banner)
@@ -5420,6 +5425,19 @@ function _renderSupplyViewInner(wrap){
                 <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${maxSingleCap>0?maxSingleCap.toLocaleString()+' t/d rated':''}</span>
               </td>`;
             let _gPrev=null;
+            // Precompute contiguous production runs (same product) so a click pre-fills the
+            // campaign dialog with that run's product + start/end dates.
+            const _runByDate={};
+            { let cs=null,cp=null,pd=null;
+              const _fin=(endDs)=>{ if(cs==null)return; let on=false; for(const d of allDates){ if(d===cs)on=true; if(on)_runByDate[d]={start:cs,end:endDs,product:cp}; if(d===endDs)break; } };
+              allDates.forEach(ds=>{
+                const rr=maintDays.has(ds)?{capacity_tpd:0,product_id:null}:resolveProduction(el,ds,allDates.indexOf(ds),maintDays);
+                const pid=(rr.capacity_tpd>0)?rr.product_id:null;
+                if(pid&&pid===cp){ pd=ds; }
+                else { if(cs!=null)_fin(pd); if(pid){cs=ds;cp=pid;pd=ds;}else{cs=null;cp=null;pd=null;} }
+              });
+              if(cs!=null)_fin(pd);
+            }
             months.forEach(mon=>{
               const isCol=collapsed.has(mon.ym);
               const mt=mon.dates.reduce((s,ds)=>{
@@ -5436,7 +5454,9 @@ function _renderSupplyViewInner(wrap){
                 const isCamp=res.isCampaign;
                 const isReal=!!res.isActual && v>0;
                 const barColor=prod?((typeof spProdColor==='function')?spProdColor(prod.name||prod.id,false):(PRODUCT_CAT_COLORS[prod.category||'']||cemColor)):cemColor;
-                const clickFn=isMaint?`openMaintenanceEventById('${maintDays.get(ds)}')`:`showCampaignPopup('${el.id}','${ds}')`;
+                const run=_runByDate[ds];
+                const campArgs=run?`'${el.id}','${ds}','${run.start}','${run.end}','${run.product}'`:`'${el.id}','${ds}'`;
+                const clickFn=isMaint?`openMaintenanceEventById('${maintDays.get(ds)}')`:`showCampaignPopup(${campArgs})`;
                 // REAL value (from file or daily-data input): show the tonnage colour-coded by
                 // product, no Gantt bar and no product-name label (the colour already signals it).
                 if(isReal){
