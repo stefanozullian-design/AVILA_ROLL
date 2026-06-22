@@ -2279,6 +2279,12 @@ function invLevelColor(value, maxCap){
   if(pct>85) return '#ff8c42';   // near full — orange
   return '#00d9a3';              // healthy — green
 }
+// Pick dark or light text for legibility on a given solid bar colour.
+function _barTextColor(hex){
+  const m=/^#?([0-9a-f]{6})$/i.exec(hex||''); if(!m) return '#0a0a0a';
+  const n=parseInt(m[1],16), r=(n>>16)&255, g=(n>>8)&255, b=n&255;
+  return (0.299*r+0.587*g+0.114*b)>150?'#0a0a0a':'#ffffff';
+}
 
 function getProductCategory(productId){
   const p=DB.products.find(x=>x.id===productId);
@@ -4772,9 +4778,9 @@ function renderDemandView(){
               const isActual=src==='actual';
               const cellBg=isNwd?'rgba(255,61,90,.08)':isActual?'rgba(0,255,157,.06)':'transparent';
               const cellColor=isNwd?'rgba(255,61,90,.4)':isActual?'var(--real)':'var(--simulated)';
-              h+=`<td class="dem-day-${mon.ym}" style="padding:1px 2px;border-bottom:1px solid var(--border);border-right:1px solid rgba(255,255,255,.03);${tdSty(ds)}">
+              h+=`<td class="dem-day-${mon.ym}" ondblclick="openDemandBuilder('${el.id}','${ds}')" title="Double-click to open the Forecast Builder for ${el.name.replace(/"/g,'&quot;')} starting ${ds}" style="cursor:cell;padding:1px 2px;border-bottom:1px solid var(--border);border-right:1px solid rgba(255,255,255,.03);${tdSty(ds)}">
                 ${isActual
-                  ? `<div style="width:50px;font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;color:${cellColor};background:${cellBg}" title="Actual shipment data">${v?Math.round(v*10)/10:''}</div>`
+                  ? `<div style="width:50px;font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;color:${cellColor};background:${cellBg}" title="Actual shipment data — double-click for Forecast Builder">${v?Math.round(v*10)/10:''}</div>`
                   : `<input class="dem-cell" data-el="${el.id}" data-date="${ds}" value="${v||''}"
                       ${isNwd?'disabled title="Non-working day"':''}
                       style="width:50px;background:${cellBg};border:none;color:${cellColor};font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;outline:none">`
@@ -5155,6 +5161,7 @@ function _renderSupplyViewInner(wrap){
   let h=`<div style="display:flex;flex-wrap:wrap;gap:14px;padding:5px 10px;font-family:var(--mono);font-size:8px;color:var(--text-dim);background:var(--surface);border-bottom:1px solid var(--border);align-items:center">
     <span style="color:var(--text);letter-spacing:.5px">PRODUCT:</span>
     ${_legProdHTML||'<span style="opacity:.6">none</span>'}
+    <span style="display:inline-flex;align-items:center;gap:3px"><span style="width:12px;height:9px;border-radius:1px;background:repeating-linear-gradient(45deg,#5f5e5a,#5f5e5a 3px,#383836 3px,#383836 6px);display:inline-block"></span>Maintenance</span>
     <span style="width:1px;height:11px;background:var(--border2);margin:0 2px"></span>
     <span style="color:var(--text);letter-spacing:.5px">INVENTORY:</span>
     ${_legSw('#ff3d5a','Critical / overflow')}${_legSw('#ffb830','Low (&lt;25%)')}${_legSw('#ff8c42','Near full (&gt;85%)')}${_legSw('#00d9a3','Healthy')}
@@ -5412,6 +5419,7 @@ function _renderSupplyViewInner(wrap){
               <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${cemColor};font-size:9px">${el.name}
                 <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${maxSingleCap>0?maxSingleCap.toLocaleString()+' t/d rated':''}</span>
               </td>`;
+            let _gPrev=null;
             months.forEach(mon=>{
               const isCol=collapsed.has(mon.ym);
               const mt=mon.dates.reduce((s,ds)=>{
@@ -5424,12 +5432,24 @@ function _renderSupplyViewInner(wrap){
                 const res=resolveProduction(el,ds,dayIdx,maintDays);
                 const v=res.capacity_tpd;
                 const prod=DB.products.find(p=>p.id===res.product_id);
-                const pColor=prod?PRODUCT_CAT_COLORS[prod.category||'']||cemColor:cemColor;
+                const isMaint=maintDays.has(ds);
                 const isCamp=res.isCampaign;
-                const campBorder=isCamp?'border-left:2px solid #4ade80;border-right:2px solid #4ade80;':'';
-                const lockBadge=isCamp?'<span style="font-size:7px;color:#4ade80;margin-left:2px" title="Manager campaign">🔒</span>':'';
-                const cellTitle=isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name||'');
-                h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();showCampaignPopup('${el.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?pColor:'rgba(255,61,90,.4)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${campBorder}${tdSty(ds)}">${maintDays.has(ds)?`<span style="font-size:7px;font-family:var(--mono);color:var(--amber);letter-spacing:.5px;cursor:pointer;font-weight:700;opacity:.9" onclick="event.stopPropagation();openMaintenanceEventById('${maintDays.get(ds)}')">MAINT</span>`:(v>0?prodIcon(prod)+Math.round(v).toLocaleString()+lockBadge:'0')}</td>`;
+                // Gantt bar: each day cell is a full-width colour block (colour = product);
+                // adjacent same-product days merge into one continuous run. The product
+                // name + rate is printed once at the start of each run and overflows along it.
+                const runKey=isMaint?'__m':(v>0?(res.product_id||'__p'):'__idle');
+                const isRunStart=(!isMaint&&v>0&&runKey!==_gPrev);
+                _gPrev=runKey;
+                const barColor=prod?((typeof spProdColor==='function')?spProdColor(prod.name||prod.id,false):(PRODUCT_CAT_COLORS[prod.category||'']||cemColor)):cemColor;
+                const maintBg='repeating-linear-gradient(45deg,#5f5e5a,#5f5e5a 3px,#383836 3px,#383836 6px)';
+                const barBg=isMaint?maintBg:(v>0?barColor:'transparent');
+                const campMark=(isCamp&&!isMaint)?'border-top:2px solid #4ade80;':'';
+                const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name?`${prod.name} · ${Math.round(v)} t/d`:'Idle'));
+                const clickFn=isMaint?`openMaintenanceEventById('${maintDays.get(ds)}')`:`showCampaignPopup('${el.id}','${ds}')`;
+                const lblName=(typeof spShortProd==='function')?spShortProd(prod?.name||''):(prod?.name||'');
+                const label=isRunStart?`<span style="position:absolute;left:5px;top:0;line-height:16px;white-space:nowrap;font-family:var(--mono);font-size:9px;font-weight:700;color:${_barTextColor(barColor)};pointer-events:none">${lblName} · ${Math.round(v).toLocaleString()}${isCamp?' 🔒':''}</span>`:'';
+                const zpos=isRunStart?'position:relative;z-index:2;':'';
+                h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="${zpos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:16px;background:${barBg};${campMark}">${label}</div></td>`;
               });
             });
             h+=`</tr>`;
