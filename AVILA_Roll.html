@@ -15894,10 +15894,14 @@ async function dsInit(){
 
 // ── Auto-refresh all slots that have a handle ─────────
 async function dsAutoRefreshAll(){
+  // Flag so dsIngestTopology applies the stale-file guard ONLY during automatic
+  // refresh (startup). A manual file pick/refresh must always load the file.
+  window._dsAutoRefreshing = true;
   const promises = DS_SLOTS
     .filter(s => DS.handles[s.id])
     .map(s => dsRefreshSlot(s.id, false));
   await Promise.allSettled(promises);
+  window._dsAutoRefreshing = false;
   // Update UI if Configure modal is open
   dsRefreshConfigUI();
   // Update Sales page status
@@ -16012,7 +16016,9 @@ const _dsWritableSlots = {
     );
     // Strip actual demand_values — those reload from the Excel feed
     if(dbOut.demand_values) dbOut.demand_values = dbOut.demand_values.filter(v => v.source !== 'actual');
-    const payload = { DB: dbOut, counter: S.elCounter, simCfg: S.simCfg };
+    // Mirror localStorage's stamp so a successful write keeps file and localStorage
+    // in lockstep; if a write fails, the file's stamp stays behind localStorage's.
+    const payload = { DB: dbOut, counter: S.elCounter, simCfg: S.simCfg, savedAt: (window._lastSaveStamp || new Date().toISOString()) };
     return { blob: new Blob([JSON.stringify(payload, null, 2)], {type:'application/json'}), mime:'application/json' };
   },
 };
@@ -16039,12 +16045,11 @@ async function dsWriteSlot(id){
   try{
     const granted = await _dsEnsureWritePermission(handle);
     if(!granted){
-      // User declined — surface once, then go silent until next pick
-      if(!DS.meta[id]?._writeDenied){
-        statMsg(`Auto-sync to ${handle.name||id} declined — file will not be updated`);
-        DS.meta[id] = { ...(DS.meta[id]||{}), _writeDenied: true };
-        dsSaveMeta();
-      }
+      // User declined write access — raise a PERSISTENT banner (silent failure
+      // here is exactly what caused edits to vanish on reload).
+      DS.meta[id] = { ...(DS.meta[id]||{}), _writeDenied: true };
+      dsSaveMeta();
+      _dsWriteBlockedBanner(id, handle.name, 'file-edit permission was declined');
       return;
     }
     const { blob } = factory();
@@ -16059,11 +16064,42 @@ async function dsWriteSlot(id){
     };
     dsSaveMeta();
     dsRefreshConfigUI();
+    _dsHideWriteBlockedBanner(); // write succeeded — clear any warning
   }catch(err){
     DS.meta[id] = { ...(DS.meta[id]||{}), writeError: err.message };
     dsSaveMeta();
     console.warn(`DS write [${id}]:`, err.message);
+    _dsWriteBlockedBanner(id, handle?.name, 'write failed — '+err.message);
   }
+}
+
+// ── Persistent "edits not reaching the file" warning banner ───────────
+// Replaces the old fire-once-then-silent statMsg so data loss can't go unnoticed.
+function _dsWriteBlockedBanner(id, name, reason){
+  let b=document.getElementById('ds-write-blocked-banner');
+  if(!b){
+    b=document.createElement('div');
+    b.id='ds-write-blocked-banner';
+    b.style.cssText='position:fixed;top:0;left:0;right:0;z-index:99999;background:#3a0d14;border-bottom:2px solid #ff3d5a;color:#ffd7de;font-family:var(--mono),monospace;font-size:11px;padding:8px 14px;display:flex;align-items:center;gap:12px;box-shadow:0 2px 14px rgba(0,0,0,.55)';
+    document.body.appendChild(b);
+  }
+  b.dataset.slot=id;
+  b.innerHTML=`<span style="font-size:15px;line-height:1">⚠</span>
+    <span style="flex:1;line-height:1.35">Your changes are <b>NOT being saved to the topology file</b>${name?` (${name})`:''} — ${reason}. They live only in this browser and can be lost when the file reloads.</span>
+    <button onclick="_dsRetryWrite('${id}')" style="background:#ff3d5a;color:#1a0508;border:none;padding:6px 13px;font-family:inherit;font-size:10px;font-weight:700;cursor:pointer;border-radius:3px;white-space:nowrap">Re-grant access &amp; save</button>
+    <button onclick="_dsHideWriteBlockedBanner()" style="background:transparent;color:#ffd7de;border:1px solid #ff3d5a;padding:6px 11px;font-family:inherit;font-size:10px;cursor:pointer;border-radius:3px">Dismiss</button>`;
+}
+function _dsHideWriteBlockedBanner(){
+  document.getElementById('ds-write-blocked-banner')?.remove();
+}
+async function _dsRetryWrite(id){
+  const handle=DS.handles[id];
+  if(!handle){ statMsg('No file connected for '+id); return; }
+  const ok=await _dsEnsureWritePermission(handle);
+  if(!ok){ statMsg('Still no write access — re-pick the file in Configuration → Data Sources'); return; }
+  if(DS.meta[id]) DS.meta[id]._writeDenied=false;
+  await dsWriteSlot(id); // succeeds → banner auto-clears
+  if(!document.getElementById('ds-write-blocked-banner')) statMsg('Topology file updated ✓');
 }
 
 // Debounced wrapper — call freely from autoSave, only the last call in a
@@ -16193,6 +16229,23 @@ async function dsIngestTopology(buf, name){
     const text = new TextDecoder().decode(buf);
     const saved = JSON.parse(text);
     if(!saved.DB) return {rowCount:0, error:'No DB found in JSON'};
+
+    // ── Stale-file safety net ────────────────────────────────────────────
+    // On automatic startup refresh only: if this browser's saved edits are
+    // NEWER than the file on disk, the previous write-back must have failed —
+    // do NOT let the older file erase them. Keep localStorage and warn loudly.
+    if(window._dsAutoRefreshing){
+      const _fileStamp = saved.savedAt || null;
+      const _lsStamp   = window._lsSavedAt || null;
+      if(_lsStamp && (!_fileStamp || _lsStamp > _fileStamp)){
+        console.warn('dsIngestTopology: local edits ('+_lsStamp+') are newer than topology file ('+(_fileStamp||'no timestamp')+') — keeping local, NOT overwriting');
+        if(typeof _dsWriteBlockedBanner==='function')
+          _dsWriteBlockedBanner('topology', name, 'the file on disk is OLDER than your local edits — the last save didn\'t reach it');
+        // Try to heal: push local state back to the file (if permission allows).
+        if(typeof dsScheduleWrite==='function') dsScheduleWrite('topology');
+        return {rowCount: DB.elements?.length||0, info:'Kept newer local edits (file was stale)'};
+      }
+    }
 
     // Merge topology into database
     Object.keys(DB).forEach(table=>{
@@ -17452,13 +17505,19 @@ function autoSave(){
     dbToSave.demand_values = dbToSave.demand_values.filter(v => v.source !== 'actual');
   }
 
+  // Stamp every save so startup can tell whether localStorage or the topology
+  // file is the newer copy (used by the stale-file safety net in dsIngestTopology).
+  const _saveStamp = new Date().toISOString();
+  window._lastSaveStamp = _saveStamp;
+
   try{
     // Clear any old oversized entry first to make room
     localStorage.removeItem('prodcast_v3');
     localStorage.setItem('prodcast_v3', JSON.stringify({
       DB: dbToSave,
       counter: S.elCounter,
-      simCfg: S.simCfg
+      simCfg: S.simCfg,
+      savedAt: _saveStamp
     }));
   }catch(e){
     console.error('Save error — data too large even without transient tables:', e);
@@ -17492,7 +17551,8 @@ function autoSave(){
       localStorage.setItem('prodcast_v3', JSON.stringify({
         DB: minimalDB,
         counter: S.elCounter,
-        simCfg: S.simCfg
+        simCfg: S.simCfg,
+        savedAt: _saveStamp
       }));
       statMsg('Saved (compact mode)');
       return;
@@ -17553,6 +17613,10 @@ function loadSaved(){
       if(saved.counter) S.elCounter=saved.counter;
       syncElCounter();
       if(saved.simCfg) Object.assign(S.simCfg,saved.simCfg);
+
+      // Remember when this localStorage copy was saved, so the topology data
+      // source can refuse to overwrite it with an OLDER file (stale-file guard).
+      window._lsSavedAt = saved.savedAt || null;
 
       // Update Real Data Input panel facility selector after loading
       if(typeof initRealDataFacilitySelector === 'function'){
