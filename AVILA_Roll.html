@@ -1010,16 +1010,27 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
           <button class="tb-btn" onclick="saveDemandValues()" style="background:var(--green);color:var(--bg)">↓ Save Forecast</button>
         </div>
       </div>
-      <!-- Demand filter bar -->
-      <div id="dem-filter-bar" style="flex-shrink:0;background:var(--surface);border-bottom:1px solid var(--border);padding:5px 14px;display:flex;align-items:center;gap:10px">
-        <span class="vw-label">Facility</span>
-        <select id="dem-fac-filter" style="padding:3px 8px;background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:9px" onchange="_demOnFacChange()">
+      <!-- Demand filter bar — styled to match the Sales Performance filter bar -->
+      <div id="dem-filter-bar" style="flex-shrink:0;background:var(--surface);border-bottom:1px solid var(--border);padding:6px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <span class="sp-filter-label">Facility</span>
+        <select class="sp-fi" id="dem-fac-filter" style="width:150px" onchange="_demOnFacChange()">
           <option value="">All Facilities</option>
         </select>
-        <span class="vw-label">Product</span>
-        <select id="dem-prod-filter" style="padding:3px 8px;background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:9px" onchange="_demOnProdChange()">
+        <div style="width:1px;height:20px;background:var(--border2)"></div>
+        <span class="sp-filter-label">Category</span>
+        <select class="sp-fi" id="dem-cat-filter" style="width:150px" onchange="_demOnCatChange()">
+          <option value="">All Categories</option>
+        </select>
+        <div style="width:1px;height:20px;background:var(--border2)"></div>
+        <span class="sp-filter-label">Product</span>
+        <select class="sp-fi" id="dem-prod-filter" style="width:180px" onchange="_demOnProdChange()">
           <option value="">All Products</option>
         </select>
+        <div style="width:1px;height:20px;background:var(--border2)"></div>
+        <span class="sp-filter-label">Type</span>
+        <div class="sp-chip green active" id="dem-type-all" onclick="_demOnTypeChange('all')">ALL</div>
+        <div class="sp-chip"             id="dem-type-ext" onclick="_demOnTypeChange('EXT')">EXT</div>
+        <div class="sp-chip"             id="dem-type-int" onclick="_demOnTypeChange('INT')">INT</div>
         <button class="tb-btn sec" style="margin-left:auto" onclick="_demClearFilters()">✕ Clear</button>
       </div>
       <!-- Top scrollbar mirror -->
@@ -4536,9 +4547,14 @@ function renderDemandView(){
   const collapsed=window._demColapsed;
   const grpCol=window._demGrpCol;
 
-  // ── Facility + product filter (bidirectional) ────────────────────────
-  if(!window._demFilter) window._demFilter={facId:'',prodId:''};
+  // ── Facility + category + product + cust-type filter (bidirectional) ──
+  if(!window._demFilter) window._demFilter={facId:'',prodId:'',cat:'',custType:'all'};
   const _df=window._demFilter;
+  if(_df.cat===undefined) _df.cat='';
+  if(_df.custType===undefined) _df.custType='all';
+
+  // Category labels (mirrors the Product editor — Supply/Product page)
+  const _demCatLabels={cement_bulk:'Cement Bulk',cement_packed:'Cement Packed',clinker:'Clinker',raw_meal:'Raw Material',additive:'SCM'};
 
   // Build per-facility product map (using the unfiltered allDpEls)
   const _dfFacProdMap={}; // facId → Set<productId>
@@ -4553,6 +4569,7 @@ function renderDemandView(){
       _dfFacProdMap[fId].add(el.props.product_id); _dfAllProdIds.add(el.props.product_id);
     }
   });
+  const _demProdCat=pid=>DB.products.find(p=>p.id===pid)?.category||'';
 
   // Facility dropdown — narrows to facilities carrying the selected product (if any)
   const _demFacSel=document.getElementById('dem-fac-filter');
@@ -4567,10 +4584,20 @@ function renderDemandView(){
       _dfFacs.map(f=>`<option value="${f.id}"${f.id===_df.facId?' selected':''}>${f.name}</option>`).join('');
   }
 
-  // Product dropdown — narrows to products at the selected facility (if any)
+  // Category dropdown — categories present among demand-point products
+  const _demCatSel=document.getElementById('dem-cat-filter');
+  if(_demCatSel){
+    const catIds=[...new Set([..._dfAllProdIds].map(_demProdCat).filter(Boolean))]
+      .sort((a,b)=>(_demCatLabels[a]||a).localeCompare(_demCatLabels[b]||b));
+    _demCatSel.innerHTML=`<option value="">All Categories</option>`+
+      catIds.map(c=>`<option value="${c}"${c===_df.cat?' selected':''}>${_demCatLabels[c]||c}</option>`).join('');
+  }
+
+  // Product dropdown — narrows to products at the selected facility and/or category
   const _demProdSel=document.getElementById('dem-prod-filter');
   if(_demProdSel){
-    const prodIds=_df.facId ? [...(_dfFacProdMap[_df.facId]||[])] : [..._dfAllProdIds];
+    let prodIds=_df.facId ? [...(_dfFacProdMap[_df.facId]||[])] : [..._dfAllProdIds];
+    if(_df.cat) prodIds=prodIds.filter(id=>_demProdCat(id)===_df.cat);
     const _dfProds=prodIds.map(id=>DB.products.find(p=>p.id===id)).filter(Boolean)
       .sort((a,b)=>(a.name||a.id).localeCompare(b.name||b.id));
     _demProdSel.innerHTML=`<option value="">All Products</option>`+
@@ -4578,9 +4605,17 @@ function renderDemandView(){
     _demProdSel.disabled=false; _demProdSel.style.opacity='1';
   }
 
+  // Cust-type chips active state (INT/EXT — embedded in product/demand-point name)
+  ['all','EXT','INT'].forEach(t=>{
+    const el=document.getElementById('dem-type-'+(t==='all'?'all':t.toLowerCase()));
+    if(el) el.classList.toggle('active', _df.custType===t);
+  });
+
   // Apply filters — reassign allDpEls to filtered subset for all table rendering below
-  if(_df.facId) allDpEls=allDpEls.filter(el=>_facForEl(el)===_df.facId);
+  if(_df.facId)  allDpEls=allDpEls.filter(el=>_facForEl(el)===_df.facId);
+  if(_df.cat)    allDpEls=allDpEls.filter(el=>_demElMatchesCat(el,_df.cat));
   if(_df.prodId) allDpEls=allDpEls.filter(el=>_demElMatchesProd(el,_df.prodId));
+  if(_df.custType!=='all') allDpEls=allDpEls.filter(el=>_demElType(el)===_df.custType);
 
   const isWkend=ds=>{const d=new Date(ds+'T00:00:00').getDay();return d===0||d===6;};
   const isSat=ds=>new Date(ds+'T00:00:00').getDay()===6;
@@ -4849,18 +4884,33 @@ function _demToggleGrp(id){
   else window._demGrpCol.add(id);
   renderDemandView();
 }
+function _demEnsureFilter(){
+  if(!window._demFilter) window._demFilter={facId:'',prodId:'',cat:'',custType:'all'};
+  if(window._demFilter.cat===undefined) window._demFilter.cat='';
+  if(window._demFilter.custType===undefined) window._demFilter.custType='all';
+  return window._demFilter;
+}
 function _demOnFacChange(){
-  if(!window._demFilter) window._demFilter={facId:'',prodId:''};
-  window._demFilter.facId=document.getElementById('dem-fac-filter')?.value||'';
+  _demEnsureFilter().facId=document.getElementById('dem-fac-filter')?.value||'';
+  renderDemandView();
+}
+function _demOnCatChange(){
+  const f=_demEnsureFilter();
+  f.cat=document.getElementById('dem-cat-filter')?.value||'';
+  // Drop a product selection that no longer fits the chosen category
+  if(f.cat && f.prodId && (DB.products.find(p=>p.id===f.prodId)?.category||'')!==f.cat) f.prodId='';
   renderDemandView();
 }
 function _demOnProdChange(){
-  if(!window._demFilter) window._demFilter={facId:'',prodId:''};
-  window._demFilter.prodId=document.getElementById('dem-prod-filter')?.value||'';
+  _demEnsureFilter().prodId=document.getElementById('dem-prod-filter')?.value||'';
+  renderDemandView();
+}
+function _demOnTypeChange(t){
+  _demEnsureFilter().custType=t;
   renderDemandView();
 }
 function _demClearFilters(){
-  window._demFilter={facId:'',prodId:''};
+  window._demFilter={facId:'',prodId:'',cat:'',custType:'all'};
   renderDemandView();
 }
 
@@ -6871,6 +6921,26 @@ function _demElMatchesProd(el, prodId){
   const dp=(DB.demand_points||[]).find(d=>d.element_id===el.id);
   if(dp?.products?.length) return dp.products.some(p=>p.product_id===prodId);
   return (el.props?.product_id||'')=== prodId;
+}
+// Product-ids carried by a demand point element (multi-product or single legacy prop)
+function _demElProdIds(el){
+  const dp=(DB.demand_points||[]).find(d=>d.element_id===el.id);
+  if(dp?.products?.length) return dp.products.map(p=>p.product_id).filter(Boolean);
+  return el.props?.product_id ? [el.props.product_id] : [];
+}
+// True if the demand point carries any product of the given category (Supply/Product → Category)
+function _demElMatchesCat(el, cat){
+  if(!cat) return true;
+  return _demElProdIds(el).some(pid=>(DB.products.find(p=>p.id===pid)?.category||'')===cat);
+}
+// INT / EXT — embedded in the product name (falls back to the demand-point name)
+function _demElType(el){
+  const names=_demElProdIds(el).map(pid=>DB.products.find(p=>p.id===pid)?.name||'');
+  names.push(el.name||'');
+  const blob=names.join(' ').toUpperCase();
+  if(blob.includes('INT')) return 'INT';
+  if(blob.includes('EXT')) return 'EXT';
+  return '';
 }
 
 // ── View range ────────────────────────────────────────────────────
