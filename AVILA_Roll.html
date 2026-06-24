@@ -17846,6 +17846,10 @@ document.addEventListener('DOMContentLoaded',async()=>{
     switchTopSection('production');
   }
 
+  // Initialize the Scenario system. May migrate a legacy topology file into a
+  // scenario, auto-open the last-used scenario, or show the startup picker.
+  if(typeof scInit === 'function'){ try{ await scInit(); }catch(e){ console.error('scInit failed',e); } }
+
   // Initialize Real Data Input panel
   initRealDataFacilitySelector();
   const rdDateInput = document.getElementById('rd-date');
@@ -17871,6 +17875,279 @@ document.addEventListener('DOMContentLoaded',async()=>{
     canvas.addEventListener('mouseup', (e) => onCanvasUp(e));
   }
 });
+
+// ═══════════════════════════════════════════════════════════════════════
+// SCENARIOS — each scenario is its own JSON file on disk (File System Access
+// API). Handles persist in IndexedDB; metadata (name, colour) in localStorage.
+// Replaces the old single "Topology JSON" Data Source: the active scenario IS
+// the topology source of truth, and autoSave mirrors edits into its file.
+// ═══════════════════════════════════════════════════════════════════════
+const SC = { meta:{}, handles:{}, activeId:null, _writeTimer:null };
+const SC_COLORS = ['#4da6ff','#ff3d5a','#ffb830','#00ff9d','#a78bfa','#f472b6','#2dd4bf','#fb923c'];
+const SC_TRANSIENT = new Set([
+  'real_shipments_daily','real_shipments_meta',
+  'simulation_day_states','simulation_inventory',
+  'simulation_stop_events','simulation_runs','in_transit_inventory',
+]);
+
+// ── IndexedDB (file handles) ──
+let _scDB=null;
+function scOpenIDB(){
+  return new Promise((res,rej)=>{
+    if(_scDB){res(_scDB);return;}
+    const req=indexedDB.open('avila_scenarios',1);
+    req.onupgradeneeded=e=>e.target.result.createObjectStore('handles');
+    req.onsuccess=e=>{_scDB=e.target.result;res(_scDB);};
+    req.onerror=()=>rej(req.error);
+  });
+}
+async function scSaveHandle(id,h){ try{const db=await scOpenIDB();await new Promise((r,j)=>{const tx=db.transaction('handles','readwrite');tx.objectStore('handles').put(h,id);tx.oncomplete=r;tx.onerror=j;});}catch(e){console.warn('SC handle save',e);} }
+async function scLoadHandle(id){ try{const db=await scOpenIDB();return await new Promise(r=>{const tx=db.transaction('handles','readonly');const q=tx.objectStore('handles').get(id);q.onsuccess=()=>r(q.result||null);q.onerror=()=>r(null);});}catch(e){return null;} }
+async function scDeleteHandleIDB(id){ try{const db=await scOpenIDB();await new Promise(r=>{const tx=db.transaction('handles','readwrite');tx.objectStore('handles').delete(id);tx.oncomplete=r;tx.onerror=r;});}catch(e){} }
+
+// ── Metadata ──
+function scSaveMeta(){ try{ localStorage.setItem('avila_scenarios', JSON.stringify({meta:SC.meta, activeId:SC.activeId})); }catch(e){console.warn('SC meta save',e);} }
+function scLoadMeta(){ try{ const raw=localStorage.getItem('avila_scenarios'); if(raw){ const o=JSON.parse(raw); SC.meta=o.meta||{}; SC.activeId=o.activeId||null; } }catch(e){} }
+function scActive(){ return SC.activeId?SC.meta[SC.activeId]:null; }
+function scPickColor(){ const used=Object.values(SC.meta).map(m=>m.color); return SC_COLORS.find(c=>!used.includes(c))||SC_COLORS[Object.keys(SC.meta).length%SC_COLORS.length]; }
+function scRelTime(iso){ if(!iso) return 'never saved'; const d=new Date(iso),now=new Date(),s=Math.round((now-d)/1000); if(s<60)return 'just now'; if(s<3600)return Math.round(s/60)+' min ago'; if(d.toDateString()===now.toDateString())return Math.round(s/3600)+'h ago'; const y=new Date(now-864e5); if(d.toDateString()===y.toDateString())return 'yesterday'; return d.toLocaleDateString('en',{month:'short',day:'numeric'}); }
+
+// ── State payload (mirrors autoSave's trimming) ──
+function scBuildPayload(){
+  const dbOut=Object.fromEntries(Object.entries(DB).filter(([k])=>!SC_TRANSIENT.has(k)));
+  if(dbOut.demand_values) dbOut.demand_values=dbOut.demand_values.filter(v=>v.source!=='actual');
+  return { DB:dbOut, counter:S.elCounter, simCfg:S.simCfg, savedAt:(window._lastSaveStamp||new Date().toISOString()) };
+}
+
+// ── Save-status dot ──
+function scSetSaveStatus(state){ const d=document.getElementById('sc-dot'); if(!d) return; d.className='sc-dot'+(state==='saving'?' saving':state==='error'?' error':state==='none'?' none':''); }
+
+// ── Write active scenario to disk ──
+async function scWriteActive(id){
+  id=id||SC.activeId; const m=SC.meta[id]; const handle=SC.handles[id];
+  if(!m||!handle){ scSetSaveStatus('none'); return; }
+  try{
+    const granted=await _dsEnsureWritePermission(handle);
+    if(!granted){ scSetSaveStatus('error'); _dsWriteBlockedBanner('scenario:'+id, m.fileName, 'file-edit permission was declined'); return; }
+    const blob=new Blob([JSON.stringify(scBuildPayload(),null,2)],{type:'application/json'});
+    const w=await handle.createWritable(); await w.write(blob); await w.close();
+    m.lastSaved=new Date().toISOString(); scSaveMeta();
+    scSetSaveStatus('saved'); _dsHideWriteBlockedBanner(); scRenderDropdown();
+  }catch(err){ scSetSaveStatus('error'); _dsWriteBlockedBanner('scenario:'+id, m.fileName, 'write failed — '+err.message); console.warn('SC write',err); }
+}
+function scScheduleWrite(){
+  if(!scActive()||!SC.handles[SC.activeId]) return; // no active scenario → localStorage only
+  scSetSaveStatus('saving');
+  clearTimeout(SC._writeTimer);
+  SC._writeTimer=setTimeout(()=>scWriteActive(), 500);
+}
+async function scRetryWrite(id){
+  const handle=SC.handles[id]; if(!handle){ statMsg('No file for that scenario'); return; }
+  const ok=await _dsEnsureWritePermission(handle);
+  if(!ok){ statMsg('Still no write access — re-pick the file via the scenario menu'); return; }
+  await scWriteActive(id);
+  if(!document.getElementById('ds-write-blocked-banner')) statMsg('Scenario saved ✓');
+}
+
+// ── Re-render the whole app after loading a scenario's state ──
+function scAfterLoad(){
+  S.simResults=null; S.selectedEl=null;
+  if(DB.facilities.length) selectFacility(DB.facilities[0].id);
+  updateStatusBar(); renderLocationTree(); updateNavFacilities();
+  if(typeof initRealDataFacilitySelector==='function') initRealDataFacilitySelector();
+  const dl=document.getElementById('sim-date-lbl'); if(dl) dl.textContent=`Day 0 / ${S.simCfg.horizon}`;
+  switchTopSection(DB.facilities.length?'production':'configuration');
+  scUpdatePill(); scRenderDropdown();
+}
+
+// ── Load a scenario file into the DB ──
+async function scLoadScenario(id, opts){
+  opts=opts||{}; const handle=SC.handles[id], m=SC.meta[id];
+  if(!handle||!m){ statMsg('Scenario file not found'); return false; }
+  let perm=await handle.queryPermission({mode:'read'});
+  if(perm!=='granted') perm=await handle.requestPermission({mode:'read'});
+  if(perm!=='granted'){ statMsg('Cannot read "'+m.name+'" — file access denied'); return false; }
+  let saved;
+  try{ const f=await handle.getFile(); saved=JSON.parse(new TextDecoder().decode(await f.arrayBuffer())); }
+  catch(e){ statMsg('Could not read "'+m.name+'": '+e.message); return false; }
+  if(!saved.DB){ statMsg('"'+m.name+'" is not a valid scenario file'); return false; }
+
+  // Startup safety net: when auto-opening the SAME scenario that's cached in
+  // localStorage, refuse to let an OLDER file overwrite newer local edits.
+  if(opts.guard && SC.activeId===id){
+    const fileStamp=saved.savedAt||null, lsStamp=window._lsSavedAt||null;
+    if(lsStamp && (!fileStamp || lsStamp>fileStamp)){
+      console.warn('scLoadScenario: local cache ('+lsStamp+') newer than file ('+(fileStamp||'none')+') — keeping local');
+      _dsWriteBlockedBanner('scenario:'+id, m.fileName, 'the file is OLDER than your local edits — the last save didn\'t reach it');
+      m.lastOpened=new Date().toISOString(); scSaveMeta(); scScheduleWrite(); scAfterLoad();
+      return true;
+    }
+  }
+  Object.keys(DB).forEach(t=>{ if(saved.DB[t]!==undefined) DB[t]=saved.DB[t]; });
+  if(saved.simCfg) Object.assign(S.simCfg,saved.simCfg);
+  if(saved.counter) S.elCounter=saved.counter;
+  syncElCounter();
+  SC.activeId=id; m.lastOpened=new Date().toISOString();
+  window._lsSavedAt=saved.savedAt||null;
+  scSaveMeta(); scSetSaveStatus('saved'); scAfterLoad();
+  return true;
+}
+
+// ── Create / duplicate / open / switch / rename / delete ──
+async function scCreateFromCurrent(suggestedName){
+  if(!window.showSaveFilePicker){ statMsg('This browser cannot save files directly — use ↓ Export JSON. (Chrome/Edge required.)'); return; }
+  let handle;
+  try{ handle=await window.showSaveFilePicker({suggestedName:(suggestedName||'Scenario').replace(/[\\/:*?"<>|]/g,'')+'.json', types:[{description:'AVILA scenario',accept:{'application/json':['.json']}}]}); }
+  catch(e){ return; } // user cancelled
+  const id='sc_'+Date.now().toString(36);
+  const name=(suggestedName||handle.name.replace(/\.json$/i,'')).trim();
+  SC.meta[id]={ id, name, color:scPickColor(), fileName:handle.name, lastSaved:null, lastOpened:new Date().toISOString() };
+  SC.handles[id]=handle; await scSaveHandle(id,handle);
+  SC.activeId=id; scSaveMeta();
+  await scWriteActive(id); // write current in-memory state into the new file now
+  scCloseDropdown(); scCloseStartup(); scUpdatePill(); scRenderDropdown();
+  statMsg('Scenario "'+name+'" created');
+}
+async function scNew(){ const n=prompt('Name the new scenario (it captures the current model):','New scenario'); if(n==null) return; await scCreateFromCurrent(n||'New scenario'); }
+async function scDuplicate(){ const m=scActive(); if(!m){ statMsg('No active scenario to duplicate'); return; } await scCreateFromCurrent(m.name+' copy'); }
+async function scOpenFile(){
+  if(!window.showOpenFilePicker){ statMsg('This browser cannot open files directly — use ↑ Import JSON. (Chrome/Edge required.)'); return; }
+  let handle;
+  try{ [handle]=await window.showOpenFilePicker({types:[{description:'AVILA scenario',accept:{'application/json':['.json']}}]}); }
+  catch(e){ return; }
+  // Reuse an existing entry if it points at the same file, else register new.
+  let id=null;
+  for(const k of Object.keys(SC.handles)){ try{ if(await SC.handles[k].isSameEntry?.(handle)){ id=k; break; } }catch(e){} }
+  if(!id){ id='sc_'+Date.now().toString(36); SC.meta[id]={ id, name:handle.name.replace(/\.json$/i,''), color:scPickColor(), fileName:handle.name, lastSaved:null, lastOpened:new Date().toISOString() }; SC.handles[id]=handle; await scSaveHandle(id,handle); }
+  scSaveMeta();
+  await scLoadScenario(id);
+  scCloseDropdown(); scCloseStartup();
+}
+function scRename(id){ const m=SC.meta[id]; if(!m) return; const nn=prompt('Rename scenario:', m.name); if(nn==null) return; const t=nn.trim(); if(t) m.name=t; scSaveMeta(); scUpdatePill(); scRenderDropdown(); }
+async function scDelete(id){
+  const m=SC.meta[id]; if(!m) return;
+  if(!confirm('Remove scenario "'+m.name+'" from the list?\n\nThe .json file on disk is NOT deleted — you can re-open it later.')) return;
+  delete SC.meta[id]; delete SC.handles[id]; await scDeleteHandleIDB(id);
+  if(localStorage.getItem('avila_sc_autoopen')===id) localStorage.removeItem('avila_sc_autoopen');
+  const wasActive=(SC.activeId===id); if(wasActive) SC.activeId=null;
+  scSaveMeta(); scUpdatePill(); scRenderDropdown();
+  if(wasActive){ const rest=Object.keys(SC.meta); if(rest.length) await scLoadScenario(rest[0]); else scOpenStartup(true); }
+}
+async function scSwitch(id){
+  if(id===SC.activeId){ scCloseDropdown(); return; }
+  clearTimeout(SC._writeTimer);
+  if(scActive() && SC.handles[SC.activeId]) await scWriteActive(); // flush current
+  scCloseDropdown(); scCloseStartup();
+  await scLoadScenario(id);
+}
+
+// ── Top-bar pill + dropdown ──
+function scUpdatePill(){
+  const nm=document.getElementById('sc-name'); const m=scActive();
+  if(nm) nm.textContent = m ? m.name : 'No scenario';
+  if(!m) scSetSaveStatus('none');
+  const sw=document.getElementById('sc-switcher');
+  if(sw) sw.title = m ? ('Scenario: '+m.name+' ('+(m.fileName||'')+')') : 'No scenario — click to create or open one';
+}
+function scToggleDropdown(ev){ if(ev) ev.stopPropagation(); const dd=document.getElementById('sc-dropdown'); if(!dd) return; if(dd.style.display==='none'){ scRenderDropdown(); dd.style.display='block'; } else dd.style.display='none'; }
+function scCloseDropdown(){ const dd=document.getElementById('sc-dropdown'); if(dd) dd.style.display='none'; document.querySelectorAll('.sc-rowmenu').forEach(e=>e.remove()); }
+function scRenderDropdown(){
+  const dd=document.getElementById('sc-dropdown'); if(!dd) return;
+  const ids=Object.keys(SC.meta);
+  let h=`<div class="sc-dd-hdr"><span>Scenarios</span><span>${ids.length} saved</span></div>`;
+  if(!ids.length){ h+=`<div style="padding:14px 12px;color:var(--text-dim);font-size:10px;text-align:center">No scenarios yet.</div>`; }
+  ids.sort((a,b)=>(SC.meta[b].lastOpened||'').localeCompare(SC.meta[a].lastOpened||''));
+  ids.forEach(id=>{
+    const m=SC.meta[id]; const act=id===SC.activeId;
+    h+=`<div class="sc-row${act?' active':''}" onclick="scSwitch('${id}')">
+      <span class="sc-sw" style="background:${m.color}"></span>
+      <div class="sc-meta"><div class="sc-t">${_scEsc(m.name)}</div><div class="sc-s">${act?'saved '+scRelTime(m.lastSaved):'opened '+scRelTime(m.lastOpened)} · ${_scEsc(m.fileName||'')}</div></div>
+      ${act?'<span style="color:var(--green);font-size:14px">✓</span>':`<span class="sc-act" onclick="event.stopPropagation();scRowMenu(event,'${id}')">⋯</span>`}
+    </div>`;
+  });
+  h+=`<div class="sc-dd-foot">
+    <div class="sc-item" onclick="scNew()"><span style="color:var(--green)">＋</span> New scenario…</div>
+    <div class="sc-item" onclick="scDuplicate()">⧉ Duplicate current</div>
+    <div class="sc-item" onclick="scOpenFile()">📂 Open from file…</div>
+  </div>`;
+  dd.innerHTML=h;
+}
+function scRowMenu(ev,id){
+  ev.stopPropagation(); document.querySelectorAll('.sc-rowmenu').forEach(e=>e.remove());
+  const menu=document.createElement('div'); menu.className='sc-rowmenu';
+  menu.innerHTML=`<div onclick="scRename('${id}');this.parentNode.remove()">✎ Rename</div>
+    <div onclick="(scSwitch('${id}').then(()=>scDuplicate()));this.parentNode.remove()">⧉ Duplicate</div>
+    <div style="color:var(--red);border-top:1px solid var(--border2)" onclick="scDelete('${id}');this.parentNode.remove()">🗑 Delete</div>`;
+  document.body.appendChild(menu);
+  const r=ev.target.getBoundingClientRect();
+  menu.style.top=(r.bottom+4)+'px'; menu.style.left=Math.max(8,r.right-150)+'px';
+  setTimeout(()=>document.addEventListener('click',function _c(){ menu.remove(); document.removeEventListener('click',_c); },{once:true}),0);
+}
+function _scEsc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+// ── Startup picker ──
+function scOpenStartup(firstRun){
+  scCloseStartup();
+  const ov=document.createElement('div'); ov.className='sc-overlay'; ov.id='sc-startup';
+  const ids=Object.keys(SC.meta).sort((a,b)=>(SC.meta[b].lastOpened||'').localeCompare(SC.meta[a].lastOpened||''));
+  const lastId=ids[0]||null;
+  let rows='';
+  ids.forEach((id,i)=>{ const m=SC.meta[id]; rows+=`<div class="sc-card" onclick="scStartupOpen('${id}')">
+    <span class="sc-sw" style="background:${m.color}"></span>
+    <div style="flex:1;min-width:0"><div class="sc-t">${_scEsc(m.name)}</div><div class="sc-s">opened ${scRelTime(m.lastOpened)} · ${_scEsc(m.fileName||'')}</div></div>
+    ${i===0?'<span style="font-size:8px;color:var(--blue);border:1px solid var(--blue);border-radius:4px;padding:2px 6px">LAST USED</span>':''}
+  </div>`; });
+  ov.innerHTML=`<div class="sc-modal">
+    <div class="sc-modal-hdr"><div class="sc-h">Choose a scenario</div><div class="sc-sub">${firstRun?'No scenarios yet — create one to start saving your work to a file.':'Pick a model to work on, or start a new one.'}</div></div>
+    <div class="sc-modal-list">${rows||'<div style="padding:14px;color:var(--text-dim);font-size:11px;text-align:center">No saved scenarios</div>'}</div>
+    ${lastId?`<div style="display:flex;align-items:center;gap:7px;padding:4px 16px"><input type="checkbox" id="sc-autoopen-chk" style="accent-color:var(--green)"><label for="sc-autoopen-chk" style="color:var(--text-dim);font-size:9px;cursor:pointer">Always open ${_scEsc(SC.meta[lastId].name)} and skip this</label></div>`:''}
+    <div class="sc-modal-foot">
+      ${lastId?`<div class="sc-btn pri" onclick="scStartupOpen('${lastId}')">Open</div>`:''}
+      <div class="sc-btn" onclick="scNew()">＋ New</div>
+      <div class="sc-btn" onclick="scOpenFile()">📂 File…</div>
+      <div style="flex:1"></div>
+      <div class="sc-btn" onclick="scCloseStartup()" title="Work without a scenario (changes won't be saved to a file until you create one)">Skip</div>
+    </div>
+  </div>`;
+  document.body.appendChild(ov);
+}
+function scCloseStartup(){ const ov=document.getElementById('sc-startup'); if(ov) ov.remove(); }
+async function scStartupOpen(id){
+  const chk=document.getElementById('sc-autoopen-chk');
+  if(chk&&chk.checked) localStorage.setItem('avila_sc_autoopen',id); else if(chk) localStorage.removeItem('avila_sc_autoopen');
+  scCloseStartup();
+  await scSwitch(id);
+}
+
+// ── Init (called from DOMContentLoaded, after dsInit) ──
+async function scInit(){
+  scLoadMeta();
+  for(const id of Object.keys(SC.meta)){ const h=await scLoadHandle(id); if(h) SC.handles[id]=h; }
+
+  // One-time migration: an existing "Topology JSON" Data Source becomes a scenario.
+  if(!Object.keys(SC.meta).length){
+    let legacy=null; try{ legacy=await dsLoadHandle('topology'); }catch(e){}
+    if(legacy){
+      const id='sc_'+Date.now().toString(36);
+      SC.meta[id]={ id, name:(legacy.name||'Baseline').replace(/\.json$/i,''), color:scPickColor(), fileName:legacy.name, lastSaved:null, lastOpened:new Date().toISOString() };
+      SC.handles[id]=legacy; await scSaveHandle(id,legacy); SC.activeId=id; scSaveMeta();
+      statMsg('Migrated your topology file into the "'+SC.meta[id].name+'" scenario');
+    }
+  }
+  scUpdatePill();
+
+  // Close the dropdown on any outside click.
+  document.addEventListener('click', e=>{
+    const dd=document.getElementById('sc-dropdown'), sw=document.getElementById('sc-switcher');
+    if(dd&&dd.style.display!=='none'&&!dd.contains(e.target)&&sw&&!sw.contains(e.target)) scCloseDropdown();
+  });
+
+  const ids=Object.keys(SC.meta);
+  if(!ids.length){ scOpenStartup(true); return; }              // first run, nothing to open
+  const pref=localStorage.getItem('avila_sc_autoopen');
+  if(pref && SC.meta[pref]){ SC.activeId=pref; await scLoadScenario(pref,{guard:true}); return; }
+  scOpenStartup(false);                                          // ask which scenario
+}
 </script>
 
 <!-- ═══════════════════════════════════════════════════════════════════
