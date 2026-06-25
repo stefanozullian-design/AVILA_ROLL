@@ -5613,6 +5613,52 @@ function _renderSupplyViewInner(wrap){
             return directDemand+railLoad;
           };
 
+          // ── Demand-swap split (so the need line reflects substitutions) ──
+          // swappedOut: this facility's own demand for prodId that a manager
+          //   re-sourced to a substitute material (drops this product's need).
+          const swappedOut=(prodId, ds)=>{
+            let q=0;
+            demandPoints.filter(dp=>dp.products?.some(p=>p.product_id===prodId)).forEach(dp=>{
+              const el=demandEls.find(e=>e.id===dp.element_id); if(!el) return;
+              const t=_demandRate(el.id,ds)||0;
+              const sw=(typeof _resolveDemandSwap==='function')?_resolveDemandSwap(el.id,t,ds):null;
+              if(sw) q+=Math.min(sw.qty,t);
+            });
+            return q;
+          };
+          // swappedIn: prodId acting as the substitute, demanded AT THIS FACILITY
+          //   because one of its own demand points switched material. The swap is
+          //   point-to-point, so the incremental volume belongs where it is
+          //   consumed (the originating facility) — NOT spread across the
+          //   substitute's other demand points, and NOT injected at the producer
+          //   (cross-facility swaps reach the producer naturally via the sim's
+          //   production/transfer flow). So only count swaps whose FROM demand
+          //   point lives at this facility.
+          const _swapFromFac=(s)=>{ const fdp=DB.demand_points.find(dp=>dp.element_id===s.from_element_id); return fdp?.facility_id || DB.elements.find(e=>e.id===s.from_element_id)?.assigned_facility_id || DB.elements.find(e=>e.id===s.from_element_id)?.facility_id || null; };
+          const swappedIn=(prodId, ds)=>{
+            let q=0;
+            (DB.demand_substitutions||[]).filter(s=>s.to_product_id===prodId&&_swapFromFac(s)===node.id).forEach(s=>{
+              const t=_demandRate(s.from_element_id,ds)||0;
+              const sw=(typeof _resolveDemandSwap==='function')?_resolveDemandSwap(s.from_element_id,t,ds):null;
+              if(sw) q+=Math.min(sw.qty,t);
+            });
+            return q;
+          };
+          const _outTargets=(prodId)=>{ const n=new Set();
+            demandPoints.filter(dp=>dp.products?.some(p=>p.product_id===prodId)).forEach(dp=>{
+              (DB.demand_substitutions||[]).filter(s=>s.from_element_id===dp.element_id).forEach(s=>n.add(DB.products.find(p=>p.id===s.to_product_id)?.name||s.to_product_id)); });
+            return [...n].join(', '); };
+          const _inSources=(prodId)=>{ const n=new Set();
+            (DB.demand_substitutions||[]).filter(s=>s.to_product_id===prodId&&_swapFromFac(s)===node.id).forEach(s=>{
+              const fdp=DB.demand_points.find(dp=>dp.element_id===s.from_element_id);
+              const pn=fdp?.products?.[0]?.product_id;
+              n.add(DB.products.find(p=>p.id===pn)?.name||DB.elements.find(e=>e.id===s.from_element_id)?.name||'?'); });
+            return [...n].join(', '); };
+          // Surface a substitute product here even if it has no direct demand at
+          // this facility — when one of this facility's demand points switched to
+          // it (swappedIn>0) — so the "swapped in" breakdown has a row to hang on.
+          (DB.demand_substitutions||[]).forEach(s=>{ if(allDates.some(ds=>swappedIn(s.to_product_id,ds)>0)) productsSet.add(s.to_product_id); });
+
           if(productsSet.size>0){
             // Section header row
             h+=`<tr class="sup-sec-hdr" data-seckey="cementNeed" onclick="_supToggleSec('cementNeed')" style="cursor:pointer;background:rgba(77,166,255,.05);border-top:2px solid rgba(77,166,255,.3)">
@@ -5642,6 +5688,31 @@ function _renderSupplyViewInner(wrap){
                 });
               });
               h+=`</tr>`;
+
+              // ── Swap breakdown child rows (only when a swap touches this product) ──
+              const outArr=allDates.map(ds=>swappedOut(prodId,ds));
+              const inArr=allDates.map(ds=>swappedIn(prodId,ds));
+              const hasOut=outArr.some(v=>v>0), hasIn=inArr.some(v=>v>0);
+              if(hasOut||hasIn){
+                const idxOf={}; allDates.forEach((ds,i)=>idxOf[ds]=i);
+                const swapChild=(label,color,bg,valFn)=>{
+                  let rr=`<tr class="supsec-cementNeed" style="background:${bg}"><td style="${stickyLeft('var(--surface)',node.depth+3,'border-bottom:1px solid var(--border),')}color:${color};font-size:8px;font-style:italic">${label}</td>`;
+                  months.forEach(mon=>{
+                    const isCol=collapsed.has(mon.ym);
+                    const mt=mon.dates.reduce((s,ds)=>s+valFn(ds),0);
+                    rr+=`<td style="border-left:2px solid rgba(255,255,255,.05);font-size:8px;color:${color};text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                    if(!isCol) mon.dates.forEach(ds=>{ const v=valFn(ds); rr+=`<td class="sup-day-${mon.ym}" style="font-size:8px;color:${color};text-align:right;padding:3px 4px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
+                  });
+                  return rr+`</tr>`;
+                };
+                const ownFn=ds=>{ const i=idxOf[ds]; return Math.max(0,totalNeed(prodId,ds)-(outArr[i]||0)); };
+                h+=swapChild('↳ '+prodName+' · own','var(--green)','rgba(76,175,80,.03)',ownFn);
+                if(hasOut) h+=swapChild('↳ ⇄ swapped out → '+(_outTargets(prodId)||'substitute'),'var(--amber)','rgba(255,184,48,.05)',ds=>outArr[idxOf[ds]]||0);
+                if(hasIn){
+                  h+=swapChild('↳ ⇄ swapped in ← '+(_inSources(prodId)||'other demand'),'#4dd0e1','rgba(77,208,225,.06)',ds=>inArr[idxOf[ds]]||0);
+                  h+=swapChild('↳ = to produce (own+in)','#4da6ff','rgba(77,166,255,.06)',ds=>{ const i=idxOf[ds]; return ownFn(ds)+(inArr[i]||0); });
+                }
+              }
             });
           }
         }
