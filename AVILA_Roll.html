@@ -3489,7 +3489,7 @@ function _resolveDemandSwap(elementId, todayRate, dateStr){
 }
 
 // ── Demand Swap manager (material substitution) ──────────
-function openDemandSwapManager(){
+function openDemandSwapManager(seedFromEl, seedDate){
   const cementProds=(DB.products||[]).filter(p=>['cement_bulk','cement_packed'].includes(p.category||''))
     .sort((a,b)=>(a.name||a.id).localeCompare(b.name||b.id));
   const matOpts=(sel)=>cementProds.map(p=>`<option value="${p.id}"${p.id===sel?' selected':''}>${p.name||p.id}</option>`).join('');
@@ -3499,6 +3499,7 @@ function openDemandSwapManager(){
   const dpName=id=>DB.elements.find(e=>e.id===id)?.name||id;
   const dpMat=id=>{ const el=DB.elements.find(e=>e.id===id); const ids=(el&&typeof _demElProdIds==='function')?_demElProdIds(el):[]; return ids.length?pn(ids[0]):''; };
   const today=new Date()._ymd();
+  const startVal=seedDate||today;
   const swaps=(DB.demand_substitutions||[]).slice().sort((a,b)=>(a.start_date||'').localeCompare(b.start_date||''));
   const rows=swaps.length?swaps.map(s=>`
     <tr style="border-bottom:1px solid var(--border)">
@@ -3522,7 +3523,7 @@ function openDemandSwapManager(){
       <div style="border-top:1px solid var(--border2);padding-top:12px">
         <div style="font-size:8px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase;margin-bottom:8px">＋ New swap</div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 12px">
-          <div><div class="fl">Cover demand point</div><select class="fi" id="ds-from" style="width:100%">${dpOpts(dpEls[0]?.id)}</select></div>
+          <div><div class="fl">Cover demand point</div><select class="fi" id="ds-from" style="width:100%">${dpOpts(seedFromEl||dpEls[0]?.id)}</select></div>
           <div><div class="fl">With (substitute material)</div><select class="fi" id="ds-to" style="width:100%">${matOpts(cementProds[0]?.id)}</select></div>
           <div><div class="fl">Amount</div>
             <div style="display:flex;gap:6px">
@@ -3531,8 +3532,8 @@ function openDemandSwapManager(){
             </div>
           </div>
           <div></div>
-          <div><div class="fl">From date</div><input class="fi" id="ds-from-date" type="date" value="${today}" style="width:100%"></div>
-          <div><div class="fl">To date</div><input class="fi" id="ds-to-date" type="date" value="${today}" style="width:100%"></div>
+          <div><div class="fl">From date</div><input class="fi" id="ds-from-date" type="date" value="${startVal}" style="width:100%"></div>
+          <div><div class="fl">To date</div><input class="fi" id="ds-to-date" type="date" value="${startVal}" style="width:100%"></div>
         </div>
         <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">
           <button class="tb-btn sec" onclick="closeModal()">Close</button>
@@ -3565,6 +3566,14 @@ function _deleteDemandSwap(id){
   renderDemandView();
   openDemandSwapManager(); // refresh the list
   statMsg('Demand swap removed — re-run simulation to update projections');
+}
+// Open the swap dialog from a material context (Supply page CEMENT NEED cell):
+// pre-select a demand point that carries that material (prefer current facility)
+// and pre-fill the date.
+function _openSwapForProduct(prodId, ds){
+  const dps=(DB.elements||[]).filter(e=>e.type==='demand_point'&&(typeof _demElProdIds==='function')&&_demElProdIds(e).includes(prodId));
+  const inFac=dps.find(e=>(e.facility_id===S.facility_id)||(e.assigned_facility_id===S.facility_id));
+  openDemandSwapManager((inFac||dps[0])?.id||'', ds||'');
 }
 
 function showCampaignPopup(elId, dateStr, runStart, runEnd, runProduct){
@@ -5549,14 +5558,14 @@ function _renderSupplyViewInner(wrap){
               const prod=DB.products.find(p=>p.id===prodId);
               const prodName=prod?.name||prodId;
               h+=`<tr>
-                <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${prodReqColor};font-size:9px">${prodName}</td>`;
+                <td ondblclick="_openSwapForProduct('${prodId}','')" title="Double-click to cover part of this material's demand with a substitute" style="cursor:pointer;${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${prodReqColor};font-size:9px">${prodName}</td>`;
               months.forEach(mon=>{
                 const isCol=collapsed.has(mon.ym);
                 const mt=mon.dates.reduce((s,ds)=>s+totalNeed(prodId,ds),0);
-                h+=`<td style="border-left:2px solid rgba(77,166,255,.1);font-size:9px;color:${prodReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                h+=`<td ondblclick="_openSwapForProduct('${prodId}','${mon.dates[0]||''}')" title="Double-click to swap part of this demand to another material" style="cursor:pointer;border-left:2px solid rgba(77,166,255,.1);font-size:9px;color:${prodReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
                 if(!isCol) mon.dates.forEach(ds=>{
                   const v=totalNeed(prodId,ds);
-                  h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${v>0?prodReqColor:'rgba(77,166,255,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
+                  h+=`<td class="sup-day-${mon.ym}" ondblclick="_openSwapForProduct('${prodId}','${ds}')" title="Double-click to swap part of this demand to another material" style="cursor:pointer;font-size:9px;color:${v>0?prodReqColor:'rgba(77,166,255,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
                 });
               });
               h+=`</tr>`;
@@ -6047,7 +6056,10 @@ function openDemandBuilder(elId, startDate){
       <span class="modal-title">⚙ Forecast Builder</span>
       <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-top:3px">Fires values directly to the grid — does not overwrite non-working days</div>
     </div>
-    <span class="modal-close" onclick="closeModal()">✕</span>
+    <div style="display:flex;align-items:center;gap:10px">
+      <button class="tb-btn sec" style="border-color:var(--amber);color:var(--amber)" onclick="openDemandSwapManager('${elId||''}')" title="Cover part of this demand point with a substitute material">⇄ Demand Swap</button>
+      <span class="modal-close" onclick="closeModal()">✕</span>
+    </div>
   </div>
   <div style="padding:16px;display:flex;flex-direction:column;gap:12px">
 
