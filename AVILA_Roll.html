@@ -1045,6 +1045,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
         <span style="font-family:var(--mono);font-size:9px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase">Demand Forecast</span>
         <div class="tb-div"></div>
         <button class="tb-btn amber" onclick="openDemandBuilder(null)">⚙ Forecast Builder</button>
+        <button class="tb-btn sec" onclick="openDemandSwapManager()">⇄ Demand Swaps</button>
         <button class="tb-btn sec" onclick="openNonWorkingDaysPanel()">⊘ Non-Working Days</button>
         <div style="display:flex;align-items:center;gap:8px;margin-left:8px;padding-left:8px;border-left:1px solid var(--border2)">
           <div style="display:flex;align-items:center;gap:4px;font-family:var(--mono);font-size:8px;color:var(--green)">
@@ -1596,6 +1597,20 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
 
 <script>
 // ═══════════════════════════════════════════════════════
+// LOCAL-TIME DATE FORMATTER
+// The app works in LOCAL time: calendar dates the user enters (campaign
+// from/to, non-working days, simulation start) are matched and displayed
+// using local date components. Using toISOString() (UTC) shifted dates by a
+// day in timezones east of UTC, so campaign/product edits landed on the wrong
+// day. _ymd() returns local YYYY-MM-DD and replaces toISOString().split('T')[0].
+// ═══════════════════════════════════════════════════════
+Date.prototype._ymd=function(){
+  if(isNaN(this.getTime())) return '';
+  const y=this.getFullYear(), m=String(this.getMonth()+1).padStart(2,'0'), d=String(this.getDate()).padStart(2,'0');
+  return `${y}-${m}-${d}`;
+};
+
+// ═══════════════════════════════════════════════════════
 // DATABASE — named tables matching agreed schema
 // ═══════════════════════════════════════════════════════
 const DB = {
@@ -1641,6 +1656,10 @@ const DB = {
 
   // Manager production campaigns — locked, simulation cannot override
   production_campaigns: [], // { id, element_id, product_id, start_date, end_date, rate_tpd, notes }
+
+  // Manager DEMAND SWAPS (material substitution) — a portion of demand for one
+  // material is covered by another material. Keyed by MATERIAL, not demand point.
+  demand_substitutions: [], // { id, from_product_id, to_product_id, mode:'percent'|'tonnage', amount, start_date, end_date, notes }
 
   // Simulation rules — natural language rules interpreted by Claude, stored as structured constraints
   simulation_rules: [], // { id, name, facility_ids[], element_ids[], natural_text, structured:{type,params}, date_from, date_to, status:'active'|'disabled'|'conflicted', conflict_ids:[], created_at }
@@ -1816,9 +1835,9 @@ const S = {
   tool:'select', selectedEl:null, connectFrom:null,
   dragging:null, dragOff:{x:0,y:0},
   elCounter:0,
-  simCfg:{start_date:new Date().toISOString().split('T')[0], horizon:90, mode:'planning', conflict_resolution:'rolling_avg'},
+  simCfg:{start_date:new Date()._ymd(), horizon:90, mode:'planning', conflict_resolution:'rolling_avg'},
   simResults:null, chatCollapsed:true, realDataCollapsed:true,
-  realDataSelectedDate:new Date().toISOString().split('T')[0],
+  realDataSelectedDate:new Date()._ymd(),
   realDataFacilityId:null,
   activeCatalog:'products', activeSchedTab:'vessels',
   logiHideMonths:false,  // collapse monthly-summary columns in logistics planners
@@ -3261,7 +3280,7 @@ function removeMaintEvent(evId,elId){
 function maintModalHTML(ev, elementId){
   const isEdit=!!ev;
   const el=getEl(elementId||ev?.element_id);
-  const today=new Date().toISOString().split('T')[0];
+  const today=new Date()._ymd();
   const startDate=ev?.start_date||today;
   const durDays=ev?.duration_days||1;
   const endDate=ev?.end_date||calcEndDate(startDate,durDays);
@@ -3350,7 +3369,7 @@ function calcEndDate(startDate, durationDays){
   try{
     const d=new Date(startDate);
     d.setDate(d.getDate()+(parseInt(durationDays)||1)-1);
-    return d.toISOString().split('T')[0];
+    return d._ymd();
   }catch(e){return startDate;}
 }
 
@@ -3445,6 +3464,106 @@ function getActiveCampaign(elId, dateStr){
   return (DB.production_campaigns||[]).find(c=>
     c.element_id===elId && dateStr>=c.start_date && dateStr<=c.end_date
   )||null;
+}
+
+// Active demand swap for a material on a date: a portion of from_product demand
+// is covered by to_product. Returns the swap record (or null).
+function getActiveDemandSwap(fromProductId, dateStr){
+  if(!fromProductId) return null;
+  return (DB.demand_substitutions||[]).find(s=>
+    s.from_product_id===fromProductId && dateStr>=s.start_date && dateStr<=s.end_date
+  )||null;
+}
+// How many tonnes of a demand point's daily demand are swapped, given its product
+// and total rate that day. Returns {swap, qty, toProduct} or null.
+function _resolveDemandSwap(productIds, todayRate, dateStr){
+  if(!todayRate||todayRate<=0) return null;
+  for(const pid of (productIds||[])){
+    const s=getActiveDemandSwap(pid, dateStr);
+    if(s){
+      const qty = s.mode==='percent'
+        ? todayRate*(parseFloat(s.amount)||0)/100
+        : Math.min(todayRate, parseFloat(s.amount)||0);
+      if(qty>0) return {swap:s, qty, fromProduct:pid, toProduct:s.to_product_id};
+    }
+  }
+  return null;
+}
+
+// ── Demand Swap manager (material substitution) ──────────
+function openDemandSwapManager(){
+  const cementProds=(DB.products||[]).filter(p=>['cement_bulk','cement_packed'].includes(p.category||''))
+    .sort((a,b)=>(a.name||a.id).localeCompare(b.name||b.id));
+  const opts=(sel)=>cementProds.map(p=>`<option value="${p.id}"${p.id===sel?' selected':''}>${p.name||p.id}</option>`).join('');
+  const pn=id=>DB.products.find(p=>p.id===id)?.name||id;
+  const today=new Date()._ymd();
+  const swaps=(DB.demand_substitutions||[]).slice().sort((a,b)=>(a.start_date||'').localeCompare(b.start_date||''));
+  const rows=swaps.length?swaps.map(s=>`
+    <tr style="border-bottom:1px solid var(--border)">
+      <td style="padding:6px 8px;color:var(--green)">${pn(s.from_product_id)}</td>
+      <td style="padding:6px 8px;color:var(--amber)"><i style="font-style:normal">⇄</i> ${pn(s.to_product_id)}</td>
+      <td style="padding:6px 8px;text-align:right;color:var(--text)">${s.mode==='percent'?(s.amount+'%'):(Number(s.amount).toLocaleString()+' t/d')}</td>
+      <td style="padding:6px 8px;color:var(--text-dim);font-size:8px">${s.start_date} → ${s.end_date}</td>
+      <td style="padding:6px 8px;text-align:right"><button class="tb-btn sec" style="padding:2px 7px" onclick="_deleteDemandSwap('${s.id}')">✕</button></td>
+    </tr>`).join(''):`<tr><td colspan="5" style="padding:12px;text-align:center;color:var(--text-dim)">No demand swaps yet.</td></tr>`;
+
+  showModalContent(`
+    <div class="modal-hdr"><span class="modal-title">⇄ Demand Swaps — material substitution</span><span class="modal-close" onclick="closeModal()">✕</span></div>
+    <div class="modal-body" style="font-family:var(--mono);font-size:9px;min-width:560px">
+      <div style="color:var(--text-dim);margin-bottom:10px;line-height:1.5">Cover part of one material's demand with another. The swapped portion is drawn from the substitute material's inventory; the original material's demand drops by the same amount.</div>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:14px">
+        <thead><tr style="color:var(--text-dim);font-size:8px;text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid var(--border2)">
+          <th style="text-align:left;padding:5px 8px">Cover demand for</th><th style="text-align:left;padding:5px 8px">With</th><th style="text-align:right;padding:5px 8px">Amount</th><th style="text-align:left;padding:5px 8px">Dates</th><th></th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div style="border-top:1px solid var(--border2);padding-top:12px">
+        <div style="font-size:8px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase;margin-bottom:8px">＋ New swap</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 12px">
+          <div><div class="fl">Cover demand for (material)</div><select class="fi" id="ds-from" style="width:100%">${opts(cementProds[0]?.id)}</select></div>
+          <div><div class="fl">With (substitute material)</div><select class="fi" id="ds-to" style="width:100%">${opts(cementProds[1]?.id||cementProds[0]?.id)}</select></div>
+          <div><div class="fl">Amount</div>
+            <div style="display:flex;gap:6px">
+              <input class="fi" id="ds-amount" type="number" min="0" value="50" style="flex:1">
+              <select class="fi" id="ds-mode" style="width:110px"><option value="percent">% of demand</option><option value="tonnage">t / day</option></select>
+            </div>
+          </div>
+          <div></div>
+          <div><div class="fl">From date</div><input class="fi" id="ds-from-date" type="date" value="${today}" style="width:100%"></div>
+          <div><div class="fl">To date</div><input class="fi" id="ds-to-date" type="date" value="${today}" style="width:100%"></div>
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">
+          <button class="tb-btn sec" onclick="closeModal()">Close</button>
+          <button class="tb-btn" style="background:var(--amber);color:var(--bg)" onclick="_saveDemandSwap()">⇄ Add swap &amp; run</button>
+        </div>
+      </div>
+    </div>`);
+}
+function _saveDemandSwap(){
+  const from=document.getElementById('ds-from')?.value;
+  const to=document.getElementById('ds-to')?.value;
+  const mode=document.getElementById('ds-mode')?.value||'percent';
+  const amount=parseFloat(document.getElementById('ds-amount')?.value)||0;
+  const start=document.getElementById('ds-from-date')?.value;
+  const end=document.getElementById('ds-to-date')?.value;
+  if(!from||!to||!start||!end){ statMsg('Fill all swap fields'); return; }
+  if(from===to){ statMsg('Pick two different materials'); return; }
+  if(start>end){ statMsg('From date must be on or before To date'); return; }
+  if(amount<=0){ statMsg('Amount must be greater than 0'); return; }
+  if(!DB.demand_substitutions) DB.demand_substitutions=[];
+  DB.demand_substitutions.push({ id:'swap_'+Date.now(), from_product_id:from, to_product_id:to, mode, amount, start_date:start, end_date:end, notes:'' });
+  autoSave();
+  closeModal();
+  renderDemandView();
+  statMsg('Demand swap saved — running simulation…');
+  if(typeof runSimulation==='function') runSimulation();
+}
+function _deleteDemandSwap(id){
+  DB.demand_substitutions=(DB.demand_substitutions||[]).filter(s=>s.id!==id);
+  autoSave();
+  renderDemandView();
+  openDemandSwapManager(); // refresh the list
+  statMsg('Demand swap removed — re-run simulation to update projections');
 }
 
 function showCampaignPopup(elId, dateStr, runStart, runEnd, runProduct){
@@ -3594,7 +3713,7 @@ function _renderSupCampaignWarnings(){
   const dateIdx={};
   for(let i=0;i<horizon;i++){
     const d=new Date(simStart); d.setDate(d.getDate()+i);
-    dateIdx[d.toISOString().split('T')[0]]=i;
+    dateIdx[d._ymd()]=i;
   }
 
   const allEls=getFacElements();
@@ -3623,7 +3742,7 @@ function _renderSupCampaignWarnings(){
       let cur=new Date(camp.start_date+'T00:00:00');
       const end=new Date(camp.end_date+'T00:00:00');
       while(cur<=end){
-        campDays.push(cur.toISOString().split('T')[0]);
+        campDays.push(cur._ymd());
         cur.setDate(cur.getDate()+1);
       }
       if(!campDays.length) return;
@@ -4077,7 +4196,7 @@ function exportElementsCSV(){
   const url=URL.createObjectURL(blob);
   const a=document.createElement('a');
   a.href=url;
-  a.download=`elements_${new Date().toISOString().split('T')[0]}.csv`;
+  a.download=`elements_${new Date()._ymd()}.csv`;
   a.click();
   URL.revokeObjectURL(url);
   statMsg('Elements exported to CSV');
@@ -4163,25 +4282,25 @@ function supGetDateRange(){
 
   if(v.preset==='custom'){
     const f=document.getElementById('sup-from-date')?.value||S.simCfg.start_date;
-    const t=document.getElementById('sup-to-date')?.value||simEnd.toISOString().split('T')[0];
+    const t=document.getElementById('sup-to-date')?.value||simEnd._ymd();
     return {from:f, to:t};
   }
   if(v.preset==='full'){
-    return {from:simStart.toISOString().split('T')[0], to:simEnd.toISOString().split('T')[0]};
+    return {from:simStart._ymd(), to:simEnd._ymd()};
   }
-  const todayStr=today.toISOString().split('T')[0];
-  const simStartStr=simStart.toISOString().split('T')[0];
+  const todayStr=today._ymd();
+  const simStartStr=simStart._ymd();
   const fromDate=simStartStr<todayStr?simStartStr:todayStr; // always start from sim start or today, whichever is earlier
   if(v.preset==='rom'){
-    const eom=new Date(today.getFullYear(),today.getMonth()+1,0).toISOString().split('T')[0];
+    const eom=new Date(today.getFullYear(),today.getMonth()+1,0)._ymd();
     return {from:fromDate, to:eom};
   }
   if(v.preset==='3m'){
-    const e3m=new Date(today.getFullYear(),today.getMonth()+3,0).toISOString().split('T')[0];
+    const e3m=new Date(today.getFullYear(),today.getMonth()+3,0)._ymd();
     return {from:fromDate, to:e3m};
   }
   // roy — rest of year
-  const eoy=new Date(today.getFullYear(),11,31).toISOString().split('T')[0];
+  const eoy=new Date(today.getFullYear(),11,31)._ymd();
   return {from:fromDate, to:eoy};
 }
 
@@ -4189,7 +4308,7 @@ function renderSupplyKPIs(){
   const bar=document.getElementById('sup-kpi-bar'); if(!bar) return;
   const r=S.simResults;
   const today=new Date();
-  const todayStr=today.toISOString().split('T')[0];
+  const todayStr=today._ymd();
   const simStart=new Date(S.simCfg.start_date+'T00:00:00');
   const facId=window._supView?.facId||'';
   const prodId=window._supView?.prodId||'';
@@ -4201,11 +4320,11 @@ function renderSupplyKPIs(){
   );
 
   // ── MTD Production ─────────────────────────────────────────
-  const mtdStart=new Date(today.getFullYear(),today.getMonth(),1).toISOString().split('T')[0];
+  const mtdStart=new Date(today.getFullYear(),today.getMonth(),1)._ymd();
   let mtdActual=0, mtdRated=0;
   const mtdDates=[];
   for(let d=new Date(mtdStart+'T00:00:00');d<=today;d=new Date(d.getTime()+864e5))
-    mtdDates.push(d.toISOString().split('T')[0]);
+    mtdDates.push(d._ymd());
 
   millEls.forEach(el=>{
     const caps=DB.element_product_capacities.filter(c=>c.element_id===el.id&&(!prodId||c.product_id===prodId));
@@ -4219,19 +4338,19 @@ function renderSupplyKPIs(){
         const sd=new Date(m.start_date+'T00:00:00');
         const dur=parseInt(m.duration_days)||1;
         const ed=new Date(sd.getTime()+(dur-1)*864e5);
-        return m.element_id===el.id&&ds>=m.start_date&&ds<=ed.toISOString().split('T')[0];
+        return m.element_id===el.id&&ds>=m.start_date&&ds<=ed._ymd();
       });
       if(!isMaint) mtdRated+=ratedMax;
     });
   });
 
   // ── Forecasted Full Month ───────────────────────────────────
-  const eomStr=new Date(today.getFullYear(),today.getMonth()+1,0).toISOString().split('T')[0];
+  const eomStr=new Date(today.getFullYear(),today.getMonth()+1,0)._ymd();
   let forecastRem=0;
   if(r?.millProductHistory){
     const tomorrow=new Date(today.getTime()+864e5);
     for(let d=new Date(tomorrow);d<=new Date(eomStr+'T00:00:00');d=new Date(d.getTime()+864e5)){
-      const ds=d.toISOString().split('T')[0];
+      const ds=d._ymd();
       const dayIdx=Math.round((d-simStart)/864e5);
       millEls.forEach(el=>{
         const pid=r.millProductHistory[el.id]?.[dayIdx]||null;
@@ -4279,7 +4398,7 @@ function renderSupplyKPIs(){
       (!facId||(e.facility_id===facId||e.assigned_facility_id===facId)));
     let totalDemand=0; let demDays=0;
     for(let i=0;i<30;i++){
-      const d=new Date(today.getTime()+i*864e5).toISOString().split('T')[0];
+      const d=new Date(today.getTime()+i*864e5)._ymd();
       const dayDem=demEls.reduce((s,el)=>s+(_demandRate(el.id,d)||0),0);
       if(dayDem>0){ totalDemand+=dayDem; demDays++; }
     }
@@ -4555,10 +4674,10 @@ function renderDemandView(){
     return;
   }
 
-  const simStart=new Date((S.simCfg.start_date||new Date().toISOString().split('T')[0])+'T00:00:00');
+  const simStart=new Date((S.simCfg.start_date||new Date()._ymd())+'T00:00:00');
   const horizon=S.simCfg.horizon||90;
   const nwdSet=new Set((DB.non_working_days||[]).map(n=>n.date));
-  const todayStr=new Date().toISOString().split('T')[0];
+  const todayStr=new Date()._ymd();
 
   // ── Date spine — always include actuals history ───────────────────────
   // Find earliest actual in demand_values so past data is always visible
@@ -4568,7 +4687,7 @@ function renderDemandView(){
   const earliestActual = actualDates.length ? actualDates.reduce((a,b)=>a<b?a:b) : null;
 
   // Grid start = earliest actual OR sim start, whichever is earlier
-  const gridStart = earliestActual && earliestActual < simStart.toISOString().split('T')[0]
+  const gridStart = earliestActual && earliestActual < simStart._ymd()
     ? new Date(earliestActual+'T00:00:00')
     : simStart;
 
@@ -4577,7 +4696,7 @@ function renderDemandView(){
 
   const allDates=[];
   for(let dt=new Date(gridStart); dt<simEnd; dt=new Date(dt.getTime()+864e5)){
-    allDates.push(dt.toISOString().split('T')[0]);
+    allDates.push(dt._ymd());
   }
   // Group by month
   const months=[];
@@ -4878,6 +4997,32 @@ function renderDemandView(){
             });
           });
           h+=`</tr>`;
+
+          // ── Demand-swap child rows: split this material's demand into the
+          //    portion met by its own product and the portion covered by a substitute.
+          (()=>{
+            const prods=(typeof _demElProdIds==='function')?_demElProdIds(el):[]; if(!prods.length) return;
+            const swDays=allDates.map(ds=>{ const t=getVal(el.id,ds); const sw=_resolveDemandSwap(prods,t,ds); return sw?{toProduct:sw.toProduct,qty:Math.min(sw.qty,t)}:null; });
+            if(!swDays.some(Boolean)) return;
+            const childRow=(label,color,bg,valFn)=>{
+              let rr=`<tr style="background:${bg}"><td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${color};font-size:8px;font-style:italic">${label}</td>`;
+              months.forEach(mon=>{
+                const isCol=collapsed.has(mon.ym);
+                const mt=mon.dates.reduce((s,ds)=>s+valFn(ds),0);
+                rr+=`<td style="border-left:2px solid rgba(255,255,255,.05);font-size:8px;color:${color};text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                if(!isCol) mon.dates.forEach(ds=>{ const v=valFn(ds); rr+=`<td class="dem-day-${mon.ym}" style="font-size:8px;color:${color};text-align:right;padding:3px 4px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
+              });
+              return rr+`</tr>`;
+            };
+            const ownFn=ds=>{ const t=getVal(el.id,ds); const sw=_resolveDemandSwap(prods,t,ds); return t-(sw?Math.min(sw.qty,t):0); };
+            const fromName=DB.products.find(p=>p.id===prods[0])?.name||prods[0]||'own';
+            h+=childRow('↳ '+fromName+' · own','var(--green)','rgba(76,175,80,.03)',ownFn);
+            [...new Set(swDays.filter(Boolean).map(s=>s.toProduct))].forEach(tp=>{
+              const toName=DB.products.find(p=>p.id===tp)?.name||tp;
+              h+=childRow('↳ ⇄ covered by '+toName,'var(--amber)','rgba(255,184,48,.05)',
+                ds=>{ const t=getVal(el.id,ds); const sw=_resolveDemandSwap(prods,t,ds); return (sw&&sw.toProduct===tp)?Math.min(sw.qty,t):0; });
+            });
+          })();
         });
       }
     } else {
@@ -4978,7 +5123,7 @@ function _demToggleMonth(ym){
 }
 
 function demandScrollToday(){
-  const todayStr=new Date().toISOString().split('T')[0];
+  const todayStr=new Date()._ymd();
   const wrap=document.getElementById('demand-table-wrap'); if(!wrap) return;
   const th=wrap.querySelector(`th[style*="border-left:2px solid var(--green)"]`);
   if(th) th.scrollIntoView({behavior:'smooth',inline:'center',block:'nearest'});
@@ -5019,14 +5164,14 @@ function _renderSupplyViewInner(wrap){
 
   const simStart=new Date(S.simCfg.start_date+'T00:00:00');
   const horizon=S.simCfg.horizon||90;
-  const todayStr=new Date().toISOString().split('T')[0];
+  const todayStr=new Date()._ymd();
 
   // Date spine — filtered by active view range
   const {from:filterFrom, to:filterTo}=supGetDateRange();
   const allDates=[];
   for(let d=0;d<horizon;d++){
     const dt=new Date(simStart.getTime()+d*864e5);
-    const ds=dt.toISOString().split('T')[0];
+    const ds=dt._ymd();
     if(ds>=filterFrom&&ds<=filterTo) allDates.push(ds);
   }
 
@@ -5075,7 +5220,7 @@ function _renderSupplyViewInner(wrap){
       const addOccurrence=(occStart)=>{
         for(let d=0;d<dur;d++){
           const dt=new Date(occStart.getTime()+d*864e5);
-          days.set(dt.toISOString().split('T')[0], ev.id);
+          days.set(dt._ymd(), ev.id);
         }
       };
       addOccurrence(sd);
@@ -5451,7 +5596,7 @@ function _renderSupplyViewInner(wrap){
             // So ONLY check previous day's real inventory data
             const prevDate=new Date(dateStr+'T00:00:00');
             prevDate.setDate(prevDate.getDate()-1);
-            const prevDateStr=prevDate.toISOString().split('T')[0];
+            const prevDateStr=prevDate._ymd();
 
             // Check ONLY previous day's ending inventory (becomes today's beginning)
             const realInv=DB.real_inventory_daily.find(ri=>ri.date===prevDateStr&&ri.silo_id===siloId);
@@ -5702,7 +5847,7 @@ function _renderSupplyViewInner(wrap){
           const getClkInvValue=(siloId, dateStr, startInv)=>{
             const prevDate=new Date(dateStr+'T00:00:00');
             prevDate.setDate(prevDate.getDate()-1);
-            const prevDateStr=prevDate.toISOString().split('T')[0];
+            const prevDateStr=prevDate._ymd();
             const realInv=DB.real_inventory_daily.find(ri=>ri.date===prevDateStr&&ri.silo_id===siloId);
             if(realInv) return {value:parseFloat(realInv.eod_volume_t)||0, isActual:true};
             const dayIdx=allDates.indexOf(dateStr);
@@ -5841,7 +5986,7 @@ function _supToggleGrp(id){
 
 function supplyScrollToday(){
   const wrap=document.getElementById('supply-table-wrap'); if(!wrap) return;
-  const todayStr=new Date().toISOString().split('T')[0];
+  const todayStr=new Date()._ymd();
   const th=wrap.querySelector(`th[style*="border-left:2px solid var(--green)"]`);
   if(th) th.scrollIntoView({behavior:'smooth',inline:'center',block:'nearest'});
 }
@@ -5889,7 +6034,7 @@ function openDemandBuilder(elId, startDate){
   const initSoldTo=uniq(actForDp,'ship_to_name');
   const initShipTo=uniq(actForDp,'ship_to');
 
-  const simStart=startDate||S.simCfg.start_date||new Date().toISOString().split('T')[0];
+  const simStart=startDate||S.simCfg.start_date||new Date()._ymd();
   const nwdCount=(DB.non_working_days||[]).length;
 
   const pi='background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:10px;padding:5px 7px;outline:none;width:100%';
@@ -6226,11 +6371,11 @@ function _fbBuildRows(elIdOverride){
   const isSat=ds=>new Date(ds+'T00:00:00').getDay()===6;
   const isSun=ds=>new Date(ds+'T00:00:00').getDay()===0;
   const isEligible=ds=>!nwdSet.has(ds)&&!isSun(ds)&&(shipsSat?true:!isSat(ds));
-  const addDays=(ds,n)=>{const d=new Date(ds+'T00:00:00');d.setDate(d.getDate()+n);return d.toISOString().split('T')[0];};
-  const endOfMonth=ds=>{const d=new Date(ds+'T00:00:00');return new Date(d.getFullYear(),d.getMonth()+1,0).toISOString().split('T')[0];};
+  const addDays=(ds,n)=>{const d=new Date(ds+'T00:00:00');d.setDate(d.getDate()+n);return d._ymd();};
+  const endOfMonth=ds=>{const d=new Date(ds+'T00:00:00');return new Date(d.getFullYear(),d.getMonth()+1,0)._ymd();};
   const endOfYear=ds=>`${ds.slice(0,4)}-12-31`;
   const simEndDate=new Date(new Date(S.simCfg.start_date||start+'T00:00:00').getTime()+(S.simCfg.horizon||90)*864e5);
-  const simEnd=simEndDate.toISOString().split('T')[0];
+  const simEnd=simEndDate._ymd();
 
   let endDate;
   if(method==='distribute'){
@@ -6241,8 +6386,8 @@ function _fbBuildRows(elIdOverride){
   }
 
   const spine=[];
-  for(let d=new Date(start+'T00:00:00');d.toISOString().split('T')[0]<=endDate;d.setDate(d.getDate()+1)){
-    spine.push(d.toISOString().split('T')[0]);
+  for(let d=new Date(start+'T00:00:00');d._ymd()<=endDate;d.setDate(d.getDate()+1)){
+    spine.push(d._ymd());
   }
 
   // Build actuals map from real_shipments_daily
@@ -6491,7 +6636,7 @@ function _fbDistributeMonthRows(y, m, total, opts){
 function _fbBulkProcess(rawRows){
   const msg=document.getElementById('fb-msg');
   const cols=Object.keys(rawRows[0]);
-  const simStart=S.simCfg.start_date||document.getElementById('fb-start')?.value||new Date().toISOString().split('T')[0];
+  const simStart=S.simCfg.start_date||document.getElementById('fb-start')?.value||new Date()._ymd();
   const defYear=parseInt(simStart.slice(0,4))||new Date().getFullYear();
 
   // Classify columns: month columns vs text columns
@@ -7018,7 +7163,7 @@ function rpGetRange(){
 function rpDayDate(d){
   const dt=new Date(S.simCfg.start_date+'T00:00:00');
   dt.setDate(dt.getDate()+d-1);
-  return dt.toISOString().split('T')[0];
+  return dt._ymd();
 }
 function rpDayDOW(d){return new Date(S.simCfg.start_date+'T00:00:00').getDay()==0?0:((new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5).getDay()+6)%7);}
 function rpIsSat(d){return new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5).getDay()===6;}
@@ -7102,7 +7247,7 @@ function rpToggleProd(prodId){
 // ── Demand rate helper ────────────────────────────────────────────
 function rpDemand(elId,d){
   const dt=new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5);
-  return _demandRate(elId,dt.toISOString().split('T')[0]);
+  return _demandRate(elId,dt._ymd());
 }
 
 // ── Inventory snapshot from simulation results ────────────────────
@@ -7192,7 +7337,7 @@ function rpRender(){
   rpRenderCharts();
 
   // ── Month grouping + summary-column styling (shared with vessel planner) ──
-  const todayStr=new Date().toISOString().split('T')[0];
+  const todayStr=new Date()._ymd();
   const months=(()=>{const mons=[];days.forEach(d=>{const ds=rpDayDate(d);const ym=ds.slice(0,7);if(!mons.length||mons[mons.length-1].ym!==ym){const dt=new Date(ds+'T00:00:00');mons.push({ym,label:dt.toLocaleString('en-US',{month:'short',year:'2-digit'}),days:[]});}mons[mons.length-1].days.push(d);});return mons;})();
   const _mTdSty='background:var(--total-faint);border-left:2px solid var(--border2);font-weight:700;color:var(--total);text-align:right;padding:3px 8px;';
   const _tpTdSty=d=>rpDayDate(d)===todayStr?'border-left:2px solid var(--green);border-right:2px solid var(--green);':'';
@@ -7378,7 +7523,7 @@ function rpRender(){
       const _rpIsWorkDay=(dayNum)=>{
         const dt=new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(dayNum-1)*864e5);
         const dow=(dt.getDay()+6)%7; // Mon=0..Sun=6
-        if(_rpNwd.has(dt.toISOString().split('T')[0])) return false;
+        if(_rpNwd.has(dt._ymd())) return false;
         if(_rpWorkDays==='7_days') return true;
         if(_rpWorkDays==='mon_sat') return dow<=5;
         return dow<=4; // weekdays default
@@ -7783,7 +7928,7 @@ function vpGetRange(){
 function vpDayDate(d){
   const dt=new Date(S.simCfg.start_date+'T00:00:00');
   dt.setDate(dt.getDate()+d-1);
-  return dt.toISOString().split('T')[0];
+  return dt._ymd();
 }
 
 function vpBuildDestFilter(){
@@ -7892,7 +8037,7 @@ function vpRender(){
   }
   vpRenderCharts();
 
-  const todayStr=new Date().toISOString().split('T')[0];
+  const todayStr=new Date()._ymd();
   const months=(()=>{const mons=[];days.forEach(d=>{const ds=vpDayDate(d);const ym=ds.slice(0,7);if(!mons.length||mons[mons.length-1].ym!==ym){const dt=new Date(ds+'T00:00:00');mons.push({ym,label:dt.toLocaleString('en-US',{month:'short',year:'2-digit'}),days:[]});}mons[mons.length-1].days.push(d);});return mons;})();
   const _mTdSty='background:var(--total-faint);border-left:2px solid var(--border2);font-weight:700;color:var(--total);text-align:right;padding:3px 8px;';
   const _tpTdSty=d=>vpDayDate(d)===todayStr?'border-left:2px solid var(--green);border-right:2px solid var(--green);':'';
@@ -8517,7 +8662,7 @@ function _planRailShipments(rBase){
         (e.assigned_facility_id||e.facility_id)===facId);
       const getDemand=d=>{
         const dt=new Date(simStart.getTime()+(d-1)*864e5);
-        return termDemEls.reduce((s,el)=>s+_demandRate(el.id,dt.toISOString().split('T')[0]),0);
+        return termDemEls.reduce((s,el)=>s+_demandRate(el.id,dt._ymd()),0);
       };
 
       // Arrivals array pre-seeded from Planned/Confirmed/In Transit movements
@@ -8587,7 +8732,7 @@ function _planRailShipments(rBase){
         const _isWorkingDay=(dayNum)=>{
           const dt=new Date(simStart.getTime()+(dayNum-1)*864e5);
           const dow=(dt.getDay()+6)%7; // Mon=0..Sun=6
-          const dateStr=dt.toISOString().split('T')[0];
+          const dateStr=dt._ymd();
           if(nwdSetLocal.has(dateStr)) return false; // facility holiday
           if(workDaysSetting==='7_days') return true;
           if(workDaysSetting==='mon_sat') return dow<=5;
@@ -8620,7 +8765,7 @@ function _planRailShipments(rBase){
         usedSwitchDays.add(switchDay);
 
         const departDate=new Date(simStart.getTime()+(switchDay-1)*864e5);
-        const departStr=departDate.toISOString().split('T')[0];
+        const departStr=departDate._ymd();
         const toFac=DB.facilities.find(f=>f.id===facId);
 
         DB.rail_movements.push({
@@ -8725,7 +8870,7 @@ function _writeProposedVesselCalls(r){
       const dailyOutflow=new Array(horizon+2).fill(0);
       for(let d=1;d<=horizon;d++){
         const dt=new Date(simStart.getTime()+(d-1)*864e5);
-        const ds=dt.toISOString().split('T')[0];
+        const ds=dt._ymd();
         dailyOutflow[d]=demIds.reduce((s,id)=>s+(_demandRate(id,ds)||0),0);
       }
       const totDemSp=dailyOutflow.reduce((s,v)=>s+v,0);
@@ -8780,8 +8925,8 @@ function _writeProposedVesselCalls(r){
         });
         if(alreadyCovered){scanFromSp=critDay+1;continue;}
 
-        const arrivalStr=new Date(simStart.getTime()+(idealArrival-1)*864e5).toISOString().split('T')[0];
-        const orderStr=new Date(simStart.getTime()+(orderDay-1)*864e5).toISOString().split('T')[0];
+        const arrivalStr=new Date(simStart.getTime()+(idealArrival-1)*864e5)._ymd();
+        const orderStr=new Date(simStart.getTime()+(orderDay-1)*864e5)._ymd();
         proposedCalls.push({arrivalDay:idealArrival});
         for(let d=idealArrival;d<idealArrival+unloadDays&&d<=horizon;d++) propInflow[d]+=primaryQty/Math.max(1,unloadDays);
         rebuildFromSp(idealArrival);
@@ -8789,7 +8934,7 @@ function _writeProposedVesselCalls(r){
         let legOffset=0;
         const legs=allocBerths.map((ab,li)=>{
           if(li>0) legOffset+=berthRate>0?Math.ceil(allocBerths[li-1].qty/(berthRate*24)):unloadDays;
-          const legArrival=new Date(simStart.getTime()+(idealArrival-1+legOffset)*864e5).toISOString().split('T')[0];
+          const legArrival=new Date(simStart.getTime()+(idealArrival-1+legOffset)*864e5)._ymd();
           const legBerth=ab.berth;
           return {
             berth_element_id:legBerth.id,
@@ -8856,7 +9001,7 @@ function _writeProposedVesselCalls(r){
       const dailyOutflow=new Array(horizon+2).fill(0);
       for(let d=1;d<=horizon;d++){
         const dt=new Date(simStart.getTime()+(d-1)*864e5);
-        const ds=dt.toISOString().split('T')[0];
+        const ds=dt._ymd();
         dailyOutflow[d]=demIds.reduce((s,id)=>s+(_demandRate(id,ds)||0),0);
       }
       const totalDemand=dailyOutflow.reduce((s,v)=>s+v,0);
@@ -8919,8 +9064,8 @@ function _writeProposedVesselCalls(r){
         });
         if(alreadyCovered){scanFrom=critDay+1;continue;}
 
-        const arrivalStr=new Date(simStart.getTime()+(idealArrival-1)*864e5).toISOString().split('T')[0];
-        const orderStr=new Date(simStart.getTime()+(orderDay-1)*864e5).toISOString().split('T')[0];
+        const arrivalStr=new Date(simStart.getTime()+(idealArrival-1)*864e5)._ymd();
+        const orderStr=new Date(simStart.getTime()+(orderDay-1)*864e5)._ymd();
 
         proposedCalls.push({arrivalDay:idealArrival});
         const dailyUnload=typicalVol/Math.max(1,unloadDays);
@@ -9043,6 +9188,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
     elementStates:{},
     inventoryHistory:{},
     millProductHistory:{},
+    demandSwapHistory:{},     // demandSwapHistory[demandPointId][day-1] = {own, swapped, toProduct, fromProduct} when a swap covers part of this DP's demand
     railHistory:{},           // railHistory[dispElId][day-1]
     berthArrivalHistory:{},   // berthArrivalHistory[berthId][day-1] = total tonnes arrived at berth
     berthUnloadHistory:{},    // berthUnloadHistory[berthId][day-1] = total tonnes unloaded from berth
@@ -9296,7 +9442,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
       const dailyRates=[];
       for(let d=1;d<=horizon;d++){
         const dt=new Date(simStartDate.getTime()+(d-1)*864e5);
-        const ds=dt.toISOString().split('T')[0];
+        const ds=dt._ymd();
         dailyRates.push(_demandRate(el.id,ds));
       }
 
@@ -9542,7 +9688,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
     // ensuring subsequent days calculate correctly from real values.
     if(DB.real_inventory_daily?.length){
       const prevAnchorDate=new Date(simStartDate.getTime()+(day-2)*864e5);
-      const prevAnchorStr=prevAnchorDate.toISOString().split('T')[0];
+      const prevAnchorStr=prevAnchorDate._ymd();
       elements.filter(e=>e.type==='bulk_silo').forEach(el=>{
         const realInv=DB.real_inventory_daily.find(ri=>ri.date===prevAnchorStr&&ri.silo_id===el.id);
         if(realInv){
@@ -9612,7 +9758,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
       if(s.status==='maintenance') return;
 
       // ── REAL PRODUCTION ANCHOR (kilns) ────────────────
-      const _kilnDate=new Date(simStartDate.getTime()+(day-1)*864e5).toISOString().split('T')[0];
+      const _kilnDate=new Date(simStartDate.getTime()+(day-1)*864e5)._ymd();
       const _kilnReal=realProdMap[el.id]?.[_kilnDate];
       if(_kilnReal?.length){
         const downClkA=(dn[el.id]||[]).map(id=>elMap[id]).filter(e=>e&&isClinkerSilo(e));
@@ -9776,7 +9922,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
 
       // ── REAL PRODUCTION ANCHOR (finish mills) ────────────
       // _campDateRail is computed just below — reuse by computing once here.
-      const _millDate=new Date(simStartDate.getTime()+(day-1)*864e5).toISOString().split('T')[0];
+      const _millDate=new Date(simStartDate.getTime()+(day-1)*864e5)._ymd();
       const _millReal=realProdMap[mill.id]?.[_millDate];
       if(_millReal?.length){
         // Use actual production volumes; route to most-urgent downstream silo per product.
@@ -9903,7 +10049,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
       // ── MANAGER CAMPAIGN OVERRIDE ────────────────────────
       // If a manager campaign is defined for this element+day, force that product/rate
       {
-        const campDate=new Date(simStartDate.getTime()+(day-1)*864e5).toISOString().split('T')[0];
+        const campDate=new Date(simStartDate.getTime()+(day-1)*864e5)._ymd();
         const camp=(DB.production_campaigns||[]).find(c=>
           c.element_id===mill.id && campDate>=c.start_date && campDate<=c.end_date
         );
@@ -10607,10 +10753,37 @@ function simulate(elements, connections, horizon, includeProposed=false){
     // Pull daily tonnage from cement silos in product priority order.
     // Pulls to zero — no minimum reservation.
     // Rail transfer silos are excluded (transit buffers, not customer-facing inventory).
+    const _ds7=new Date(simStartDate.getTime()+(day-1)*864e5)._ymd();
+    // Pull up to `qty` tonnes of the given products from a demand point's reachable
+    // silos (bulk then packed). Returns tonnes actually pulled. `relaxed` drops the
+    // facility/topology scope so any cement silo of the product qualifies — used for
+    // demand-swap coverage, which is a deliberate manager re-source of the material.
+    const _pullDemand=(productIds, qty, topoSilos, facilityId, relaxed)=>{
+      let remaining=qty, pulled=0;
+      const scoped=e=> relaxed || topoSilos.has(e.id) ||
+        (e.assigned_facility_id||e.facility_id||S.facility_id)===facilityId;
+      const drain=si=>{
+        if(remaining<=0) return;
+        const ss=state[si.id];
+        const avail=Math.max(0,(ss.inventory||0)-(siloOutflow[si.id]||0));
+        const p=Math.min(remaining,avail);
+        if(p>0){ siloOutflow[si.id]=(siloOutflow[si.id]||0)+p; remaining-=p; pulled+=p; }
+      };
+      productIds.forEach(pid=>{
+        if(remaining<=0) return;
+        elements.filter(e=>e.type==='bulk_silo'&&isCementSilo(e)&&!railTransferSiloIds.has(e.id)&&
+                           getSiloProducts(e).includes(pid)&&scoped(e)).forEach(drain);
+      });
+      productIds.forEach(pid=>{
+        if(remaining<=0) return;
+        elements.filter(e=>e.type==='packed_silo'&&e.props.product_id===pid&&scoped(e)).forEach(drain);
+      });
+      return pulled;
+    };
+
     demandPoints.forEach(dp=>{
       const todayRate=dp.dailyRates[day-1]||0;
       if(todayRate<=0) return;
-      let remaining=todayRate;
       const topoSilos=demandSiloMap[dp.id]||new Set();
 
       // Resolve product list: use configured priorities, or fall back to products
@@ -10625,41 +10798,19 @@ function simulate(elements, connections, horizon, includeProposed=false){
         products=[...topoProds];
       }
 
-      products.forEach(pid=>{
-        if(remaining<=0) return;
-        elements.filter(e=>e.type==='bulk_silo'&&isCementSilo(e)&&
-                            !railTransferSiloIds.has(e.id)&&
-                            getSiloProducts(e).includes(pid)&&
-                            (topoSilos.has(e.id)||
-                             (e.assigned_facility_id||e.facility_id||S.facility_id)===dp.facilityId)
-        ).forEach(si=>{
-          if(remaining<=0) return;
-          const ss=state[si.id];
-          const avail=Math.max(0,(ss.inventory||0)-(siloOutflow[si.id]||0));
-          const pull=Math.min(remaining,avail);
-          if(pull>0){
-            siloOutflow[si.id]=(siloOutflow[si.id]||0)+pull;
-            remaining-=pull;
-          }
-        });
-      });
-      // Demand for packed silos (topology + facility scoped)
-      products.forEach(pid=>{
-        if(remaining<=0) return;
-        elements.filter(e=>e.type==='packed_silo'&&e.props.product_id===pid&&
-                            (topoSilos.has(e.id)||
-                             (e.assigned_facility_id||e.facility_id||S.facility_id)===dp.facilityId)
-        ).forEach(si=>{
-          if(remaining<=0) return;
-          const ss=state[si.id];
-          const avail=Math.max(0,(ss.inventory||0)-(siloOutflow[si.id]||0));
-          const pull=Math.min(remaining,avail);
-          if(pull>0){
-            siloOutflow[si.id]=(siloOutflow[si.id]||0)+pull;
-            remaining-=pull;
-          }
-        });
-      });
+      // ── DEMAND SWAP (material substitution) ──────────────
+      // If a swap covers part of this material's demand, fulfil the swapped
+      // portion from the substitute material and the rest from the own product.
+      const sw=_resolveDemandSwap(products, todayRate, _ds7);
+      const swapQty=sw?Math.min(sw.qty,todayRate):0;
+      const ownTarget=todayRate-swapQty;
+
+      _pullDemand(products, ownTarget, topoSilos, dp.facilityId, false);
+      if(sw && swapQty>0){
+        const swapPulled=_pullDemand([sw.toProduct], swapQty, topoSilos, dp.facilityId, true);
+        if(!r.demandSwapHistory[dp.id]) r.demandSwapHistory[dp.id]=[];
+        r.demandSwapHistory[dp.id][day-1]={own:ownTarget, swapped:swapQty, swapPulled, toProduct:sw.toProduct, fromProduct:sw.fromProduct};
+      }
     });
 
     // ── STEP 7: APPLY INVENTORY CHANGES ──────────────
@@ -10803,7 +10954,7 @@ function renderResultsTable(){
     return;
   }
 
-  const todayStr=new Date().toISOString().split('T')[0];
+  const todayStr=new Date()._ymd();
   const fac=getResultElements();
   const {startDay,endDay}=getViewRange();
   const horizon=endDay-startDay+1;
@@ -10834,7 +10985,7 @@ function renderResultsTable(){
         const addOcc=(occStart)=>{
           for(let d=0;d<dur;d++){
             const dt=new Date(occStart.getTime()+d*864e5);
-            m.set(dt.toISOString().split('T')[0], ev.id);
+            m.set(dt._ymd(), ev.id);
           }
         };
         addOcc(sd);
@@ -10917,7 +11068,7 @@ function renderResultsTable(){
     const day=startDay+i; // actual simulation day
     const date=new Date(S.simCfg.start_date+'T00:00:00');
     date.setDate(date.getDate()+day-1);
-    const dateStr=date.toISOString().split('T')[0];
+    const dateStr=date._ymd();
     const dayStr=dateStr.slice(5); // MM-DD
 
     // Check if any stop event on this day
@@ -10950,7 +11101,7 @@ function renderResultsTable(){
         // So for date X, look for real_inventory with date X-1 (that's the ending inv from previous day)
         const prevDate=new Date(dateStr+'T00:00:00');
         prevDate.setDate(prevDate.getDate()-1);
-        const prevDateStr=prevDate.toISOString().split('T')[0];
+        const prevDateStr=prevDate._ymd();
 
         // For date X: display BEGINNING inventory = ENDING of day X-1
         // So ONLY check previous day's real inventory data (never check current date)
@@ -11099,7 +11250,7 @@ function renderResultsTable(){
         for(let i=0;i<horizon;i++){
           const dt=new Date(S.simCfg.start_date+'T00:00:00');
           dt.setDate(dt.getDate()+startDay-1+i);
-          total+=_demandRate(dpEl.id,dt.toISOString().split('T')[0]);
+          total+=_demandRate(dpEl.id,dt._ymd());
         }
       } else { total=(d.daily_tonnage||0)*horizon; }
       h+=`<td style="color:var(--green)">${Number(Math.round(total)).toLocaleString()}</td>`;
@@ -11174,7 +11325,7 @@ function exportJSON(){
   const a=document.createElement('a');
   a.href=url;
   const facName=(getFacility()?.name||'avila_roll').replace(/\s+/g,'_');
-  a.download=`AVILA_Roll_${facName}_${new Date().toISOString().split('T')[0]}.json`;
+  a.download=`AVILA_Roll_${facName}_${new Date()._ymd()}.json`;
   a.click();
   URL.revokeObjectURL(url);
   statMsg('JSON exported');
@@ -11352,7 +11503,7 @@ function updateViewRangeLabel(){
   const simStart=new Date(S.simCfg.start_date+'T00:00:00');
   const sd=new Date(simStart); sd.setDate(sd.getDate()+startDay-1);
   const ed=new Date(simStart); ed.setDate(ed.getDate()+endDay-1);
-  const fmt=d=>d.toISOString().split('T')[0];
+  const fmt=d=>d._ymd();
   const lbl=document.getElementById('vw-range-lbl');
   if(lbl) lbl.textContent=`${fmt(sd)} → ${fmt(ed)} (${endDay-startDay+1}d)`;
 }
@@ -11360,7 +11511,7 @@ function updateViewRangeLabel(){
 function dayToDate(day){
   const d=new Date(S.simCfg.start_date+'T00:00:00');
   d.setDate(d.getDate()+day-1);
-  return d.toISOString().split('T')[0];
+  return d._ymd();
 }
 
 function _dashToggle(bodyId, hdrEl){
@@ -11435,9 +11586,9 @@ function renderDtree(r){
   const inv=(elId,day)=>{
     const simStart=new Date(S.simCfg.start_date+'T00:00:00');
     const currentDate=new Date(simStart.getTime()+(day-1)*864e5);
-    const dateStr=currentDate.toISOString().split('T')[0];
+    const dateStr=currentDate._ymd();
     const prevDate=new Date(currentDate.getTime()-864e5);
-    const prevDateStr=prevDate.toISOString().split('T')[0];
+    const prevDateStr=prevDate._ymd();
 
     // Check for ACTUAL inventory data - BOD inventory = EOD of previous day
     // So ONLY check previous day's real inventory (never check current date)
@@ -11460,7 +11611,7 @@ function renderDtree(r){
   const prod=(elId,day)=>{
     const simStart=new Date(S.simCfg.start_date+'T00:00:00');
     const currentDate=new Date(simStart.getTime()+(day-1)*864e5);
-    const dateStr=currentDate.toISOString().split('T')[0];
+    const dateStr=currentDate._ymd();
 
     // Check for ACTUAL production data first
     const realProduction=DB.real_production_daily.filter(r=>r.date===dateStr&&r.element_id===elId);
@@ -11508,7 +11659,7 @@ function renderDtree(r){
         days:days.map(d=>{
           const dt=new Date(S.simCfg.start_date+'T00:00:00');
           dt.setDate(dt.getDate()+(d-1));
-          return _demandRate(el.id,dt.toISOString().split('T')[0]);
+          return _demandRate(el.id,dt._ymd());
         }),
         color:C_L1, isRate:true
       };
@@ -11551,7 +11702,7 @@ function renderDtree(r){
       const children=sortedEls.map(el=>{
         return {id:`dem_el_${el.id}`,label:el.name,days:days.map(d=>{
           const dt=new Date(S.simCfg.start_date+'T00:00:00');dt.setDate(dt.getDate()+(d-1));
-          return _demandRate(el.id,dt.toISOString().split('T')[0]);
+          return _demandRate(el.id,dt._ymd());
         }),color:C_L2,isRate:true};
       });
       const subtotals=days.map((_,i)=>children.reduce((s,c)=>s+(c.days[i]||0),0));
@@ -11998,7 +12149,7 @@ function _attachTooltip(canvasId){
     const idx=Math.max(0,Math.min(days-1,Math.round(rawIdx)));
     const simDate=new Date(S.simCfg.start_date+'T00:00:00');
     simDate.setDate(simDate.getDate()+startDay-1+idx);
-    const dateStr=simDate.toISOString().split('T')[0];
+    const dateStr=simDate._ymd();
 
     let html=`<div style="color:#8e9ab8;margin-bottom:3px;border-bottom:1px solid #1e2738;padding-bottom:3px">${dateStr} · Day ${startDay+idx}</div>`;
 
@@ -12096,7 +12247,7 @@ function _drawXAxis(ctx,P,W,H,cW,cH,days,startDay){
     const dIdx=Math.round(i/labelCount*(days-1));
     const x=P.l+(dIdx/(days-1||1))*cW;
     const d=new Date(simStart.getTime()+(startDay-1+dIdx)*864e5);
-    ctx.fillText(d.toISOString().split('T')[0].slice(5),x,H-6);
+    ctx.fillText(d._ymd().slice(5),x,H-6);
   }
 }
 
@@ -12201,7 +12352,7 @@ function _drawClinkerChart(id, r){
   const getChartProduction=(elId, dayOffset)=>{
     const simStart=new Date(S.simCfg.start_date+'T00:00:00');
     const currentDate=new Date(simStart.getTime()+(dayOffset-1)*864e5);
-    const dateStr=currentDate.toISOString().split('T')[0];
+    const dateStr=currentDate._ymd();
 
     // Check for ACTUAL production first
     const realProduction=DB.real_production_daily.filter(rp=>rp.date===dateStr&&rp.element_id===elId);
@@ -12271,9 +12422,9 @@ function _drawClinkerChart(id, r){
   const getChartInventory=(elId, dayOffset)=>{
     const simStart=new Date(S.simCfg.start_date+'T00:00:00');
     const currentDate=new Date(simStart.getTime()+(dayOffset-1)*864e5);
-    const dateStr=currentDate.toISOString().split('T')[0];
+    const dateStr=currentDate._ymd();
     const prevDate=new Date(currentDate.getTime()-864e5);
-    const prevDateStr=prevDate.toISOString().split('T')[0];
+    const prevDateStr=prevDate._ymd();
 
     // Check for ACTUAL inventory - BOD inventory = EOD of previous day
     // So ONLY check previous day's real inventory (never check current date)
@@ -12434,7 +12585,7 @@ function _drawClinkerChart(id, r){
     const dIdx=Math.round(i/labelCount*(days-1));
     const x=P.l+(dIdx+0.5)*slotW;
     const d=new Date(simStart.getTime()+(startDay-1+dIdx)*864e5);
-    ctx.fillText(d.toISOString().split('T')[0].slice(5),x,H-8);
+    ctx.fillText(d._ymd().slice(5),x,H-8);
   }
 
   // ── Store meta ──
@@ -12538,7 +12689,7 @@ function _drawProdBarChart(id,r,type){
         const data=[];
         for(let d=startDay;d<=endDay;d++){
           const dt=new Date(simBase.getTime()+(d-1)*864e5);
-          data.push(_demandRate(dpEl.id,dt.toISOString().split('T')[0]));
+          data.push(_demandRate(dpEl.id,dt._ymd()));
         }
         const facName=DB.facilities.find(f=>f.id===(dpEl.assigned_facility_id||S.facility_id))?.name||'';
         const facPrefix=!S.facFilter&&facName?`${facName} — `:'';
@@ -13087,7 +13238,7 @@ function railHTML(){
       ◆ Rail: Mass balance. Inventory deducted from source on departure. Added to destination on arrival after transit days. Train departs only if min load % is met.
     </div>
     <div class="fr"><div class="ff"><div class="fl">Reference</div><input class="fi" id="rl-ref" placeholder="RAIL-001"></div>
-      <div class="ff"><div class="fl">Departure Date</div><input class="fi" type="date" id="rl-date" value="${new Date().toISOString().split('T')[0]}"></div></div>
+      <div class="ff"><div class="fl">Departure Date</div><input class="fi" type="date" id="rl-date" value="${new Date()._ymd()}"></div></div>
     <div class="fr"><div class="ff"><div class="fl">From Facility</div><select class="fi" id="rl-from">${fromFacOpts}</select></div>
       <div class="ff"><div class="fl">To Facility</div><select class="fi" id="rl-to"><option value="">-- Select destination --</option>${toFacOpts}</select></div></div>
     <div class="fr"><div class="ff"><div class="fl">Product</div><select class="fi" id="rl-prod"><option value="">-- Select --</option>${prods}</select></div>
@@ -13225,7 +13376,7 @@ function truckHTML(){
       ◆ Truck: Same-day delivery. Inventory deducted from source and added to destination on the same simulation day. No transit lag.
     </div>
     <div class="fr"><div class="ff"><div class="fl">Reference</div><input class="fi" id="tk-ref" placeholder="TRUCK-001"></div>
-      <div class="ff"><div class="fl">Start Date</div><input class="fi" type="date" id="tk-date" value="${new Date().toISOString().split('T')[0]}"></div></div>
+      <div class="ff"><div class="fl">Start Date</div><input class="fi" type="date" id="tk-date" value="${new Date()._ymd()}"></div></div>
     <div class="fr"><div class="ff"><div class="fl">From Facility</div><select class="fi" id="tk-from">${allFacOpts}</select></div>
       <div class="ff"><div class="fl">To Facility</div><select class="fi" id="tk-to">${allFacOpts}</select></div></div>
     <div class="fr"><div class="ff"><div class="fl">Product</div><select class="fi" id="tk-prod"><option value="">-- Select --</option>${prods}</select></div>
@@ -13358,15 +13509,15 @@ function saveFacility(){
 
 function simCfgHTML(){
   const today=new Date();
-  const startDate=new Date((S.simCfg.start_date||today.toISOString().split('T')[0])+'T00:00:00');
+  const startDate=new Date((S.simCfg.start_date||today._ymd())+'T00:00:00');
   const eom=new Date(today.getFullYear(),today.getMonth()+1,0);
   const e3m=new Date(today.getFullYear(),today.getMonth()+4,0);
   const eoy=new Date(today.getFullYear(),11,31);
   const daysFromStart=d=>Math.max(1,Math.round((d-startDate)/(864e5)));
   const presets=[
-    {id:'eom',label:'End of Month',days:daysFromStart(eom),date:eom.toISOString().split('T')[0]},
-    {id:'3m',label:'Next 3 Months',days:daysFromStart(e3m),date:e3m.toISOString().split('T')[0]},
-    {id:'eoy',label:'End of Year',days:daysFromStart(eoy),date:eoy.toISOString().split('T')[0]},
+    {id:'eom',label:'End of Month',days:daysFromStart(eom),date:eom._ymd()},
+    {id:'3m',label:'Next 3 Months',days:daysFromStart(e3m),date:e3m._ymd()},
+    {id:'eoy',label:'End of Year',days:daysFromStart(eoy),date:eoy._ymd()},
     {id:'custom',label:'Custom',days:S.simCfg.horizon,date:null}
   ];
   const cur=S.simCfg.horizonPreset||'3m';
@@ -13921,7 +14072,7 @@ function renderSalesPerfView(){
   // Set date range: actuals start → simulation end so forecast future is always visible.
   // Always recompute simEnd so reloading data or changing simulation horizon extends the window.
   const simEnd = S.simCfg.start_date
-    ? new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(S.simCfg.horizon||365)*864e5).toISOString().split('T')[0]
+    ? new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(S.simCfg.horizon||365)*864e5)._ymd()
     : `${new Date().getFullYear()+1}-12-31`;
   if(m.date_min && !SP.f.dateFrom) SP.f.dateFrom = m.date_min;
   // Extend dateTo to whichever is furthest: current user setting, data max, or sim end
@@ -14142,13 +14293,13 @@ function spRenderChart(){
   if(SP.chartInst){ SP.chartInst.destroy(); SP.chartInst=null; }
 
   const rows  = SP.scopedRows;
-  const today = new Date().toISOString().split('T')[0];
+  const today = new Date()._ymd();
 
   // Date window cutoff
   let cutoff='';
   if(SP.chartRange !== 'all'){
     const d=new Date(today); d.setDate(d.getDate()-parseInt(SP.chartRange));
-    cutoff=d.toISOString().split('T')[0];
+    cutoff=d._ymd();
   }
 
   const visRows = cutoff ? rows.filter(r=>r.date>=cutoff) : rows;
@@ -14331,12 +14482,12 @@ function spExtractSoldTo(shipToName){
 
 // ── Quick date range buttons ──────────────────────────
 function spSetQuickDate(mode){
-  const today=new Date().toISOString().split('T')[0];
+  const today=new Date()._ymd();
   const [y,m]=today.split('-');
   let from, to;
-  if(mode==='MTD')      { from=`${y}-${m}-01`; to=new Date(+y,+m,0).toISOString().split('T')[0]; }
+  if(mode==='MTD')      { from=`${y}-${m}-01`; to=new Date(+y,+m,0)._ymd(); }
   else if(mode==='YTD') { from=`${y}-01-01`; to=`${y}-12-31`; }
-  else if(mode==='R12M'){ const d=new Date(today+'T00:00:00'); d.setFullYear(d.getFullYear()-1); from=d.toISOString().split('T')[0]; to=today; }
+  else if(mode==='R12M'){ const d=new Date(today+'T00:00:00'); d.setFullYear(d.getFullYear()-1); from=d._ymd(); to=today; }
   else return;
   const df=document.getElementById('sp-date-from'), dt=document.getElementById('sp-date-to');
   if(df) df.value=from; if(dt) dt.value=to;
@@ -14359,7 +14510,7 @@ function spToggleMonth(ym){
 
 // ── Build date spine from current filter range ────────
 function spBuildDateSpine(){
-  const today=new Date().toISOString().split('T')[0];
+  const today=new Date()._ymd();
   const curYm=today.slice(0,7);
   const from=SP.f.dateFrom||`${today.slice(0,4)}-01-01`;
   const to  =SP.f.dateTo  ||`${today.slice(0,4)}-12-31`;
@@ -14369,8 +14520,8 @@ function spBuildDateSpine(){
     return {months:SP._spine.months,today};
   }
   const months=[];
-  for(let d=new Date(from+'T00:00:00'); d.toISOString().split('T')[0]<=to; d.setDate(d.getDate()+1)){
-    const ds=d.toISOString().split('T')[0], ym=ds.slice(0,7);
+  for(let d=new Date(from+'T00:00:00'); d._ymd()<=to; d.setDate(d.getDate()+1)){
+    const ds=d._ymd(), ym=ds.slice(0,7);
     let mo=months.find(m=>m.ym===ym);
     if(!mo){ mo={ym,label:new Date(ds+'T00:00:00').toLocaleDateString('en',{month:'short',year:'2-digit'}),dates:[],isPast:ym<curYm,isCurrent:ym===curYm}; months.push(mo); }
     mo.dates.push(ds);
@@ -14404,9 +14555,9 @@ function spBuildOrgTree(rows){
   });
   const getDpEl=prod=>dpNameIdx[(prod||'').trim().toUpperCase()]||null;
   // 7-day activity cutoff relative to data max (not today, in case data lags)
-  const refDate=DB.real_shipments_meta?.date_max||new Date().toISOString().split('T')[0];
+  const refDate=DB.real_shipments_meta?.date_max||new Date()._ymd();
   const cutoffD=new Date(refDate+'T00:00:00'); cutoffD.setDate(cutoffD.getDate()-7);
-  const cutoffStr=cutoffD.toISOString().split('T')[0];
+  const cutoffStr=cutoffD._ymd();
   // Inline actMap + recentVol update: single pass, no re-scan of rows later
   const upd=(node,r)=>{
     if(r.date) node.actMap[r.date]=(node.actMap[r.date]||0)+(r.volume||0);
@@ -14656,7 +14807,7 @@ function spGetRestOfMonthDates(dateNow){
   const monthEnd = new Date(y, parseInt(m), 0); // last day of month
   const days = [];
   for(let dt=new Date(current); dt<=monthEnd; dt=new Date(dt.getTime()+864e5)){
-    days.push(dt.toISOString().split('T')[0]);
+    days.push(dt._ymd());
   }
   return days;
 }
@@ -14681,7 +14832,7 @@ function spGetMonthDates(yearMonth){
   const lastDay = new Date(year, monthNum, 0);
   const days = [];
   for(let dt=new Date(firstDay); dt<=lastDay; dt=new Date(dt.getTime()+864e5)){
-    days.push(dt.toISOString().split('T')[0]);
+    days.push(dt._ymd());
   }
   return days;
 }
@@ -14728,7 +14879,7 @@ function spGetHistoricalRange(basis, dateNow){
   for(let i = config.days - 1; i >= 0; i--){
     const d = new Date(today);
     d.setDate(d.getDate() - i);
-    dates.push(d.toISOString().split('T')[0]);
+    dates.push(d._ymd());
   }
   return dates;
 }
@@ -14824,7 +14975,7 @@ function spRenderBasisButtons(rKey, sKey, stKey, section='', rowData=[]){
   if(rowData && rowData.length > 0){
     // Calculate daily average for each basis
     bases.forEach((basis, idx) => {
-      const histRange = spGetHistoricalRange(basis, new Date().toISOString().split('T')[0]);
+      const histRange = spGetHistoricalRange(basis, new Date()._ymd());
       const dailyVals = spCalcForecast(rowData, histRange, histRange, basis);
       const dailyAvg = dailyVals.length > 0 ? dailyVals[0] : 0;
       const label = labels[idx];
@@ -14862,7 +15013,7 @@ function _spRenderTable_legacy(){
   const rows=SP.filteredRows;
   if(!rows.length){ tbody.innerHTML=`<tr><td colspan="20" class="sp-no-data">No data for current filters</td></tr>`; return; }
 
-  const today=new Date().toISOString().split('T')[0];
+  const today=new Date()._ymd();
   const isWkday=ds=>{ const d=new Date(ds+'T12:00:00').getDay(); return d!==0&&d!==6; };
 
   // Generate dynamic header with basis and date labels based on selected forecast horizon
@@ -15310,7 +15461,7 @@ function openSpForecastBuilder(dpElIds, label){
   if(!dpElIds||!dpElIds.length){ statMsg('No demand points linked to this node — check org structure matches Origins in the Excel'); return; }
 
   // Build modal for one or more demand points (do not delegate to openDemandBuilder which is scoped to S.facility_id)
-  const simStart=S.simCfg.start_date||new Date().toISOString().split('T')[0];
+  const simStart=S.simCfg.start_date||new Date()._ymd();
   const nwdCount=(DB.non_working_days||[]).length;
   const dpEls=dpElIds.map(id=>(DB.elements||[]).find(e=>e.id===id)).filter(Boolean);
   const pi='background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:10px;padding:5px 7px;outline:none;width:100%';
@@ -15711,7 +15862,7 @@ function spFcResolvedVal(stats,custKey,repKey,hz){ return spFcResolve(stats,cust
 
 // ── Footer ────────────────────────────────────────────
 function spFcUpdateFooter(){
-  const today=new Date().toISOString().split('T')[0];
+  const today=new Date()._ymd();
   const df=SP.f.dateFrom||`${today.slice(0,4)}-01-01`;
   const dt=SP.f.dateTo  ||`${today.slice(0,4)}-12-31`;
   const actualsTotal=SP.filteredRows.filter(r=>r.date>=df&&r.date<=dt&&r.date<=today).reduce((s,r)=>s+(r.volume||0),0);
@@ -15719,8 +15870,8 @@ function spFcUpdateFooter(){
   const demIdx=spBuildDemandIndex();
   let fcTotal=0;
   const fcStart=new Date(Math.max(new Date(today+'T00:00:00').getTime()+864e5, new Date(df+'T00:00:00').getTime()));
-  for(let d=new Date(fcStart); d.toISOString().split('T')[0]<=dt; d.setDate(d.getDate()+1)){
-    const ds=d.toISOString().split('T')[0];
+  for(let d=new Date(fcStart); d._ymd()<=dt; d.setDate(d.getDate()+1)){
+    const ds=d._ymd();
     dpElIds.forEach(id=>{ fcTotal+=spGetFcVal(id,ds,demIdx); });
   }
   const el=id=>document.getElementById(id);
@@ -15730,7 +15881,7 @@ function spFcUpdateFooter(){
 }
 
 function spCommit(){
-  const today=new Date().toISOString().split('T')[0];
+  const today=new Date()._ymd();
   const isWkday=ds=>{ const d=new Date(ds+'T12:00:00').getDay(); return d!==0&&d!==6; };
 
   const calcStats=arr=>{
@@ -15743,7 +15894,7 @@ function spCommit(){
     const v10=sorted.slice(-10).map(d=>byDate[d]||0);
     const d10=v10.length?Math.round(v10.reduce((a,b)=>a+b,0)/v10.length):0;
     const d15cut=new Date(today); d15cut.setDate(d15cut.getDate()-15);
-    const d15s=d15cut.toISOString().split('T')[0];
+    const d15s=d15cut._ymd();
     const v15o=wk.filter(r=>r.date>=d15s).reduce((m,r)=>{m[r.date]=(m[r.date]||0)+r.volume;return m;},{});
     const d15=Object.values(v15o).length?Math.round(Object.values(v15o).reduce((a,b)=>a+b,0)/Object.values(v15o).length):0;
     const v30=sorted.slice(-30).map(d=>byDate[d]||0);
@@ -16651,7 +16802,7 @@ function aiSetModel(m){
 function dsWriteActualsToDemandGrid(){
   if(!DB.real_shipments_daily.length) return;
 
-  const today = new Date().toISOString().split('T')[0];
+  const today = new Date()._ymd();
 
   // ── Aggregate by Demand Point name + date ─────────────────────────────
   const aggByDpDate = {}; // key: `dpName|date` → total volume
@@ -16970,7 +17121,7 @@ function renderRealDataSections(){
     return result;
   };
 
-  const nextDate=dateStr?(()=>{const nd=new Date(dateStr);nd.setDate(nd.getDate()+1);return nd.toISOString().split('T')[0];})():'';
+  const nextDate=dateStr?(()=>{const nd=new Date(dateStr+'T00:00:00');nd.setDate(nd.getDate()+1);return nd._ymd();})():'';
   let html='';
 
   // ── 1. KILNS PRODUCTION ─────────────────────────────────────────────────────
@@ -17527,7 +17678,7 @@ function autoSave(){
   // Trim real data to last 90 days to prevent localStorage overflow
   const cutoffDate = new Date();
   cutoffDate.setDate(cutoffDate.getDate() - 90);
-  const cutoffStr = cutoffDate.toISOString().split('T')[0];
+  const cutoffStr = cutoffDate._ymd();
 
   if(DB.real_production_daily) DB.real_production_daily = DB.real_production_daily.filter(r => r.date >= cutoffStr);
   if(DB.real_inventory_daily) DB.real_inventory_daily = DB.real_inventory_daily.filter(r => r.date >= cutoffStr);
@@ -17784,7 +17935,7 @@ function loadSaved(){
         dt.setDate(dt.getDate()+d);
         const dow=dt.getDay();
         if(dow===0) continue; // skip Sundays
-        DB.demand_values.push({element_id:dp.element_id,date:dt.toISOString().split('T')[0],value_t:daily});
+        DB.demand_values.push({element_id:dp.element_id,date:dt._ymd(),value_t:daily});
       }
     });
   }
