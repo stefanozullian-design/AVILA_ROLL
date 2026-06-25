@@ -5488,15 +5488,19 @@ function _renderSupplyViewInner(wrap){
     const hist=r?.inventoryHistory?.[siloId]||[];
     return dayIdx<=0?(parseFloat(startInv)||0):(hist[dayIdx-1]??0);
   };
-  const _invChartRow=(label, cat, accent)=>{
-    const silos=getFacElements().filter(e=>e.type==='bulk_silo').filter(s=>getSiloProducts(s).some(p=>{
+  const _invChartRow=(label, cat, accent, scopeEls, depth)=>{
+    const silos=(scopeEls||getFacElements()).filter(e=>e.type==='bulk_silo').filter(s=>getSiloProducts(s).some(p=>{
       const pr=DB.products.find(x=>x.id===p);
       return pr&&(cat==='cement'?(pr.category==='cement_bulk'||pr.category==='cement_packed'):pr.category==='clinker');
     }));
     if(!silos.length) return '';
     const prodMap={};
     silos.forEach(s=>{ const pid=getSiloProducts(s)[0]; if(!pid) return; (prodMap[pid]=prodMap[pid]||[]).push(s); });
-    const prodIds=Object.keys(prodMap); if(!prodIds.length) return '';
+    let prodIds=Object.keys(prodMap); if(!prodIds.length) return '';
+    // Respect the page product filter — narrow to the selected product when it
+    // belongs to this chart's category (otherwise leave the chart unfiltered so
+    // a cement-product filter doesn't blank the clinker chart, and vice-versa).
+    if(_supProdFilter && prodIds.includes(_supProdFilter)) prodIds=[_supProdFilter];
     const colorFor=pid=>{ const nm=DB.products.find(p=>p.id===pid)?.name||pid; return (typeof spProdColor==='function')?spProdColor(nm,false):accent; };
     const nameOf=pid=>DB.products.find(p=>p.id===pid)?.name||pid;
     const inv={}; let gmax=0;
@@ -5504,7 +5508,7 @@ function _renderSupplyViewInner(wrap){
     if(gmax<=0) gmax=1;
     const H=88;
     const legend=prodIds.map(pid=>`<span style="display:inline-flex;align-items:center;gap:3px;margin:0 5px 1px 0;white-space:nowrap"><span style="width:7px;height:7px;background:${colorFor(pid)};border-radius:1px;flex-shrink:0"></span>${nameOf(pid)}</span>`).join('');
-    let row=`<tr class="sup-chart-row" data-chart="${cat}"><td style="${stickyLeft('var(--surface)',1,'border-bottom:2px solid var(--border2),')}vertical-align:bottom;padding:5px 10px">
+    let row=`<tr class="sup-chart-row" data-chart="${cat}"><td style="${stickyLeft('var(--surface)',depth!=null?depth:1,'border-bottom:2px solid var(--border2),')}vertical-align:bottom;padding:5px 10px">
       <div style="color:${accent};font-size:8px;font-weight:700;letter-spacing:1px;text-transform:uppercase">${label}</div>
       <div style="display:flex;flex-wrap:wrap;font-size:7px;color:var(--text-dim);line-height:1.5;margin-top:3px;max-width:${leftW-24}px">${legend}</div>
       <div style="font-size:7px;color:var(--text-dim);margin-top:3px">scale max ${Math.round(gmax).toLocaleString()} t</div>
@@ -5522,8 +5526,10 @@ function _renderSupplyViewInner(wrap){
     });
     return row+`</tr>`;
   };
-  h+=_invChartRow('Cement inventory','cement','#00d9a3');
-  h+=_invChartRow('Clinker inventory','clinker','#ff8c42');
+  // Inventory bar charts are now rendered inside each facility's flow:
+  //   cement chart  → between CEMENT NEED and STARTING INVENTORY (cement)
+  //   clinker chart → between CLINKER REQUIREMENTS and CLINKER INVENTORY
+  // (so they sit with their data and inherit the facility + product filters).
 
   // Walk tree
   const typeBg={mr:'rgba(255,255,255,.04)',co:'rgba(255,255,255,.04)',reg:'rgba(255,255,255,.03)',sub:'rgba(255,255,255,.02)',fac:'rgba(255,184,48,.04)'};
@@ -5639,6 +5645,9 @@ function _renderSupplyViewInner(wrap){
             });
           }
         }
+
+        // ── CEMENT inventory bar chart (between requirement & inventory data) ──
+        h+=_invChartRow('Cement inventory','cement','#00d9a3',facEls,node.depth+1);
 
         // ══════════════════════════════════════════════════════════════
         // SECTION 2: STARTING INVENTORY (cement silos, per silo)
@@ -5803,6 +5812,9 @@ function _renderSupplyViewInner(wrap){
           });
         }
 
+        // ── Thick separator: end of CEMENT block, start of CLINKER block ──
+        h+=`<tr class="sup-sep-row" aria-hidden="true"><td colspan="999" style="padding:0;border:0"><div style="height:5px;background:linear-gradient(90deg,#00d9a3,#ff8c42);opacity:.85"></div></td></tr>`;
+
         // ══════════════════════════════════════════════════════════════
         // SECTION 3: CLINKER REQUIREMENTS (calculated from cement demand)
         // ══════════════════════════════════════════════════════════════
@@ -5892,6 +5904,9 @@ function _renderSupplyViewInner(wrap){
             });
           }
         }
+
+        // ── CLINKER inventory bar chart (between requirement & inventory data) ──
+        h+=_invChartRow('Clinker inventory','clinker','#ff8c42',facEls,node.depth+1);
 
         // ══════════════════════════════════════════════════════════════
         // SECTION 4: CLINKER INVENTORY (clinker silos, per silo)
