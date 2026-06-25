@@ -3467,16 +3467,26 @@ function getActiveCampaign(elId, dateStr){
   )||null;
 }
 
-// Active demand swap for a material on a date: a portion of from_product demand
-// is covered by to_product. Returns the swap record (or null).
+// Active demand swap OUT of a demand point on a date: a portion of this point's
+// demand is relocated to another demand point (to_element_id). Returns the swap
+// record (or null). Keyed by from_element_id.
 function getActiveDemandSwap(elementId, dateStr){
   if(!elementId) return null;
   return (DB.demand_substitutions||[]).find(s=>
     s.from_element_id===elementId && dateStr>=s.start_date && dateStr<=s.end_date
   )||null;
 }
-// How many tonnes of a demand point's daily demand are swapped on a date.
-// Keyed by the demand-point element id. Returns {swap, qty, toProduct} or null.
+// Primary product/material carried by a demand point element.
+function _dpPrimaryProduct(elId){
+  const dp=(DB.demand_points||[]).find(d=>d.element_id===elId);
+  if(dp&&(dp.products||[]).length) return dp.products[0].product_id;
+  const el=(DB.elements||[]).find(e=>e.id===elId);
+  const ids=(el&&typeof _demElProdIds==='function')?_demElProdIds(el):[];
+  return ids[0]||null;
+}
+// How many tonnes of a demand point's daily demand are swapped OUT on a date.
+// The swap is point-to-point: the volume is relocated to to_element_id (whose
+// own material is the substitute). Returns {swap, qty, toElement, toProduct} or null.
 function _resolveDemandSwap(elementId, todayRate, dateStr){
   if(!todayRate||todayRate<=0) return null;
   const s=getActiveDemandSwap(elementId, dateStr);
@@ -3485,7 +3495,26 @@ function _resolveDemandSwap(elementId, todayRate, dateStr){
     ? todayRate*(parseFloat(s.amount)||0)/100
     : Math.min(todayRate, parseFloat(s.amount)||0);
   if(qty<=0) return null;
-  return {swap:s, qty, toProduct:s.to_product_id, fromElement:elementId};
+  // Substitute material derives from the destination demand point (new model);
+  // fall back to the legacy to_product_id field for older records.
+  const toProduct = s.to_element_id ? _dpPrimaryProduct(s.to_element_id) : s.to_product_id;
+  return {swap:s, qty, toElement:s.to_element_id||null, toProduct, fromElement:elementId};
+}
+// Tonnes swapped INTO a demand point on a date, summed over all swaps targeting
+// it (each computed from its SOURCE point's own demand). Keyed by to_element_id.
+function _resolveDemandSwapIn(toElementId, dateStr, rateFn){
+  if(!toElementId) return 0;
+  const rate=rateFn||((id)=>(typeof _demandRate==='function')?(_demandRate(id,dateStr)||0):0);
+  let q=0;
+  (DB.demand_substitutions||[]).forEach(s=>{
+    if(s.to_element_id!==toElementId) return;
+    if(!(dateStr>=s.start_date&&dateStr<=s.end_date)) return;
+    const fromRate=rate(s.from_element_id);
+    if(fromRate<=0) return;
+    const v = s.mode==='percent' ? fromRate*(parseFloat(s.amount)||0)/100 : Math.min(fromRate, parseFloat(s.amount)||0);
+    if(v>0) q+=Math.min(fromRate,v);
+  });
+  return q;
 }
 
 // ── Demand Swap manager (material substitution) ──────────
@@ -3504,7 +3533,7 @@ function openDemandSwapManager(seedFromEl, seedDate){
   const rows=swaps.length?swaps.map(s=>`
     <tr style="border-bottom:1px solid var(--border)">
       <td style="padding:6px 8px;color:var(--green)">${dpName(s.from_element_id)}${dpMat(s.from_element_id)?`<div style="color:var(--text-dim);font-size:8px">material: ${dpMat(s.from_element_id)}</div>`:''}</td>
-      <td style="padding:6px 8px;color:var(--amber)"><i style="font-style:normal">⇄</i> ${pn(s.to_product_id)}</td>
+      <td style="padding:6px 8px;color:var(--amber)"><i style="font-style:normal">⇄</i> ${s.to_element_id?dpName(s.to_element_id):pn(s.to_product_id)}${s.to_element_id&&dpMat(s.to_element_id)?`<div style="color:var(--text-dim);font-size:8px">material: ${dpMat(s.to_element_id)}</div>`:''}</td>
       <td style="padding:6px 8px;text-align:right;color:var(--text)">${s.mode==='percent'?(s.amount+'%'):(Number(s.amount).toLocaleString()+' t/d')}</td>
       <td style="padding:6px 8px;color:var(--text-dim);font-size:8px">${s.start_date} → ${s.end_date}</td>
       <td style="padding:6px 8px;text-align:right"><button class="tb-btn sec" style="padding:2px 7px" onclick="_deleteDemandSwap('${s.id}')">✕</button></td>
@@ -3513,18 +3542,18 @@ function openDemandSwapManager(seedFromEl, seedDate){
   showModalContent(`
     <div class="modal-hdr"><span class="modal-title">⇄ Demand Swaps</span><span class="modal-close" onclick="closeModal()">✕</span></div>
     <div class="modal-body" style="font-family:var(--mono);font-size:9px;min-width:580px">
-      <div style="color:var(--text-dim);margin-bottom:10px;line-height:1.5">Cover part of a <b>demand point's</b> demand with a substitute material. The swapped portion is drawn from the substitute material's inventory; that demand point's own demand drops by the same amount.</div>
+      <div style="color:var(--text-dim);margin-bottom:10px;line-height:1.5">Relocate part of a <b>demand point's</b> demand to <b>another demand point</b>. The source point's demand drops and the destination point's demand rises by the same amount — so it covers both <i>where</i> (the destination location) and <i>what</i> (the destination's material). Production and transfers then follow naturally.</div>
       <table style="width:100%;border-collapse:collapse;margin-bottom:14px">
         <thead><tr style="color:var(--text-dim);font-size:8px;text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid var(--border2)">
-          <th style="text-align:left;padding:5px 8px">Cover demand point</th><th style="text-align:left;padding:5px 8px">With material</th><th style="text-align:right;padding:5px 8px">Amount</th><th style="text-align:left;padding:5px 8px">Dates</th><th></th>
+          <th style="text-align:left;padding:5px 8px">From demand point</th><th style="text-align:left;padding:5px 8px">To demand point</th><th style="text-align:right;padding:5px 8px">Amount</th><th style="text-align:left;padding:5px 8px">Dates</th><th></th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
       <div style="border-top:1px solid var(--border2);padding-top:12px">
         <div style="font-size:8px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase;margin-bottom:8px">＋ New swap</div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 12px">
-          <div><div class="fl">Cover demand point</div><select class="fi" id="ds-from" style="width:100%">${dpOpts(seedFromEl||dpEls[0]?.id)}</select></div>
-          <div><div class="fl">With (substitute material)</div><select class="fi" id="ds-to" style="width:100%">${matOpts(cementProds[0]?.id)}</select></div>
+          <div><div class="fl">From demand point</div><select class="fi" id="ds-from" style="width:100%">${dpOpts(seedFromEl||dpEls[0]?.id)}</select></div>
+          <div><div class="fl">To demand point (destination)</div><select class="fi" id="ds-to" style="width:100%">${dpOpts(dpEls.find(e=>e.id!==(seedFromEl||dpEls[0]?.id))?.id)}</select></div>
           <div><div class="fl">Amount</div>
             <div style="display:flex;gap:6px">
               <input class="fi" id="ds-amount" type="number" min="0" value="50" style="flex:1">
@@ -3543,17 +3572,20 @@ function openDemandSwapManager(seedFromEl, seedDate){
     </div>`);
 }
 function _saveDemandSwap(){
-  const from=document.getElementById('ds-from')?.value;     // demand point element id
-  const to=document.getElementById('ds-to')?.value;         // substitute material id
+  const from=document.getElementById('ds-from')?.value;     // source demand point element id
+  const to=document.getElementById('ds-to')?.value;         // destination demand point element id
   const mode=document.getElementById('ds-mode')?.value||'percent';
   const amount=parseFloat(document.getElementById('ds-amount')?.value)||0;
   const start=document.getElementById('ds-from-date')?.value;
   const end=document.getElementById('ds-to-date')?.value;
   if(!from||!to||!start||!end){ statMsg('Fill all swap fields'); return; }
+  if(from===to){ statMsg('Source and destination demand points must differ'); return; }
   if(start>end){ statMsg('From date must be on or before To date'); return; }
   if(amount<=0){ statMsg('Amount must be greater than 0'); return; }
   if(!DB.demand_substitutions) DB.demand_substitutions=[];
-  DB.demand_substitutions.push({ id:'swap_'+Date.now(), from_element_id:from, to_product_id:to, mode, amount, start_date:start, end_date:end, notes:'' });
+  // Point-to-point: store the destination demand point; keep a derived
+  // to_product_id (its material) for labels/colours and legacy readers.
+  DB.demand_substitutions.push({ id:'swap_'+Date.now(), from_element_id:from, to_element_id:to, to_product_id:_dpPrimaryProduct(to)||'', mode, amount, start_date:start, end_date:end, notes:'' });
   autoSave();
   closeModal();
   renderDemandView();
@@ -5008,12 +5040,16 @@ function renderDemandView(){
           });
           h+=`</tr>`;
 
-          // ── Demand-swap child rows: split this material's demand into the
-          //    portion met by its own product and the portion covered by a substitute.
+          // ── Demand-swap child rows (point-to-point). Source side: own demand
+          //    minus what's moved to the destination point. Destination side: own
+          //    demand plus what's swapped in from the source point(s). ──
           (()=>{
-            const swDays=allDates.map(ds=>{ const t=getVal(el.id,ds); const sw=_resolveDemandSwap(el.id,t,ds); return sw?{toProduct:sw.toProduct,qty:Math.min(sw.qty,t)}:null; });
-            if(!swDays.some(Boolean)) return;
-            const prods=(typeof _demElProdIds==='function')?_demElProdIds(el):[];
+            const outFn=ds=>{ const t=getVal(el.id,ds); const sw=_resolveDemandSwap(el.id,t,ds); return sw?Math.min(sw.qty,t):0; };
+            const inFn=ds=>_resolveDemandSwapIn(el.id,ds,(id)=>getVal(id,ds));
+            const hasOut=allDates.some(ds=>outFn(ds)>0);
+            const hasIn=allDates.some(ds=>inFn(ds)>0);
+            if(!hasOut&&!hasIn) return;
+            const dpDisp=id=>DB.elements.find(e=>e.id===id)?.name||DB.demand_points.find(d=>d.element_id===id)?.element_name||id;
             const childRow=(label,color,bg,valFn)=>{
               let rr=`<tr style="background:${bg}"><td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${color};font-size:8px;font-style:italic">${label}</td>`;
               months.forEach(mon=>{
@@ -5024,14 +5060,13 @@ function renderDemandView(){
               });
               return rr+`</tr>`;
             };
-            const ownFn=ds=>{ const t=getVal(el.id,ds); const sw=_resolveDemandSwap(el.id,t,ds); return t-(sw?Math.min(sw.qty,t):0); };
-            const fromName=DB.products.find(p=>p.id===prods[0])?.name||prods[0]||'own';
-            h+=childRow('↳ '+fromName+' · own','var(--green)','rgba(76,175,80,.03)',ownFn);
-            [...new Set(swDays.filter(Boolean).map(s=>s.toProduct))].forEach(tp=>{
-              const toName=DB.products.find(p=>p.id===tp)?.name||tp;
-              h+=childRow('↳ ⇄ covered by '+toName,'var(--amber)','rgba(255,184,48,.05)',
-                ds=>{ const t=getVal(el.id,ds); const sw=_resolveDemandSwap(el.id,t,ds); return (sw&&sw.toProduct===tp)?Math.min(sw.qty,t):0; });
-            });
+            const myName=DB.products.find(p=>p.id===((typeof _demElProdIds==='function'?_demElProdIds(el):[])[0]))?.name||'own';
+            const outDest=[...new Set((DB.demand_substitutions||[]).filter(s=>s.from_element_id===el.id).map(s=>dpDisp(s.to_element_id)))].join(', ');
+            const inSrc=[...new Set((DB.demand_substitutions||[]).filter(s=>s.to_element_id===el.id).map(s=>dpDisp(s.from_element_id)))].join(', ');
+            h+=childRow('↳ '+myName+' · own','var(--green)','rgba(76,175,80,.03)',ds=>getVal(el.id,ds)-outFn(ds));
+            if(hasOut) h+=childRow('↳ ⇄ moved to '+(outDest||'destination'),'var(--amber)','rgba(255,184,48,.05)',outFn);
+            if(hasIn)  h+=childRow('↳ ⇄ swapped in ← '+(inSrc||'source'),'#4dd0e1','rgba(77,208,225,.06)',inFn);
+            h+=childRow('↳ = demand here (own ± swap)','var(--total)','rgba(255,255,255,.04)',ds=>getVal(el.id,ds)-outFn(ds)+inFn(ds));
           })();
         });
       }
@@ -5626,33 +5661,26 @@ function _renderSupplyViewInner(wrap){
             });
             return q;
           };
-          // swappedIn: prodId acting as the substitute, demanded AT THIS FACILITY
-          //   because one of its own demand points switched material. The swap is
-          //   point-to-point, so the incremental volume belongs where it is
-          //   consumed (the originating facility) — NOT spread across the
-          //   substitute's other demand points, and NOT injected at the producer
-          //   (cross-facility swaps reach the producer naturally via the sim's
-          //   production/transfer flow). So only count swaps whose FROM demand
-          //   point lives at this facility.
-          const _swapFromFac=(s)=>{ const fdp=DB.demand_points.find(dp=>dp.element_id===s.from_element_id); return fdp?.facility_id || DB.elements.find(e=>e.id===s.from_element_id)?.assigned_facility_id || DB.elements.find(e=>e.id===s.from_element_id)?.facility_id || null; };
+          // swappedIn: prodId demand RISING at this facility because a swap's
+          //   DESTINATION demand point lives here (point-to-point relocation). Summed
+          //   over this facility's prodId demand points via _resolveDemandSwapIn,
+          //   so it lands exactly where the destination point is — no redistribution,
+          //   no injection at the producer.
+          const _dpDisp=id=>DB.elements.find(e=>e.id===id)?.name||DB.demand_points.find(d=>d.element_id===id)?.element_name||id;
           const swappedIn=(prodId, ds)=>{
             let q=0;
-            (DB.demand_substitutions||[]).filter(s=>s.to_product_id===prodId&&_swapFromFac(s)===node.id).forEach(s=>{
-              const t=_demandRate(s.from_element_id,ds)||0;
-              const sw=(typeof _resolveDemandSwap==='function')?_resolveDemandSwap(s.from_element_id,t,ds):null;
-              if(sw) q+=Math.min(sw.qty,t);
+            demandPoints.filter(dp=>dp.products?.some(p=>p.product_id===prodId)).forEach(dp=>{
+              q+=(typeof _resolveDemandSwapIn==='function')?_resolveDemandSwapIn(dp.element_id,ds,(id)=>_demandRate(id,ds)):0;
             });
             return q;
           };
           const _outTargets=(prodId)=>{ const n=new Set();
             demandPoints.filter(dp=>dp.products?.some(p=>p.product_id===prodId)).forEach(dp=>{
-              (DB.demand_substitutions||[]).filter(s=>s.from_element_id===dp.element_id).forEach(s=>n.add(DB.products.find(p=>p.id===s.to_product_id)?.name||s.to_product_id)); });
+              (DB.demand_substitutions||[]).filter(s=>s.from_element_id===dp.element_id).forEach(s=>n.add(s.to_element_id?_dpDisp(s.to_element_id):(DB.products.find(p=>p.id===s.to_product_id)?.name||s.to_product_id))); });
             return [...n].join(', '); };
           const _inSources=(prodId)=>{ const n=new Set();
-            (DB.demand_substitutions||[]).filter(s=>s.to_product_id===prodId&&_swapFromFac(s)===node.id).forEach(s=>{
-              const fdp=DB.demand_points.find(dp=>dp.element_id===s.from_element_id);
-              const pn=fdp?.products?.[0]?.product_id;
-              n.add(DB.products.find(p=>p.id===pn)?.name||DB.elements.find(e=>e.id===s.from_element_id)?.name||'?'); });
+            demandPoints.filter(dp=>dp.products?.some(p=>p.product_id===prodId)).forEach(dp=>{
+              (DB.demand_substitutions||[]).filter(s=>s.to_element_id===dp.element_id).forEach(s=>n.add(_dpDisp(s.from_element_id))); });
             return [...n].join(', '); };
           // Surface a substitute product here even if it has no direct demand at
           // this facility — when one of this facility's demand points switched to
@@ -10949,8 +10977,19 @@ function simulate(elements, connections, horizon, includeProposed=false){
     };
 
     demandPoints.forEach(dp=>{
-      const todayRate=dp.dailyRates[day-1]||0;
-      if(todayRate<=0) return;
+      const ownRate=dp.dailyRates[day-1]||0;
+
+      // ── DEMAND SWAP (point-to-point relocation) ───────────
+      // The swap MOVES demand from a source point to a destination point: the
+      // source pulls less of its own product, the destination pulls more of its
+      // own. Everything is served from each point's own topology, so production
+      // and transfers follow naturally (no "from anywhere" re-source).
+      const swOutR=_resolveDemandSwap(dp.id, ownRate, _ds7);
+      const swOut=swOutR?Math.min(swOutR.qty,ownRate):0;
+      const swIn=_resolveDemandSwapIn(dp.id, _ds7, (id)=>{ const o=demandPoints.find(d=>d.id===id); return o?(o.dailyRates[day-1]||0):(_demandRate(id,_ds7)||0); });
+      const effective=Math.max(0, ownRate - swOut + swIn);
+      if(ownRate<=0 && swIn<=0) return;
+
       const topoSilos=demandSiloMap[dp.id]||new Set();
 
       // Resolve product list: use configured priorities, or fall back to products
@@ -10965,18 +11004,10 @@ function simulate(elements, connections, horizon, includeProposed=false){
         products=[...topoProds];
       }
 
-      // ── DEMAND SWAP (substitution) ───────────────────────
-      // If a swap covers part of THIS demand point's demand, fulfil the swapped
-      // portion from the substitute material and the rest from the own product.
-      const sw=_resolveDemandSwap(dp.id, todayRate, _ds7);
-      const swapQty=sw?Math.min(sw.qty,todayRate):0;
-      const ownTarget=todayRate-swapQty;
-
-      _pullDemand(products, ownTarget, topoSilos, dp.facilityId, false);
-      if(sw && swapQty>0){
-        const swapPulled=_pullDemand([sw.toProduct], swapQty, topoSilos, dp.facilityId, true);
+      _pullDemand(products, effective, topoSilos, dp.facilityId, false);
+      if(swOut>0||swIn>0){
         if(!r.demandSwapHistory[dp.id]) r.demandSwapHistory[dp.id]=[];
-        r.demandSwapHistory[dp.id][day-1]={own:ownTarget, swapped:swapQty, swapPulled, toProduct:sw.toProduct, fromProduct:sw.fromProduct};
+        r.demandSwapHistory[dp.id][day-1]={own:ownRate, swappedOut:swOut, swappedIn:swIn, effective, toElement:swOutR?.toElement||null, toProduct:swOutR?.toProduct||null};
       }
     });
 
