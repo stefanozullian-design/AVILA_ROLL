@@ -16355,8 +16355,11 @@ async function dsRefreshSlot(id, showErrors=true){
     }
     if(perm !== 'granted') throw new Error('File access denied');
 
+    console.log(`DS [${id}] getting file...`);
     const file = await handle.getFile();
+    console.log(`DS [${id}] reading buffer (${file.size} bytes)...`);
     const buf  = await file.arrayBuffer();
+    console.log(`DS [${id}] buffer read, calling handler...`);
     const fileModTime = file.lastModified;
 
     // Check if file changed: compare with saved timestamp
@@ -16371,7 +16374,14 @@ async function dsRefreshSlot(id, showErrors=true){
     }
 
     // Dispatch to the right ingestion handler
-    const result = await window[slot.handler]?.(buf, file.name) || {rowCount:0};
+    try{
+      console.log(`DS [${id}] calling handler: ${slot.handler}`);
+      const result = await window[slot.handler]?.(buf, file.name) || {rowCount:0};
+      console.log(`DS [${id}] handler returned:`, result);
+    }catch(handlerErr){
+      console.error(`DS [${id}] handler failed:`, handlerErr.name, handlerErr.message);
+      throw handlerErr;
+    }
 
     console.log(`DS [${id}] loaded: ${file.name} (${result.rowCount||0} rows)`);
     DS.meta[id] = {
