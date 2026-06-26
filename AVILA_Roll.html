@@ -17062,14 +17062,17 @@ function dsWriteActualsToDemandGrid(){
 
   const today = new Date()._ymd();
 
-  // ── Aggregate by Demand Point name + date ─────────────────────────────
+  // ── Aggregate by Demand Point name + date (past dates only) ───────────
   const aggByDpDate = {}; // key: `dpName|date` → total volume
+  let winMin = null;      // earliest shipment date in the file
   DB.real_shipments_daily.forEach(r=>{
     if(!r.product || !r.date || r.date > today) return;
     const key = r.product.trim() + '|' + r.date;
     aggByDpDate[key] = (aggByDpDate[key]||0) + r.volume;
+    if(winMin === null || r.date < winMin) winMin = r.date;
   });
   if(!Object.keys(aggByDpDate).length) return;
+  const winMax = today;   // file is authoritative for the whole past window
 
   // ── Build lookup: dpName (upper) → element_id ─────────────────────────
   // Direct match on el.name — topology elements are now named to match Excel exactly
@@ -17085,22 +17088,36 @@ function dsWriteActualsToDemandGrid(){
     if(code) dpNameMap[code] = el.id; // explicit override wins
   });
 
-  // ── Write actuals to demand_values ────────────────────────────────────
-  let written = 0;
+  // ── Determine which demand points the file covers ─────────────────────
+  const matchedElIds = new Set();
   const matchedDps = new Set(), unmatchedDps = new Set();
+  Object.keys(aggByDpDate).forEach(key=>{
+    const dpName = key.slice(0, key.lastIndexOf('|'));
+    const elId   = dpNameMap[dpName.toUpperCase()];
+    if(!elId){ unmatchedDps.add(dpName); return; }
+    matchedElIds.add(elId); matchedDps.add(dpName);
+  });
 
+  // ── Clear the whole actuals window for matched DPs ────────────────────
+  // The file is the truth for past dates: a day present in the file becomes an
+  // actual; a day ABSENT becomes 0 (its stale forecast is removed). Other demand
+  // points, and dates outside [winMin, today], are left untouched.
+  if(matchedElIds.size){
+    DB.demand_values = (DB.demand_values||[]).filter(v=>{
+      if(!matchedElIds.has(v.element_id)) return true;       // untouched DP
+      if(v.date < winMin || v.date > winMax) return true;    // outside window
+      return false;                                          // inside window → drop
+    });
+  }
+
+  // ── Write actuals into the cleared window ─────────────────────────────
+  let written = 0;
   Object.entries(aggByDpDate).forEach(([key, vol])=>{
     const pipeIdx = key.lastIndexOf('|');
     const dpName  = key.slice(0, pipeIdx);
     const date    = key.slice(pipeIdx + 1);
     const elId    = dpNameMap[dpName.toUpperCase()];
-
-    if(!elId){ unmatchedDps.add(dpName); return; }
-    matchedDps.add(dpName);
-
-    DB.demand_values = (DB.demand_values||[]).filter(
-      v=>!(v.element_id===elId && v.date===date)
-    );
+    if(!elId) return;
     if(vol > 0){
       DB.demand_values.push({
         element_id: elId, date,
