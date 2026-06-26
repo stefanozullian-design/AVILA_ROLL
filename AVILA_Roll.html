@@ -16286,13 +16286,13 @@ function dsLoadMeta(){
 // ── Init — called once on DOMContentLoaded ────────────
 async function dsInit(){
   dsLoadMeta();
-  // Load all handles from IDB into memory
+  // Load all handles from IDB into memory so the mapped files are ready, but do
+  // NOT read them. The app owns its data (loaded from the scenario / localStorage);
+  // external files only re-import when the user explicitly clicks Refresh / Refresh All.
   for(const slot of DS_SLOTS){
     const h = await dsLoadHandle(slot.id);
     if(h) DS.handles[slot.id] = h;
   }
-  // Auto-refresh all configured slots
-  dsAutoRefreshAll();
 }
 
 // ── Auto-refresh all slots that have a handle ─────────
@@ -16358,12 +16358,12 @@ async function dsRefreshSlot(id, showErrors=true){
     const prevModTime = DS.meta[id]?.lastFileModified;
     const fileChanged = !prevModTime || fileModTime > prevModTime;
 
-    // Only ingest if file is newer (or first time)
-    // For data sources: always reload on startup — they're read-only and data must load into DB
-    if(!fileChanged && window._dsAutoRefreshing && slot.dbKey !== 'real_shipments_daily' && slot.dbKey !== 'real_production_daily' && slot.dbKey !== 'real_inventory_daily' && slot.dbKey !== 'real_transfers_daily' && slot.dbKey !== 'real_rail_daily'){
+    // During a background change-check, skip unchanged files. A user-initiated
+    // Refresh (showErrors=true / not auto) always re-imports, even if unchanged.
+    if(!fileChanged && window._dsAutoRefreshing){
       dsUpdateSlotUI(id, 'ok');
       DS.refreshing[id] = false;
-      return null;  // No change on auto-refresh
+      return null;
     }
 
     // Dispatch to the right ingestion handler
@@ -17943,11 +17943,10 @@ function autoSave(){
   if(DB.real_rail_daily) DB.real_rail_daily = DB.real_rail_daily.filter(r => r.date >= cutoffStr);
   if(DB.real_shipping_daily) DB.real_shipping_daily = DB.real_shipping_daily.filter(r => r.date >= cutoffStr);
 
-  // Tables that are either regenerated on startup (from source files) or
-  // regenerated on simulation run — never save these to localStorage
+  // Only regenerated-on-run tables are transient. Real data (production,
+  // shipments, etc.) belongs to the app once imported — it is persisted so the
+  // app stands alone without re-reading the external files.
   const TRANSIENT_TABLES = new Set([
-    'real_shipments_daily',   // reloaded from Excel file on startup
-    'real_shipments_meta',    // reloaded from Excel file on startup
     'simulation_day_states',  // regenerated on Run Simulation
     'simulation_inventory',   // regenerated on Run Simulation
     'simulation_stop_events', // regenerated on Run Simulation
@@ -17958,15 +17957,7 @@ function autoSave(){
   const dbToSave = Object.fromEntries(
     Object.entries(DB).filter(([k]) => !TRANSIENT_TABLES.has(k))
   );
-  // Never persist actual demand_values — they reload from Excel file on startup
-  if(dbToSave.demand_values){
-    dbToSave.demand_values = dbToSave.demand_values.filter(v => v.source !== 'actual');
-  }
-  // Strip actuals from demand_values — they reload from file on startup
-  // Only persist user-entered forecast values
-  if(dbToSave.demand_values){
-    dbToSave.demand_values = dbToSave.demand_values.filter(v => v.source !== 'actual');
-  }
+  // Actual demand_values are kept — once imported/entered they belong to the app.
 
   // Stamp every save so startup can tell whether localStorage or the topology
   // file is the newer copy (used by the stale-file safety net in dsIngestTopology).
@@ -18036,36 +18027,16 @@ function autoSave(){
 }
 
 function loadSaved(){
-  // ── Clear oversized legacy localStorage entries ─────────────────────────
-  // Any entry containing simulation output or raw sales data is too large.
-  // Clear it unconditionally — the lean re-save happens at next autoSave().
+  // ── Clear only truly-oversized legacy entries ───────────────────────────
+  // Real data (shipments, production, actual demand_values) now belongs to the
+  // app and is intentionally persisted, so we no longer strip it on load. Only
+  // wipe the cache if it is so large it would break localStorage (3MB guard),
+  // in which case the scenario file remains the source of truth on startup.
   try{
     const raw = localStorage.getItem('prodcast_v3');
-    if(raw && raw.length > 2000000){
-      // Entry is over 2MB — definitely contains bloat, clear it
-      // (2MB threshold allows simResults which can be large for multi-facility scenarios)
-      console.warn('loadSaved: clearing oversized localStorage entry ('+Math.round(raw.length/1024)+'KB)');
+    if(raw && raw.length > 3000000){
+      console.warn('loadSaved: clearing oversized localStorage entry ('+Math.round(raw.length/1024)+'KB) — scenario file remains source of truth');
       localStorage.removeItem('prodcast_v3');
-    } else if(raw){
-      const probe = JSON.parse(raw);
-      // Strip actual demand_values in place (don't clear everything)
-      if(probe.DB?.demand_values){
-        const before = probe.DB.demand_values.length;
-        probe.DB.demand_values = probe.DB.demand_values.filter(v=>v.source!=='actual');
-        if(probe.DB.demand_values.length < before){
-          console.warn('loadSaved: stripped',before-probe.DB.demand_values.length,'actual demand_values from saved state');
-          localStorage.removeItem('prodcast_v3');
-          localStorage.setItem('prodcast_v3', JSON.stringify(probe));
-        }
-      }
-      if(probe.DB && (
-        (probe.DB.simulation_day_states?.length > 0) ||
-        (probe.DB.real_shipments_daily?.length > 0) ||
-        (probe.DB.simulation_inventory?.length > 0)
-      )){
-        console.warn('loadSaved: clearing legacy entry with transient tables');
-        localStorage.removeItem('prodcast_v3');
-      }
     }
   }catch(e){ localStorage.removeItem('prodcast_v3'); }
 
@@ -18299,8 +18270,10 @@ document.addEventListener('DOMContentLoaded',async()=>{
 // ═══════════════════════════════════════════════════════════════════════
 const SC = { meta:{}, handles:{}, activeId:null, _writeTimer:null };
 const SC_COLORS = ['#4da6ff','#ff3d5a','#ffb830','#00ff9d','#a78bfa','#f472b6','#2dd4bf','#fb923c'];
+// Only truly regenerated-on-run tables are transient. Real data (production,
+// shipments, etc.) BELONGS to the app once imported/entered — it is saved with
+// the scenario so the app stands alone without the external files.
 const SC_TRANSIENT = new Set([
-  'real_shipments_daily','real_shipments_meta',
   'simulation_day_states','simulation_inventory',
   'simulation_stop_events','simulation_runs','in_transit_inventory',
 ]);
@@ -18330,8 +18303,8 @@ function scRelTime(iso){ if(!iso) return 'never saved'; const d=new Date(iso),no
 // ── State payload (mirrors autoSave's trimming) ──
 function scBuildPayload(){
   const dbOut=Object.fromEntries(Object.entries(DB).filter(([k])=>!SC_TRANSIENT.has(k)));
-  if(dbOut.demand_values) dbOut.demand_values=dbOut.demand_values.filter(v=>v.source!=='actual');
-  return { DB:dbOut, counter:S.elCounter, simCfg:S.simCfg, savedAt:(window._lastSaveStamp||new Date().toISOString()) };
+  // Keep actual demand_values too — once imported they belong to the app.
+  return { DB:dbOut, counter:S.elCounter, simCfg:S.simCfg, simResults:S.simResults||null, savedAt:(window._lastSaveStamp||new Date().toISOString()) };
 }
 
 // ── Save-status dot ──
