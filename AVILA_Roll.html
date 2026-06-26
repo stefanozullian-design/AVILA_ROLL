@@ -16302,8 +16302,24 @@ async function dsAutoRefreshAll(){
   const promises = DS_SLOTS
     .filter(s => DS.handles[s.id])
     .map(s => dsRefreshSlot(s.id, false));
-  await Promise.allSettled(promises);
+  const results = await Promise.allSettled(promises);
   window._dsAutoRefreshing = false;
+
+  // Check if any slot's data changed
+  const changedSlots = results
+    .map(r => r.status === 'fulfilled' ? r.value : null)
+    .filter(v => v?.changed);
+
+  // If real data changed on startup load: show banner + auto-run simulation
+  if(changedSlots.length > 0){
+    const names = changedSlots.map(c=>DS.meta[c.slot]?.fileName||c.slot).join(', ');
+    _showDataUpdateBanner('Real data updated: '+names);
+    // Auto-run simulation with new real data
+    if(typeof runSimulation==='function'){
+      setTimeout(()=>{ runSimulation(); }, 500);
+    }
+  }
+
   // Update UI if Configure modal is open
   dsRefreshConfigUI();
   // Update Sales page status
@@ -16315,8 +16331,9 @@ async function dsAutoRefreshAll(){
 }
 
 // ── Refresh a single slot ─────────────────────────────
+// Returns { changed: bool, slot: id } if file changed, else null
 async function dsRefreshSlot(id, showErrors=true){
-  if(DS.refreshing[id]) return;
+  if(DS.refreshing[id]) return null;
   DS.refreshing[id] = true;
   dsUpdateSlotUI(id, 'loading');
 
@@ -16335,6 +16352,18 @@ async function dsRefreshSlot(id, showErrors=true){
 
     const file = await handle.getFile();
     const buf  = await file.arrayBuffer();
+    const fileModTime = file.lastModified;
+
+    // Check if file changed: compare with saved timestamp
+    const prevModTime = DS.meta[id]?.lastFileModified;
+    const fileChanged = !prevModTime || fileModTime > prevModTime;
+
+    // Only ingest if file is newer (or first time)
+    if(!fileChanged && window._dsAutoRefreshing){
+      dsUpdateSlotUI(id, 'ok');
+      DS.refreshing[id] = false;
+      return null;  // No change on auto-refresh
+    }
 
     // Dispatch to the right ingestion handler
     const result = await window[slot.handler]?.(buf, file.name) || {rowCount:0};
@@ -16343,6 +16372,7 @@ async function dsRefreshSlot(id, showErrors=true){
       ...DS.meta[id],
       fileName:  file.name,
       fileSize:  file.size,
+      lastFileModified: fileModTime,
       lastLoaded:new Date().toISOString().slice(0,16).replace('T',' '),
       rowCount:  result.rowCount || 0,
       matched:   result.matched  ?? null,
@@ -16355,11 +16385,14 @@ async function dsRefreshSlot(id, showErrors=true){
     dsUpdateSlotUI(id, 'ok');
     if(result.warnings?.length) result.warnings.forEach(w=>statMsg('⚠ '+w));
 
+    return { changed: true, slot: id };  // Signal that data changed
+
   }catch(err){
     DS.meta[id] = { ...(DS.meta[id]||{}), error: err.message, lastLoaded: DS.meta[id]?.lastLoaded||null };
     dsSaveMeta();
     dsUpdateSlotUI(id, 'error', err.message);
     if(showErrors) console.warn(`DS [${id}]:`, err.message);
+    return null;
   }finally{
     DS.refreshing[id] = false;
   }
@@ -16493,6 +16526,20 @@ function _dsWriteBlockedBanner(id, name, reason){
 }
 function _dsHideWriteBlockedBanner(){
   document.getElementById('ds-write-blocked-banner')?.remove();
+}
+function _showDataUpdateBanner(msg){
+  let b=document.getElementById('data-update-banner');
+  if(!b){
+    b=document.createElement('div');
+    b.id='data-update-banner';
+    b.style.cssText='position:fixed;top:0;left:0;right:0;z-index:99999;background:#0d3a1a;border-bottom:2px solid #00d9a3;color:#c5f9d7;font-family:var(--mono),monospace;font-size:11px;padding:8px 14px;display:flex;align-items:center;gap:12px;box-shadow:0 2px 14px rgba(0,0,0,.55)';
+    document.body.appendChild(b);
+  }
+  b.innerHTML=`<span style="font-size:15px;line-height:1">✓</span>
+    <span style="flex:1;line-height:1.35">${msg} — simulation is running…</span>
+    <button onclick="document.getElementById('data-update-banner')?.remove()" style="background:transparent;color:#c5f9d7;border:1px solid #00d9a3;padding:6px 11px;font-family:inherit;font-size:10px;cursor:pointer;border-radius:3px">Dismiss</button>`;
+  // Auto-hide after 5 seconds
+  setTimeout(()=>{ document.getElementById('data-update-banner')?.remove(); }, 5000);
 }
 async function _dsRetryWrite(id){
   // Scenario files route through the scenario writer, not the DS slots.
@@ -17921,6 +17968,7 @@ function autoSave(){
       DB: dbToSave,
       counter: S.elCounter,
       simCfg: S.simCfg,
+      simResults: S.simResults || null,  // Save simulation results so forecast is visible on load
       savedAt: _saveStamp
     }));
   }catch(e){
@@ -17956,6 +18004,7 @@ function autoSave(){
         DB: minimalDB,
         counter: S.elCounter,
         simCfg: S.simCfg,
+        simResults: S.simResults || null,
         savedAt: _saveStamp
       }));
       statMsg('Saved (compact mode)');
@@ -18019,6 +18068,7 @@ function loadSaved(){
       if(saved.counter) S.elCounter=saved.counter;
       syncElCounter();
       if(saved.simCfg) Object.assign(S.simCfg,saved.simCfg);
+      if(saved.simResults) S.simResults = saved.simResults;  // Restore forecast results so all data visible on load
 
       // Remember when this localStorage copy was saved, so the topology data
       // source can refuse to overwrite it with an OLDER file (stale-file guard).
