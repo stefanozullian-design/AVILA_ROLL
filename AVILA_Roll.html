@@ -5743,9 +5743,11 @@ function _renderSupplyViewInner(wrap){
               <td style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${prodReqColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('cementNeed')}</span> CEMENT NEED <span style="font-size:7px;opacity:.6;font-weight:400;margin-left:4px">(Direct+Transfer Demand)</span></td>`;
             months.forEach(mon=>{
               const isCol=collapsed.has(mon.ym);
-              h+=`<td style="border-left:2px solid rgba(77,166,255,.2);font-size:9px;color:${prodReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)"></td>`;
+              const mt=[...productsSet].reduce((s,pid)=>s+mon.dates.reduce((a,ds)=>a+totalNeed(pid,ds),0),0);
+              h+=`<td style="border-left:2px solid rgba(77,166,255,.2);font-size:9px;font-weight:700;color:${prodReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
               if(!isCol) mon.dates.forEach(ds=>{
-                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}"></td>`;
+                const v=[...productsSet].reduce((s,pid)=>s+totalNeed(pid,ds),0);
+                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${prodReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`;
               });
             });
             h+=`</tr>`;
@@ -5811,20 +5813,6 @@ function _renderSupplyViewInner(wrap){
 
         if(cementSilos.length>0){
           const invColor='#00d9a3';
-          // Section header
-          h+=`<tr class="sup-sec-hdr" data-seckey="cementInv" onclick="_supToggleSec('cementInv')" style="cursor:pointer;background:rgba(0,217,163,.05);border-top:2px solid rgba(0,217,163,.3)">
-            <td style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${invColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('cementInv')}</span> STARTING INVENTORY (cement)</td>`;
-          months.forEach(mon=>{
-            const isCol=collapsed.has(mon.ym);
-            h+=`<td style="border-left:2px solid rgba(0,217,163,.2);font-size:9px;color:${invColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)"></td>`;
-            if(!isCol){
-              mon.dates.forEach(ds=>{
-                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}"></td>`;
-              });
-            }
-          });
-          h+=`</tr>`;
-
           // Helper to get inventory value (checks actual data first, then simulated)
           const getInventoryValue=(siloId, dateStr, startInv)=>{
             // For date X: display BEGINNING inventory = ENDING of day X-1
@@ -5844,6 +5832,22 @@ function _renderSupplyViewInner(wrap){
             const v=dayIdx<=0?parseFloat(startInv)||0:hist[dayIdx-1]??0;
             return {value:v, isActual:false};
           };
+          // Section header — total = sum of all cement silos on hand (filter-scoped)
+          const _cemInvDay=ds=>cementSilos.reduce((s,si)=>s+getInventoryValue(si.id,ds,parseFloat(si.props?.start_inventory)||0).value,0);
+          h+=`<tr class="sup-sec-hdr" data-seckey="cementInv" onclick="_supToggleSec('cementInv')" style="cursor:pointer;background:rgba(0,217,163,.05);border-top:2px solid rgba(0,217,163,.3)">
+            <td style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${invColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('cementInv')}</span> STARTING INVENTORY (cement)</td>`;
+          months.forEach(mon=>{
+            const isCol=collapsed.has(mon.ym);
+            const mt=mon.dates.reduce((a,ds)=>a+_cemInvDay(ds),0)/(mon.dates.length||1);
+            h+=`<td style="border-left:2px solid rgba(0,217,163,.2);font-size:9px;font-weight:700;color:${invColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+            if(!isCol){
+              mon.dates.forEach(ds=>{
+                const v=_cemInvDay(ds);
+                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${invColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`;
+              });
+            }
+          });
+          h+=`</tr>`;
 
           // One row per silo
           cementSilos.forEach(silo=>{
@@ -5988,15 +5992,23 @@ function _renderSupplyViewInner(wrap){
 
           if(clinkerProdsSet.size>0){
             const clinkerReqColor='#ff9d5c';
-            // Section header
+            // Total clinker required (all types) on a date = Σ cementDemand·recipe%
+            const _clkReqDay=ds=>{ let t=0; demandPoints.forEach(dp=>{ const el=demandEls.find(e=>e.id===dp.element_id); if(!el) return;
+              (dp.products||[]).forEach(p=>{ const prod=DB.products.find(pr=>pr.id===p.product_id);
+                if(prod&&(prod.category==='cement_bulk'||prod.category==='cement_packed')){ const cd=_demandRate(el.id,ds)||0;
+                  DB.recipes.filter(rc=>rc.product_id===p.product_id&&clinkerProdsSet.has(rc.material_id)).forEach(rc=>{ t+=cd*(parseFloat(rc.pct)||0)/100; }); } }); });
+              return t; };
+            // Section header — total = sum of all clinker types below
             h+=`<tr class="sup-sec-hdr" data-seckey="clinkerReq" onclick="_supToggleSec('clinkerReq')" style="cursor:pointer;background:rgba(255,157,92,.05);border-top:2px solid rgba(255,157,92,.3)">
               <td style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${clinkerReqColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('clinkerReq')}</span> CLINKER REQUIREMENTS</td>`;
             months.forEach(mon=>{
               const isCol=collapsed.has(mon.ym);
-              h+=`<td style="border-left:2px solid rgba(255,157,92,.2);font-size:9px;color:${clinkerReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)"></td>`;
+              const mt=mon.dates.reduce((a,ds)=>a+_clkReqDay(ds),0);
+              h+=`<td style="border-left:2px solid rgba(255,157,92,.2);font-size:9px;font-weight:700;color:${clinkerReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
               if(!isCol){
                 mon.dates.forEach(ds=>{
-                  h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}"></td>`;
+                  const v=_clkReqDay(ds);
+                  h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${clinkerReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`;
                 });
               }
             });
@@ -6071,20 +6083,6 @@ function _renderSupplyViewInner(wrap){
 
         if(clinkerSilos.length>0){
           const clinkerInvColor='#ff8c42';
-          // Section header
-          h+=`<tr class="sup-sec-hdr" data-seckey="clinkerInv" onclick="_supToggleSec('clinkerInv')" style="cursor:pointer;background:rgba(255,140,66,.05);border-top:2px solid rgba(255,140,66,.3)">
-            <td style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${clinkerInvColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('clinkerInv')}</span> CLINKER INVENTORY</td>`;
-          months.forEach(mon=>{
-            const isCol=collapsed.has(mon.ym);
-            h+=`<td style="border-left:2px solid rgba(255,140,66,.2);font-size:9px;color:${clinkerInvColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)"></td>`;
-            if(!isCol){
-              mon.dates.forEach(ds=>{
-                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}"></td>`;
-              });
-            }
-          });
-          h+=`</tr>`;
-
           // Helper for clinker inventory (same as cement above)
           const getClkInvValue=(siloId, dateStr, startInv)=>{
             const prevDate=new Date(dateStr+'T00:00:00');
@@ -6097,6 +6095,22 @@ function _renderSupplyViewInner(wrap){
             const v=dayIdx<=0?parseFloat(startInv)||0:hist[dayIdx-1]??0;
             return {value:v, isActual:false};
           };
+          // Section header — total = sum of all clinker silos on hand (filter-scoped)
+          const _clkInvDay=ds=>clinkerSilos.reduce((s,si)=>s+getClkInvValue(si.id,ds,parseFloat(si.props?.start_inventory)||0).value,0);
+          h+=`<tr class="sup-sec-hdr" data-seckey="clinkerInv" onclick="_supToggleSec('clinkerInv')" style="cursor:pointer;background:rgba(255,140,66,.05);border-top:2px solid rgba(255,140,66,.3)">
+            <td style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${clinkerInvColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('clinkerInv')}</span> CLINKER INVENTORY</td>`;
+          months.forEach(mon=>{
+            const isCol=collapsed.has(mon.ym);
+            const mt=mon.dates.reduce((a,ds)=>a+_clkInvDay(ds),0)/(mon.dates.length||1);
+            h+=`<td style="border-left:2px solid rgba(255,140,66,.2);font-size:9px;font-weight:700;color:${clinkerInvColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+            if(!isCol){
+              mon.dates.forEach(ds=>{
+                const v=_clkInvDay(ds);
+                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${clinkerInvColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`;
+              });
+            }
+          });
+          h+=`</tr>`;
 
           // One row per silo
           clinkerSilos.forEach(silo=>{
