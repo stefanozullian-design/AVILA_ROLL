@@ -16389,15 +16389,19 @@ async function dsRefreshSlot(id, showErrors=true){
     return { changed: true, slot: id };  // Signal that data changed
 
   }catch(err){
-    // If handle is stale or access denied, clear it so user can re-select
-    const isHandleStale = err.message.includes('No file configured') ||
-                         err.message.includes('File access denied') ||
-                         err.message.includes('handle has been invalidated');
-    if(isHandleStale && DS.handles[id]){
+    // Log errors for debugging
+    console.error(`DS [${id}] Error:`, err.name, err.message);
+
+    // Only clear handle if it's truly invalid (NotFoundError, NotAllowedError during init)
+    // Don't clear on other errors — they might be transient
+    const isInvalidHandle = (err.name === 'NotFoundError' ||
+                            err.name === 'NotAllowedError') && window._dsAutoRefreshing;
+    if(isInvalidHandle && DS.handles[id]){
       delete DS.handles[id];
       await dsDeleteHandle(id);
-      console.warn(`DS [${id}]: handle became stale, cleared — user must re-select file`);
+      console.warn(`DS [${id}]: handle invalidated, cleared — please re-select file`);
     }
+
     DS.meta[id] = { ...(DS.meta[id]||{}), error: err.message, lastLoaded: DS.meta[id]?.lastLoaded||null };
     dsSaveMeta();
     dsUpdateSlotUI(id, 'error', err.message);
