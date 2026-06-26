@@ -5032,7 +5032,7 @@ function renderDemandView(){
               h+=`<td class="dem-day-${mon.ym}" ondblclick="openDemandBuilder('${el.id}','${ds}')" title="Double-click to open the Forecast Builder for ${el.name.replace(/"/g,'&quot;')} starting ${ds}" style="cursor:cell;padding:1px 2px;border-bottom:1px solid var(--border);border-right:1px solid rgba(255,255,255,.03);${tdSty(ds)}">
                 ${isActual
                   ? `<div style="width:50px;font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;color:${cellColor};background:${cellBg}" title="Actual shipment data — double-click for Forecast Builder">${v?Math.round(v*10)/10:''}</div>`
-                  : `<input class="dem-cell" data-el="${el.id}" data-date="${ds}" value="${v||''}"
+                  : `<input class="dem-cell" data-el="${el.id}" data-date="${ds}" value="${v||''}" onchange="saveDemandCell(this)"
                       ${isNwd?'disabled title="Non-working day"':''}
                       style="width:50px;background:${cellBg};border:none;color:${cellColor};font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;outline:none">`
                 }
@@ -5173,6 +5173,20 @@ function demandScrollToday(){
   const wrap=document.getElementById('demand-table-wrap'); if(!wrap) return;
   const th=wrap.querySelector(`th[style*="border-left:2px solid var(--green)"]`);
   if(th) th.scrollIntoView({behavior:'smooth',inline:'center',block:'nearest'});
+}
+
+// Single-cell save — fires on every cell change (incl. clearing to delete) so a
+// manual edit persists immediately, no "Save Forecast" click needed. Clearing a
+// cell (empty / 0) removes the row permanently.
+function saveDemandCell(inp){
+  if(!inp) return;
+  if(!DB.demand_values) DB.demand_values=[];
+  const elId=inp.dataset.el, ds=inp.dataset.date;
+  const v=parseFloat(inp.value)||0;
+  DB.demand_values=DB.demand_values.filter(r=>!(r.element_id===elId&&r.date===ds));
+  if(v>0) DB.demand_values.push({element_id:elId, date:ds, value_t:v});
+  autoSave();
+  _demandCacheInvalidate();
 }
 
 function saveDemandValues(){
