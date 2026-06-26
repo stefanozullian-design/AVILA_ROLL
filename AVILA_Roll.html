@@ -3519,7 +3519,7 @@ function _resolveDemandSwapIn(toElementId, dateStr, rateFn){
 }
 
 // ── Demand Swap manager (material substitution) ──────────
-function openDemandSwapManager(seedFromEl, seedDate){
+function openDemandSwapManager(seedFromEl, seedDate, editId){
   const cementProds=(DB.products||[]).filter(p=>['cement_bulk','cement_packed'].includes(p.category||''))
     .sort((a,b)=>(a.name||a.id).localeCompare(b.name||b.id));
   const matOpts=(sel)=>cementProds.map(p=>`<option value="${p.id}"${p.id===sel?' selected':''}>${p.name||p.id}</option>`).join('');
@@ -3529,15 +3529,23 @@ function openDemandSwapManager(seedFromEl, seedDate){
   const dpName=id=>DB.elements.find(e=>e.id===id)?.name||id;
   const dpMat=id=>{ const el=DB.elements.find(e=>e.id===id); const ids=(el&&typeof _demElProdIds==='function')?_demElProdIds(el):[]; return ids.length?pn(ids[0]):''; };
   const today=new Date()._ymd();
-  const startVal=seedDate||today;
+  // Swap being edited (if any) — its current values pre-fill the form below so
+  // every characteristic (from, to, amount, mode, dates) can be changed in place.
+  const editing=editId?(DB.demand_substitutions||[]).find(s=>s.id===editId):null;
+  const dFrom=editing?editing.from_element_id:(seedFromEl||dpEls[0]?.id);
+  const dTo=editing?editing.to_element_id:(dpEls.find(e=>e.id!==(seedFromEl||dpEls[0]?.id))?.id);
+  const dAmount=editing?editing.amount:50;
+  const dMode=editing?editing.mode:'percent';
+  const startVal=editing?editing.start_date:(seedDate||today);
+  const endVal=editing?editing.end_date:(seedDate||today);
   const swaps=(DB.demand_substitutions||[]).slice().sort((a,b)=>(a.start_date||'').localeCompare(b.start_date||''));
   const rows=swaps.length?swaps.map(s=>`
-    <tr style="border-bottom:1px solid var(--border)">
+    <tr style="border-bottom:1px solid var(--border)${s.id===editId?';background:rgba(255,184,48,.08)':''}">
       <td style="padding:6px 8px;color:var(--green)">${dpName(s.from_element_id)}${dpMat(s.from_element_id)?`<div style="color:var(--text-dim);font-size:8px">material: ${dpMat(s.from_element_id)}</div>`:''}</td>
       <td style="padding:6px 8px;color:var(--amber)"><i style="font-style:normal">⇄</i> ${s.to_element_id?dpName(s.to_element_id):pn(s.to_product_id)}${s.to_element_id&&dpMat(s.to_element_id)?`<div style="color:var(--text-dim);font-size:8px">material: ${dpMat(s.to_element_id)}</div>`:''}</td>
       <td style="padding:6px 8px;text-align:right;color:var(--text)">${s.mode==='percent'?(s.amount+'%'):(Number(s.amount).toLocaleString()+' t/d')}</td>
       <td style="padding:6px 8px;color:var(--text-dim);font-size:8px">${s.start_date} → ${s.end_date}</td>
-      <td style="padding:6px 8px;text-align:right"><button class="tb-btn sec" style="padding:2px 7px" onclick="_deleteDemandSwap('${s.id}')">✕</button></td>
+      <td style="padding:6px 8px;text-align:right;white-space:nowrap"><button class="tb-btn sec" style="padding:2px 7px;margin-right:4px" onclick="_editDemandSwap('${s.id}')" title="Edit this swap">✎</button><button class="tb-btn sec" style="padding:2px 7px" onclick="_deleteDemandSwap('${s.id}')" title="Delete this swap">✕</button></td>
     </tr>`).join(''):`<tr><td colspan="5" style="padding:12px;text-align:center;color:var(--text-dim)">No demand swaps yet.</td></tr>`;
 
   showModalContent(`
@@ -3551,28 +3559,31 @@ function openDemandSwapManager(seedFromEl, seedDate){
         <tbody>${rows}</tbody>
       </table>
       <div style="border-top:1px solid var(--border2);padding-top:12px">
-        <div style="font-size:8px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase;margin-bottom:8px">＋ New swap</div>
+        <input type="hidden" id="ds-edit-id" value="${editId||''}">
+        <div style="font-size:8px;letter-spacing:1px;color:${editing?'var(--amber)':'var(--text-dim)'};text-transform:uppercase;margin-bottom:8px">${editing?'✎ Edit swap':'＋ New swap'}</div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 12px">
-          <div><div class="fl">From demand point</div><select class="fi" id="ds-from" style="width:100%">${dpOpts(seedFromEl||dpEls[0]?.id)}</select></div>
-          <div><div class="fl">To demand point (destination)</div><select class="fi" id="ds-to" style="width:100%">${dpOpts(dpEls.find(e=>e.id!==(seedFromEl||dpEls[0]?.id))?.id)}</select></div>
+          <div><div class="fl">From demand point</div><select class="fi" id="ds-from" style="width:100%">${dpOpts(dFrom)}</select></div>
+          <div><div class="fl">To demand point (destination)</div><select class="fi" id="ds-to" style="width:100%">${dpOpts(dTo)}</select></div>
           <div><div class="fl">Amount</div>
             <div style="display:flex;gap:6px">
-              <input class="fi" id="ds-amount" type="number" min="0" value="50" style="flex:1">
-              <select class="fi" id="ds-mode" style="width:110px"><option value="percent">% of demand</option><option value="tonnage">t / day</option></select>
+              <input class="fi" id="ds-amount" type="number" min="0" value="${dAmount}" style="flex:1">
+              <select class="fi" id="ds-mode" style="width:110px"><option value="percent"${dMode==='percent'?' selected':''}>% of demand</option><option value="tonnage"${dMode==='tonnage'?' selected':''}>t / day</option></select>
             </div>
           </div>
           <div></div>
           <div><div class="fl">From date</div><input class="fi" id="ds-from-date" type="date" value="${startVal}" style="width:100%"></div>
-          <div><div class="fl">To date</div><input class="fi" id="ds-to-date" type="date" value="${startVal}" style="width:100%"></div>
+          <div><div class="fl">To date</div><input class="fi" id="ds-to-date" type="date" value="${endVal}" style="width:100%"></div>
         </div>
         <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">
+          ${editing?`<button class="tb-btn sec" onclick="openDemandSwapManager()">Cancel edit</button>`:''}
           <button class="tb-btn sec" onclick="closeModal()">Close</button>
-          <button class="tb-btn" style="background:var(--amber);color:var(--bg)" onclick="_saveDemandSwap()">⇄ Add swap &amp; run</button>
+          <button class="tb-btn" style="background:var(--amber);color:var(--bg)" onclick="_saveDemandSwap()">${editing?'✎ Save changes &amp; run':'⇄ Add swap &amp; run'}</button>
         </div>
       </div>
     </div>`);
 }
 function _saveDemandSwap(){
+  const editId=document.getElementById('ds-edit-id')?.value||'';
   const from=document.getElementById('ds-from')?.value;     // source demand point element id
   const to=document.getElementById('ds-to')?.value;         // destination demand point element id
   const mode=document.getElementById('ds-mode')?.value||'percent';
@@ -3586,12 +3597,23 @@ function _saveDemandSwap(){
   if(!DB.demand_substitutions) DB.demand_substitutions=[];
   // Point-to-point: store the destination demand point; keep a derived
   // to_product_id (its material) for labels/colours and legacy readers.
-  DB.demand_substitutions.push({ id:'swap_'+Date.now(), from_element_id:from, to_element_id:to, to_product_id:_dpPrimaryProduct(to)||'', mode, amount, start_date:start, end_date:end, notes:'' });
+  if(editId){
+    const s=DB.demand_substitutions.find(x=>x.id===editId);
+    if(s) Object.assign(s,{ from_element_id:from, to_element_id:to, to_product_id:_dpPrimaryProduct(to)||'', mode, amount, start_date:start, end_date:end });
+  } else {
+    DB.demand_substitutions.push({ id:'swap_'+Date.now(), from_element_id:from, to_element_id:to, to_product_id:_dpPrimaryProduct(to)||'', mode, amount, start_date:start, end_date:end, notes:'' });
+  }
   autoSave();
   closeModal();
   renderDemandView();
-  statMsg('Demand swap saved — running simulation…');
+  statMsg((editId?'Demand swap updated':'Demand swap saved')+' — running simulation…');
   if(typeof runSimulation==='function') runSimulation();
+}
+// Open the manager with an existing swap loaded into the form for editing.
+function _editDemandSwap(id){
+  const s=(DB.demand_substitutions||[]).find(x=>x.id===id);
+  if(!s){ openDemandSwapManager(); return; }
+  openDemandSwapManager(s.from_element_id, s.start_date, id);
 }
 function _deleteDemandSwap(id){
   DB.demand_substitutions=(DB.demand_substitutions||[]).filter(s=>s.id!==id);
