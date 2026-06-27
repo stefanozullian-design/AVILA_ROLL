@@ -1666,13 +1666,15 @@ const DB = {
   // Simulation rules — natural language rules interpreted by Claude, stored as structured constraints
   simulation_rules: [], // { id, name, facility_ids[], element_ids[], natural_text, structured:{type,params}, date_from, date_to, status:'active'|'disabled'|'conflicted', conflict_ids:[], created_at }
 
-  // Mill policy overrides — per finish-mill, date-bounded tweaks to the urgency rule.
-  // Each param is optional; when set it overrides the silo prop / engine default for
-  // silos this mill feeds, during [date_from,date_to]. products[] (optional) limits
-  // which of a multi-product mill's products the urgency ranking chases in the window.
-  // { id, name, element_ids[], date_from, date_to, products:[]|null,
+  // Mill policy overrides — per (finish-mill + PRODUCT), date-bounded tweaks to the
+  // urgency rule for that product's silo. A multi-product mill gets one row per product
+  // it makes (e.g. MIAFM03 → an IL(11) row and an SPC row, each independent).
+  // { id, element_id (mill), product_id, date_from, date_to,
   //   params:{ target_pct?, critical_floor_pct?, stop_pct?, restart_cover_days?, lookahead_days?, min_run_days? }, created_at }
   mill_policies: [],
+  // Products considered (separate from tuning) — per finish-mill, date-bounded allow-list
+  // limiting which products the mill chases in the window. { id, element_id, date_from, date_to, products:[] }
+  mill_product_focus: [],
 
   // Simulation
   simulation_runs:      [], // { id, facility_id, start_date, horizon, mode, conflict_resolution, run_at }
@@ -3647,23 +3649,24 @@ function _mpProdsOf(millId){
     .filter(c=>c.element_id===millId&&(parseFloat(c.capacity_tpd)||0)>0)
     .map(c=>c.product_id))];
 }
-// Representative capacity + forward-14-day demand rate for the day⇄% conversion,
-// for the silos this mill feeds that carry any of the considered products.
-function _mpMeta(millId, prodIds){
+function _mpPn(id){ return DB.products.find(p=>p.id===id)?.name||id; }
+function _mpMn(id){ return DB.elements.find(e=>e.id===id)?.name||id; }
+// Capacity + forward-14-day demand rate for ONE product's silo(s), for day⇄% conversion.
+function _mpMeta(millId, prodId){
   const mill=getEl(millId); const facId=mill&&(mill.assigned_facility_id||mill.facility_id);
   const silos=(DB.elements||[]).filter(e=>e.type==='bulk_silo'
     && (DB.connections||[]).some(c=>c.from_element_id===millId&&c.to_element_id===e.id)
-    && getSiloProducts(e).some(p=>prodIds.includes(p)));
+    && getSiloProducts(e).includes(prodId));
   const cap=silos.reduce((s,si)=>s+(parseFloat(si.props?.max_capacity)||0),0);
   const today=new Date()._ymd(); const dates=[]; const d=new Date(today+'T00:00:00');
   for(let i=0;i<14;i++){ dates.push(d._ymd()); d.setDate(d.getDate()+1); }
   const dps=(DB.demand_points||[]).filter(dp=>{ const el=getEl(dp.element_id); const f=el&&(el.assigned_facility_id||el.facility_id);
-    return (!facId||f===facId)&&(dp.products||[]).some(p=>prodIds.includes(p.product_id)); });
+    return (!facId||f===facId)&&(dp.products||[]).some(p=>p.product_id===prodId); });
   let tot=0; dates.forEach(ds=>dps.forEach(dp=>{ tot+=_demandRate(dp.element_id,ds)||0; }));
   return {cap, rate:tot/14, silos};
 }
-function _mpDefaults(millId){
-  const m=_mpMeta(millId,_mpProdsOf(millId)); const s0=m.silos[0];
+function _mpDefaults(millId, prodId){
+  const m=_mpMeta(millId,prodId); const s0=m.silos[0];
   const tp=s0&&parseFloat(s0.props?.target_pct); const cf=s0&&parseFloat(s0.props?.critical_floor_pct);
   // 'maximize' silos (no explicit target_pct) default the target to the stop level
   // so the prefill is valid (floor < target ≤ stop) and replicates "fill to stop".
@@ -3671,29 +3674,21 @@ function _mpDefaults(millId){
 }
 function _mpRefreshMeta(){
   const mill=document.getElementById('mp-mill')?.value;
-  window._mpMetaCur=_mpMeta(mill,[...(window._mpSel||[])]);
+  const prod=document.getElementById('mp-prod')?.value;
+  window._mpMetaCur=_mpMeta(mill,prod);
 }
-function _mpRenderProds(){
-  const mill=document.getElementById('mp-mill')?.value; const prods=_mpProdsOf(mill);
-  const pn=id=>DB.products.find(p=>p.id===id)?.name||id;
-  const wrap=document.getElementById('mp-prod-chips'); if(!wrap) return;
-  if(!window._mpSel) window._mpSel=new Set(prods);
-  wrap.innerHTML=prods.map(p=>{ const on=window._mpSel.has(p);
-    return `<span onclick="_mpToggleProd('${p}')" style="font-size:9px;padding:3px 9px;border-radius:4px;cursor:pointer;border:1px solid ${on?'var(--blue)':'var(--border2)'};background:${on?'rgba(77,166,255,.16)':'transparent'};color:${on?'var(--blue)':'var(--text-dim)'}">${pn(p)}</span>`;
-  }).join('');
-  document.getElementById('mp-prod-note').textContent = prods.length===1?'Single-product mill — nothing to narrow.':(window._mpSel.size<prods.length?'Only selected products chased during the window; others paused.':'All products in play.');
+function _mpRepopulateProducts(){
+  const mill=document.getElementById('mp-mill')?.value; const sel=document.getElementById('mp-prod'); if(!sel) return;
+  const prods=_mpProdsOf(mill); const cur=sel.value;
+  sel.innerHTML=prods.map(p=>`<option value="${p}"${p===cur?' selected':''}>${_mpPn(p)}</option>`).join('');
+  if(!prods.includes(cur)) sel.value=prods[0]||'';
 }
-function _mpToggleProd(pid){
-  if(!window._mpSel) window._mpSel=new Set();
-  if(window._mpSel.has(pid)){ if(window._mpSel.size>1) window._mpSel.delete(pid); } else window._mpSel.add(pid);
-  _mpRenderProds(); _mpRefreshMeta(); ['target','crit','stop'].forEach(k=>_mpSync(k,'range'));
-}
-function _mpMillChanged(){
-  const mill=document.getElementById('mp-mill').value;
-  window._mpSel=new Set(_mpProdsOf(mill));
-  const d=_mpDefaults(mill);
+function _mpMillChanged(){ _mpRepopulateProducts(); _mpProdChanged(); }
+function _mpProdChanged(){
+  const mill=document.getElementById('mp-mill')?.value, prod=document.getElementById('mp-prod')?.value;
+  const d=_mpDefaults(mill,prod);
   ['target','crit','stop','restart','look','minrun'].forEach(k=>{ const el=document.getElementById('mp-'+k); if(el&&d[k]!=null) el.value=d[k]; });
-  _mpRenderProds(); _mpRefreshMeta(); ['target','crit','stop'].forEach(k=>_mpSync(k,'range')); _mpUpdate();
+  _mpRefreshMeta(); ['target','crit','stop'].forEach(k=>_mpSync(k,'range')); _mpUpdate();
 }
 function _mpSync(k, src){
   const meta=window._mpMetaCur||{cap:0,rate:0};
@@ -3720,42 +3715,42 @@ function _mpUpdate(){
 }
 function _mpParamSummary(p){
   const pr=p.params||{}; const bits=[];
-  if(pr.target_pct!=null) bits.push('target '+Math.round(pr.target_pct)+'%');
+  if(pr.target_pct!=null) bits.push('tgt '+Math.round(pr.target_pct)+'%');
   if(pr.critical_floor_pct!=null) bits.push('floor '+Math.round(pr.critical_floor_pct)+'%');
   if(pr.stop_pct!=null) bits.push('stop '+Math.round(pr.stop_pct)+'%');
   if(pr.restart_cover_days) bits.push('restart ≤'+pr.restart_cover_days+'d');
-  if(pr.lookahead_days!=null) bits.push('look '+Math.round(pr.lookahead_days)+'d');
   if(pr.min_run_days) bits.push('minrun '+Math.round(pr.min_run_days)+'d');
-  if(Array.isArray(p.products)&&p.products.length) bits.push(p.products.length+' prod'+(p.products.length>1?'s':''));
+  if(pr.lookahead_days!=null) bits.push('look '+Math.round(pr.lookahead_days)+'d');
   return bits.join(' · ');
 }
-function openMillPolicyManager(editId){
+function openMillPolicyManager(editId, focusEditId){
   const mills=(DB.elements||[]).filter(e=>e.type==='finish_mill').sort((a,b)=>(a.name||'').localeCompare(b.name||''));
   if(!mills.length){ statMsg('No finish mills in the topology'); return; }
-  const editing=editId?(DB.mill_policies||[]).find(p=>p.id===editId):null;
-  const pn=id=>DB.products.find(p=>p.id===id)?.name||id;
-  const mn=id=>DB.elements.find(e=>e.id===id)?.name||id;
   const today=new Date()._ymd();
-  const selMill=editing?(editing.element_ids||[])[0]:mills[0].id;
-  window._mpEdit=editId||'';
-  window._mpSel=new Set(editing&&Array.isArray(editing.products)&&editing.products.length?editing.products:_mpProdsOf(selMill));
-  const def=_mpDefaults(selMill); const P=editing?editing.params||{}:{};
+  const milOpts=(sel)=>mills.map(m=>`<option value="${m.id}"${m.id===sel?' selected':''}>${(m.name||m.id).replace(/"/g,'&quot;')}</option>`).join('');
+
+  // ── Section A: per-(mill,product) objectives ──
+  const editing=editId?(DB.mill_policies||[]).find(p=>p.id===editId):null;
+  const selMill=editing?editing.element_id:mills[0].id;
+  const selProd=editing?editing.product_id:(_mpProdsOf(selMill)[0]||'');
+  const prodOpts=_mpProdsOf(selMill).map(p=>`<option value="${p}"${p===selProd?' selected':''}>${_mpPn(p)}</option>`).join('');
+  const def=_mpDefaults(selMill,selProd); const P=editing?editing.params||{}:{};
   const g=(k,d)=>P[k]!=null?P[k]:d;
   const vals={ target:g('target_pct',def.target), crit:g('critical_floor_pct',def.crit), stop:g('stop_pct',def.stop),
     restart:g('restart_cover_days',def.restart), look:g('lookahead_days',def.look), minrun:g('min_run_days',def.minrun) };
   const dFrom=editing?editing.date_from:today, dTo=editing?editing.date_to:today;
-  const milOpts=mills.map(m=>`<option value="${m.id}"${m.id===selMill?' selected':''}>${(m.name||m.id).replace(/"/g,'&quot;')}</option>`).join('');
   const policies=(DB.mill_policies||[]).slice().sort((a,b)=>(a.date_from||'').localeCompare(b.date_from||''));
-  const rows=policies.length?policies.map(p=>`
+  const polRows=policies.length?policies.map(p=>`
     <tr style="border-bottom:1px solid var(--border)${p.id===editId?';background:rgba(255,184,48,.08)':''}">
-      <td style="padding:6px 8px;color:var(--green)">${(p.element_ids||[]).map(mn).join(', ')}</td>
+      <td style="padding:6px 8px;color:var(--green)">${_mpMn(p.element_id)}</td>
+      <td style="padding:6px 8px;color:var(--blue)">${_mpPn(p.product_id)}</td>
       <td style="padding:6px 8px;color:var(--text-dim);font-size:8px">${p.date_from} → ${p.date_to}</td>
       <td style="padding:6px 8px;color:var(--text);font-size:8px">${_mpParamSummary(p)}</td>
       <td style="padding:6px 8px;text-align:right;white-space:nowrap"><button class="tb-btn sec" style="padding:2px 7px;margin-right:4px" onclick="_editMillPolicy('${p.id}')" title="Edit">✎</button><button class="tb-btn sec" style="padding:2px 7px" onclick="_deleteMillPolicy('${p.id}')" title="Delete">✕</button></td>
-    </tr>`).join(''):`<tr><td colspan="4" style="padding:12px;text-align:center;color:var(--text-dim)">No mill policies yet.</td></tr>`;
+    </tr>`).join(''):`<tr><td colspan="5" style="padding:12px;text-align:center;color:var(--text-dim)">No per-product policies yet.</td></tr>`;
   const lvlRow=(k,lab,max)=>`
     <div style="margin-bottom:9px">
-      <div style="display:flex;justify-content:space-between;align-items:baseline"><span class="fl">${lab}</span><span class="mpv" id="mp-rv-${k}" style="font-size:10px;color:var(--text-dim)"></span></div>
+      <div style="display:flex;justify-content:space-between;align-items:baseline"><span class="fl">${lab}</span><span id="mp-rv-${k}" style="font-size:10px;color:var(--text-dim)"></span></div>
       <div style="display:flex;align-items:center;gap:8px">
         <input type="range" id="mp-${k}" min="0" max="${max}" step="1" value="${vals[k]}" oninput="_mpSync('${k}','range')" style="flex:1;accent-color:var(--green)">
         <input type="number" id="mp-${k}-d" min="0" step="0.1" oninput="_mpSync('${k}','days')" class="fi" style="width:50px;font-size:10px"><span style="font-size:9px;color:var(--text-dim)">days</span>
@@ -3763,30 +3758,41 @@ function openMillPolicyManager(editId){
     </div>`;
   const plainRow=(k,lab,max,step)=>`
     <div style="margin-bottom:9px">
-      <div style="display:flex;justify-content:space-between;align-items:baseline"><span class="fl">${lab}</span><span class="mpv" id="mp-rv-${k}" style="font-size:10px;color:var(--text-dim)"></span></div>
+      <div style="display:flex;justify-content:space-between;align-items:baseline"><span class="fl">${lab}</span><span id="mp-rv-${k}" style="font-size:10px;color:var(--text-dim)"></span></div>
       <input type="range" id="mp-${k}" min="0" max="${max}" step="${step}" value="${vals[k]}" oninput="_mpUpdate()" style="width:100%;accent-color:var(--green)">
     </div>`;
+
+  // ── Section B: products considered (pause list) ──
+  const fEditing=focusEditId?(DB.mill_product_focus||[]).find(f=>f.id===focusEditId):null;
+  const fMill=fEditing?fEditing.element_id:selMill;
+  window._mpFocusSel=new Set(fEditing&&Array.isArray(fEditing.products)?fEditing.products:_mpProdsOf(fMill));
+  const fFrom=fEditing?fEditing.date_from:today, fTo=fEditing?fEditing.date_to:today;
+  const focus=(DB.mill_product_focus||[]).slice().sort((a,b)=>(a.date_from||'').localeCompare(b.date_from||''));
+  const focusRows=focus.length?focus.map(f=>`
+    <tr style="border-bottom:1px solid var(--border)${f.id===focusEditId?';background:rgba(255,184,48,.08)':''}">
+      <td style="padding:6px 8px;color:var(--green)">${_mpMn(f.element_id)}</td>
+      <td style="padding:6px 8px;color:var(--text-dim);font-size:8px">${f.date_from} → ${f.date_to}</td>
+      <td style="padding:6px 8px;color:var(--blue);font-size:8px">${(f.products||[]).map(_mpPn).join(', ')}</td>
+      <td style="padding:6px 8px;text-align:right;white-space:nowrap"><button class="tb-btn sec" style="padding:2px 7px;margin-right:4px" onclick="_editMillFocus('${f.id}')" title="Edit">✎</button><button class="tb-btn sec" style="padding:2px 7px" onclick="_deleteMillFocus('${f.id}')" title="Delete">✕</button></td>
+    </tr>`).join(''):`<tr><td colspan="4" style="padding:10px;text-align:center;color:var(--text-dim)">No focus rules — all products chased.</td></tr>`;
+
   showModalContent(`
     <div class="modal-hdr"><span class="modal-title">⚙ Finish-Mill Policies</span><span class="modal-close" onclick="closeModal()">✕</span></div>
-    <div class="modal-body" style="font-family:var(--mono);font-size:9px;min-width:600px">
-      <div style="color:var(--text-dim);margin-bottom:10px;line-height:1.5">Tweak how a mill manages its silos for a date range, without editing topology. Levels show in both % and days-of-cover; the urgency formula stays fixed. Reverts automatically when the window ends.</div>
-      <table style="width:100%;border-collapse:collapse;margin-bottom:12px">
+    <div class="modal-body" style="font-family:var(--mono);font-size:9px;min-width:620px;max-height:78vh;overflow:auto">
+      <div style="color:var(--text-dim);margin-bottom:10px;line-height:1.5">Per-product objectives for how a mill manages each product's silo over a date range — levels in % and days-of-cover; urgency formula stays fixed. Reverts when the window ends.</div>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:10px">
         <thead><tr style="color:var(--text-dim);font-size:8px;text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid var(--border2)">
-          <th style="text-align:left;padding:5px 8px">Mill</th><th style="text-align:left;padding:5px 8px">Dates</th><th style="text-align:left;padding:5px 8px">Policy</th><th></th>
-        </tr></thead><tbody>${rows}</tbody>
+          <th style="text-align:left;padding:5px 8px">Mill</th><th style="text-align:left;padding:5px 8px">Product</th><th style="text-align:left;padding:5px 8px">Dates</th><th style="text-align:left;padding:5px 8px">Policy</th><th></th>
+        </tr></thead><tbody>${polRows}</tbody>
       </table>
       <div style="border-top:1px solid var(--border2);padding-top:11px">
         <input type="hidden" id="mp-edit-id" value="${editId||''}">
-        <div style="font-size:8px;letter-spacing:1px;color:${editing?'var(--amber)':'var(--text-dim)'};text-transform:uppercase;margin-bottom:8px">${editing?'✎ Edit policy':'＋ New policy'}</div>
-        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px 12px;margin-bottom:10px">
-          <div><div class="fl">Finish mill</div><select class="fi" id="mp-mill" onchange="_mpMillChanged()" style="width:100%">${milOpts}</select></div>
+        <div style="font-size:8px;letter-spacing:1px;color:${editing?'var(--amber)':'var(--text-dim)'};text-transform:uppercase;margin-bottom:8px">${editing?'✎ Edit policy':'＋ New per-product policy'}</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px 12px;margin-bottom:10px">
+          <div><div class="fl">Finish mill</div><select class="fi" id="mp-mill" onchange="_mpMillChanged()" style="width:100%">${milOpts(selMill)}</select></div>
+          <div><div class="fl">Product</div><select class="fi" id="mp-prod" onchange="_mpProdChanged()" style="width:100%">${prodOpts}</select></div>
           <div><div class="fl">From</div><input class="fi" id="mp-from" type="date" value="${dFrom}" style="width:100%"></div>
           <div><div class="fl">To</div><input class="fi" id="mp-to" type="date" value="${dTo}" style="width:100%"></div>
-        </div>
-        <div style="margin-bottom:10px">
-          <div class="fl">Products considered</div>
-          <div id="mp-prod-chips" style="display:flex;flex-wrap:wrap;gap:5px;margin-top:3px"></div>
-          <div id="mp-prod-note" style="font-size:8px;color:var(--text-dim);margin-top:4px"></div>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
           ${lvlRow('target','Target level',100)}
@@ -3799,33 +3805,54 @@ function openMillPolicyManager(editId){
         <div id="mp-warn" style="display:none;font-size:9px;color:var(--red);margin-top:6px">⚠ Need: critical floor &lt; target ≤ stop.</div>
         <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">
           ${editing?`<button class="tb-btn sec" onclick="openMillPolicyManager()">Cancel edit</button>`:''}
-          <button class="tb-btn sec" onclick="closeModal()">Close</button>
           <button class="tb-btn" id="mp-save" style="background:var(--green);color:var(--bg)" onclick="_saveMillPolicy()">${editing?'✎ Save & run':'⚙ Add policy & run'}</button>
         </div>
       </div>
+
+      <div style="border-top:2px solid var(--border2);margin-top:16px;padding-top:12px">
+        <div style="font-size:9px;letter-spacing:1px;color:var(--blue);text-transform:uppercase;margin-bottom:6px">Products considered (pause)</div>
+        <div style="color:var(--text-dim);margin-bottom:8px;line-height:1.4">Separately limit which products a mill chases in a window. Listed products are the ONLY ones it makes then; others are paused (manager campaigns still override).</div>
+        <table style="width:100%;border-collapse:collapse;margin-bottom:10px">
+          <thead><tr style="color:var(--text-dim);font-size:8px;text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid var(--border2)">
+            <th style="text-align:left;padding:5px 8px">Mill</th><th style="text-align:left;padding:5px 8px">Dates</th><th style="text-align:left;padding:5px 8px">Chases only</th><th></th>
+          </tr></thead><tbody>${focusRows}</tbody>
+        </table>
+        <input type="hidden" id="mpf-edit-id" value="${focusEditId||''}">
+        <div style="font-size:8px;letter-spacing:1px;color:${fEditing?'var(--amber)':'var(--text-dim)'};text-transform:uppercase;margin-bottom:6px">${fEditing?'✎ Edit focus':'＋ New focus'}</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px 12px;margin-bottom:8px">
+          <div><div class="fl">Finish mill</div><select class="fi" id="mpf-mill" onchange="_mpfMillChanged()" style="width:100%">${milOpts(fMill)}</select></div>
+          <div><div class="fl">From</div><input class="fi" id="mpf-from" type="date" value="${fFrom}" style="width:100%"></div>
+          <div><div class="fl">To</div><input class="fi" id="mpf-to" type="date" value="${fTo}" style="width:100%"></div>
+        </div>
+        <div class="fl">Products to chase</div>
+        <div id="mpf-chips" style="display:flex;flex-wrap:wrap;gap:5px;margin-top:3px"></div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px">
+          ${fEditing?`<button class="tb-btn sec" onclick="openMillPolicyManager()">Cancel edit</button>`:''}
+          <button class="tb-btn" style="background:var(--blue);color:var(--bg)" onclick="_saveMillFocus()">${fEditing?'✎ Save focus & run':'＋ Add focus & run'}</button>
+        </div>
+      </div>
     </div>`);
-  _mpRenderProds(); _mpRefreshMeta();
-  ['target','crit','stop'].forEach(k=>_mpSync(k,'range')); _mpUpdate();
+  _mpRefreshMeta(); ['target','crit','stop'].forEach(k=>_mpSync(k,'range')); _mpUpdate();
+  _mpfRenderChips();
 }
 function _saveMillPolicy(){
   const editId=document.getElementById('mp-edit-id')?.value||'';
   const mill=document.getElementById('mp-mill')?.value;
+  const prod=document.getElementById('mp-prod')?.value;
   const from=document.getElementById('mp-from')?.value, to=document.getElementById('mp-to')?.value;
   const v=id=>parseFloat(document.getElementById('mp-'+id)?.value)||0;
-  if(!mill||!from||!to){ statMsg('Fill mill and dates'); return; }
+  if(!mill||!prod||!from||!to){ statMsg('Fill mill, product and dates'); return; }
   if(from>to){ statMsg('From date must be on or before To date'); return; }
   const crit=v('crit'),target=v('target'),stop=v('stop');
   if(!(crit<target&&target<=stop)){ statMsg('Need: critical floor < target ≤ stop'); return; }
-  const allProds=_mpProdsOf(mill); const sel=[...(window._mpSel||[])];
   const params={ target_pct:target, critical_floor_pct:crit, stop_pct:stop,
     restart_cover_days:v('restart'), lookahead_days:v('look'), min_run_days:v('minrun') };
-  const products=(sel.length&&sel.length<allProds.length)?sel:null; // null = all products
   if(!DB.mill_policies) DB.mill_policies=[];
   if(editId){
     const p=DB.mill_policies.find(x=>x.id===editId);
-    if(p) Object.assign(p,{ element_ids:[mill], date_from:from, date_to:to, products, params });
+    if(p) Object.assign(p,{ element_id:mill, product_id:prod, date_from:from, date_to:to, params });
   } else {
-    DB.mill_policies.push({ id:'mp_'+Date.now(), name:'', element_ids:[mill], date_from:from, date_to:to, products, params, created_at:new Date().toISOString() });
+    DB.mill_policies.push({ id:'mp_'+Date.now(), element_id:mill, product_id:prod, date_from:from, date_to:to, params, created_at:new Date().toISOString() });
   }
   autoSave(); closeModal();
   statMsg((editId?'Mill policy updated':'Mill policy saved')+' — running simulation…');
@@ -3833,10 +3860,49 @@ function _saveMillPolicy(){
 }
 function _editMillPolicy(id){ const p=(DB.mill_policies||[]).find(x=>x.id===id); if(!p){ openMillPolicyManager(); return; } openMillPolicyManager(id); }
 function _deleteMillPolicy(id){
-  if(!confirm('Delete this mill policy?')) return;
+  if(!confirm('Delete this per-product policy?')) return;
   DB.mill_policies=(DB.mill_policies||[]).filter(p=>p.id!==id);
   autoSave(); openMillPolicyManager();
-  statMsg('Mill policy removed — re-run simulation to update projections');
+  statMsg('Policy removed — re-run simulation to update projections');
+}
+
+// ── Products considered (focus) ──
+function _mpfRenderChips(){
+  const mill=document.getElementById('mpf-mill')?.value; const prods=_mpProdsOf(mill);
+  const wrap=document.getElementById('mpf-chips'); if(!wrap) return;
+  if(!window._mpFocusSel) window._mpFocusSel=new Set(prods);
+  wrap.innerHTML=prods.map(p=>{ const on=window._mpFocusSel.has(p);
+    return `<span onclick="_mpfToggle('${p}')" style="font-size:9px;padding:3px 9px;border-radius:4px;cursor:pointer;border:1px solid ${on?'var(--blue)':'var(--border2)'};background:${on?'rgba(77,166,255,.16)':'transparent'};color:${on?'var(--blue)':'var(--text-dim)'}">${_mpPn(p)}</span>`;
+  }).join('');
+}
+function _mpfToggle(pid){
+  if(!window._mpFocusSel) window._mpFocusSel=new Set();
+  if(window._mpFocusSel.has(pid)){ if(window._mpFocusSel.size>1) window._mpFocusSel.delete(pid); } else window._mpFocusSel.add(pid);
+  _mpfRenderChips();
+}
+function _mpfMillChanged(){ window._mpFocusSel=new Set(_mpProdsOf(document.getElementById('mpf-mill').value)); _mpfRenderChips(); }
+function _saveMillFocus(){
+  const editId=document.getElementById('mpf-edit-id')?.value||'';
+  const mill=document.getElementById('mpf-mill')?.value;
+  const from=document.getElementById('mpf-from')?.value, to=document.getElementById('mpf-to')?.value;
+  const products=[...(window._mpFocusSel||[])];
+  if(!mill||!from||!to){ statMsg('Fill mill and dates'); return; }
+  if(from>to){ statMsg('From date must be on or before To date'); return; }
+  if(!products.length){ statMsg('Select at least one product to chase'); return; }
+  if(products.length===_mpProdsOf(mill).length){ statMsg('All products selected = no restriction; pick a subset to pause the rest'); return; }
+  if(!DB.mill_product_focus) DB.mill_product_focus=[];
+  if(editId){ const f=DB.mill_product_focus.find(x=>x.id===editId); if(f) Object.assign(f,{element_id:mill,date_from:from,date_to:to,products}); }
+  else DB.mill_product_focus.push({ id:'mpf_'+Date.now(), element_id:mill, date_from:from, date_to:to, products });
+  autoSave(); closeModal();
+  statMsg((editId?'Focus updated':'Focus saved')+' — running simulation…');
+  if(typeof runSimulation==='function') runSimulation();
+}
+function _editMillFocus(id){ const f=(DB.mill_product_focus||[]).find(x=>x.id===id); if(!f){ openMillPolicyManager(); return; } openMillPolicyManager(undefined,id); }
+function _deleteMillFocus(id){
+  if(!confirm('Delete this products-considered rule?')) return;
+  DB.mill_product_focus=(DB.mill_product_focus||[]).filter(f=>f.id!==id);
+  autoSave(); openMillPolicyManager();
+  statMsg('Focus removed — re-run simulation to update projections');
 }
 
 function showCampaignPopup(elId, dateStr, runStart, runEnd, runProduct){
@@ -4427,11 +4493,9 @@ function executeDeleteElement(elId){
   if(DB.simulation_rules) DB.simulation_rules.forEach(rule=>{
     if(Array.isArray(rule.element_ids)) rule.element_ids=rule.element_ids.filter(id=>id!==elId);
   });
-  // Mill policies: drop this element; remove any policy left with no elements
-  if(DB.mill_policies){
-    DB.mill_policies.forEach(p=>{ if(Array.isArray(p.element_ids)) p.element_ids=p.element_ids.filter(id=>id!==elId); });
-    DB.mill_policies=DB.mill_policies.filter(p=>(p.element_ids||[]).length);
-  }
+  // Mill policies + focus: drop any row referencing this element
+  if(DB.mill_policies) DB.mill_policies=DB.mill_policies.filter(p=>(p.element_id||(p.element_ids||[])[0])!==elId);
+  if(DB.mill_product_focus) DB.mill_product_focus=DB.mill_product_focus.filter(f=>f.element_id!==elId);
 
   // Remove element itself
   DB.elements = DB.elements.filter(e=>e.id!==elId);
@@ -10147,21 +10211,30 @@ function simulate(elements, connections, horizon, includeProposed=false){
     });
   };
 
-  // ── Mill policy overrides (per element, date-bounded) ───────────────────
-  // Resolve the effective override params + products allow-list for a mill on a day.
-  const _polByEl={};
-  (DB.mill_policies||[]).forEach(p=>{ (p.element_ids||[]).forEach(eid=>{ (_polByEl[eid]=_polByEl[eid]||[]).push(p); }); });
-  const effMillPolicy=(millId,day)=>{
-    const dayDate=new Date(ruleSimStart.getTime()+(day-1)*864e5);
-    const out={params:{},products:null};
+  // ── Mill policy overrides (per mill+PRODUCT, date-bounded) ──────────────
+  const _polByEl={}, _focusByEl={};
+  (DB.mill_policies||[]).forEach(p=>{ const eid=p.element_id||(p.element_ids||[])[0]; if(eid)(_polByEl[eid]=_polByEl[eid]||[]).push(p); });
+  (DB.mill_product_focus||[]).forEach(f=>{ const eid=f.element_id||(f.element_ids||[])[0]; if(eid)(_focusByEl[eid]=_focusByEl[eid]||[]).push(f); });
+  const _polActive=(from,to,day)=>{ const d=new Date(ruleSimStart.getTime()+(day-1)*864e5);
+    const f=from?new Date(from+'T00:00:00'):null, t=to?new Date(to+'T00:00:00'):null;
+    if(f&&d<f) return false; if(t&&d>t) return false; return true; };
+  // Resolve effective params for a (mill, product) on a day. A row with no product_id
+  // is treated as applying to all of the mill's products (legacy/back-compat).
+  const effMillPolicy=(millId,prodId,day)=>{
+    const out={};
     (_polByEl[millId]||[]).forEach(p=>{
-      const f=p.date_from?new Date(p.date_from+'T00:00:00'):null;
-      const t=p.date_to?new Date(p.date_to+'T00:00:00'):null;
-      if(f&&dayDate<f) return; if(t&&dayDate>t) return;
-      Object.keys(p.params||{}).forEach(k=>{ const v=p.params[k]; if(v!=null&&v!=='') out.params[k]=v; });
-      if(Array.isArray(p.products)&&p.products.length) out.products = out.products?out.products.filter(x=>p.products.includes(x)):p.products.slice();
+      if(!_polActive(p.date_from,p.date_to,day)) return;
+      if(p.product_id && p.product_id!==prodId) return;
+      Object.keys(p.params||{}).forEach(k=>{ const v=p.params[k]; if(v!=null&&v!=='') out[k]=v; });
     });
     return out;
+  };
+  // Allowed-product set for a mill on a day (null = all). Union across active focus rows.
+  const millAllowedProducts=(millId,day)=>{
+    let set=null;
+    (_focusByEl[millId]||[]).forEach(f=>{ if(!_polActive(f.date_from,f.date_to,day)) return;
+      if(Array.isArray(f.products)&&f.products.length){ set=set||new Set(); f.products.forEach(p=>set.add(p)); } });
+    return set;
   };
 
   // ── PLANNED DISPATCH MAP ─────────────────────────────
@@ -10631,33 +10704,34 @@ function simulate(elements, connections, horizon, includeProposed=false){
       }
 
       // ── MILL ROUTING ─────────────────────────────────────
-      // Effective mill-policy override for this mill/day (target/floor/stop/lookahead +
-      // products allow-list). Each falls back to silo prop / engine default when unset.
-      const _pol=effMillPolicy(mill.id,day), _pp=_pol.params;
-      const _stopFrac=(_pp.stop_pct!=null)?Math.min(1,Math.max(0,parseFloat(_pp.stop_pct)/100)):0.98;
-      const _ovTarget=(_pp.target_pct!=null)?parseFloat(_pp.target_pct):undefined;
-      const _ovFloor =(_pp.critical_floor_pct!=null)?parseFloat(_pp.critical_floor_pct):undefined;
-      const _ovLook  =(_pp.lookahead_days!=null)?parseFloat(_pp.lookahead_days):undefined;
+      // Products-considered (separate mill-level allow-list): which products the mill
+      // may chase in the window (null = all). Per-product objectives come from effMillPolicy.
+      const _allowed=millAllowedProducts(mill.id,day);
 
-      // Build candidate for each product this mill can make
-      const candidates=[];
+      // Build candidate for each product this mill can make. Target/floor/stop/lookahead
+      // are resolved PER PRODUCT (that product's silo objective) — a multi-product mill
+      // behaves differently per product (e.g. IL vs SPC).
+      let candidates=[];
       caps.forEach(cap=>{
         const prodId=cap.product_id;
-        // Products-considered filter: skip products the policy pauses for this window
-        if(_pol.products && !_pol.products.includes(prodId)) return;
+        if(_allowed && !_allowed.has(prodId)) return; // product paused for this window
         const ratedTPD=parseFloat(cap.capacity_tpd)||0;
         if(!ratedTPD) return;
 
-        // Receiving silos: downstream, cement type, accepts this product, not full.
-        // "Full" = at/above the STOP level, measured NET of what other mills already
-        // poured in today (siloInflow) so multiple mills feeding one silo don't each
-        // size to the same free space and collectively overshoot (over-count + waste clinker).
+        // Per-(mill,product) policy params for this product's silo
+        const _pp=effMillPolicy(mill.id,prodId,day);
+        const _stopFrac=(_pp.stop_pct!=null)?Math.min(1,Math.max(0,parseFloat(_pp.stop_pct)/100)):0.98;
+        const _ovTarget=(_pp.target_pct!=null)?parseFloat(_pp.target_pct):undefined;
+        const _ovFloor =(_pp.critical_floor_pct!=null)?parseFloat(_pp.critical_floor_pct):undefined;
+        const _ovLook  =(_pp.lookahead_days!=null)?parseFloat(_pp.lookahead_days):undefined;
+
+        // Receiving silos: not full at the STOP level, NET of same-day inflow (so multiple
+        // mills feeding one silo don't each size to the same free space and overshoot).
         const recvSilos=(millProductSiloMap[mill.id]||{})[prodId]||[];
         const availSilos=recvSilos.filter(si=>{
           const stopLvl=(state[si.id]?.maxCap||0)*_stopFrac;
           const proj=(state[si.id]?.inventory||0)+(siloInflow[si.id]||0);
           if(proj>=stopLvl) return false;
-          // Concurrent source check: limit distinct mills feeding this silo today
           const maxSrc=parseInt(si.props?.max_concurrent_sources)||0; // 0 = unlimited
           if(maxSrc>0){
             const contributors=siloSourceTracker[si.id]||new Set();
@@ -10665,9 +10739,8 @@ function simulate(elements, connections, horizon, includeProposed=false){
           }
           return true;
         });
-        if(!availSilos.length) return; // all receiving silos full or source-limited
+        if(!availSilos.length) return;
 
-        // Best receiving silo = highest urgency (policy target + lookahead applied)
         let bestSilo=null, bestUrgency=-1;
         availSilos.forEach(si=>{
           const u=urgency(si.id, mill.id, _ovTarget, _ovLook);
@@ -10676,24 +10749,19 @@ function simulate(elements, connections, horizon, includeProposed=false){
         if(!bestSilo) bestSilo=availSilos[0];
         if(!bestSilo) return;
 
-        // Clinker silo and consumption rate from recipe
         const clkSilo=(millProductClinkerMap[mill.id]||{})[prodId]||null;
         const recipe=recipeMap[prodId]||[];
         const clkIng=recipe.find(ri=>
           prodMap[ri.material_id]?.category==='clinker'||ri.material_id==='clinker');
         const clkPct=clkIng?clkIng.pct/100:0;
-
         let clkAvail=Infinity;
-        if(clkSilo&&clkPct>0){
-          clkAvail=Math.max(0,state[clkSilo.id]?.inventory||0);
-        }
+        if(clkSilo&&clkPct>0) clkAvail=Math.max(0,state[clkSilo.id]?.inventory||0);
 
         const rampFactor=s.status==='rampup'?s._rampPct||1:1;
         let actualRate=ratedTPD*rampFactor;
         if(clkPct>0&&clkAvail<Infinity) actualRate=Math.min(actualRate,clkAvail/clkPct);
-        if(actualRate<1) return; // not enough clinker
+        if(actualRate<1) return;
 
-        // Cap by silo space to the STOP level, net of same-day inflow (overshoot fix).
         const siloSpace=Math.max(0,(state[bestSilo.id]?.maxCap||0)*_stopFrac
                                    -(state[bestSilo.id]?.inventory||0)
                                    -(siloInflow[bestSilo.id]||0));
@@ -10701,7 +10769,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
         if(actualRate<1) return;
 
         candidates.push({prodId,ratedTPD,actualRate,clkSilo,clkPct,bestSilo,
-                         urgency:bestUrgency});
+                         urgency:bestUrgency, pol:_pp, ovFloor:_ovFloor, ovLook:_ovLook});
       });
 
       if(!candidates.length){
@@ -10722,39 +10790,36 @@ function simulate(elements, connections, horizon, includeProposed=false){
         return;
       }
 
-      // ── RESTART HYSTERESIS (anti-flapping) ────────────
-      // If the mill is idle/blocked and a restart threshold is set (mill policy
-      // restart_cover_days, or an AI restart_threshold rule), keep it idle until a
-      // downstream silo's days-of-cover (forward-looking) drops to the threshold.
+      // ── RESTART HYSTERESIS (anti-flapping), per product ────────────
+      // If the mill is idle/blocked, a candidate product may only restart once ITS OWN
+      // silo cover (forward-looking) has dropped to that product's restart threshold
+      // (mill+product policy restart_cover_days, or an AI restart_threshold rule).
       if(s.status==='idle'||s.status==='blocked'){
-        let restartThresh=null;
         const rtRules=getRules(mill.id,'restart_threshold',day);
-        if(rtRules.length) restartThresh=parseFloat(rtRules[0].structured.params?.threshold)||5;
-        if(_pp.restart_cover_days!=null) restartThresh=parseFloat(_pp.restart_cover_days)||0;
-        if(restartThresh!=null){
-          const downSiloIds=[...new Set(caps
-            .filter(cap=>!_pol.products||_pol.products.includes(cap.product_id))
-            .flatMap(cap=>(millProductSiloMap[mill.id]||{})[cap.product_id]||[]).map(x=>x.id))];
-          const anyBelow=downSiloIds.some(sid=>{
-            const inv=state[sid]?.inventory||0;
-            const rate=siloRate(sid,_ovLook)||1;
-            return (inv/rate)<=restartThresh;
-          });
-          if(!anyBelow){ s.status='idle'; s.currentProduct=null; r.millProductHistory[mill.id].push(null); return; }
-        }
+        const ruleTh=rtRules.length?(parseFloat(rtRules[0].structured.params?.threshold)||5):null;
+        const elig=candidates.filter(c=>{
+          let th=ruleTh;
+          if(c.pol.restart_cover_days!=null) th=parseFloat(c.pol.restart_cover_days)||0;
+          if(th==null) return true;             // no hysteresis for this product → eligible
+          const inv=state[c.bestSilo.id]?.inventory||0;
+          const rate=siloRate(c.bestSilo.id,c.ovLook)||1;
+          return (inv/rate)<=th;
+        });
+        if(!elig.length){ s.status='idle'; s.currentProduct=null; r.millProductHistory[mill.id].push(null); return; }
+        candidates=elig;
       }
 
-      // ── MIN RUN BEFORE SWITCH ─────────────────────────
-      // Don't switch product until the minimum continuous run is met (mill policy
-      // min_run_days, or an AI min_run_duration rule — whichever is larger).
-      let _minDays=0;
-      const minRunRules=getRules(mill.id,'min_run_duration',day);
-      if(minRunRules.length) _minDays=Math.max(_minDays,parseFloat(minRunRules[0].structured.params?.min_days)||0);
-      if(_pp.min_run_days!=null) _minDays=Math.max(_minDays,parseFloat(_pp.min_run_days)||0);
+      // ── MIN RUN BEFORE SWITCH, per product ─────────────
+      // Don't switch off the current product until ITS minimum continuous run is met
+      // (mill+product policy min_run_days, or AI min_run_duration — whichever is larger).
       let filteredCandidates=candidates;
-      if(_minDays>0&&s.currentProduct&&(s.runDays||0)<_minDays){
-        const sameProductCandidates=candidates.filter(c=>c.prodId===s.currentProduct);
-        if(sameProductCandidates.length) filteredCandidates=sameProductCandidates;
+      if(s.currentProduct){
+        const cur=candidates.find(c=>c.prodId===s.currentProduct);
+        let _minDays=0;
+        const minRunRules=getRules(mill.id,'min_run_duration',day);
+        if(minRunRules.length) _minDays=Math.max(_minDays,parseFloat(minRunRules[0].structured.params?.min_days)||0);
+        if(cur&&cur.pol.min_run_days!=null) _minDays=Math.max(_minDays,parseFloat(cur.pol.min_run_days)||0);
+        if(_minDays>0&&cur&&(s.runDays||0)<_minDays) filteredCandidates=[cur];
       }
 
       // ── RULE: product_switch_window ───────────────────
@@ -10780,7 +10845,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
 
       // Critical pre-pass: if any silo will empty within 1 day, force that product
       // Note: critical emergencies override switch-window rules intentionally
-      const critCandidates=filteredCandidates.filter(c=>isCritical(c.bestSilo.id,mill.id,_ovFloor,_ovLook));
+      const critCandidates=filteredCandidates.filter(c=>isCritical(c.bestSilo.id,mill.id,c.ovFloor,c.ovLook));
       const pool=critCandidates.length?critCandidates:filteredCandidates;
 
       // Sort by urgency desc (urgency already accounts for net depletion)
