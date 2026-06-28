@@ -10779,18 +10779,35 @@ function simulate(elements, connections, horizon, includeProposed=false){
       });
 
       if(!candidates.length){
-        // Determine why: all silos full or no clinker
-        const anyHasClinker=caps.some(cap=>{
-          const clkSilo=(millProductClinkerMap[mill.id]||{})[cap.product_id];
-          return !clkSilo||(state[clkSilo.id]?.inventory||0)>0;
+        // Classify the REAL reason per product, using each product's effective STOP
+        // level (policy or 98%) net of same-day inflow, and a real clinker check —
+        // so "silos at policy stop" reports as blocked (expected), not a false
+        // "no clinker" shortfall. Only a genuine clinker shortage is 'starved'.
+        let clinkerShort=false, silosFull=false, hadProducible=false, anyPaused=false;
+        caps.forEach(cap=>{
+          const pid=cap.product_id;
+          if(_allowed && !_allowed.has(pid)){ anyPaused=true; return; }
+          if(!(parseFloat(cap.capacity_tpd)>0)) return;
+          hadProducible=true;
+          const pp=effMillPolicy(mill.id,pid,day);
+          const sf=(pp.stop_pct!=null)?Math.min(1,Math.max(0,parseFloat(pp.stop_pct)/100)):0.98;
+          const recv=(millProductSiloMap[mill.id]||{})[pid]||[];
+          const hasSpace=recv.some(si=>((state[si.id]?.inventory||0)+(siloInflow[si.id]||0)) < (state[si.id]?.maxCap||0)*sf);
+          const clkSilo=(millProductClinkerMap[mill.id]||{})[pid]||null;
+          const recipe=recipeMap[pid]||[];
+          const clkIng=recipe.find(ri=>prodMap[ri.material_id]?.category==='clinker'||ri.material_id==='clinker');
+          const clkPct=clkIng?clkIng.pct/100:0;
+          const clkOk=!(clkSilo&&clkPct>0)||(Math.max(0,state[clkSilo.id]?.inventory||0)>=1);
+          if(hasSpace && !clkOk) clinkerShort=true;   // wants to run, no clinker → real shortfall
+          if(!hasSpace) silosFull=true;               // silo at stop level → blocked (expected)
         });
-        const allSilosFull=caps.every(cap=>{
-          const recv=(millProductSiloMap[mill.id]||{})[cap.product_id]||[];
-          return recv.every(si=>state[si.id]?.inventory>=(state[si.id]?.maxCap||0)*0.98);
-        });
-        s.status=allSilosFull?'blocked':'starved';
-        const cause=allSilosFull?'All receiving silos full':'No clinker available';
-        logStop(mill.id,mill.name,day,s.status,cause);
+        let status, cause;
+        if(!hadProducible && anyPaused){ status='idle'; cause='All products paused (policy)'; }
+        else if(clinkerShort){ status='starved'; cause='No clinker available'; }
+        else if(silosFull){ status='blocked'; cause='Receiving silos at stop level'; }
+        else { status='idle'; cause='No production needed'; }
+        s.status=status;
+        logStop(mill.id,mill.name,day,status,cause);
         s.currentProduct=null;
         r.millProductHistory[mill.id].push(null);
         return;
