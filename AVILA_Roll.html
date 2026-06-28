@@ -7951,6 +7951,68 @@ function rpPlannedLoadingForDest(destFacId){
   return map;
 }
 
+// ── Rail loading capacity helpers (shared by display + planner) ────
+// A rail dispatch point's siding can physically load only a fixed number of cars per
+// day — `std_loading_cars_shift × shifts_per_day` — TOTAL, across every destination and
+// product it serves. These helpers enforce that single shared cap everywhere loading is
+// derived, so the schedule never shows (or plans) more than the siding can actually load.
+
+// Returns a (dayNum)=>bool predicate for whether a given simulation day is a working
+// (loading) day for this dispatch point, honoring working_days + facility non-working days.
+function _mkRailWorkDayFn(dp){
+  const setting=dp?.props?.working_days||'weekdays';
+  const nwd=new Set((DB.non_working_days||[]).map(n=>n.date));
+  const start=new Date((S.simCfg?.start_date||'')+'T00:00:00');
+  return (dayNum)=>{
+    const dt=new Date(start.getTime()+(dayNum-1)*864e5);
+    if(nwd.has(dt._ymd())) return false;
+    const dow=(dt.getDay()+6)%7; // Mon=0..Sun=6
+    if(setting==='7_days') return true;
+    if(setting==='mon_sat') return dow<=5;
+    return dow<=4; // weekdays default
+  };
+}
+
+// The per-dispatch-point physical loading cap, in cars/day.
+function _railCarsPerDay(dp){
+  return (parseFloat(dp?.props?.std_loading_cars_shift||dp?.props?.std_loading_cars_day)||10)
+        *(parseFloat(dp?.props?.shifts_per_day)||1);
+}
+
+// Allocate per-day car loading for a set of movements that all share ONE dispatch point's
+// loading capacity. Movements are scheduled earliest-switch-day-first (earliest deadline
+// wins capacity) and load ASAP within each [load_start_day, switch_day) working-day window,
+// never pushing any day over `carsPerDay` total. Mutates each movement, setting:
+//   m.placed   = { day:cars } actually loadable
+//   m.unplaced = cars that physically cannot be loaded in time (over-commitment)
+// Returns { byDay, overflow } where byDay[d] is the siding's TOTAL cars loaded on day d
+// (<= carsPerDay) and overflow lists movements with unplaced cars.
+function rpAllocateLoading(movements, carsPerDay, isWorkDay){
+  const cap=Math.max(0,carsPerDay||0);
+  const byDay={};
+  const overflow=[];
+  const sorted=[...movements]
+    .filter(m=>m.cars>0&&m.sw>m.ls)
+    .sort((a,b)=>(a.sw-b.sw)||(a.ls-b.ls));
+  sorted.forEach(m=>{
+    m.placed={}; m.unplaced=0;
+    let rem=m.cars;
+    for(let d=m.ls;d<m.sw&&rem>0;d++){
+      if(!isWorkDay(d)) continue;
+      const free=cap-(byDay[d]||0);
+      if(free<=0) continue;
+      const put=Math.min(free,rem);
+      byDay[d]=(byDay[d]||0)+put;
+      m.placed[d]=(m.placed[d]||0)+put;
+      rem-=put;
+    }
+    if(rem>0){ m.unplaced=rem; overflow.push(m); }
+  });
+  // Movements with no valid window still get cleared fields for safe access downstream.
+  movements.forEach(m=>{ if(!m.placed){m.placed={};m.unplaced=m.cars>0?m.cars:0;} });
+  return {byDay,overflow};
+}
+
 // ── Main render ───────────────────────────────────────────────────
 function rpRender(){
   if(!S.simCfg.start_date){
@@ -8158,39 +8220,32 @@ function rpRender(){
         origRows.push(`<tr class="tp-row-rail-silo"><td style="color:#38bdf8">${railSilo.name}</td>${railCells}</tr>`);
       }
 
-      // Loading per day (all statuses shown)
-      // Only spread loading across WORKING days — skip weekends and non-working days
+      // Loading per day — capped at the dispatch point's physical loading capacity.
+      // The siding can load at most `carsPerDay` cars/day TOTAL, shared across every
+      // destination & product it serves. So we allocate ALL of this dp's movements onto
+      // working days at once (earliest switch day first, ASAP within each load window)
+      // without ever exceeding that cap, then display the share that belongs to the
+      // currently-visible movements. byDay holds the siding's true per-day total (for
+      // at-capacity styling); _visUnplaced surfaces any cars that can't be loaded in time.
       const loadMap={}; const dispMap={};
-      const _rpWorkDays=dp.props?.working_days||'weekdays';
-      const _rpNwd=new Set((DB.non_working_days||[]).map(n=>n.date));
-      const _rpIsWorkDay=(dayNum)=>{
-        const dt=new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(dayNum-1)*864e5);
-        const dow=(dt.getDay()+6)%7; // Mon=0..Sun=6
-        if(_rpNwd.has(dt._ymd())) return false;
-        if(_rpWorkDays==='7_days') return true;
-        if(_rpWorkDays==='mon_sat') return dow<=5;
-        return dow<=4; // weekdays default
-      };
-      myDests.forEach(destFacId=>{
-        DB.rail_movements
-          .filter(rm=>rm.from_facility_id===S.facility_id&&rm.to_facility_id===destFacId)
-          .filter(rm=>!_rp.prodId||rm.product_id===_rp.prodId)
-          .filter(rm=>!rm.departure_date||rm.departure_date>=S.simCfg.start_date)
-          .forEach(rm=>{
-            const sw=rm.switch_day; const ls=rm.load_start_day;
-            if(!sw||!ls) return;
-            const st=rm.status||'Planned';
-            const cars=parseInt(rm.wagon_count)||0;
-            // Count only working days in the loading window
-            const workingLoadDays=[];
-            for(let d=ls;d<sw;d++) if(_rpIsWorkDay(d)) workingLoadDays.push(d);
-            const daysLoad=workingLoadDays.length||1;
-            const cpd=Math.ceil(cars/daysLoad);
-            // Only assign loading to working days
-            workingLoadDays.forEach(d=>{ loadMap[d]=(loadMap[d]||0)+cpd; });
-            if(!dispMap[sw]) dispMap[sw]=[];
-            dispMap[sw].push({cars,status:st});
-          });
+      const _isWorkDp=_mkRailWorkDayFn(dp);
+      const _dpDestIds=new Set((dp.props?.destinations||[]).map(x=>x.facility_id));
+      const _dpMoves=DB.rail_movements
+        .filter(rm=>(rm.from_dispatch_id===dp.id||(rm.from_facility_id===S.facility_id&&_dpDestIds.has(rm.to_facility_id)))
+          &&rm.switch_day&&rm.load_start_day
+          &&(!rm.departure_date||rm.departure_date>=S.simCfg.start_date))
+        .map(rm=>({id:rm.id,destFacId:rm.to_facility_id,productId:rm.product_id||'',
+          status:rm.status||'Planned',cars:parseInt(rm.wagon_count)||0,
+          ls:rm.load_start_day,sw:rm.switch_day}));
+      const _alloc=rpAllocateLoading(_dpMoves,carsPerDay,_isWorkDp);
+      let _visUnplaced=0;
+      _dpMoves.forEach(m=>{
+        const visible=myDests.includes(m.destFacId)&&(!_rp.prodId||m.productId===_rp.prodId);
+        if(!visible) return;
+        Object.entries(m.placed||{}).forEach(([d,c])=>{ loadMap[+d]=(loadMap[+d]||0)+c; });
+        if(m.unplaced>0) _visUnplaced+=m.unplaced;
+        if(!dispMap[m.sw]) dispMap[m.sw]=[];
+        dispMap[m.sw].push({cars:m.cars,status:m.status});
       });
 
       const loadCells=months.map(mon=>{
@@ -8198,14 +8253,23 @@ function rpRender(){
         const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monC>0?monC+' cars':'—'}</td>`;
         return mTd+mon.days.map(d=>{
           const cars=loadMap[d]||0;
+          const sidingTot=_alloc.byDay[d]||0;
+          const atCap=carsPerDay>0&&sidingTot>=carsPerDay;
           const sw=rpIsSwitch(d,switchDays);
           const tSty=_tpTdSty(d);
           const clsA=sw?' class="tp-col-switch"':'';
-          const styA=tSty?` style="${tSty}"`:'';
-          return `<td${clsA}${styA}>${cars>0?`${cars} cars`:'—'}</td>`;
+          const capSty=atCap?'color:#ffb830;font-weight:700;':'';
+          const styA=(tSty||capSty)?` style="${capSty}${tSty}"`:'';
+          const titleA=cars>0
+            ?` title="${cars} car(s) loaded${sidingTot!==cars?` · siding total ${sidingTot}/${carsPerDay}`:` of ${carsPerDay} cap`}${atCap?' — at capacity':''}"`
+            :'';
+          return `<td${clsA}${styA}${titleA}>${cars>0?`${cars} cars`:'—'}</td>`;
         }).join('');
       }).join('');
-      origRows.push(`<tr class="tp-row-loading"><td style="color:#4da6ff">  ↑ Loading (cars/d)</td>${loadCells}</tr>`);
+      const _loadLbl=_visUnplaced>0
+        ?`  ↑ Loading (cars/d) <span style="color:#ff3d5a" title="${_visUnplaced} car(s) cannot be loaded within the ${carsPerDay} cars/day siding capacity before their dispatch day — the plan is over-committed. Reduce wagons, add a loading shift, or spread switch days.">⚠ ${_visUnplaced} unscheduled</span>`
+        :'  ↑ Loading (cars/d)';
+      origRows.push(`<tr class="tp-row-loading"><td style="color:#4da6ff">${_loadLbl}</td>${loadCells}</tr>`);
 
       // Dispatch on switch days — color-coded by movement status
       const _dOrder=['In Transit','Confirmed','Planned','Proposed'];
@@ -9246,6 +9310,33 @@ function _planRailShipments(rBase){
     const switchDays=dp.props.switch_days||[]; // Mon=0..Sun=6
     const dests=dp.props.destinations||[];
 
+    // Working-day predicate for this dispatch point (hoisted; used both to seed the shared
+    // loading budget below and inside the per-destination scheduler).
+    const _isWorkingDay=_mkRailWorkDayFn(dp);
+
+    // ── Shared per-dp loading budget ──────────────────────────────────────────
+    // The siding loads at most stdCarsDay cars/day TOTAL, across ALL destinations. Track
+    // cars already committed to loading on each day so newly-proposed movements (for any
+    // destination) only consume the REMAINING daily capacity. Seeded from movements that
+    // are already locked (Planned/Confirmed/In Transit) or user-created Proposed — i.e.
+    // everything except the auto-Proposed entries this pass just cleared and will regenerate.
+    const loadUsedByDay={};
+    DB.rail_movements
+      .filter(rm=>(rm.from_dispatch_id===dp.id||(rm.from_facility_id===S.facility_id&&dests.some(x=>x.facility_id===rm.to_facility_id)))
+        &&rm.switch_day&&rm.load_start_day
+        &&(['Planned','Confirmed','In Transit'].includes(rm.status||'')||
+           (rm.status==='Proposed'&&rm.notes!=='Auto-generated by simulation')))
+      .forEach(rm=>{
+        let rem=parseInt(rm.wagon_count)||0;
+        for(let d=rm.load_start_day;d<rm.switch_day&&rem>0;d++){
+          if(!_isWorkingDay(d)) continue;
+          const free=stdCarsDay-(loadUsedByDay[d]||0);
+          if(free<=0) continue;
+          const put=Math.min(free,rem);
+          loadUsedByDay[d]=(loadUsedByDay[d]||0)+put; rem-=put;
+        }
+      });
+
     // Find all switch day indices in the horizon
     const allSwitchDayNums=[];
     for(let d=1;d<=horizon;d++){
@@ -9368,44 +9459,39 @@ function _planRailShipments(rBase){
         const projAtArrival=Math.max(0, projInvFwd[arrivalDay]+(plannedArrivals[arrivalDay]||0));
         // Skip if terminal will already be at/near capacity on arrival day
         if(projAtArrival>=siloMax*0.95){ usedSwitchDays.add(switchDay); scanFrom=critDay+1; continue; }
-        // Loading rate cap: only count WORKING days in the window since previous switch
-        // working_days: 'weekdays'=Mon-Fri, 'mon_sat'=Mon-Sat, '7_days'=all
-        const workDaysSetting=dp.props.working_days||'weekdays';
-        const nwdSetLocal=new Set((DB.non_working_days||[]).map(n=>n.date));
-        const _isWorkingDay=(dayNum)=>{
-          const dt=new Date(simStart.getTime()+(dayNum-1)*864e5);
-          const dow=(dt.getDay()+6)%7; // Mon=0..Sun=6
-          const dateStr=dt._ymd();
-          if(nwdSetLocal.has(dateStr)) return false; // facility holiday
-          if(workDaysSetting==='7_days') return true;
-          if(workDaysSetting==='mon_sat') return dow<=5;
-          return dow<=4; // weekdays default
-        };
-        // Count actual working days available between last switch and this switch
+        // Loading-capacity cap: count only this dp's REMAINING free car-slots on working
+        // days in the window since the previous switch day. Capacity is shared across ALL
+        // destinations via loadUsedByDay, so overlapping windows can never over-load the
+        // siding beyond stdCarsDay cars/day.
         const prevSw=switchIdx>0?allSwitchDayNums[switchIdx-1]:0;
         const rangeStart=Math.max(1, prevSw+1);
-        let availWorkingDays=0;
-        for(let d=rangeStart; d<switchDay; d++) if(_isWorkingDay(d)) availWorkingDays++;
-        const availLoadDays=Math.max(1, availWorkingDays);
-        const maxCarsLoadable=Math.floor(availLoadDays*stdCarsDay);
+        let availCap=0;
+        for(let d=rangeStart; d<switchDay; d++) if(_isWorkingDay(d)) availCap+=Math.max(0, stdCarsDay-(loadUsedByDay[d]||0));
+        const maxCarsLoadable=Math.floor(availCap);
         const maxCarsSilo=Math.floor((siloMax-projAtArrival)/carCapT);
-        const carsNeeded=Math.max(1, Math.min(maxCarsSilo, maxCarsLoadable));
+        const carsNeeded=Math.min(maxCarsSilo, maxCarsLoadable);
+        // No remaining loading capacity (or no silo room) for this switch day — skip it.
+        if(carsNeeded<1){ usedSwitchDays.add(switchDay); scanFrom=critDay+1; continue; }
 
-        // Work backward from switchDay counting only working days to find loadStart
-        const loadDays=Math.ceil(carsNeeded/stdCarsDay);
-        let loadStart=switchDay-1;
-        let workingDaysFound=0;
-        while(loadStart>=1 && workingDaysFound<loadDays){
-          if(_isWorkingDay(loadStart)) workingDaysFound++;
-          if(workingDaysFound<loadDays) loadStart--;
+        // Place cars backward from switchDay onto working days that still have free
+        // capacity in the shared budget. loadStart = earliest day actually used.
+        const _placement={};
+        let _rem=carsNeeded, loadStart=switchDay-1;
+        for(let d=switchDay-1; d>=rangeStart && _rem>0; d--){
+          if(!_isWorkingDay(d)) continue;
+          const free=stdCarsDay-(loadUsedByDay[d]||0);
+          if(free<=0) continue;
+          const put=Math.min(free,_rem);
+          _placement[d]=put; _rem-=put; loadStart=d;
         }
-        if(loadStart<1){ usedSwitchDays.add(switchDay); scanFrom=critDay+1; continue; }
+        if(_rem>0||loadStart<1){ usedSwitchDays.add(switchDay); scanFrom=critDay+1; continue; }
 
-        // Commit the movement and update the projection
+        // Commit the movement and update the projection + shared loading budget
         const tonnesArriving=carsNeeded*carCapT;
         plannedArrivals[arrivalDay]=(plannedArrivals[arrivalDay]||0)+tonnesArriving;
         rebuildFrom(arrivalDay);
         usedSwitchDays.add(switchDay);
+        Object.entries(_placement).forEach(([d,c])=>{ loadUsedByDay[+d]=(loadUsedByDay[+d]||0)+c; });
 
         const departDate=new Date(simStart.getTime()+(switchDay-1)*864e5);
         const departStr=departDate._ymd();
