@@ -5776,7 +5776,7 @@ function _renderSupplyViewInner(wrap){
 
   const indentPx=depth=>depth*14;
   const stickyLeft=(bg,depth,extra='')=>
-    `position:sticky;left:0;z-index:2;background:${bg};border-right:1px solid var(--border2);padding:4px 10px 4px ${indentPx(depth)+10}px;${extra}`;
+    `position:sticky;left:0;z-index:3;background:${bg};border-right:1px solid var(--border2);padding:4px 10px 4px ${indentPx(depth)+10}px;${extra}`;
 
   const leftW=260;
   const _legSw=(color,label)=>`<span style="display:inline-flex;align-items:center;gap:3px"><span style="width:9px;height:9px;background:${color};border-radius:1px;display:inline-block"></span>${label}</span>`;
@@ -5789,6 +5789,7 @@ function _renderSupplyViewInner(wrap){
     <span style="color:var(--text);letter-spacing:.5px">PRODUCT:</span>
     ${_legProdHTML||'<span style="opacity:.6">none</span>'}
     <span style="display:inline-flex;align-items:center;gap:3px"><span style="width:12px;height:9px;border-radius:1px;background:repeating-linear-gradient(45deg,#5f5e5a,#5f5e5a 3px,#383836 3px,#383836 6px);display:inline-block"></span>Maintenance</span>
+    <span style="display:inline-flex;align-items:center;gap:3px"><span style="width:12px;height:9px;border-radius:1px;background:repeating-linear-gradient(45deg,#5f5e5a,#5f5e5a 3px,#a32d2d 3px,#a32d2d 6px);display:inline-block"></span>Unplanned shortfall</span>
     <span style="width:1px;height:11px;background:var(--border2);margin:0 2px"></span>
     <span style="color:var(--text);letter-spacing:.5px">INVENTORY:</span>
     ${_legSw('#ff3d5a','Critical / overflow')}${_legSw('#ffb830','Low (&lt;25%)')}${_legSw('#ff8c42','Near full (&gt;85%)')}${_legSw('#00d9a3','Healthy')}
@@ -6201,6 +6202,9 @@ function _renderSupplyViewInner(wrap){
 
           node.mills.forEach(el=>{
             const maintDays=maintSetFor(el.id);
+            // Days the mill couldn't produce despite needing to (no clinker) — an
+            // UNPLANNED cement shortfall, flagged with a gray/red hatch below.
+            const starvedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='starved').map(e=>allDates[e.day-1]).filter(Boolean));
             const caps=DB.element_product_capacities.filter(c=>c.element_id===el.id);
             const maxSingleCap=caps.length?Math.max(...caps.map(c=>parseFloat(c.capacity_tpd)||0)):0;
             h+=`<tr class="supsec-cementProd">
@@ -6252,13 +6256,15 @@ function _renderSupplyViewInner(wrap){
                 const isRunStart=(!isMaint&&v>0&&runKey!==_gPrev);
                 _gPrev=runKey;
                 const maintBg='repeating-linear-gradient(45deg,#5f5e5a,#5f5e5a 3px,#383836 3px,#383836 6px)';
-                const barBg=isMaint?maintBg:(v>0?barColor:'transparent');
+                const starvedBg='repeating-linear-gradient(45deg,#5f5e5a,#5f5e5a 3px,#a32d2d 3px,#a32d2d 6px)';
+                const isStarved=(!isMaint&&v<=0&&starvedDays.has(ds));
+                const barBg=isMaint?maintBg:isStarved?starvedBg:(v>0?barColor:'transparent');
                 const campMark=(isCamp&&!isMaint)?'border-top:2px solid #4ade80;':'';
-                const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name?`${prod.name} · ${Math.round(v)} t/d`:'Idle'));
+                const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(isStarved?'⚠ Unplanned shortfall — mill could not produce (no clinker)':(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name?`${prod.name} · ${Math.round(v)} t/d`:'Idle')));
                 const lblName=(typeof spShortProd==='function')?spShortProd(prod?.name||''):(prod?.name||'');
-                const label=isRunStart?`<span style="position:absolute;left:5px;top:0;line-height:16px;white-space:nowrap;font-family:var(--mono);font-size:9px;font-weight:700;color:${_barTextColor(barColor)};pointer-events:none">${lblName} · ${Math.round(v).toLocaleString()}${isCamp?' 🔒':''}</span>`:'';
+                const label=isRunStart?`<span style="position:absolute;left:5px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:9px;font-weight:700;color:${_barTextColor(barColor)};pointer-events:none">${lblName} · ${Math.round(v).toLocaleString()}${isCamp?' 🔒':''}</span>`:'';
                 const zpos=isRunStart?'position:relative;z-index:2;':'';
-                h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="${zpos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:16px;background:${barBg};${campMark}">${label}</div></td>`;
+                h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="${zpos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barBg};${campMark}">${label}</div></td>`;
               });
             });
             h+=`</tr>`;
