@@ -5538,6 +5538,12 @@ function _supSecArrow(key){ return (window._supSecCol&&window._supSecCol.has(key
 
 function _renderSupplyViewInner(wrap){
   if(!window._supSecCol) window._supSecCol=new Set();
+  // First time the Supply page renders, start every section collapsed so the page
+  // opens as a compact overview (headers + inventory charts) instead of a wall of rows.
+  if(!window._supSecDefaultApplied){
+    window._supSecDefaultApplied=true;
+    ['clinkerInv','clinkerReq','clinkerProd','cementInv','cementNeed','cementProd','railLoad'].forEach(k=>window._supSecCol.add(k));
+  }
   if(!S.simCfg.start_date){
     wrap.innerHTML=`<div style="font-family:var(--mono);font-size:10px;color:var(--text-dim);padding:30px;text-align:center">Configure simulation dates in Configure first.</div>`;
     return;
@@ -6044,7 +6050,7 @@ function _renderSupplyViewInner(wrap){
           if(productsSet.size>0){
             // Section header row
             h+=`<tr class="sup-sec-hdr" data-seckey="cementNeed" onclick="_supToggleSec('cementNeed')" style="cursor:pointer;background:rgba(77,166,255,.05);border-top:2px solid rgba(77,166,255,.3)">
-              <td style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${prodReqColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('cementNeed')}</span> CEMENT NEED <span style="font-size:7px;opacity:.6;font-weight:400;margin-left:4px">(Direct+Transfer Demand)</span></td>`;
+              <td style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${prodReqColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('cementNeed')}</span> CEMENT REQUIREMENTS <span style="font-size:7px;opacity:.6;font-weight:400;margin-left:4px">(Direct+Transfer Demand)</span></td>`;
             months.forEach(mon=>{
               const isCol=collapsed.has(mon.ym);
               const mt=[...productsSet].reduce((s,pid)=>s+mon.dates.reduce((a,ds)=>a+totalNeed(pid,ds),0),0);
@@ -6101,7 +6107,10 @@ function _renderSupplyViewInner(wrap){
           }
         }
 
-        // ── CEMENT inventory bar chart (between requirement & inventory data) ──
+        // End of CEMENT REQUIREMENTS — capture boundary so chart+inventory can be reordered above it.
+        const _cemNeed1=h.length;
+
+        // ── CEMENT inventory bar chart ──
         h+=_invChartRow('Cement inventory','cement','#00d9a3',facEls,node.depth+1);
 
         // ══════════════════════════════════════════════════════════════
@@ -6183,6 +6192,14 @@ function _renderSupplyViewInner(wrap){
             });
             h+=`</tr>`;
           });
+        }
+
+        // ── Reorder cement block: chart + inventory data ABOVE requirements ──
+        // Built order was [requirements][chart][inventory]; swap to [chart][inventory][requirements].
+        {
+          const _needHTML=h.slice(_cemStart,_cemNeed1);
+          const _chartInvHTML=h.slice(_cemNeed1);
+          h=h.slice(0,_cemStart)+_chartInvHTML+_needHTML;
         }
 
         // ── CEMENT section (finish mills) ────────────────
@@ -6272,6 +6289,47 @@ function _renderSupplyViewInner(wrap){
             });
             h+=`</tr>`;
           });
+        }
+
+        // ── RAIL LOADING (plan vs real) — only for facilities that ship by rail ──
+        // Aggregate over all rail dispatch points at this facility (we don't break
+        // it down by destination terminal here). Plan = simulated cars loaded ×
+        // car capacity; Real = actual cars loaded (daily-data entry) × car capacity.
+        {
+          const railDisp=facEls.filter(e=>e.type==='dispatch_point'&&e.props?.dispatch_type==='Rail');
+          if(railDisp.length){
+            const railColor='#b388ff';
+            const _carCap=parseFloat(railDisp[0]?.props?.car_capacity_t)||112;
+            const railPlanDay=ds=>{ const di=allDates.indexOf(ds); if(di<0) return 0;
+              return railDisp.reduce((sum,disp)=>{ const rh=r?.railHistory?.[disp.id]||[]; const e=rh[di]; if(!e) return sum;
+                const cc=parseFloat(disp.props?.car_capacity_t)||112;
+                const cars=Object.values(e.carsLoadedByProduct||{}).reduce((a,c)=>a+(c||0),0);
+                return sum+cars*cc; },0); };
+            const railRealDay=ds=>(DB.real_rail_daily||[]).filter(rr=>rr.date===ds&&rr.facility_id===node.id&&rr.type==='loading')
+              .reduce((s,rr)=>s+(parseFloat(rr.cars)||0)*_carCap,0);
+            // Section header (total row mirrors PLAN tonnage)
+            h+=`<tr class="sup-sec-hdr" data-seckey="railLoad" onclick="_supToggleSec('railLoad')" style="cursor:pointer;background:rgba(179,136,255,.05);border-top:2px solid rgba(179,136,255,.3)">
+              <td style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${railColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('railLoad')}</span> RAIL LOADING <span style="font-size:7px;opacity:.6;font-weight:400;margin-left:4px">(plan vs real · t)</span></td>`;
+            months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+              const mt=mon.dates.reduce((a,ds)=>a+railPlanDay(ds),0);
+              h+=`<td style="border-left:2px solid rgba(179,136,255,.2);font-size:9px;font-weight:700;color:${railColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+              if(!isCol) mon.dates.forEach(ds=>{ const v=railPlanDay(ds);
+                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${railColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
+            });
+            h+=`</tr>`;
+            const railRow=(label,color,bg,fn,isReal)=>{
+              let rr=`<tr class="supsec-railLoad" style="background:${bg}"><td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${color};font-size:9px">${label}</td>`;
+              months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+                const mt=mon.dates.reduce((s,ds)=>s+fn(ds),0);
+                rr+=`<td style="border-left:2px solid rgba(179,136,255,.1);font-size:9px;color:${color};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                if(!isCol) mon.dates.forEach(ds=>{ const v=fn(ds); const cls=(isReal&&v>0)?'cell-real':'';
+                  rr+=`<td class="sup-day-${mon.ym} ${cls}" style="font-size:9px;color:${v>0?color:'rgba(179,136,255,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${(isReal&&v>0)?'700':'400'};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+              });
+              return rr+`</tr>`;
+            };
+            h+=railRow('↳ Plan',railColor,'rgba(179,136,255,.04)',railPlanDay,false);
+            h+=railRow('↳ Real','#00d9a3','rgba(0,217,163,.05)',railRealDay,true);
+          }
         }
 
         // ── End of CEMENT block: stash its HTML, then start capturing CLINKER ──
@@ -6376,7 +6434,10 @@ function _renderSupplyViewInner(wrap){
           }
         }
 
-        // ── CLINKER inventory bar chart (between requirement & inventory data) ──
+        // End of CLINKER REQUIREMENTS — capture boundary so chart+inventory can be reordered above it.
+        const _clkReq1=h.length;
+
+        // ── CLINKER inventory bar chart ──
         h+=_invChartRow('Clinker inventory','clinker','#ff8c42',facEls,node.depth+1);
 
         // ══════════════════════════════════════════════════════════════
@@ -6450,6 +6511,13 @@ function _renderSupplyViewInner(wrap){
             });
             h+=`</tr>`;
           });
+        }
+
+        // ── Reorder clinker block: chart + inventory data ABOVE requirements ──
+        {
+          const _reqHTML=h.slice(_clkStart,_clkReq1);
+          const _chartInvHTML=h.slice(_clkReq1);
+          h=h.slice(0,_clkStart)+_chartInvHTML+_reqHTML;
         }
 
         // ── CLINKER section (kilns) ──────────────────────
