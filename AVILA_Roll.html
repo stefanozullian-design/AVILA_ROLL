@@ -6361,33 +6361,33 @@ function _renderSupplyViewInner(wrap){
         const _clkStart=h.length;
 
         // ══════════════════════════════════════════════════════════════
-        // SECTION 3: CLINKER REQUIREMENTS (calculated from cement demand)
+        // SECTION 3: CLINKER REQUIREMENTS — clinker CONSUMED by actual finish-mill
+        // production (Σ production × each product's clinker recipe %). This matches what the
+        // simulation actually draws from clinker inventory, and the FINISH MILL PRODUCTION rows
+        // below. (Previously this was demand×clinker%, which overstates when production ≠ demand.)
         // ══════════════════════════════════════════════════════════════
-        if(demandPoints.length>0&&demandEls.length>0){
-          // Find all clinker products needed for cement products
+        const _clkFinishMills=facEls.filter(e=>e.type==='finish_mill');
+        {
+          // Clinker materials used by any product these mills can produce
           const clinkerProdsSet=new Set();
-          demandPoints.forEach(dp=>{
-            (dp.products||[]).forEach(p=>{
-              const prod=DB.products.find(pr=>pr.id===p.product_id);
-              if(prod&&(prod.category==='cement_bulk'||prod.category==='cement_packed')){
-                const recipes=DB.recipes.filter(r=>r.product_id===p.product_id);
-                recipes.forEach(rec=>{
-                  const mat=DB.products.find(pm=>pm.id===rec.material_id);
-                  if(mat&&mat.category==='clinker'){
-                    clinkerProdsSet.add(rec.material_id);
-                  }
-                });
-              }
+          _clkFinishMills.forEach(m=>{
+            DB.element_product_capacities.filter(c=>c.element_id===m.id).forEach(c=>{
+              DB.recipes.filter(rc=>rc.product_id===c.product_id).forEach(rec=>{
+                const mat=DB.products.find(pm=>pm.id===rec.material_id);
+                if(mat&&mat.category==='clinker') clinkerProdsSet.add(rec.material_id);
+              });
             });
           });
 
-          if(clinkerProdsSet.size>0){
+          if(_clkFinishMills.length>0&&clinkerProdsSet.size>0){
             const clinkerReqColor='#ff9d5c';
-            // Total clinker required (all types) on a date = Σ cementDemand·recipe%
-            const _clkReqDay=ds=>{ let t=0; demandPoints.forEach(dp=>{ const el=demandEls.find(e=>e.id===dp.element_id); if(!el) return;
-              (dp.products||[]).forEach(p=>{ const prod=DB.products.find(pr=>pr.id===p.product_id);
-                if(prod&&(prod.category==='cement_bulk'||prod.category==='cement_packed')){ const cd=_demandRate(el.id,ds)||0;
-                  DB.recipes.filter(rc=>rc.product_id===p.product_id&&clinkerProdsSet.has(rc.material_id)).forEach(rc=>{ t+=cd*(parseFloat(rc.pct)||0)/100; }); } }); });
+            // Clinker consumed on a date = Σ over mills of (actual production × clinker recipe %).
+            // clkId optional → restrict to a single clinker product (for the per-type rows below).
+            const _clkReqDay=(ds,clkId)=>{ const dayIdx=allDates.indexOf(ds); let t=0;
+              _clkFinishMills.forEach(m=>{ const res=resolveProduction(m,ds,dayIdx,maintSetFor(m.id));
+                if(!res.product_id||!res.capacity_tpd) return;
+                DB.recipes.filter(rc=>rc.product_id===res.product_id&&clinkerProdsSet.has(rc.material_id)&&(!clkId||rc.material_id===clkId))
+                  .forEach(rc=>{ t+=res.capacity_tpd*(parseFloat(rc.pct)||0)/100; }); });
               return t; };
             // Section header — total = sum of all clinker types below
             h+=`<tr class="sup-sec-hdr" data-seckey="clinkerReq" onclick="_supToggleSec('clinkerReq')" style="cursor:pointer;background:rgba(255,157,92,.05);border-top:2px solid rgba(255,157,92,.3)">
@@ -6405,7 +6405,7 @@ function _renderSupplyViewInner(wrap){
             });
             h+=`</tr>`;
 
-            // One row per clinker type
+            // One row per clinker type (production-consumed, via _clkReqDay restricted to clkId)
             Array.from(clinkerProdsSet).sort().forEach(clinkerProdId=>{
               const clinkerProd=DB.products.find(p=>p.id===clinkerProdId);
               const clinkerName=clinkerProd?.name||clinkerProdId;
@@ -6413,42 +6413,11 @@ function _renderSupplyViewInner(wrap){
                 <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${clinkerReqColor};font-size:9px">${clinkerName}</td>`;
               months.forEach(mon=>{
                 const isCol=collapsed.has(mon.ym);
-                const mt=mon.dates.reduce((s,ds)=>{
-                  let totalReq=0;
-                  demandPoints.forEach(dp=>{
-                    const el=demandEls.find(e=>e.id===dp.element_id);
-                    if(!el) return;
-                    (dp.products||[]).forEach(p=>{
-                      const prod=DB.products.find(pr=>pr.id===p.product_id);
-                      if(prod&&(prod.category==='cement_bulk'||prod.category==='cement_packed')){
-                        const cementDemand=_demandRate(el.id,ds)||0;
-                        const recipes=DB.recipes.filter(r=>r.product_id===p.product_id&&r.material_id===clinkerProdId);
-                        recipes.forEach(rec=>{
-                          totalReq+=cementDemand*(parseFloat(rec.pct)||0)/100;
-                        });
-                      }
-                    });
-                  });
-                  return s+totalReq;
-                },0);
+                const mt=mon.dates.reduce((s,ds)=>s+_clkReqDay(ds,clinkerProdId),0);
                 h+=`<td style="border-left:2px solid rgba(255,157,92,.1);font-size:9px;color:${clinkerReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
                 if(!isCol){
                   mon.dates.forEach(ds=>{
-                    let totalReq=0;
-                    demandPoints.forEach(dp=>{
-                      const el=demandEls.find(e=>e.id===dp.element_id);
-                      if(!el) return;
-                      (dp.products||[]).forEach(p=>{
-                        const prod=DB.products.find(pr=>pr.id===p.product_id);
-                        if(prod&&(prod.category==='cement_bulk'||prod.category==='cement_packed')){
-                          const cementDemand=_demandRate(el.id,ds)||0;
-                          const recipes=DB.recipes.filter(r=>r.product_id===p.product_id&&r.material_id===clinkerProdId);
-                          recipes.forEach(rec=>{
-                            totalReq+=cementDemand*(parseFloat(rec.pct)||0)/100;
-                          });
-                        }
-                      });
-                    });
+                    const totalReq=_clkReqDay(ds,clinkerProdId);
                     h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${totalReq>0?clinkerReqColor:'rgba(255,157,92,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${totalReq>0?Math.round(totalReq).toLocaleString():''}</td>`;
                   });
                 }
@@ -7916,21 +7885,39 @@ function rpDemand(elId,d){
   const dt=new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5);
   return _demandRate(elId,dt._ymd());
 }
-// EFFECTIVE demand a point must serve on a sim day, matching the engine:
-// own − swapped-out (relocated elsewhere) + swapped-in (relocated here from other points).
+// Demand-page value for an element on a date — aggregates DB.demand_values EXACTLY like the
+// Demand grid's getVal (sums ship_to breakdowns; DP-level value otherwise). The Demand page is
+// the single source of truth the logistics schedules must mirror, so the schedules use THIS —
+// not _demandRate, which also folds in actuals and doesn't sum ship_to (would desync).
+function _demGridVal(elId, ds){
+  let c=_demGridVal._cache;
+  if(!c){
+    c=_demGridVal._cache={};
+    (DB.demand_values||[]).forEach(v=>{
+      if(!v.element_id||!v.date) return;
+      const k=v.element_id+'|'+v.date;
+      if(v.ship_to){ if(!c[k]||!c[k]._s) c[k]={t:0,_s:true}; c[k].t+=(parseFloat(v.value_t)||0); }
+      else if(!c[k]?._s){ c[k]={t:parseFloat(v.value_t)||0}; }
+    });
+  }
+  const r=c[elId+'|'+ds];
+  return r?(r.t||0):0;
+}
+// EFFECTIVE demand shown on the Demand page = own − swapped-out + swapped-in (point-to-point),
+// computed from the SAME getVal source so the logistics schedules match the Demand page exactly.
 function rpDemandEff(elId,d){
   const ds=new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5)._ymd();
-  const own=_demandRate(elId,ds)||0;
+  const own=_demGridVal(elId,ds);
   let v=own;
-  if(typeof _resolveDemandSwap==='function'){ const sw=_resolveDemandSwap(elId,own,ds); if(sw&&sw.qty) v-=sw.qty; }
-  if(typeof _resolveDemandSwapIn==='function'){ v+=_resolveDemandSwapIn(elId,ds,(id)=>_demandRate(id,ds)||0)||0; }
+  if(typeof _resolveDemandSwap==='function'){ const sw=_resolveDemandSwap(elId,own,ds); if(sw&&sw.qty) v-=Math.min(sw.qty,own); }
+  if(typeof _resolveDemandSwapIn==='function'){ v+=_resolveDemandSwapIn(elId,ds,(id)=>_demGridVal(id,ds))||0; }
   return Math.max(0,v);
 }
-// Tonnes swapped INTO a demand point on sim day d (for the breakout row).
+// Tonnes swapped INTO a demand point on sim day d (for the breakout row) — same source as above.
 function rpSwapIn(elId,d){
   if(typeof _resolveDemandSwapIn!=='function') return 0;
   const ds=new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5)._ymd();
-  return _resolveDemandSwapIn(elId,ds,(id)=>_demandRate(id,ds)||0)||0;
+  return _resolveDemandSwapIn(elId,ds,(id)=>_demGridVal(id,ds))||0;
 }
 // Push a demand point's rows into a logistics planner table: an EFFECTIVE-demand row
 // (own − swapped-out + swapped-in) plus, when relevant, an amber "↳ ⇄ swapped in" breakout
@@ -8185,6 +8172,7 @@ function rpRender(){
   // Rail-relevant products for the selected destinations (used to keep both the chart and the
   // destination rows focused on what actually moves by rail — no empty/non-cement berth silos).
   const _railProdSet=new Set(rpGetRailProducts().map(p=>p.id));
+  if(typeof _demGridVal==='function') _demGridVal._cache=null; // fresh demand-page values
   rpRenderCharts();
   rpRenderExceptions();
 
@@ -8839,6 +8827,7 @@ function vpRender(){
     document.getElementById('vp-orig-section').style.display='none';
     return;
   }
+  if(typeof _demGridVal==='function') _demGridVal._cache=null; // mirror current Demand-page values
   vpBuildDestFilter();
   vpBuildProdFilter();
   const {startDay,endDay}=vpGetRange();
@@ -9365,7 +9354,7 @@ function _demandRate(elId, dateStr){
   return 0;
 }
 // Invalidate cache whenever demand_values changes
-function _demandCacheInvalidate(){ _demandRate._cache={}; if(typeof SP!=='undefined') SP._demIdx=null; }
+function _demandCacheInvalidate(){ _demandRate._cache={}; if(typeof _demGridVal==='function') _demGridVal._cache=null; if(typeof SP!=='undefined') SP._demIdx=null; }
 
 // ── Monthly demand total for an element (for dashboard summaries) ──
 function _demandMonthTotal(elId, year, month){
