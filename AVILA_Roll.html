@@ -5651,7 +5651,16 @@ function _renderSupplyViewInner(wrap){
       return {product_id:managerCampaign.product_id, capacity_tpd:rate, isCampaign:true};
     }
 
-    // Tier 1: sim results
+    // Tier 1: sim results — KILNS report ACTUAL produced clinker (0 when blocked), so the
+    // CLINKER PRODUCTION row reflects reality and reconciles with clinker inventory.
+    if(hasSim&&el.type==='kiln'&&r.kilnProdHistory?.[el.id]){
+      const v=r.kilnProdHistory[el.id][dayIdx];
+      if(v!==undefined){
+        const first=DB.element_product_capacities.find(c=>c.element_id===el.id);
+        return {product_id:first?.product_id||null, capacity_tpd:v||0};
+      }
+    }
+    // Tier 1: sim results (finish mills) — product chosen by the sim, at its rated rate
     if(hasSim&&r.millProductHistory[el.id]){
       const pid=r.millProductHistory[el.id][dayIdx]||null;
       if(pid!==undefined){
@@ -10033,6 +10042,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
     elementStates:{},
     inventoryHistory:{},
     millProductHistory:{},
+    kilnProdHistory:{},      // kilnProdHistory[kilnId][day-1] = ACTUAL clinker produced that day (0 when blocked)
     demandSwapHistory:{},     // demandSwapHistory[demandPointId][day-1] = {own, swapped, toProduct, fromProduct} when a swap covers part of this DP's demand
     railHistory:{},           // railHistory[dispElId][day-1]
     berthArrivalHistory:{},   // berthArrivalHistory[berthId][day-1] = total tonnes arrived at berth
@@ -10062,6 +10072,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
     r.elementStates[el.id]=[];
     r.inventoryHistory[el.id]=[];
     if(el.type==='finish_mill') r.millProductHistory[el.id]=[];
+    if(el.type==='kiln') r.kilnProdHistory[el.id]=[];
     if(el.type==='kiln') state[el.id]._blockedHighInv=false; // tracks restart_threshold rule
     if(el.type==='dispatch_point'&&el.props.dispatch_type==='Rail'){
       r.railHistory[el.id]=[];
@@ -10680,7 +10691,10 @@ function simulate(elements, connections, horizon, includeProposed=false){
     // Blocked only if ALL downstream clinker silos are ≥98% full.
     elements.filter(e=>e.type==='kiln').forEach(el=>{
       const s=state[el.id];
-      if(s.status==='maintenance') return;
+      // Record ACTUAL clinker produced today (0 when blocked/idle/maintenance) so the
+      // CLINKER PRODUCTION row reflects reality and reconciles with clinker inventory.
+      const recK=v=>{ r.kilnProdHistory[el.id].push(v||0); };
+      if(s.status==='maintenance'){ recK(0); return; }
 
       // ── REAL PRODUCTION ANCHOR (kilns) ────────────────
       const _kilnDate=new Date(simStartDate.getTime()+(day-1)*864e5)._ymd();
@@ -10688,16 +10702,17 @@ function simulate(elements, connections, horizon, includeProposed=false){
       if(_kilnReal?.length){
         const downClkA=(dn[el.id]||[]).map(id=>elMap[id]).filter(e=>e&&isClinkerSilo(e));
         s.status='running'; s.runDays++;
+        let _kProd=0;
         _kilnReal.forEach(rp=>{
           const vol=parseFloat(rp.volume_t)||0; if(!vol) return;
           const silo=downClkA.find(cs=>getSiloProducts(cs).includes(rp.product_id));
-          if(silo) siloInflow[silo.id]=(siloInflow[silo.id]||0)+vol;
+          if(silo){ siloInflow[silo.id]=(siloInflow[silo.id]||0)+vol; _kProd+=vol; }
         });
-        return;
+        recK(_kProd); return;
       }
 
       const caps=capMap[el.id]||[];
-      if(!caps.length){ s.status='idle'; return; }
+      if(!caps.length){ s.status='idle'; recK(0); return; }
 
       const totalCap=caps.reduce((a,c)=>a+(parseFloat(c.capacity_tpd)||0),0);
       const rate=s.status==='rampup'?totalCap*(s._rampPct||1):totalCap;
@@ -10710,7 +10725,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
         s.status='blocked';
         s._blockedHighInv=true; // remember this was a high-inventory block
         logStop(el.id,el.name,day,'blocked','Clinker silo full');
-        return;
+        recK(0); return;
       }
 
       // ── RULE: restart_threshold ────────────────────────
@@ -10731,7 +10746,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
             s.status='blocked';
             logStop(el.id,el.name,day,'blocked',
               `Clinker silo at ${pct}% — waiting to drop below ${restartFloor}% before restart`);
-            return;
+            recK(0); return;
           } else {
             s._blockedHighInv=false;
           }
@@ -10759,7 +10774,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
               s.status='blocked';
               logStop(el.id,el.name,day,'blocked',
                 `Rule "${rule.name}": waiting for clinker silo to drop to ${threshold}${metric==='inventory_pct'?'%':metric==='inventory_days'?' days':' t'} (currently ${pct}%)`);
-              return;
+              recK(0); return;
             } else {
               s._blockedHighInv=false;
             }
@@ -10772,14 +10787,16 @@ function simulate(elements, connections, horizon, includeProposed=false){
       s.status=s.status==='rampup'?'rampup':'running';
       s.runDays++;
 
-      // Distribute production to downstream clinker silos by product
+      // Distribute production to downstream clinker silos by product (record actual produced)
+      let _kProd=0;
       caps.forEach(cap=>{
         const capRate=parseFloat(cap.capacity_tpd)||0;
         const kilnRate=s.status==='rampup'?capRate*(s._rampPct||1):capRate;
         const silo=downClk.find(cs=>getSiloProducts(cs).includes(cap.product_id));
         if(!silo||state[silo.id]?.inventory>=(state[silo.id]?.maxCap||0)*0.98) return;
-        siloInflow[silo.id]=(siloInflow[silo.id]||0)+kilnRate;
+        siloInflow[silo.id]=(siloInflow[silo.id]||0)+kilnRate; _kProd+=kilnRate;
       });
+      recK(_kProd);
     });
 
     // ── STEP 3: RAW MEAL MILLS ────────────────────────
