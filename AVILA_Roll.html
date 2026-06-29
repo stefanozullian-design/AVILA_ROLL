@@ -7916,6 +7916,42 @@ function rpDemand(elId,d){
   const dt=new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5);
   return _demandRate(elId,dt._ymd());
 }
+// EFFECTIVE demand a point must serve on a sim day, matching the engine:
+// own − swapped-out (relocated elsewhere) + swapped-in (relocated here from other points).
+function rpDemandEff(elId,d){
+  const ds=new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5)._ymd();
+  const own=_demandRate(elId,ds)||0;
+  let v=own;
+  if(typeof _resolveDemandSwap==='function'){ const sw=_resolveDemandSwap(elId,own,ds); if(sw&&sw.qty) v-=sw.qty; }
+  if(typeof _resolveDemandSwapIn==='function'){ v+=_resolveDemandSwapIn(elId,ds,(id)=>_demandRate(id,ds)||0)||0; }
+  return Math.max(0,v);
+}
+// Tonnes swapped INTO a demand point on sim day d (for the breakout row).
+function rpSwapIn(elId,d){
+  if(typeof _resolveDemandSwapIn!=='function') return 0;
+  const ds=new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5)._ymd();
+  return _resolveDemandSwapIn(elId,ds,(id)=>_demandRate(id,ds)||0)||0;
+}
+// Push a demand point's rows into a logistics planner table: an EFFECTIVE-demand row
+// (own − swapped-out + swapped-in) plus, when relevant, an amber "↳ ⇄ swapped in" breakout
+// showing the extra demand relocated here from other points (e.g. MIA→PEV).
+function _vpPushDemandRows(rows, el, months, mSty, tpSty){
+  const demCells=months.map(mon=>{
+    const monT=mon.days.reduce((s,d)=>s+rpDemandEff(el.id,d),0);
+    const mTd=`<td class="logi-mcol" style="${mSty}">${monT>0?Number(Math.round(monT)).toLocaleString():'—'}</td>`;
+    return mTd+mon.days.map(d=>{const v=rpDemandEff(el.id,d);const tSty=tpSty(d);return `<td style="color:var(--simulated);${tSty}">${v>0?Number(v).toLocaleString():'—'}</td>`;}).join('');
+  }).join('');
+  rows.push(`<tr class="tp-row-dem"><td style="padding-left:14px">${el.name}</td>${demCells}</tr>`);
+  let swTot=0; months.forEach(mon=>mon.days.forEach(d=>{swTot+=rpSwapIn(el.id,d);}));
+  if(swTot>0){
+    const siCells=months.map(mon=>{
+      const monT=mon.days.reduce((s,d)=>s+rpSwapIn(el.id,d),0);
+      const mTd=`<td class="logi-mcol" style="${mSty}">${monT>0?'+'+Number(Math.round(monT)).toLocaleString():'—'}</td>`;
+      return mTd+mon.days.map(d=>{const v=rpSwapIn(el.id,d);const tSty=tpSty(d);return `<td style="color:#ffb830;font-size:9px;${tSty}">${v>0?'+'+Number(Math.round(v)).toLocaleString():'—'}</td>`;}).join('');
+    }).join('');
+    rows.push(`<tr class="tp-row-dem"><td style="padding-left:24px;color:#ffb830;font-style:italic;font-size:9px">↳ ⇄ swapped in (added coverage)</td>${siCells}</tr>`);
+  }
+}
 
 // ── Inventory snapshot from simulation results ────────────────────
 function rpInv(elId,d){
@@ -8251,16 +8287,16 @@ function rpRender(){
       destRows.push(`<tr class="tp-row-unload"><td style="padding-left:14px;color:var(--real);font-size:10px">Unloading</td>${unldCells}</tr>`);
     }
 
-    // 4) DEMAND — consolidated to ONE row per product (sum of all that product's demand points)
+    // 4) DEMAND — consolidated to ONE row per product (EFFECTIVE: own − swapped-out + swapped-in)
     _activeProdIds.forEach(pid=>{
       const matchEls=demEls.filter(el=>_demElMatchesProd(el,pid));
       if(!matchEls.length) return;
       const prodName=DB.products.find(p=>p.id===pid)?.name||pid;
       const demCells=months.map(mon=>{
-        const monT=mon.days.reduce((s,d)=>s+matchEls.reduce((q,el)=>q+rpDemand(el.id,d),0),0);
+        const monT=mon.days.reduce((s,d)=>s+matchEls.reduce((q,el)=>q+rpDemandEff(el.id,d),0),0);
         const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString():'—'}</td>`;
         return mTd+mon.days.map(d=>{
-          const v=matchEls.reduce((q,el)=>q+rpDemand(el.id,d),0);
+          const v=matchEls.reduce((q,el)=>q+rpDemandEff(el.id,d),0);
           const tSty=_tpTdSty(d);
           return `<td style="color:var(--simulated);${tSty}">${v>0?Number(v).toLocaleString():'—'}</td>`;
         }).join('');
@@ -8936,23 +8972,13 @@ function vpRender(){
         // Demand rows for this product
         demEls.filter(el=>_demElMatchesProd(el,pid)&&!_vtShownDemIds.has(el.id)).forEach(el=>{
           _vtShownDemIds.add(el.id);
-          const demCells=months.map(mon=>{
-            const monT=mon.days.reduce((s,d)=>s+rpDemand(el.id,d),0);
-            const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString():'—'}</td>`;
-            return mTd+mon.days.map(d=>{const v=rpDemand(el.id,d);const tSty=_tpTdSty(d);return `<td style="color:var(--simulated);${tSty}">${v>0?Number(v).toLocaleString():'—'}</td>`;}).join('');
-          }).join('');
-          destRows.push(`<tr class="tp-row-dem"><td style="padding-left:14px">${el.name}</td>${demCells}</tr>`);
+          _vpPushDemandRows(destRows,el,months,_mTdSty,_tpTdSty);
         });
       });
       // Demand points not matched to any product silo (only when no product filter)
       if(!_vp.prodId){
         demEls.filter(el=>!_vtShownDemIds.has(el.id)).forEach(el=>{
-          const demCells=months.map(mon=>{
-            const monT=mon.days.reduce((s,d)=>s+rpDemand(el.id,d),0);
-            const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString():'—'}</td>`;
-            return mTd+mon.days.map(d=>{const v=rpDemand(el.id,d);const tSty=_tpTdSty(d);return `<td style="color:var(--simulated);${tSty}">${v>0?Number(v).toLocaleString():'—'}</td>`;}).join('');
-          }).join('');
-          destRows.push(`<tr class="tp-row-dem"><td style="padding-left:14px">${el.name}</td>${demCells}</tr>`);
+          _vpPushDemandRows(destRows,el,months,_mTdSty,_tpTdSty);
         });
       }
     });
