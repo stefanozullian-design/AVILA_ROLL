@@ -10787,7 +10787,11 @@ function simulate(elements, connections, horizon, includeProposed=false){
           return ['Planned','Confirmed','Proposed'].includes(st);
         })
         .forEach(rm=>{
-          if(day<rm.load_start_day||day>=rm.switch_day) return; // not our window
+          // Load window is [load_start_day, switch_day] INCLUSIVE — cement loaded the morning
+          // of the switch ships that day. Excluding the switch day meant single-day-window
+          // shipments (load_start_day === switch_day) NEVER triggered the mill to fill the rail
+          // silo, so they loaded/shipped nothing and the terminal showed no unload.
+          if(day<rm.load_start_day||day>rm.switch_day) return; // not our window
           // Find the rail dispatch point and its upstream RAIL silo
           const dpEl=elMap[rm.from_dispatch_id]; if(!dpEl) return;
           const railSiloId=(up[dpEl.id]||[]).find(uid=>railTransferSiloIds.has(uid));
