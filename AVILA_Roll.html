@@ -1391,21 +1391,14 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
             </div>
             <!-- Exception banner: rail loading shortfalls + terminals below safety stock -->
             <div id="rp-exceptions" style="display:none"></div>
-            <!-- Charts section: rendered by rpRenderCharts() after a simulation run -->
+            <!-- One full-width destination chart: all selected destinations & products over the range -->
             <div id="rp-charts-section" style="display:none;margin-bottom:16px">
-              <div id="rp-charts-inner" style="display:grid;grid-template-columns:1fr 1fr;gap:10px"></div>
+              <div id="rp-charts-inner"></div>
             </div>
-            <!-- Two stacked planner tables -->
-            <div id="rp-dest-section">
-              <div class="tp-section-hdr">DESTINATION</div>
-              <div class="tp-table-wrap" id="rp-dest-table-wrap">
-                <table class="tp-table" id="rp-dest-table"><thead><tr id="rp-dest-thead-row"></tr></thead><tbody id="rp-dest-tbody"></tbody></table>
-              </div>
-            </div>
-            <div id="rp-orig-section" style="margin-top:12px">
-              <div class="tp-section-hdr">ORIGIN</div>
-              <div class="tp-table-wrap" id="rp-orig-table-wrap">
-                <table class="tp-table" id="rp-orig-table"><thead><tr id="rp-orig-thead-row"></tr></thead><tbody id="rp-orig-tbody"></tbody></table>
+            <!-- Single merged planner table: ORIGIN (plan switches) then DESTINATIONS, same date columns -->
+            <div id="rp-rail-section">
+              <div class="tp-table-wrap" id="rp-rail-table-wrap">
+                <table class="tp-table" id="rp-rail-table"><thead><tr id="rp-thead-row"></tr></thead><tbody id="rp-rail-tbody"></tbody></table>
               </div>
             </div>
             <div id="rp-empty" style="font-family:var(--mono);font-size:9px;color:var(--text-dim);padding:24px;text-align:center;display:none">
@@ -8132,8 +8125,7 @@ function rpAllocateLoading(movements, carsPerDay, isWorkDay){
 // ── Main render ───────────────────────────────────────────────────
 function rpRender(){
   if(!S.simCfg.start_date){
-    document.getElementById('rp-dest-section').style.display='none';
-    document.getElementById('rp-orig-section').style.display='none';
+    document.getElementById('rp-rail-section').style.display='none';
     return;
   }
   rpBuildDestFilter();
@@ -8147,14 +8139,16 @@ function rpRender(){
   if(lbl) lbl.textContent=`${rpDayDate(startDay).slice(5)} → ${rpDayDate(endDay).slice(5)} (${days.length}d)`;
 
   const hasDests=_rp.dests.length>0;
-  document.getElementById('rp-dest-section').style.display=hasDests?'':'none';
-  document.getElementById('rp-orig-section').style.display=hasDests?'':'none';
+  document.getElementById('rp-rail-section').style.display=hasDests?'':'none';
   document.getElementById('rp-empty').style.display=hasDests?'none':'block';
   if(!hasDests){
     rpDestroyCharts();
     document.getElementById('rp-charts-section').style.display='none';
     return;
   }
+  // Rail-relevant products for the selected destinations (used to keep both the chart and the
+  // destination rows focused on what actually moves by rail — no empty/non-cement berth silos).
+  const _railProdSet=new Set(rpGetRailProducts().map(p=>p.id));
   rpRenderCharts();
   rpRenderExceptions();
 
@@ -8175,8 +8169,8 @@ function rpRender(){
     }).join('');
     return `<th class="logi-mcol" style="border-left:2px solid var(--border2);color:var(--total);font-size:8px;font-weight:700;text-align:center;padding:4px 6px;position:sticky;top:0;background:var(--surface2)">${mon.label}</th>`+dayThs;
   }).join('');
-  document.getElementById('rp-dest-thead-row').innerHTML=thHtml;
-  document.getElementById('rp-orig-thead-row').innerHTML=thHtml;
+  document.getElementById('rp-thead-row').innerHTML=thHtml;
+  const _railColspan=days.length+months.length+1;
 
   // ── DESTINATION TABLE ─────────────────────────────────────────
   const destRows=[];
@@ -8232,8 +8226,10 @@ function rpRender(){
     }
 
     // INVENTORY + DEMAND rows — grouped by product
-    // Collect unique products present at this terminal (from all silos wired to this berth)
-    const _termProdIds=[...new Set(destSilos.flatMap(s=>getSiloProducts(s)).filter(Boolean))];
+    // Collect rail-relevant products present at this terminal (silos wired to the rail berth,
+    // limited to products actually moved by rail — skips empty/non-cement berth silos).
+    const _termProdIds=[...new Set(destSilos.flatMap(s=>getSiloProducts(s)).filter(Boolean))]
+      .filter(pid=>_railProdSet.size===0||_railProdSet.has(pid));
     // Apply product filter if active
     const _activeProdIds=_rp.prodId?_termProdIds.filter(pid=>pid===_rp.prodId):_termProdIds;
     const _shownDemIds=new Set();
@@ -8271,26 +8267,14 @@ function rpRender(){
         destRows.push(`<tr class="tp-row-dem"><td style="padding-left:14px">${el.name}</td>${demCells}</tr>`);
       });
     });
-    // Demand points not matched to any product silo (only when no product filter)
-    if(!_rp.prodId){
-      demEls.filter(el=>!_shownDemIds.has(el.id)).forEach(el=>{
-        const demCells=months.map(mon=>{
-          const monT=mon.days.reduce((s,d)=>s+rpDemand(el.id,d),0);
-          const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString():'—'}</td>`;
-          return mTd+mon.days.map(d=>{
-            const v=rpDemand(el.id,d);
-            const tSty=_tpTdSty(d);
-            return `<td style="color:var(--simulated);${tSty}">${v>0?Number(v).toLocaleString():'—'}</td>`;
-          }).join('');
-        }).join('');
-        destRows.push(`<tr class="tp-row-dem"><td style="padding-left:14px">${el.name}</td>${demCells}</tr>`);
-      });
-    }
+    // NOTE: only RAIL-associated demand points are listed (those whose product matches a
+    // rail-berth silo, handled above). Vessel-only demand points at the terminal are excluded.
   });
-  document.getElementById('rp-dest-tbody').innerHTML=destRows.join('');
+  // destRows are assigned into the single merged table at the end (after origin rows).
 
-  // ── ORIGIN TABLE ──────────────────────────────────────────────
+  // ── ORIGIN ROWS (planning) ────────────────────────────────────
   const origRows=[];
+  origRows.push(`<tr><td colspan="${_railColspan}" style="background:rgba(255,148,51,.08);color:#ff9433;font-family:var(--mono);font-size:8px;padding:3px 8px;letter-spacing:.06em;border-top:1px solid rgba(255,148,51,.22)">▸ ORIGIN — plan loading &amp; switches</td></tr>`);
   // Collect all unique origins that serve any selected destination
   const seenDp=new Set();
   _rp.dests.forEach(destFacId=>{
@@ -8421,7 +8405,8 @@ function rpRender(){
       origRows.push(`<tr class="tp-row-confirm"><td style="color:#8e9ab8;font-size:8px;letter-spacing:.04em">    ✓ confirm · ⟳ reset</td>${confirmCells}</tr>`);
     });
   });
-  document.getElementById('rp-orig-tbody').innerHTML=origRows.join('');
+  // Single merged table: ORIGIN (planning) first, then the selected DESTINATIONS — same dates.
+  document.getElementById('rp-rail-tbody').innerHTML=origRows.join('')+destRows.join('');
 }
 
 // ── Rail exception banner ──────────────────────────────────────────
@@ -8609,138 +8594,46 @@ function rpRenderCharts(){
     }
   });
 
-  const _statusPriority=['In Transit','Unloading','Confirmed','Planned','Proposed','Finished'];
-  const _statusChartColor={
-    'Proposed':  'rgba(142,154,184,.65)',
-    'Planned':   'rgba(255,184,48,.80)',
-    'Confirmed': 'rgba(0,229,160,.80)',
-    'In Transit':'rgba(77,166,255,.80)',
-    'Unloading': 'rgba(56,189,248,.80)',
-    'Finished':  'rgba(142,154,184,.40)',
-  };
-
-  // ── Collect unique dispatch points (multiple dests can share one) ─
-  const seenDpIds=new Set();
-  const uniqueOrigins=[];
+  // ── One full-width DESTINATION chart: terminal inventory for every selected
+  //    destination × product over the range, with dashed demand lines. ──────────
+  const _palette=[
+    {line:'#34d399',fill:'rgba(52,211,153,.10)'},
+    {line:'#60a5fa',fill:'rgba(96,165,250,.10)'},
+    {line:'#f472b6',fill:'rgba(244,114,182,.10)'},
+    {line:'#fb923c',fill:'rgba(251,146,60,.10)'},
+    {line:'#a78bfa',fill:'rgba(167,139,250,.10)'},
+    {line:'#fbbf24',fill:'rgba(251,191,36,.10)'},
+    {line:'#22d3ee',fill:'rgba(34,211,238,.10)'},
+    {line:'#f87171',fill:'rgba(248,113,113,.10)'},
+  ];
+  const _railProdSet=new Set(rpGetRailProducts().map(p=>p.id));
+  const dsAll=[]; let _ci=0;
   _rp.dests.forEach(destFacId=>{
     const origins=rpGetOriginsForDest(destFacId); if(!origins.length) return;
-    const {dp,railSilo}=origins[0];
-    if(!seenDpIds.has(dp.id)){ seenDpIds.add(dp.id); uniqueOrigins.push({dp,railSilo}); }
-  });
-
-  // ── Chart 1 — Origin Rail Silo (one per unique dispatch point) ───
-  uniqueOrigins.forEach(({dp,railSilo},ui)=>{
-    if(!railSilo) return;
-    const siloMax=parseFloat(railSilo.props?.max_capacity)||0;
-    const floor=(parseFloat(railSilo.props?.critical_floor_pct)||10)/100*siloMax;
-    const invData=days.map(d=>{const v=rpInv(railSilo.id,d);return v!==null?v:null;});
-    const cid=`rpc1_${ui}`;
-    const ds=[
-      {label:'Rail Silo',data:invData,borderColor:'#38bdf8',backgroundColor:'rgba(56,189,248,.12)',
-       fill:true,tension:0.2,pointRadius:0,borderWidth:1.5,_u:' t'}
-    ];
-    if(siloMax>0) ds.push({label:'Cap',data:days.map(()=>siloMax),borderColor:'rgba(255,255,255,.18)',borderDash:[5,3],pointRadius:0,borderWidth:1,type:'line',_u:' t'});
-    if(floor>0)   ds.push({label:'Floor',data:days.map(()=>floor),borderColor:'rgba(248,113,113,.65)',borderDash:[3,3],pointRadius:0,borderWidth:1,type:'line',_u:' t'});
-    const canvas=mkCanvas(cid);
-    chartBuilders.push(()=>{_rpCharts[cid]=new Chart(canvas,{type:'line',data:{labels,datasets:ds},options:baseOpts(`RAIL SILO · ${railSilo.name}`)});});
-  });
-
-  // ── Chart 2 — Railyard (one per unique dispatch point) ───────────
-  uniqueOrigins.forEach(({dp},ui)=>{
-    const carCap=parseFloat(dp.props?.car_capacity_t)||50;
-    const hist=S.simResults.railHistory[dp.id]||[];
-    const yardData=days.map(d=>{
-      const h=hist[d-1]; if(!h) return 0;
-      return Object.values(h.carsInYardByProduct||{}).reduce((a,b)=>a+b,0)*carCap;
-    });
-    const dispData=days.map(d=>{
-      const h=hist[d-1]; if(!h) return null;
-      const cars=Object.values(h.dispatchByDest||{}).reduce((a,b)=>a+b,0);
-      return cars>0?cars*carCap:null;
-    });
-    const cid=`rpc2_${ui}`;
-    const canvas=mkCanvas(cid);
-    chartBuilders.push(()=>{
-      _rpCharts[cid]=new Chart(canvas,{type:'bar',data:{labels,datasets:[
-        {label:'In Yard',data:yardData,backgroundColor:'rgba(77,166,255,.45)',borderColor:'#4da6ff',borderWidth:1,_u:' t'},
-        {label:'Dispatched',data:dispData,backgroundColor:'rgba(255,148,51,.75)',borderColor:'#ff9433',borderWidth:1,_u:' t'}
-      ]},options:{...baseOpts(`RAILYARD · ${dp.name}`,true)}});
-    });
-  });
-
-  // ── Chart 3 — Destination Silo (one per selected destination) ────
-  _rp.dests.forEach((destFacId,di)=>{
-    const origins=rpGetOriginsForDest(destFacId); if(!origins.length) return;
     const {berth}=origins[0];
-    const destSilos=rpGetDestSilos(berth);
-    const visibleSilos=_rp.prodId
-      ? destSilos.filter(s=>getSiloProducts(s).includes(_rp.prodId))
-      : destSilos;
     const destFac=DB.facilities.find(f=>f.id===destFacId);
     const allDemEls=rpGetDestDemEls(destFacId);
-    if(!visibleSilos.length) return;
-
-    const arrHist=S.simResults.berthArrivalHistory?.[berth?.id]||[];
-    const arrData=days.map(d=>arrHist[d-1]||null);
-    const arrivals4=rpPlannedArrivalsForDest(destFacId,berth?.id);
-    const arrBgColors=days.map(d=>{
-      const entries=arrivals4[d]||[];
-      if(!entries.length) return 'rgba(77,166,255,.55)';
-      const domSt=_statusPriority.find(s=>entries.some(e=>e.status===s))||entries[0]?.status||'Planned';
-      return _statusChartColor[domSt]||'rgba(77,166,255,.55)';
-    });
-
-    // Color palette — one hue per product silo
-    const _palette=[
-      {line:'#34d399',fill:'rgba(52,211,153,.12)',dem:'rgba(52,211,153,.55)'},
-      {line:'#60a5fa',fill:'rgba(96,165,250,.12)', dem:'rgba(96,165,250,.55)'},
-      {line:'#f472b6',fill:'rgba(244,114,182,.12)',dem:'rgba(244,114,182,.55)'},
-      {line:'#fb923c',fill:'rgba(251,146,60,.12)', dem:'rgba(251,146,60,.55)'},
-      {line:'#a78bfa',fill:'rgba(167,139,250,.12)',dem:'rgba(167,139,250,.55)'},
-      {line:'#fbbf24',fill:'rgba(251,191,36,.12)', dem:'rgba(251,191,36,.55)'},
-    ];
-
-    const ds=[
-      {label:'Arrivals',data:arrData,type:'bar',order:10,
-       backgroundColor:arrBgColors,
-       borderColor:arrBgColors.map(c=>c.replace(/[\d.]+\)$/,'1)')),borderWidth:1,_u:' t'}
-    ];
-
-    visibleSilos.forEach((silo,si)=>{
-      const col=_palette[si%_palette.length];
+    const silos=rpGetDestSilos(berth).filter(s=>_rp.prodId
+      ? getSiloProducts(s).includes(_rp.prodId)
+      : getSiloProducts(s).some(pid=>_railProdSet.size===0||_railProdSet.has(pid)));
+    silos.forEach(silo=>{
+      const col=_palette[_ci%_palette.length]; _ci++;
       const siloProds=getSiloProducts(silo);
-      const siloMax=parseFloat(silo.props?.max_capacity)||0;
-      const floor=(parseFloat(silo.props?.critical_floor_pct)||10)/100*siloMax;
+      const prodLabel=DB.products.find(p=>p.id===siloProds[0])?.name||siloProds[0]||silo.name;
+      const tag=`${destFac?.name||destFacId} · ${prodLabel}`;
       const invData=days.map(d=>{const v=rpInv(silo.id,d);return v!==null?v:null;});
+      dsAll.push({label:tag,data:invData,type:'line',borderColor:col.line,backgroundColor:col.fill,
+        fill:false,tension:0.2,pointRadius:0,borderWidth:1.6,_u:' t'});
       const siloDemEls=allDemEls.filter(e=>siloProds.some(pid=>_demElMatchesProd(e,pid)));
       const demData=days.map(d=>siloDemEls.reduce((s,e)=>s+rpDemand(e.id,d),0));
-      const prodLabel=DB.products.find(p=>p.id===siloProds[0])?.name||siloProds[0]||silo.name;
-
-      ds.push({label:`Inv · ${prodLabel}`,data:invData,type:'line',order:si+1,
-        borderColor:col.line,backgroundColor:col.fill,
-        fill:true,tension:0.2,pointRadius:0,borderWidth:1.5,_u:' t'});
-      if(demData.some(v=>v>0)) ds.push({label:`Dem · ${prodLabel}`,data:demData,type:'line',order:si+1,
-        borderColor:col.dem,borderDash:[3,3],pointRadius:0,borderWidth:1,_u:' t/d'});
-      if(siloMax>0) ds.push({label:'Cap',data:days.map(()=>siloMax),type:'line',order:20,
-        borderColor:'rgba(255,255,255,.12)',borderDash:[5,3],pointRadius:0,borderWidth:1,_u:' t'});
-      if(floor>0) ds.push({label:'Floor',data:days.map(()=>floor),type:'line',order:20,
-        borderColor:'rgba(248,113,113,.4)',borderDash:[3,3],pointRadius:0,borderWidth:1,_u:' t'});
+      if(demData.some(v=>v>0)) dsAll.push({label:`${tag} dem`,data:demData,type:'line',borderColor:col.line,
+        borderDash:[3,3],pointRadius:0,borderWidth:1,fill:false,_u:' t/d'});
     });
-
-    const multiProd=visibleSilos.length>1;
-    const cid=`rpc3_${di}`;
-    const _destFacIdCopy=destFacId;
-    const canvas=mkCanvas(cid,multiProd?'220px':'180px');
-    const destOpts={...baseOpts(`DESTINATION · ${destFac?.name||destFacId}`,multiProd)};
-    destOpts.onClick=(evt,active)=>{
-      if(!active.length) return;
-      rpOpenArrivalDialog(_destFacIdCopy,String(days[active[0].index]),rpDayDate(days[active[0].index]).slice(5));
-    };
-    destOpts.onHover=(evt,active)=>{
-      if(evt?.native?.target) evt.native.target.style.cursor=active.length?'pointer':'default';
-    };
-    chartBuilders.push(()=>{_rpCharts[cid]=new Chart(canvas,{type:'bar',data:{labels,datasets:ds},options:destOpts});});
   });
+  if(!dsAll.length){ section.style.display='none'; return; }
+  const _destCanvas=mkCanvas('rpc_dest','300px');
+  chartBuilders.push(()=>{_rpCharts['rpc_dest']=new Chart(_destCanvas,{type:'line',data:{labels,datasets:dsAll},
+    options:baseOpts('TERMINAL INVENTORY — selected destinations & products',true)});});
 
   // Build all charts, loading Chart.js on demand if needed
   const buildAll=()=>chartBuilders.forEach(f=>f());
