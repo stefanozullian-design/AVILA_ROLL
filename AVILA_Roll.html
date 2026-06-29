@@ -1642,7 +1642,8 @@ const DB = {
 
   // Schedules
   vessel_calls:       [], // { id, facility_id, berth_element_id, berth_name, name, arrival_date, cargo_type, quantity_t, unload_rate_tph, transit_days, status, notes }
-  rail_movements:     [], // { id, from_facility_id, to_facility_id, from_dispatch_id, to_berth_id, reference, departure_date, wagon_count, wagon_capacity_t, total_capacity_t, product_id, loading_rate_tph, min_load_pct, transit_days, status, notes }
+  rail_movements:     [], // { id, from_facility_id, to_facility_id, from_dispatch_id, to_berth_id, reference, departure_date, wagon_count, wagon_capacity_t, total_capacity_t, product_id, loading_rate_tph, min_load_pct, transit_days, switch_day, status, notes } — also used for manager "push" allocations (status Confirmed)
+  rail_loading_plan:  [], // { id, dispatch_id, product_id, cars_per_day, date_from?, date_to? } — ops loading plan: cars/day to load per product at a rail dispatch point. No dates = base rate; dated rows override that range.
   truck_movements:    [], // { id, from_facility_id, to_facility_id, from_dispatch_id, to_element_id, reference, date, capacity_t, daily_rate_t, product_id, status, notes }
   transport_links:    [], // { id, from_facility_id, to_facility_id, mode:'truck'|'rail'|'vessel', transit_days, notes } — network level links
   in_transit_inventory:[], // { id, mode, reference_id, product_id, quantity_t, departure_date, arrival_date, to_facility_id, to_element_id, status:'in_transit'|'arrived'|'unloading'|'complete' }
@@ -6331,6 +6332,29 @@ function _renderSupplyViewInner(wrap){
             };
             h+=railRow('↳ Plan',railColor,'rgba(179,136,255,.04)',railPlanDay,false);
             h+=railRow('↳ Real','#00d9a3','rgba(0,217,163,.05)',railRealDay,true);
+
+            // ── LOADING PLAN (editable, per product) ──────────────────────────
+            // Ops set cars/day per product at each rail dispatch point. Day cells show the
+            // actual cars loaded once a sim has run (else the planned rate); amber = loaded < plan.
+            railDisp.forEach(disp=>{
+              const _isW=_mkRailWorkDayFn(disp);
+              const histArr=r?.railHistory?.[disp.id]||[];
+              const planCars=(pid,ds)=>{ const di=allDates.indexOf(ds); return (di>=0&&_isW(di+1))?railPlanRate(disp.id,pid,ds):0; };
+              const loadCars=(pid,ds)=>{ const di=allDates.indexOf(ds); if(di<0) return null; const e=histArr[di]; return e?(e.carsLoadedByProduct?.[pid]||0):null; };
+              railDpProducts(disp).forEach(pid=>{
+                const prod=DB.products.find(p=>p.id===pid);
+                const baseRate=railPlanRate(disp.id,pid,null);
+                let rr=`<tr class="supsec-railLoad" style="background:rgba(179,136,255,.02)"><td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${railColor};font-size:9px">↳ load ${prod?.name||pid} <input type="number" min="0" step="1" value="${baseRate}" title="Base cars/day to load" onclick="event.stopPropagation()" onchange="_supSetRailRate('${disp.id}','${pid}',this.value)" style="width:40px;margin-left:4px;background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:9px;padding:1px 3px"><span style="opacity:.5;margin-left:2px">cars/d</span></td>`;
+                months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+                  const mt=mon.dates.reduce((s,ds)=>{ const ac=loadCars(pid,ds); return s+(ac!=null?ac:planCars(pid,ds)); },0);
+                  rr+=`<td style="border-left:2px solid rgba(179,136,255,.1);font-size:9px;color:${railColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?mt:''}</td>`;
+                  if(!isCol) mon.dates.forEach(ds=>{ const pl=planCars(pid,ds); const ac=loadCars(pid,ds);
+                    const show=ac!=null?ac:pl; const shortfall=(ac!=null&&pl>0&&ac<pl);
+                    rr+=`<td class="sup-day-${mon.ym}" title="plan ${pl} / loaded ${ac!=null?ac:'—'} — dbl-click to override this day" ondblclick="_supSetRailDayRate('${disp.id}','${pid}','${ds}')" style="font-size:9px;color:${shortfall?'#ffb830':(show>0?railColor:'rgba(179,136,255,.25)')};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);cursor:pointer;${tdSty(ds)}">${show>0?show:0}</td>`; });
+                });
+                h+=rr+`</tr>`;
+              });
+            });
           }
         }
 
@@ -7981,6 +8005,68 @@ function _railCarsPerDay(dp){
         *(parseFloat(dp?.props?.shifts_per_day)||1);
 }
 
+// Ops loading plan: how many cars/day of a product to load at a rail dispatch point on a date.
+// A dated row (date_from..date_to) overrides the base (undated) row. Returns 0 if unset.
+function railPlanRate(dispatchId, productId, dateStr){
+  const rows=(DB.rail_loading_plan||[]).filter(p=>p.dispatch_id===dispatchId&&p.product_id===productId);
+  let base=0, override=null;
+  rows.forEach(p=>{
+    const dated=p.date_from||p.date_to;
+    if(!dated){ base=parseFloat(p.cars_per_day)||0; return; }
+    const from=p.date_from||'0000-01-01', to=p.date_to||'9999-12-31';
+    if(dateStr>=from&&dateStr<=to) override=parseFloat(p.cars_per_day)||0;
+  });
+  return override!==null?override:base;
+}
+// Set the base (undated) loading rate for a product at a dispatch point, then re-run the sim.
+function _supSetRailRate(dispId, pid, value){
+  const cars=Math.max(0,parseFloat(value)||0);
+  if(!DB.rail_loading_plan) DB.rail_loading_plan=[];
+  let row=DB.rail_loading_plan.find(p=>p.dispatch_id===dispId&&p.product_id===pid&&!p.date_from&&!p.date_to);
+  if(row) row.cars_per_day=cars;
+  else DB.rail_loading_plan.push({id:'lp_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),dispatch_id:dispId,product_id:pid,cars_per_day:cars});
+  autoSave();
+  if(typeof runSimulation==='function') runSimulation();
+}
+// Override the loading rate for a single day (dated row), then re-run the sim.
+function _supSetRailDayRate(dispId, pid, ds){
+  const cur=railPlanRate(dispId,pid,ds);
+  const v=prompt('Cars to load on '+ds+' (override base rate for this day):', cur);
+  if(v===null) return;
+  const cars=Math.max(0,parseFloat(v)||0);
+  if(!DB.rail_loading_plan) DB.rail_loading_plan=[];
+  let row=DB.rail_loading_plan.find(p=>p.dispatch_id===dispId&&p.product_id===pid&&p.date_from===ds&&p.date_to===ds);
+  if(row) row.cars_per_day=cars;
+  else DB.rail_loading_plan.push({id:'lp_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),dispatch_id:dispId,product_id:pid,cars_per_day:cars,date_from:ds,date_to:ds});
+  autoSave();
+  if(typeof runSimulation==='function') runSimulation();
+}
+// Operator "push": set how many cars of a product go from a dispatch point to a terminal on a
+// switch day. Upserts a Confirmed rail_movement (or removes it when 0), then re-runs the sim.
+function _rpSetPush(dpId, destFacId, pid, dayNum, ds, value){
+  const cars=Math.max(0,parseInt(value)||0);
+  const dp=DB.elements.find(e=>e.id===dpId);
+  const carCap=parseFloat(dp?.props?.car_capacity_t)||112;
+  const destCfg=(dp?.props?.destinations||[]).find(x=>x.facility_id===destFacId);
+  const transit=parseInt(destCfg?.transit_days)||1;
+  const berth=DB.elements.find(e=>e.type==='berth'&&(e.props?.berth_type||'').includes('Rail')&&(e.assigned_facility_id||e.facility_id)===destFacId);
+  const berthId=berth?berth.id:null;
+  let row=DB.rail_movements.find(rm=>rm.from_dispatch_id===dpId&&rm.to_facility_id===destFacId&&(rm.product_id||'')===pid&&rm.switch_day===dayNum);
+  if(cars<=0){ if(row) DB.rail_movements=DB.rail_movements.filter(r=>r!==row); }
+  else if(row){ row.wagon_count=cars; row.wagon_capacity_t=carCap; row.total_capacity_t=cars*carCap; row.status='Confirmed'; if(!row.to_berth_id) row.to_berth_id=berthId; }
+  else DB.rail_movements.push({id:'push_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),from_facility_id:S.facility_id,to_facility_id:destFacId,from_dispatch_id:dpId,to_berth_id:berthId,product_id:pid,wagon_count:cars,wagon_capacity_t:carCap,total_capacity_t:cars*carCap,switch_day:dayNum,departure_date:ds,transit_days:transit,status:'Confirmed',notes:'Operator push'});
+  autoSave();
+  if(typeof runSimulation==='function') runSimulation();
+}
+// Products a rail dispatch point can load — the products held by its upstream bulk silos.
+function railDpProducts(dp, connections){
+  const conns=connections||DB.connections;
+  const ups=conns.filter(c=>c.to_element_id===dp.id).map(c=>c.from_element_id);
+  const set=new Set();
+  ups.forEach(id=>{ const e=DB.elements.find(x=>x.id===id); if(e&&e.type==='bulk_silo') getSiloProducts(e).forEach(p=>set.add(p)); });
+  return [...set];
+}
+
 // Allocate per-day car loading for a set of movements that all share ONE dispatch point's
 // loading capacity. Movements are scheduled earliest-switch-day-first (earliest deadline
 // wins capacity) and load ASAP within each [load_start_day, switch_day) working-day window,
@@ -8224,76 +8310,76 @@ function rpRender(){
         origRows.push(`<tr class="tp-row-rail-silo"><td style="color:#38bdf8">${railSilo.name}</td>${railCells}</tr>`);
       }
 
-      // Loading per day — capped at the dispatch point's physical loading capacity.
-      // The siding can load at most `carsPerDay` cars/day TOTAL, shared across every
-      // destination & product it serves. So we allocate ALL of this dp's movements onto
-      // working days at once (earliest switch day first, ASAP within each load window)
-      // without ever exceeding that cap, then display the share that belongs to the
-      // currently-visible movements. byDay holds the siding's true per-day total (for
-      // at-capacity styling); _visUnplaced surfaces any cars that can't be loaded in time.
-      const loadMap={}; const dispMap={};
-      const _isWorkDp=_mkRailWorkDayFn(dp);
-      const _dpDestIds=new Set((dp.props?.destinations||[]).map(x=>x.facility_id));
-      const _dpMoves=DB.rail_movements
-        .filter(rm=>(rm.from_dispatch_id===dp.id||(rm.from_facility_id===S.facility_id&&_dpDestIds.has(rm.to_facility_id)))
-          &&rm.switch_day&&rm.load_start_day
-          &&(!rm.departure_date||rm.departure_date>=S.simCfg.start_date))
-        .map(rm=>({id:rm.id,destFacId:rm.to_facility_id,productId:rm.product_id||'',
-          status:rm.status||'Planned',cars:parseInt(rm.wagon_count)||0,
-          ls:rm.load_start_day,sw:rm.switch_day}));
-      const _alloc=rpAllocateLoading(_dpMoves,carsPerDay,_isWorkDp);
-      let _visUnplaced=0;
-      _dpMoves.forEach(m=>{
-        const visible=myDests.includes(m.destFacId)&&(!_rp.prodId||m.productId===_rp.prodId);
-        if(!visible) return;
-        Object.entries(m.placed||{}).forEach(([d,c])=>{ loadMap[+d]=(loadMap[+d]||0)+c; });
-        if(m.unplaced>0) _visUnplaced+=m.unplaced;
-        if(!dispMap[m.sw]) dispMap[m.sw]=[];
-        dispMap[m.sw].push({cars:m.cars,status:m.status});
+      // ── RAIL v2 (operator-driven) ───────────────────────────────────────────
+      // Per product the dp loads: actual cars loaded/day (from the sim), the cars accumulated
+      // & available at each switch, and one editable PUSH row per terminal (pre-filled).
+      const rh=S.simResults?.railHistory?.[dp.id]||[];
+      const dpProducts=railDpProducts(dp).filter(pid=>!_rp.prodId||pid===_rp.prodId);
+      const loadedOn=(pid,d)=>{ const e=rh[d-1]; return e?(e.carsLoadedByProduct?.[pid]||0):0; };
+      const yardAfter=(pid,d)=>{ const e=rh[d-1]; return d>=1&&e?(e.carsInYardByProduct?.[pid]||0):0; };
+      const prevSwitch=d=>{ for(let x=d-1;x>=1;x--){ if(rpIsSwitch(x,switchDays)) return x; } return 0; };
+      // Cars available to push at switch S = yard carried from the previous switch + loaded since.
+      const availAtSwitch=(pid,S)=>{ const P=prevSwitch(S); let a=yardAfter(pid,P); for(let x=P+1;x<=S;x++) a+=loadedOn(pid,x); return a; };
+      const transitOf=fid=>{ const d=(dp.props?.destinations||[]).find(x=>x.facility_id===fid); return parseInt(d?.transit_days)||1; };
+      const existingPush=(pid,fid,d)=>DB.rail_movements.find(rm=>rm.from_dispatch_id===dp.id&&rm.to_facility_id===fid&&(rm.product_id||'')===pid&&rm.switch_day===d);
+
+      dpProducts.forEach(pid=>{
+        const prod=DB.products.find(p=>p.id===pid);
+        const pName=prod?.name||pid;
+
+        // 1) Actual loading per day (from sim)
+        const loadCells=months.map(mon=>{
+          const mc=mon.days.reduce((s,d)=>s+loadedOn(pid,d),0);
+          const mTd=`<td class="logi-mcol" style="${_mTdSty}">${mc>0?mc+' cars':'—'}</td>`;
+          return mTd+mon.days.map(d=>{ const c=loadedOn(pid,d); const tSty=_tpTdSty(d); const sw=rpIsSwitch(d,switchDays);
+            return `<td${sw?' class="tp-col-switch"':''}${tSty?` style="${tSty}"`:''}>${c>0?c:'—'}</td>`; }).join('');
+        }).join('');
+        origRows.push(`<tr class="tp-row-loading"><td style="color:#4da6ff">  ↑ Loaded ${pName} (cars/d)</td>${loadCells}</tr>`);
+
+        // 2) Accumulated cars available at each switch
+        const availCells=months.map(mon=>{
+          const mTd=`<td class="logi-mcol" style="${_mTdSty}">—</td>`;
+          return mTd+mon.days.map(d=>{ const tSty=_tpTdSty(d); const sw=rpIsSwitch(d,switchDays);
+            if(!sw) return `<td${tSty?` style="${tSty}"`:''}></td>`;
+            const a=availAtSwitch(pid,d);
+            return `<td class="tp-col-switch"${tSty?` style="${tSty}"`:''} title="cars accumulated in the yard, available to push">${a>0?a:'0'}</td>`; }).join('');
+        }).join('');
+        origRows.push(`<tr class="tp-row-avail"><td style="color:#b388ff">  ▣ Available ${pName} (cars @ switch)</td>${availCells}</tr>`);
+
+        // Pre-fill suggestion per switch: distribute the cars NOT already pushed across the
+        // terminals proportional to each terminal's demand over the days right after arrival.
+        const suggest={}; // {switchDay:{destFacId:cars}}
+        days.forEach(d=>{ if(!rpIsSwitch(d,switchDays)) return;
+          let avail=availAtSwitch(pid,d); if(avail<=0){ suggest[d]={}; return; }
+          const w={}; let tw=0; let pushedTot=0;
+          myDests.forEach(fid=>{
+            const ex=existingPush(pid,fid,d); if(ex) pushedTot+=parseInt(ex.wagon_count)||0;
+            const tr=transitOf(fid);
+            const dem=rpGetDestDemEls(fid).reduce((s,el)=>{ let q=0; for(let k=0;k<7;k++) q+=rpDemand(el.id,d+tr+k)||0; return s+q; },0);
+            w[fid]=dem; tw+=dem;
+          });
+          const free=Math.max(0,avail-pushedTot);
+          suggest[d]={}; let assigned=0; const fids=myDests.filter(fid=>!existingPush(pid,fid,d));
+          fids.forEach((fid,i)=>{ let a= tw>0?(i===fids.length-1?free-assigned:Math.floor(free*(w[fid]||0)/tw)):(i===0?free:0); a=Math.max(0,a); suggest[d][fid]=a; assigned+=a; });
+        });
+
+        // 3) Editable push row per terminal (only on switch-day columns)
+        myDests.forEach(fid=>{
+          const destFac=DB.facilities.find(f=>f.id===fid);
+          const pushCells=months.map(mon=>{
+            const mc=mon.days.reduce((s,d)=>{ if(!rpIsSwitch(d,switchDays))return s; const ex=existingPush(pid,fid,d); return s+(ex?(parseInt(ex.wagon_count)||0):(suggest[d]?.[fid]||0)); },0);
+            const mTd=`<td class="logi-mcol" style="${_mTdSty}">${mc>0?mc+' cars':'—'}</td>`;
+            return mTd+mon.days.map(d=>{ const tSty=_tpTdSty(d); const sw=rpIsSwitch(d,switchDays);
+              if(!sw) return `<td${tSty?` style="${tSty}"`:''}></td>`;
+              const ds=rpDayDate(d);
+              const ex=existingPush(pid,fid,d);
+              const val=ex?(parseInt(ex.wagon_count)||0):(suggest[d]?.[fid]||0);
+              const isSet=!!ex;
+              return `<td class="tp-col-switch"${tSty?` style="${tSty}"`:''}><input type="number" min="0" step="1" value="${val}" title="${isSet?'Confirmed push':'Suggested — edit to confirm'}" onchange="_rpSetPush('${dp.id}','${fid}','${pid}',${d},'${ds}',this.value)" style="width:38px;background:${isSet?'rgba(0,229,160,.08)':'var(--surface2)'};border:1px solid ${isSet?'rgba(0,229,160,.4)':'var(--border2)'};color:var(--text);font-family:var(--mono);font-size:9px;padding:1px 2px;text-align:right"></td>`; }).join('');
+          }).join('');
+          origRows.push(`<tr class="tp-row-push"><td style="color:#ff9433">    → push ${destFac?.name||fid}</td>${pushCells}</tr>`);
+        });
       });
-
-      const loadCells=months.map(mon=>{
-        const monC=mon.days.reduce((s,d)=>s+(loadMap[d]||0),0);
-        const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monC>0?monC+' cars':'—'}</td>`;
-        return mTd+mon.days.map(d=>{
-          const cars=loadMap[d]||0;
-          const sidingTot=_alloc.byDay[d]||0;
-          const atCap=carsPerDay>0&&sidingTot>=carsPerDay;
-          const sw=rpIsSwitch(d,switchDays);
-          const tSty=_tpTdSty(d);
-          const clsA=sw?' class="tp-col-switch"':'';
-          const capSty=atCap?'color:#ffb830;font-weight:700;':'';
-          const styA=(tSty||capSty)?` style="${capSty}${tSty}"`:'';
-          const titleA=cars>0
-            ?` title="${cars} car(s) loaded${sidingTot!==cars?` · siding total ${sidingTot}/${carsPerDay}`:` of ${carsPerDay} cap`}${atCap?' — at capacity':''}"`
-            :'';
-          return `<td${clsA}${styA}${titleA}>${cars>0?`${cars} cars`:'—'}</td>`;
-        }).join('');
-      }).join('');
-      const _loadLbl=_visUnplaced>0
-        ?`  ↑ Loading (cars/d) <span style="color:#ff3d5a" title="${_visUnplaced} car(s) cannot be loaded within the ${carsPerDay} cars/day siding capacity before their dispatch day — the plan is over-committed. Reduce wagons, add a loading shift, or spread switch days.">⚠ ${_visUnplaced} unscheduled</span>`
-        :'  ↑ Loading (cars/d)';
-      origRows.push(`<tr class="tp-row-loading"><td style="color:#4da6ff">${_loadLbl}</td>${loadCells}</tr>`);
-
-      // Dispatch on switch days — color-coded by movement status
-      const _dOrder=['In Transit','Confirmed','Planned','Proposed'];
-      const dispCells=months.map(mon=>{
-        const monC=mon.days.reduce((s,d)=>s+(dispMap[d]||[]).reduce((t,e)=>t+e.cars,0),0);
-        const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monC>0?monC+' cars':'—'}</td>`;
-        return mTd+mon.days.map(d=>{
-          const entries=dispMap[d]||[];
-          const sw=rpIsSwitch(d,switchDays);
-          const tSty=_tpTdSty(d);
-          const clsA=sw?' class="tp-col-switch"':'';
-          const styA=tSty?` style="${tSty}"`:'';
-          if(!entries.length) return `<td${clsA}${styA}>—</td>`;
-          const totalCars=entries.reduce((s,e)=>s+e.cars,0);
-          const domSt=_dOrder.find(s=>entries.some(e=>e.status===s))||entries[0].status;
-          const col=_tsGet(domSt).color;
-          return `<td${clsA}${styA}><span style="color:${col}">${totalCars} cars</span></td>`;
-        }).join('');
-      }).join('');
-      origRows.push(`<tr class="tp-row-dispatch"><td style="color:#ff9433">  ⇒ Dispatch (switch day)</td>${dispCells}</tr>`);
     });
   });
   document.getElementById('rp-orig-tbody').innerHTML=origRows.join('');
@@ -9347,6 +9433,16 @@ function _demandMonthTotal(elId, year, month){
 // floor, then works backward through switch days to find the latest valid
 // dispatch that makes the train arrive in time. Repeats until no stockouts
 // remain in the projection. Respects Planned/Confirmed as hard constraints.
+// Rail v2 is operator-driven — drop any legacy auto-generated rail proposals so the board
+// only contains operator pushes. (Idempotent.)
+function _railClearAutoProposed(){
+  const before=DB.rail_movements.length;
+  DB.rail_movements=DB.rail_movements.filter(m=>m.notes!=='Auto-generated by simulation');
+  if(DB.rail_movements.length!==before) autoSave();
+}
+
+// DEPRECATED (rail v1) — no longer called. Kept for reference / quick revert. The rail
+// schedule is now driven by DB.rail_loading_plan (loading) + operator pushes in DB.rail_movements.
 function _planRailShipments(rBase){
   // Remove only AUTO-GENERATED Proposed rail movements. User-created Proposed ones
   // (notes !== 'Auto-generated by simulation') are kept so the planner treats them as
@@ -9946,11 +10042,12 @@ async function runSimulation(){
       }
     });
 
-    // ── Pass 1: baseline without proposed vessels/rail ──────────
-    // Generates rail and vessel proposals from clean inventory picture.
+    // ── Pass 1: baseline without proposed vessels ──────────
+    // Rail is now operator-driven (loading plan + manual pushes) — NO auto rail planner.
+    // Pass 1 still generates vessel proposals from the clean inventory picture.
     const rBase=simulate(els, getFacConnections(), effectiveHorizon, false);
     rBase.simHorizon=effectiveHorizon;
-    _planRailShipments(rBase);
+    _railClearAutoProposed(); // one-time cleanup of legacy auto-generated rail proposals
     _writeProposedVesselCalls(rBase);
 
     // ── Pass 2: full plan including proposed vessels ────────
@@ -10020,8 +10117,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
     if(el.type==='kiln') state[el.id]._blockedHighInv=false; // tracks restart_threshold rule
     if(el.type==='dispatch_point'&&el.props.dispatch_type==='Rail'){
       r.railHistory[el.id]=[];
-      state[el.id].yardByDest={};       // {destFacId:{productId:cars}} — loaded cars TAGGED by destination, awaiting the next switch
-      state[el.id]._loadDebtByDest={};  // {destFacId:cars} — scheduled cars not yet loaded (silo/capacity short), rolls forward per destination (carry-rest)
+      state[el.id].yardByProduct={};    // {productId:cars} — loaded cars by product, accumulating since the last switch (carry-forward)
     }
     if(el.type==='berth'){
       state[el.id].berthQueue={};    // {productId: tonnes} — stock waiting to unload
@@ -10214,60 +10310,39 @@ function simulate(elements, connections, horizon, includeProposed=false){
   });
 
   // ── RAIL SCHEDULE (plan-driven loading + assigned-destination dispatch) ───────
-  // For each rail dispatch point, derive from DB.rail_movements:
-  //   loadByDay[day]   = cars the plant should LOAD that day (all scheduled movements'
-  //                      cars spread backward over their [load_start_day, switch_day] working
-  //                      days, capped at the siding's daily capacity shared across movements).
-  //   switchMoves[day] = the scheduled movements DEPARTING on that switch day, each tagged
-  //                      with destination/berth/product/cars/transit/status. Step 6 ships the
-  //                      yard to these ASSIGNED destinations (no demand-score re-split).
-  // Proposed movements drive loading & in-loop dispatch; Planned/Confirmed are also included
-  // here for loading (silo deduction) but their ARRIVAL is the pre-built transit (locked).
-  const railSchedule={};
+  // RAIL v2 is operator-driven. For each rail dispatch point we precompute:
+  //   railProdSilo[dp]  = {productId: upstreamSiloId} — where each loadable product comes from.
+  //   railPushes[dp]    = {switchDay: [{toFacId, berthId, productId, cars, transitDays, status}]}
+  //                       the manager's allocations (DB.rail_movements) departing that switch.
+  // Loading (Step 6) pulls from DB.rail_loading_plan; shipping executes these pushes from the
+  // accumulated yard. Already-departed / In-Transit cargo is pre-built (excluded here).
+  const railProdSilo={};
+  const railPushes={};
   elements.filter(e=>e.type==='dispatch_point'&&e.props.dispatch_type==='Rail').forEach(dp=>{
-    const sched={loadByDay:{}, loadByDayDest:{}, switchMoves:{}};
-    const _isWork=_mkRailWorkDayFn(dp);
-    const stdRate=(parseFloat(dp.props.std_loading_cars_shift||dp.props.std_loading_cars_day)||0)
-                 *(parseFloat(dp.props.shifts_per_day)||1);
-    const dpDestIds=new Set((dp.props.destinations||[]).map(x=>x.facility_id));
-    // Every movement that LOADS during the sim window — Planned, Confirmed or Proposed — is
-    // executed here (uniform mass balance). In-Transit / already-departed cargo is pre-built, so
-    // it's excluded to avoid double-counting.
-    const moves=DB.rail_movements
-      .filter(rm=>(rm.from_dispatch_id===dp.id||(rm.from_facility_id===S.facility_id&&dpDestIds.has(rm.to_facility_id)))
-        &&rm.switch_day&&rm.load_start_day
-        &&(rm.status||'Planned')!=='In Transit'
-        &&(includeProposed||rm.status!=='Proposed')
-        &&(!rm.departure_date||rm.departure_date>=S.simCfg.start_date))
-      .sort((a,b)=>(a.switch_day-b.switch_day)||(a.load_start_day-b.load_start_day));
-    moves.forEach(rm=>{
-      const cars=parseInt(rm.wagon_count)||0;
-      const sw=rm.switch_day, ls=rm.load_start_day;
-      // Group by switch day for dispatch
-      const berthInfo=(railDestBerthMap[dp.id]||{})[rm.to_facility_id];
-      if(!sched.switchMoves[sw]) sched.switchMoves[sw]=[];
-      sched.switchMoves[sw].push({
-        rmId:rm.id, toFacId:rm.to_facility_id,
-        berthId:rm.to_berth_id||berthInfo?.berthId||null,
-        transitDays:parseInt(rm.transit_days)||berthInfo?.transitDays||1,
-        productId:rm.product_id||'', cars, status:rm.status||'Planned'
-      });
-      // Spread cars backward from switch day over working days, capped by remaining daily
-      // capacity. Track BOTH the daily total (loadByDay, for capacity) and the per-destination
-      // split (loadByDayDest, so loading can tag each car with where it's headed).
-      let rem=cars;
-      for(let d=sw; d>=ls&&rem>0; d--){
-        if(!_isWork(d)) continue;
-        const free=stdRate>0?stdRate-(sched.loadByDay[d]||0):rem;
-        if(free<=0) continue;
-        const put=Math.min(free,rem);
-        sched.loadByDay[d]=(sched.loadByDay[d]||0)+put;
-        if(!sched.loadByDayDest[d]) sched.loadByDayDest[d]={};
-        sched.loadByDayDest[d][rm.to_facility_id]=(sched.loadByDayDest[d][rm.to_facility_id]||0)+put;
-        rem-=put;
-      }
+    railProdSilo[dp.id]={};
+    (up[dp.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='bulk_silo').forEach(si=>{
+      getSiloProducts(si).forEach(pid=>{ if(!railProdSilo[dp.id][pid]) railProdSilo[dp.id][pid]=si.id; });
     });
-    railSchedule[dp.id]=sched;
+    railPushes[dp.id]={};
+    const dpDestIds=new Set((dp.props.destinations||[]).map(x=>x.facility_id));
+    DB.rail_movements
+      .filter(rm=>(rm.from_dispatch_id===dp.id||(rm.from_facility_id===S.facility_id&&dpDestIds.has(rm.to_facility_id)))
+        &&rm.switch_day
+        &&(rm.status||'Planned')!=='In Transit'
+        &&(!rm.departure_date||rm.departure_date>=S.simCfg.start_date))
+      .forEach(rm=>{
+        const sw=rm.switch_day;
+        const berthInfo=(railDestBerthMap[dp.id]||{})[rm.to_facility_id];
+        if(!railPushes[dp.id][sw]) railPushes[dp.id][sw]=[];
+        railPushes[dp.id][sw].push({
+          toFacId:rm.to_facility_id,
+          berthId:rm.to_berth_id||berthInfo?.berthId||null,
+          transitDays:parseInt(rm.transit_days)||berthInfo?.transitDays||1,
+          productId:rm.product_id||'',
+          cars:parseInt(rm.wagon_count)||0,
+          status:rm.status||'Planned'
+        });
+      });
   });
 
 
@@ -10775,41 +10850,25 @@ function simulate(elements, connections, horizon, includeProposed=false){
         .forEach(hs=>{ siloInflow[hs.id]=(siloInflow[hs.id]||0)+rate; });
     });
 
-    // ── PRE-STEP 4: RAIL FILL TRIGGER ─────────────────
-    // In Pass 2, check if any planned rail shipment requires the RAIL silo
-    // to start being filled today. If so, add a hard override entry.
-    // railFillTarget[railSiloId] = {tonnes, prodId} for this day only.
+    // ── PRE-STEP 4: RAIL FILL TRIGGER (loading-plan driven) ─────────────
+    // Rail v2: keep each rail silo stocked to support today's LOADING PLAN, so the mill
+    // prioritizes routing product into the rail silo. Target ≈ a few days of the planned
+    // loading rate, capped by silo capacity. railFillTarget[railSiloId] = {tonnes, prodId}.
     const railFillTarget={};
     {
-      // Rail fill: always honor Planned/Confirmed; honor Proposed in both passes
-      // (Pass 1 fills origin correctly; Pass 2 adds destination arrivals)
-      DB.rail_movements
-        .filter(rm=>{
-          const st=rm.status||'Planned';
-          if(!rm.from_facility_id||rm.from_facility_id!==S.facility_id||!rm.load_start_day) return false;
-          if(rm.departure_date&&rm.departure_date<S.simCfg.start_date) return false;
-          return ['Planned','Confirmed','Proposed'].includes(st);
-        })
-        .forEach(rm=>{
-          // Load window is [load_start_day, switch_day] INCLUSIVE — cement loaded the morning
-          // of the switch ships that day. Excluding the switch day meant single-day-window
-          // shipments (load_start_day === switch_day) NEVER triggered the mill to fill the rail
-          // silo, so they loaded/shipped nothing and the terminal showed no unload.
-          if(day<rm.load_start_day||day>rm.switch_day) return; // not our window
-          // Find the rail dispatch point and its upstream RAIL silo
-          const dpEl=elMap[rm.from_dispatch_id]; if(!dpEl) return;
-          const railSiloId=(up[dpEl.id]||[]).find(uid=>railTransferSiloIds.has(uid));
-          if(!railSiloId) return;
-          const existing=railFillTarget[railSiloId];
-          // Accumulate target tonnes per silo (multiple shipments may overlap)
-          const tonnes=rm.total_capacity_t||0;
-          if(!existing||tonnes>existing.tonnes)
-            railFillTarget[railSiloId]={
-              tonnes,
-              prodId:rm.product_id||'',
-              switchDay:rm.switch_day
-            };
+      const _ffDate=new Date(simStartDate.getTime()+(day-1)*864e5)._ymd();
+      elements.filter(e=>e.type==='dispatch_point'&&e.props.dispatch_type==='Rail').forEach(dp=>{
+        const carCap=parseFloat(dp.props.car_capacity_t)||112;
+        Object.keys(railProdSilo[dp.id]||{}).forEach(pid=>{
+          const rate=railPlanRate(dp.id,pid,_ffDate); if(rate<=0) return;
+          const siloId=railProdSilo[dp.id][pid]; if(!siloId) return;
+          const siloMax=state[siloId]?.maxCap||parseFloat(elMap[siloId]?.props?.max_capacity)||0;
+          const dailyTonnes=rate*carCap;
+          const target=siloMax>0?Math.min(siloMax,dailyTonnes*3):dailyTonnes*3;
+          const ex=railFillTarget[siloId];
+          if(!ex||target>ex.tonnes) railFillTarget[siloId]={tonnes:target,prodId:pid};
         });
+      });
     }
 
     // ── STEP 4: FINISH MILLS ──────────────────────────
@@ -11247,141 +11306,87 @@ function simulate(elements, connections, horizon, includeProposed=false){
 
     elements.filter(e=>e.type==='dispatch_point'&&e.props.dispatch_type==='Rail').forEach(el=>{
       const s=state[el.id];
-      // Flatten the destination-tagged yard into a by-product total (for the history/chart).
-      const _yardProd=()=>{const o={};Object.values(s.yardByDest||{}).forEach(byPid=>Object.entries(byPid).forEach(([p,c])=>{o[p]=(o[p]||0)+c;}));return o;};
+      const _yardProd=()=>({...s.yardByProduct}); // yard is by product in v2
       if(s.status==='maintenance'){
         r.railHistory[el.id].push({carsLoadedByProduct:{},carsInYardByProduct:_yardProd(),dispatchByDest:{}});
         return;
       }
 
       const carCap=parseFloat(el.props.car_capacity_t)||50;
-      // Support both new (per-shift) and legacy (per-day) field names
-      const carsPerShift=parseFloat(el.props.std_loading_cars_shift||el.props.std_loading_cars_day)||0;
-      const loadShifts=parseFloat(el.props.shifts_per_day)||1;
-      const stdRate=carsPerShift*loadShifts; // total cars loadable per day
+      const stdRate=_railCarsPerDay(el); // total cars loadable per day (capacity cap)
       const workDays=el.props.working_days||'weekdays';
       const switchDays=el.props.switch_days||[];
-      const dests=el.props.destinations||[];
+      const _dateStr=new Date(simStartDate.getTime()+(day-1)*864e5)._ymd();
 
-      // Check if today is a working day
       const isWorking=(workDays==='7_days')||
                       (workDays==='mon_sat'&&dow<=5)||
                       (workDays==='weekdays'&&dow<=4);
       const isSwitch=switchDays.includes(dow);
 
-      // Find upstream transfer silo
-      const upSilos=(up[el.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='bulk_silo');
-      const upSilo=upSilos[0]||null;
-
       const carsLoadedByProduct={};
-      const sched=railSchedule[el.id]||{loadByDay:{},loadByDayDest:{},switchMoves:{}};
 
-      // ── LOADING (plant-controlled, plan-driven, destination-tagged) ──────────
-      // Load the cars the plan calls for today PER DESTINATION (sched.loadByDayDest) plus any
-      // per-destination carry-debt, capped by the daily siding capacity AND the cement actually
-      // available upstream. Each loaded car is TAGGED with its destination (s.yardByDest) so the
-      // next switch ships it where it was meant to go. Cars that can't be loaded roll forward
-      // (_loadDebtByDest) and load as soon as cement frees up — carry-rest. Loading is bounded by
-      // physical supply, never the plan alone.
-      if(isWorking&&upSilo){
-        const todays=sched.loadByDayDest[day]||{};
-        const wantByDest={}; let totalWant=0;
-        new Set([...Object.keys(todays),...Object.keys(s._loadDebtByDest)]).forEach(d=>{
-          const w=(todays[d]||0)+(s._loadDebtByDest[d]||0);
-          if(w>0){ wantByDest[d]=w; totalWant+=w; }
-        });
-        const desired=stdRate>0?Math.min(totalWant,stdRate):totalWant; // capacity cap
-        if(desired>0){
-          const siloState=state[upSilo.id];
-          // Include same-day inflow (e.g. FM production into this silo today)
-          const totalInSilo=(siloState.inventory+(siloInflow[upSilo.id]||0))-(siloOutflow[upSilo.id]||0);
-          const siloCars=Math.max(0,Math.floor(totalInSilo/carCap));
-          const actualCars=Math.min(desired,siloCars);
-          const alloc={};
-          if(actualCars>0){
-            // Split the loadable cars across destinations proportional to their want
-            // (largest gets the rounding remainder so the totals stay exact).
-            const dEntries=Object.entries(wantByDest); let assigned=0;
-            dEntries.forEach(([d,w],i)=>{
-              const a=i===dEntries.length-1?actualCars-assigned:Math.floor(actualCars*w/totalWant);
-              alloc[d]=a; assigned+=a;
-            });
-            // Product split by silo composition, applied within each destination's allocation.
-            const comp=siloState.composition||{};
-            const compTotal=Object.values(comp).reduce((a,b)=>a+b,0)||1;
-            let compProds=Object.keys(comp).filter(pid=>comp[pid]>0);
-            if(!compProds.length){ const ps=getSiloProducts(upSilo); if(ps.length) compProds=[ps[0]]; }
-            Object.entries(alloc).forEach(([d,carsForDest])=>{
-              if(carsForDest<=0) return;
-              if(!s.yardByDest[d]) s.yardByDest[d]={};
-              let rem=carsForDest;
-              compProds.forEach((pid,i)=>{
-                const c=i===compProds.length-1?rem:Math.min(rem,Math.round(carsForDest*((comp[pid]||0)/compTotal)));
-                if(c>0){
-                  carsLoadedByProduct[pid]=(carsLoadedByProduct[pid]||0)+c;
-                  s.yardByDest[d][pid]=(s.yardByDest[d][pid]||0)+c;
-                  rem-=c;
-                }
-              });
-            });
-            siloOutflow[upSilo.id]=(siloOutflow[upSilo.id]||0)+actualCars*carCap;
+      // ── LOADING (plant, plan-driven) ─────────────────────────────────────────
+      // Ops set how many cars/day of each product to load (DB.rail_loading_plan). Each working
+      // day we load, per product, min(plan rate, remaining daily capacity, cement available in
+      // that product's source silo). Loaded cars accumulate in the yard BY PRODUCT and stay
+      // there until a switch. Loading is bounded by both the plan and physical supply.
+      if(isWorking&&stdRate>0){
+        let capRem=stdRate;
+        Object.keys(railProdSilo[el.id]||{}).forEach(pid=>{
+          if(capRem<=0) return;
+          const rate=railPlanRate(el.id,pid,_dateStr); if(rate<=0) return;
+          const siloId=railProdSilo[el.id][pid]; const siloSt=state[siloId]; if(!siloSt) return;
+          const avail=(siloSt.inventory+(siloInflow[siloId]||0))-(siloOutflow[siloId]||0);
+          const siloCars=Math.max(0,Math.floor(avail/carCap));
+          const cars=Math.min(rate,capRem,siloCars);
+          if(cars>0){
+            s.yardByProduct[pid]=(s.yardByProduct[pid]||0)+cars;
+            carsLoadedByProduct[pid]=(carsLoadedByProduct[pid]||0)+cars;
+            siloOutflow[siloId]=(siloOutflow[siloId]||0)+cars*carCap;
+            capRem-=cars;
             s.status='running';
           }
-          // Whatever each destination wanted but didn't get carries forward.
-          Object.keys(wantByDest).forEach(d=>{ s._loadDebtByDest[d]=Math.max(0,wantByDest[d]-(alloc[d]||0)); });
-        }
+        });
       }
 
-      // ── SHIPPING (railroad-controlled) ───────────────────────────────────────
-      // On a switch day the railroad collects the ENTIRE yard and departs — every car that has
-      // been loaded since the last switch leaves now (per the operating model). Because each car
-      // is TAGGED with its destination, the train delivers every destination's accumulated cars
-      // to that destination (no demand-score re-split, no per-shipment cap that strands late
-      // cement). This empties the yard each switch, so all loaded cement reaches its terminal,
-      // unloads, and is counted in inventory — uniform across Planned/Confirmed/Proposed.
+      // ── SHIPPING (railroad, operator pushes) ─────────────────────────────────
+      // On a switch day the railroad departs. The logistics manager's pushes (railPushes, from
+      // DB.rail_movements) say how many cars of each product go to each terminal. We ship
+      // min(requested, cars accumulated in the yard for that product); the rest is a shortfall.
+      // Unshipped yard cars carry forward to the next switch.
       const dispatchByDest={};
       if(isSwitch){
-        // Per-destination berth/transit lookup (movements override the topology default).
-        const berthByDest={};
-        (sched.switchMoves[day]||[]).forEach(m=>{ if(m.berthId&&!berthByDest[m.toFacId]) berthByDest[m.toFacId]={berthId:m.berthId,transitDays:m.transitDays}; });
-        Object.keys(s.yardByDest).forEach(destFacId=>{
-          const byPid=s.yardByDest[destFacId]||{};
-          const cars=Object.values(byPid).reduce((a,b)=>a+b,0);
-          if(cars<=0) return;
-          const info=berthByDest[destFacId]||(railDestBerthMap[el.id]||{})[destFacId];
-          if(!info||!info.berthId) return; // no receiving berth — can't ship; leave in yard
-          const arrivalDay=day+(info.transitDays||1);
-          if(arrivalDay>horizon) return;  // would arrive after the horizon — keep in yard (honest)
-          dispatchByDest[destFacId]=(dispatchByDest[destFacId]||0)+cars;
-          if(!transitQueue[arrivalDay]) transitQueue[arrivalDay]=[];
-          const byProdTonnes={};
-          Object.entries(byPid).forEach(([p,c])=>{ byProdTonnes[p]=(byProdTonnes[p]||0)+c*carCap; });
-          transitQueue[arrivalDay].push({berthId:info.berthId,byProduct:byProdTonnes,fromFacId:S.facility_id,toFacId:destFacId});
-          s.yardByDest[destFacId]={}; // emptied — the train took it all
-        });
-        // Record shortfalls: cars scheduled to depart today that the origin couldn't supply
-        // (planned for this switch minus what actually shipped to that destination).
-        const plannedToday={};
-        (sched.switchMoves[day]||[]).forEach(m=>{ plannedToday[m.toFacId]=(plannedToday[m.toFacId]||0)+m.cars; });
-        Object.entries(plannedToday).forEach(([destFacId,planned])=>{
-          const shipped=dispatchByDest[destFacId]||0;
-          if(planned-shipped>0) r.railShortfalls.push({dpId:el.id,dpName:el.name,switchDay:day,date:simDate._ymd(),
-            toFacId:destFacId,plannedCars:planned,shippedCars:shipped,shortCars:planned-shipped});
+        const pushes=(railPushes[el.id]||{})[day]||[];
+        pushes.forEach(p=>{
+          const dpProds=Object.keys(railProdSilo[el.id]||{});
+          const pid=p.productId||(dpProds.length===1?dpProds[0]:null);
+          const avail=pid?(s.yardByProduct[pid]||0):0;
+          const cars=Math.max(0,Math.min(p.cars||0,avail));
+          if(cars>0&&p.berthId){
+            const arrivalDay=day+(p.transitDays||1);
+            s.yardByProduct[pid]=avail-cars;
+            dispatchByDest[p.toFacId]=(dispatchByDest[p.toFacId]||0)+cars;
+            if(arrivalDay<=horizon){
+              if(!transitQueue[arrivalDay]) transitQueue[arrivalDay]=[];
+              transitQueue[arrivalDay].push({berthId:p.berthId,byProduct:{[pid]:cars*carCap},fromFacId:S.facility_id,toFacId:p.toFacId});
+            }
+          }
+          const short=(p.cars||0)-cars;
+          if(short>0) r.railShortfalls.push({dpId:el.id,dpName:el.name,switchDay:day,date:simDate._ymd(),
+            toFacId:p.toFacId,plannedCars:p.cars||0,shippedCars:cars,shortCars:short});
         });
         s.status='running';
       }
 
-      // Capture silo composition snapshot (beginning of day, before flows applied)
+      // Capture rail-silo composition snapshot (across the dp's upstream silos)
       const siloCompositionByProduct={};
-      if(upSilo){
-        const comp=state[upSilo.id].composition||{};
+      new Set(Object.values(railProdSilo[el.id]||{})).forEach(siloId=>{
+        const st=state[siloId]; if(!st) return;
+        const comp=st.composition||{};
         const compTotal=Object.values(comp).reduce((a,b)=>a+b,0)||1;
-        const siloInv=state[upSilo.id].inventory||0;
-        Object.keys(comp).forEach(pid=>{
-          // Scale composition to actual inventory
-          siloCompositionByProduct[pid]=Math.round(siloInv*(comp[pid]/compTotal));
-        });
-      }
+        const siloInv=st.inventory||0;
+        Object.keys(comp).forEach(pid=>{ siloCompositionByProduct[pid]=(siloCompositionByProduct[pid]||0)+Math.round(siloInv*(comp[pid]/compTotal)); });
+      });
 
       r.railHistory[el.id].push({
         carsLoadedByProduct:{...carsLoadedByProduct},
@@ -18786,6 +18791,7 @@ function autoSave(){
         simulation_rules: DB.simulation_rules,
         vessel_calls:   DB.vessel_calls,
         rail_movements: DB.rail_movements,
+        rail_loading_plan: DB.rail_loading_plan,
         forecast_commitments: DB.forecast_commitments,
         real_production_daily: DB.real_production_daily,
         real_inventory_daily:  DB.real_inventory_daily,
