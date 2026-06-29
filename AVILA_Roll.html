@@ -10126,13 +10126,15 @@ function simulate(elements, connections, horizon, includeProposed=false){
         return st==='Proposed'?includeProposed:['Planned','Confirmed','In Transit'].includes(st);
       }
       // Outbound: train departing from this facility to a terminal berth on this canvas.
-      // ONLY locked commitments (Planned/Confirmed/In Transit) are pre-built here. Proposed
-      // (auto-planned) outbound shipments are executed dynamically in Step 6 so the terminal
-      // only ever receives what the origin actually loaded & shipped (mass balance). Pre-building
-      // their PLANNED tonnage was the source of phantom over-supply.
+      // ONLY movements that already DEPARTED before the sim window (cargo is en route and can no
+      // longer be loaded) are pre-built. Every shipment that loads DURING the sim — Planned,
+      // Confirmed OR Proposed — is executed in Step 6 from the ACTUAL yard, so the terminal
+      // receives only what the origin physically loaded & shipped. This makes unloading uniform
+      // and mass-balanced for ALL statuses (status no longer changes how much is delivered);
+      // pre-building planned tonnage was the source of phantom over-supply.
       if(rm.from_facility_id===S.facility_id&&rm.to_berth_id){
-        if(st==='Proposed') return false;
-        return ['Planned','Confirmed','In Transit'].includes(st)&&elements.some(e=>e.id===rm.to_berth_id);
+        const departedBeforeSim=rm.departure_date&&rm.departure_date<S.simCfg.start_date;
+        return (departedBeforeSim||st==='In Transit')&&elements.some(e=>e.id===rm.to_berth_id);
       }
       return false;
     })
@@ -10228,9 +10230,13 @@ function simulate(elements, connections, horizon, includeProposed=false){
     const stdRate=(parseFloat(dp.props.std_loading_cars_shift||dp.props.std_loading_cars_day)||0)
                  *(parseFloat(dp.props.shifts_per_day)||1);
     const dpDestIds=new Set((dp.props.destinations||[]).map(x=>x.facility_id));
+    // Every movement that LOADS during the sim window — Planned, Confirmed or Proposed — is
+    // executed here (uniform mass balance). In-Transit / already-departed cargo is pre-built, so
+    // it's excluded to avoid double-counting.
     const moves=DB.rail_movements
       .filter(rm=>(rm.from_dispatch_id===dp.id||(rm.from_facility_id===S.facility_id&&dpDestIds.has(rm.to_facility_id)))
         &&rm.switch_day&&rm.load_start_day
+        &&(rm.status||'Planned')!=='In Transit'
         &&(includeProposed||rm.status!=='Proposed')
         &&(!rm.departure_date||rm.departure_date>=S.simCfg.start_date))
       .sort((a,b)=>(a.switch_day-b.switch_day)||(a.load_start_day-b.load_start_day));
@@ -11328,14 +11334,13 @@ function simulate(elements, connections, horizon, includeProposed=false){
           return {got,byProduct};
         };
 
-        // 1) Locked commitments first — arrival is pre-built; just consume their cars & record.
-        moves.filter(m=>['Planned','Confirmed','In Transit'].includes(m.status)).forEach(m=>{
-          pullFromYard(m.productId,m.cars);
-          dispatchByDest[m.toFacId]=(dispatchByDest[m.toFacId]||0)+m.cars;
-        });
-
-        // 2) Proposed — ship ACTUAL cars to the assigned destination and inject transit now.
-        moves.filter(m=>m.status==='Proposed').forEach(m=>{
+        // Ship EVERY scheduled movement for this switch uniformly — Planned, Confirmed and
+        // Proposed alike — from the ACTUAL yard to its assigned destination, injecting the real
+        // tonnage into transit. Delivery/unloading no longer depends on status (the old code
+        // gave locked movements a pre-built full delivery while Proposed got the real amount).
+        // Commitments are served first (so the limited yard honors firm orders before proposals).
+        const _ord={'Confirmed':0,'Planned':1,'Proposed':2};
+        [...moves].sort((a,b)=>(_ord[a.status]??9)-(_ord[b.status]??9)).forEach(m=>{
           const {got,byProduct}=m.berthId?pullFromYard(m.productId,m.cars):{got:0,byProduct:{}};
           if(got>0){
             dispatchByDest[m.toFacId]=(dispatchByDest[m.toFacId]||0)+got;
