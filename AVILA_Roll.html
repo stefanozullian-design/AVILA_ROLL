@@ -363,6 +363,11 @@ select.pi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
 .tp-row-rail-silo td:first-child{color:#38bdf8;}
 .tp-row-loading td:first-child{color:#4da6ff;}
 .tp-row-dispatch td:first-child{color:#ff9433;}
+.rp-push-inp{width:38px;background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:9px;padding:1px 2px;text-align:right;}
+.rp-push-inp.rp-committed{background:rgba(0,229,160,.14);border-color:rgba(0,229,160,.55);}
+.rp-push-inp.rp-dirty{background:rgba(255,184,48,.16);border-color:rgba(255,184,48,.65);}
+.rp-sw-icon{cursor:pointer;font-size:11px;padding:0 3px;opacity:.7;user-select:none;}
+.rp-sw-icon:hover{opacity:1;}
 .tp-cell-clickable{cursor:pointer;transition:background .1s;}
 .tp-cell-clickable:hover{background:rgba(0,214,143,.12)!important;color:#00d68f!important;}
 .tp-cell-planned{background:rgba(255,184,48,.15)!important;color:var(--amber)!important;}
@@ -8042,8 +8047,9 @@ function _supSetRailDayRate(dispId, pid, ds){
   if(typeof runSimulation==='function') runSimulation();
 }
 // Operator "push": set how many cars of a product go from a dispatch point to a terminal on a
-// switch day. Upserts a Confirmed rail_movement (or removes it when 0), then re-runs the sim.
-function _rpSetPush(dpId, destFacId, pid, dayNum, ds, value){
+// switch day. Upserts a Confirmed rail_movement (or removes it when 0). With skipRun=true it only
+// mutates DB (caller saves + re-runs once); otherwise it saves + re-runs immediately.
+function _rpSetPush(dpId, destFacId, pid, dayNum, ds, value, skipRun){
   const cars=Math.max(0,parseInt(value)||0);
   const dp=DB.elements.find(e=>e.id===dpId);
   const carCap=parseFloat(dp?.props?.car_capacity_t)||112;
@@ -8055,8 +8061,29 @@ function _rpSetPush(dpId, destFacId, pid, dayNum, ds, value){
   if(cars<=0){ if(row) DB.rail_movements=DB.rail_movements.filter(r=>r!==row); }
   else if(row){ row.wagon_count=cars; row.wagon_capacity_t=carCap; row.total_capacity_t=cars*carCap; row.status='Confirmed'; if(!row.to_berth_id) row.to_berth_id=berthId; }
   else DB.rail_movements.push({id:'push_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),from_facility_id:S.facility_id,to_facility_id:destFacId,from_dispatch_id:dpId,to_berth_id:berthId,product_id:pid,wagon_count:cars,wagon_capacity_t:carCap,total_capacity_t:cars*carCap,switch_day:dayNum,departure_date:ds,transit_days:transit,status:'Confirmed',notes:'Operator push'});
+  if(!skipRun){ autoSave(); if(typeof runSimulation==='function') runSimulation(); }
+}
+// A push cell was edited — recolor it (green = matches the confirmed value, amber = unsaved draft).
+function _rpPushEdit(inp){
+  const committed=parseInt(inp.dataset.committed)||0;
+  const v=Math.max(0,parseInt(inp.value)||0);
+  inp.classList.remove('rp-committed','rp-dirty');
+  if(v!==committed) inp.classList.add('rp-dirty');
+  else if(committed>0) inp.classList.add('rp-committed');
+}
+// Confirm every push for one switch at the given dispatch point, then save + re-run once.
+function _rpConfirmSwitch(dpId, sw){
+  const inps=document.querySelectorAll(`input.rp-push-inp[data-dp="${dpId}"][data-sw="${sw}"]`);
+  if(!inps.length) return;
+  inps.forEach(inp=>{ _rpSetPush(dpId, inp.dataset.dest, inp.dataset.pid, parseInt(sw,10), inp.dataset.ds, inp.value, true); });
   autoSave();
   if(typeof runSimulation==='function') runSimulation();
+}
+// Reset one switch's push inputs back to the suggested distribution (no commit, no re-run).
+function _rpResetSwitch(dpId, sw){
+  document.querySelectorAll(`input.rp-push-inp[data-dp="${dpId}"][data-sw="${sw}"]`).forEach(inp=>{
+    inp.value=inp.dataset.suggest||0; _rpPushEdit(inp);
+  });
 }
 // Products a rail dispatch point can load — the products held by its upstream bulk silos.
 function railDpProducts(dp, connections){
@@ -8346,21 +8373,20 @@ function rpRender(){
         }).join('');
         origRows.push(`<tr class="tp-row-avail"><td style="color:#b388ff">  ▣ Available ${pName} (cars @ switch)</td>${availCells}</tr>`);
 
-        // Pre-fill suggestion per switch: distribute the cars NOT already pushed across the
-        // terminals proportional to each terminal's demand over the days right after arrival.
+        // Pre-fill suggestion per switch: distribute ALL the cars available at that switch across
+        // the terminals proportional to each terminal's demand over the days right after arrival.
+        // (Full fresh split, so the ⟳ reset always restores a meaningful distribution.)
         const suggest={}; // {switchDay:{destFacId:cars}}
         days.forEach(d=>{ if(!rpIsSwitch(d,switchDays)) return;
-          let avail=availAtSwitch(pid,d); if(avail<=0){ suggest[d]={}; return; }
-          const w={}; let tw=0; let pushedTot=0;
+          const avail=availAtSwitch(pid,d); if(avail<=0){ suggest[d]={}; return; }
+          const w={}; let tw=0;
           myDests.forEach(fid=>{
-            const ex=existingPush(pid,fid,d); if(ex) pushedTot+=parseInt(ex.wagon_count)||0;
             const tr=transitOf(fid);
             const dem=rpGetDestDemEls(fid).reduce((s,el)=>{ let q=0; for(let k=0;k<7;k++) q+=rpDemand(el.id,d+tr+k)||0; return s+q; },0);
             w[fid]=dem; tw+=dem;
           });
-          const free=Math.max(0,avail-pushedTot);
-          suggest[d]={}; let assigned=0; const fids=myDests.filter(fid=>!existingPush(pid,fid,d));
-          fids.forEach((fid,i)=>{ let a= tw>0?(i===fids.length-1?free-assigned:Math.floor(free*(w[fid]||0)/tw)):(i===0?free:0); a=Math.max(0,a); suggest[d][fid]=a; assigned+=a; });
+          suggest[d]={}; let assigned=0;
+          myDests.forEach((fid,i)=>{ let a= tw>0?(i===myDests.length-1?avail-assigned:Math.floor(avail*(w[fid]||0)/tw)):(i===0?avail:0); a=Math.max(0,a); suggest[d][fid]=a; assigned+=a; });
         });
 
         // 3) Editable push row per terminal (only on switch-day columns)
@@ -8373,13 +8399,26 @@ function rpRender(){
               if(!sw) return `<td${tSty?` style="${tSty}"`:''}></td>`;
               const ds=rpDayDate(d);
               const ex=existingPush(pid,fid,d);
-              const val=ex?(parseInt(ex.wagon_count)||0):(suggest[d]?.[fid]||0);
+              const committed=ex?(parseInt(ex.wagon_count)||0):0;
+              const sg=suggest[d]?.[fid]||0;
+              const val=ex?committed:sg;
               const isSet=!!ex;
-              return `<td class="tp-col-switch"${tSty?` style="${tSty}"`:''}><input type="number" min="0" step="1" value="${val}" title="${isSet?'Confirmed push':'Suggested — edit to confirm'}" onchange="_rpSetPush('${dp.id}','${fid}','${pid}',${d},'${ds}',this.value)" style="width:38px;background:${isSet?'rgba(0,229,160,.08)':'var(--surface2)'};border:1px solid ${isSet?'rgba(0,229,160,.4)':'var(--border2)'};color:var(--text);font-family:var(--mono);font-size:9px;padding:1px 2px;text-align:right"></td>`; }).join('');
+              return `<td class="tp-col-switch"${tSty?` style="${tSty}"`:''}><input type="number" min="0" step="1" value="${val}" data-dp="${dp.id}" data-sw="${d}" data-dest="${fid}" data-pid="${pid}" data-ds="${ds}" data-committed="${committed}" data-suggest="${sg}" title="${isSet?'Confirmed push — edit & click ✓ to update':'Suggested — adjust then click ✓ under this switch to confirm'}" onchange="_rpPushEdit(this)" class="rp-push-inp${isSet?' rp-committed':''}"></td>`; }).join('');
           }).join('');
           origRows.push(`<tr class="tp-row-push"><td style="color:#ff9433">    → push ${destFac?.name||fid}</td>${pushCells}</tr>`);
         });
       });
+
+      // Per-switch CONFIRM (✓) / RESET (⟳) controls — one row for this dispatch point.
+      // The manager adjusts the push numbers above (cells turn amber), then clicks ✓ under a
+      // switch to commit ALL that switch's pushes at once (they turn green); ⟳ restores suggestions.
+      const confirmCells=months.map(mon=>{
+        const mTd=`<td class="logi-mcol" style="${_mTdSty}"></td>`;
+        return mTd+mon.days.map(d=>{ const tSty=_tpTdSty(d); const sw=rpIsSwitch(d,switchDays);
+          if(!sw) return `<td${tSty?` style="${tSty}"`:''}></td>`;
+          return `<td class="tp-col-switch" style="text-align:center;${tSty||''}"><span class="rp-sw-icon" style="color:#00d9a3" title="Confirm all pushes for this switch" onclick="_rpConfirmSwitch('${dp.id}',${d})">✓</span><span class="rp-sw-icon" style="color:#8e9ab8" title="Reset this switch to suggested" onclick="_rpResetSwitch('${dp.id}',${d})">⟳</span></td>`; }).join('');
+      }).join('');
+      origRows.push(`<tr class="tp-row-confirm"><td style="color:#8e9ab8;font-size:8px;letter-spacing:.04em">    ✓ confirm · ⟳ reset</td>${confirmCells}</tr>`);
     });
   });
   document.getElementById('rp-orig-tbody').innerHTML=origRows.join('');
