@@ -3948,8 +3948,13 @@ function showCampaignPopup(elId, dateStr, runStart, runEnd, runProduct){
   const caps=DB.element_product_capacities.filter(c=>c.element_id===elId);
   if(!caps.length){ statMsg('No products configured for this element'); return; }
 
+  // Existing REAL production already entered for the clicked day (single date = dateStr).
+  const existingReal=(DB.real_production_daily||[]).filter(r=>r.date===dateStr&&r.element_id===elId);
+  // Default the toggle to Real when real data already exists for this day, else Forecast.
+  const defaultMode=existingReal.length?'real':'forecast';
+
   // Pre-fill from the saved campaign if any, otherwise from the clicked Gantt run.
-  const selProd=existing?.product_id||runProduct||caps[0].product_id;
+  const selProd=(defaultMode==='real'&&existingReal[0]?.product_id)||existing?.product_id||runProduct||caps[0].product_id;
 
   // Product options
   const prodOpts=caps.map(c=>{
@@ -3961,12 +3966,15 @@ function showCampaignPopup(elId, dateStr, runStart, runEnd, runProduct){
   const currentRate=existing?.rate_tpd||(parseFloat(selCap?.capacity_tpd)||parseFloat(caps[0].capacity_tpd)||0);
   const fromVal=existing?.start_date||runStart||dateStr;
   const toVal=existing?.end_date||runEnd||dateStr;
+  // In Real mode the rate field holds the actual produced tonnage for the clicked day.
+  const realVal=existingReal.find(r=>r.product_id===selProd)?.volume_t ?? existingReal[0]?.volume_t ?? '';
+  const initVal=defaultMode==='real'?realVal:currentRate;
 
   const html=`
   <div style="font-family:var(--mono);font-size:9px;min-width:320px">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
       <div>
-        <div style="font-size:11px;font-weight:700;color:${existing?'#4ade80':'var(--text)'}">
+        <div id="camp-title" style="font-size:11px;font-weight:700;color:${existing?'#4ade80':'var(--text)'}">
           ${existing?'🔒 Edit Campaign':'+ New Campaign'}
         </div>
         <div style="color:var(--text-dim);margin-top:2px">${el.name} · ${dateStr}</div>
@@ -3974,26 +3982,34 @@ function showCampaignPopup(elId, dateStr, runStart, runEnd, runProduct){
       <button onclick="closeCampaignPopup()" style="background:transparent;border:none;color:var(--text-dim);cursor:pointer;font-size:16px">✕</button>
     </div>
 
+    <!-- Forecast vs Real toggle -->
+    <div style="display:flex;gap:0;margin-bottom:12px;border:1px solid var(--border2);border-radius:3px;overflow:hidden">
+      <button type="button" id="camp-mode-forecast" onclick="_campSetMode('forecast')"
+        style="flex:1;padding:6px 8px;font-family:var(--mono);font-size:9px;border:none;cursor:pointer">📈 Forecast Campaign</button>
+      <button type="button" id="camp-mode-real" onclick="_campSetMode('real')"
+        style="flex:1;padding:6px 8px;font-family:var(--mono);font-size:9px;border:none;cursor:pointer">✅ Real Data</button>
+    </div>
+
     <div style="display:flex;flex-direction:column;gap:8px">
       <div class="fr s1">
         <div class="ff">
           <div class="fl">Product</div>
-          <select class="fi" id="camp-product" onchange="document.getElementById('camp-rate').value=this.options[this.selectedIndex].dataset.rate" style="width:100%">${prodOpts}</select>
+          <select class="fi" id="camp-product" onchange="if(window._campMode!=='real')document.getElementById('camp-rate').value=this.options[this.selectedIndex].dataset.rate" style="width:100%">${prodOpts}</select>
         </div>
       </div>
       <div class="fr s2">
         <div class="ff">
-          <div class="fl">Rate (t/d)</div>
-          <input class="fi" id="camp-rate" type="number" value="${currentRate}" min="0" step="10" style="width:100%">
+          <div class="fl" id="camp-rate-label">Rate (t/d)</div>
+          <input class="fi" id="camp-rate" type="number" value="${initVal}" min="0" step="10" style="width:100%">
         </div>
-        <div style="font-size:8px;color:var(--text-dim);align-self:flex-end;padding-bottom:6px">override topology</div>
+        <div id="camp-rate-hint" style="font-size:8px;color:var(--text-dim);align-self:flex-end;padding-bottom:6px">override topology</div>
       </div>
       <div class="fr s2">
         <div class="ff">
-          <div class="fl">From</div>
+          <div class="fl" id="camp-from-label">From</div>
           <input class="fi" id="camp-from" type="date" value="${fromVal}" style="width:100%">
         </div>
-        <div class="ff">
+        <div class="ff" id="camp-to-field">
           <div class="fl">To</div>
           <input class="fi" id="camp-to" type="date" value="${toVal}" style="width:100%">
         </div>
@@ -4002,15 +4018,18 @@ function showCampaignPopup(elId, dateStr, runStart, runEnd, runProduct){
 
     <div style="margin-top:12px;display:flex;gap:8px;justify-content:space-between;align-items:center">
       <div style="display:flex;gap:6px">
-        ${existing?`<button onclick="deleteCampaignRange('${elId}','${existing.start_date}','${existing.end_date}')"
+        <span id="camp-del-wrap">${existing?`<button onclick="deleteCampaignRange('${elId}','${existing.start_date}','${existing.end_date}')"
           style="padding:5px 10px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid rgba(255,61,90,.5);color:var(--red);cursor:pointer;border-radius:2px">
-          ✕ Delete Campaign</button>`:''}
+          ✕ Delete Campaign</button>`:''}</span>
+        <span id="camp-clear-real-wrap" style="display:none">${existingReal.length?`<button onclick="_campClearReal('${elId}','${dateStr}')"
+          style="padding:5px 10px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid rgba(255,61,90,.5);color:var(--red);cursor:pointer;border-radius:2px">
+          ✕ Clear Real Value</button>`:''}</span>
         <button onclick="closeCampaignPopup();switchView('schedules');setSchedTab('maintenance');" title="Open the Maintenance Calendar to coordinate downtime for this equipment"
           style="padding:5px 10px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid var(--amber);color:var(--amber);cursor:pointer;border-radius:2px">📅 Maintenance Calendar</button>
       </div>
       <div style="display:flex;gap:6px">
         <button onclick="closeCampaignPopup()" style="padding:5px 12px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid var(--border2);color:var(--text-dim);cursor:pointer;border-radius:2px">Cancel</button>
-        <button onclick="applyCampaign('${elId}')" style="padding:5px 14px;font-family:var(--mono);font-size:9px;background:#4ade80;border:none;color:#000;cursor:pointer;font-weight:700;border-radius:2px">🔒 Apply Campaign</button>
+        <button id="camp-apply-btn" onclick="applyCampaign('${elId}')" style="padding:5px 14px;font-family:var(--mono);font-size:9px;background:#4ade80;border:none;color:#000;cursor:pointer;font-weight:700;border-radius:2px">🔒 Apply Campaign</button>
       </div>
     </div>
   </div>`;
@@ -4026,10 +4045,187 @@ function showCampaignPopup(elId, dateStr, runStart, runEnd, runProduct){
   }
   ov.innerHTML=`<div style="background:var(--surface);border:1px solid #4ade80;padding:18px;border-radius:6px;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.6)">${html}</div>`;
   ov.style.display='flex';
+  _campSetMode(defaultMode);
+}
+
+// Switch the Campaign popup between Forecast (date-range campaign) and Real (single-day actual) input.
+function _campSetMode(mode){
+  window._campMode=mode;
+  const real=mode==='real';
+  const fBtn=document.getElementById('camp-mode-forecast');
+  const rBtn=document.getElementById('camp-mode-real');
+  const onSty='background:#4ade80;color:#000;font-weight:700';
+  const offSty='background:transparent;color:var(--text-dim);font-weight:400';
+  if(fBtn) fBtn.style.cssText='flex:1;padding:6px 8px;font-family:var(--mono);font-size:9px;border:none;cursor:pointer;'+(real?offSty:onSty);
+  if(rBtn) rBtn.style.cssText='flex:1;padding:6px 8px;font-family:var(--mono);font-size:9px;border:none;cursor:pointer;'+(real?onSty:offSty);
+  // Real = a single day → hide the "To" field; relabel From + the value field.
+  const toField=document.getElementById('camp-to-field'); if(toField) toField.style.display=real?'none':'';
+  const fromLbl=document.getElementById('camp-from-label'); if(fromLbl) fromLbl.textContent=real?'Date':'From';
+  const rateLbl=document.getElementById('camp-rate-label'); if(rateLbl) rateLbl.textContent=real?'Actual production (t)':'Rate (t/d)';
+  const rateHint=document.getElementById('camp-rate-hint'); if(rateHint) rateHint.style.display=real?'none':'';
+  const title=document.getElementById('camp-title'); if(title) title.textContent=real?'✅ Real Production':( (DB.production_campaigns||[]).length||document.getElementById('camp-del-wrap')?.innerHTML?'🔒 Edit Campaign':'+ New Campaign');
+  const apply=document.getElementById('camp-apply-btn');
+  if(apply){ apply.textContent=real?'✅ Save Real Value':'🔒 Apply Campaign'; apply.style.background=real?'#3b82f6':'#4ade80'; apply.style.color=real?'#fff':'#000'; }
+  // Swap the delete buttons (campaign delete vs clear real value).
+  const delW=document.getElementById('camp-del-wrap'); if(delW) delW.style.display=real?'none':'';
+  const clrW=document.getElementById('camp-clear-real-wrap'); if(clrW) clrW.style.display=real?'':'none';
+}
+
+// Remove a real production entry for the clicked day/element (all products), then re-run.
+function _campClearReal(elId, dateStr){
+  if(!confirm(`Clear real production for ${dateStr}?\nSimulation will resume forecast/auto-selection for this day.`)) return;
+  DB.real_production_daily=(DB.real_production_daily||[]).filter(r=>!(r.date===dateStr&&r.element_id===elId));
+  closeCampaignPopup();
+  autoSave();
+  _demandCacheInvalidate();
+  renderSupplyView();
+  statMsg('Real production cleared — running simulation…');
+  if(typeof runSimulation==='function') runSimulation();
 }
 
 function closeCampaignPopup(){
   const ov=document.getElementById('camp-overlay');
+  if(ov) ov.style.display='none';
+}
+
+// ── Real Inventory popup (Supply page inventory cells) ───────────────────────
+// Supply cell for date X shows BEGINNING-of-day = end-of-day of X-1, so a real value
+// entered here is stored at X-1 in real_inventory_daily (Tier-0, same store as the
+// Daily Data form / Excel). The clicked cell then reflects the entered number.
+function _supInvValueAt(siloId, dateStr){
+  const silo=getEl(siloId);
+  const startInv=parseFloat(silo?.props?.start_inventory)||0;
+  const d=new Date(dateStr+'T00:00:00');
+  const pd=new Date(d); pd.setDate(pd.getDate()-1);
+  const realInv=(DB.real_inventory_daily||[]).find(ri=>ri.date===pd._ymd()&&ri.silo_id===siloId);
+  if(realInv) return {value:parseFloat(realInv.eod_volume_t)||0, isActual:true};
+  const r=S.simResults, simStart=S.simCfg?.start_date;
+  if(r&&simStart&&r.inventoryHistory?.[siloId]){
+    const dayIdx=Math.round((d-new Date(simStart+'T00:00:00'))/86400000);
+    const hist=r.inventoryHistory[siloId]||[];
+    return {value:(dayIdx<=0?startInv:(hist[dayIdx-1]??0)), isActual:false};
+  }
+  return {value:startInv, isActual:false};
+}
+
+function _invEodDate(asOf){ const d=new Date(asOf+'T00:00:00'); d.setDate(d.getDate()-1); return d._ymd(); }
+
+function showInventoryPopup(siloId, dateStr){
+  const silo=getEl(siloId); if(!silo) return;
+  const prods=getSiloProducts(silo);
+  const eodDate=_invEodDate(dateStr);
+  const existing=(DB.real_inventory_daily||[]).filter(r=>r.date===eodDate&&r.silo_id===siloId);
+  const selProd=existing[0]?.product_id||prods[0]||'';
+  const prodList=prods.length?prods:(selProd?[selProd]:[]);
+  const prodOpts=prodList.length
+    ? prodList.map(pid=>{ const p=DB.products.find(pr=>pr.id===pid); return `<option value="${pid}" ${selProd===pid?'selected':''}>${p?.name||pid}</option>`; }).join('')
+    : '<option value="">(silo product)</option>';
+  const siloMax=parseFloat(silo.props?.max_capacity)||0;
+  const realRow=existing.find(r=>r.product_id===selProd)||existing[0];
+  const initVal=realRow?(parseFloat(realRow.eod_volume_t)||0):Math.round(_supInvValueAt(siloId,dateStr).value);
+  const hasReal=existing.length>0;
+
+  const html=`
+  <div style="font-family:var(--mono);font-size:9px;min-width:320px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <div>
+        <div style="font-size:11px;font-weight:700;color:${hasReal?'#3b82f6':'var(--text)'}">${hasReal?'✏️ Edit Real Inventory':'✏️ Set Real Inventory'}</div>
+        <div style="color:var(--text-dim);margin-top:2px">${silo.name} · ${dateStr}${siloMax>0?' · cap '+siloMax.toLocaleString()+'t':''}</div>
+      </div>
+      <button onclick="closeInventoryPopup()" style="background:transparent;border:none;color:var(--text-dim);cursor:pointer;font-size:16px">✕</button>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <div class="fr s1">
+        <div class="ff">
+          <div class="fl">Product</div>
+          <select class="fi" id="inv-product" onchange="_invPrefill('${siloId}')" style="width:100%">${prodOpts}</select>
+        </div>
+      </div>
+      <div class="fr s2">
+        <div class="ff">
+          <div class="fl">Inventory level (t)</div>
+          <input class="fi" id="inv-value" type="number" value="${initVal}" min="0" step="10" style="width:100%">
+        </div>
+        <div style="font-size:8px;color:var(--text-dim);align-self:flex-end;padding-bottom:6px">${hasReal?'actual':'override sim'}</div>
+      </div>
+      <div class="fr s1">
+        <div class="ff">
+          <div class="fl">As of (start of day)</div>
+          <input class="fi" id="inv-date" type="date" value="${dateStr}" onchange="_invPrefill('${siloId}')" style="width:100%">
+        </div>
+      </div>
+      <div style="font-size:8px;color:var(--text-dim);line-height:1.4">Beginning-of-day level for this date — stored as end-of-day <b>${eodDate}</b>. Treated as real data, like the Daily Data form / Excel.</div>
+    </div>
+
+    <div style="margin-top:12px;display:flex;gap:8px;justify-content:space-between;align-items:center">
+      <div style="display:flex;gap:6px">
+        ${hasReal?`<button onclick="clearInventory('${siloId}')" style="padding:5px 10px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid rgba(255,61,90,.5);color:var(--red);cursor:pointer;border-radius:2px">✕ Clear Real Value</button>`:''}
+      </div>
+      <div style="display:flex;gap:6px">
+        <button onclick="closeInventoryPopup()" style="padding:5px 12px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid var(--border2);color:var(--text-dim);cursor:pointer;border-radius:2px">Cancel</button>
+        <button onclick="applyInventory('${siloId}')" style="padding:5px 14px;font-family:var(--mono);font-size:9px;background:#3b82f6;border:none;color:#fff;cursor:pointer;font-weight:700;border-radius:2px">✅ Save Real Inventory</button>
+      </div>
+    </div>
+  </div>`;
+
+  let ov=document.getElementById('inv-overlay');
+  if(!ov){
+    ov=document.createElement('div');
+    ov.id='inv-overlay';
+    ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:20000;display:flex;align-items:center;justify-content:center';
+    ov.onclick=e=>{ if(e.target===ov) closeInventoryPopup(); };
+    document.body.appendChild(ov);
+  }
+  ov.innerHTML=`<div style="background:var(--surface);border:1px solid #3b82f6;padding:18px;border-radius:6px;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.6)">${html}</div>`;
+  ov.style.display='flex';
+}
+
+// Re-prefill the value when the product or as-of date changes (shows the existing real
+// value if one exists for that combination, else the simulated level).
+function _invPrefill(siloId){
+  const asOf=document.getElementById('inv-date')?.value;
+  const pid=document.getElementById('inv-product')?.value||'';
+  if(!asOf) return;
+  const eodDate=_invEodDate(asOf);
+  const real=(DB.real_inventory_daily||[]).find(r=>r.date===eodDate&&r.silo_id===siloId&&(r.product_id===pid||!pid));
+  const inp=document.getElementById('inv-value');
+  if(inp) inp.value=real?(parseFloat(real.eod_volume_t)||0):Math.round(_supInvValueAt(siloId,asOf).value);
+}
+
+function applyInventory(siloId){
+  const productId=document.getElementById('inv-product')?.value||null;
+  const value=parseFloat(document.getElementById('inv-value')?.value);
+  const asOf=document.getElementById('inv-date')?.value;
+  if(!asOf||isNaN(value)||value<0){ statMsg('Enter a valid date and a non-negative inventory level'); return; }
+  const eodDate=_invEodDate(asOf);
+  const facId=getEl(siloId)?.facility_id||S.facility_id;
+  const now=new Date().toISOString();
+  const existing=(DB.real_inventory_daily||[]).find(r=>r.date===eodDate&&r.silo_id===siloId&&r.product_id===productId);
+  if(existing){ existing.eod_volume_t=value; existing.updated_at=now; }
+  else DB.real_inventory_daily.push({date:eodDate,facility_id:facId,silo_id:siloId,product_id:productId,eod_volume_t:value,source:'actual',created_at:now,updated_at:now});
+  closeInventoryPopup();
+  autoSave();
+  renderSupplyView();
+  statMsg('Real inventory saved — running simulation…');
+  if(typeof runSimulation==='function') runSimulation();
+}
+
+function clearInventory(siloId){
+  const asOf=document.getElementById('inv-date')?.value;
+  if(!asOf) return;
+  const eodDate=_invEodDate(asOf);
+  if(!confirm(`Clear real inventory for ${asOf}?\nSimulation will resume its projected level for this silo.`)) return;
+  DB.real_inventory_daily=(DB.real_inventory_daily||[]).filter(r=>!(r.date===eodDate&&r.silo_id===siloId));
+  closeInventoryPopup();
+  autoSave();
+  renderSupplyView();
+  statMsg('Real inventory cleared — running simulation…');
+  if(typeof runSimulation==='function') runSimulation();
+}
+
+function closeInventoryPopup(){
+  const ov=document.getElementById('inv-overlay');
   if(ov) ov.style.display='none';
 }
 
@@ -4038,6 +4234,24 @@ function applyCampaign(elId){
   const rateTpd=parseFloat(document.getElementById('camp-rate')?.value)||0;
   const fromDate=document.getElementById('camp-from')?.value;
   const toDate=document.getElementById('camp-to')?.value;
+
+  // REAL mode: write a single-day actual to real_production_daily (Tier 0 — same as Daily Data / Excel).
+  if(window._campMode==='real'){
+    if(!productId||!fromDate){ statMsg('Please choose a product and date'); return; }
+    const facId=getEl(elId)?.facility_id||S.facility_id;
+    const now=new Date().toISOString();
+    // Upsert: one row per element+product+date.
+    const existing=(DB.real_production_daily||[]).find(r=>r.date===fromDate&&r.element_id===elId&&r.product_id===productId);
+    if(existing){ existing.volume_t=rateTpd; existing.updated_at=now; }
+    else DB.real_production_daily.push({date:fromDate,facility_id:facId,element_id:elId,product_id:productId,volume_t:rateTpd,source:'actual',created_at:now,updated_at:now});
+    closeCampaignPopup();
+    autoSave();
+    _demandCacheInvalidate();
+    renderSupplyView();
+    statMsg('Real production saved — running simulation…');
+    if(typeof runSimulation==='function') runSimulation();
+    return;
+  }
 
   if(!productId||!fromDate||!toDate){ statMsg('Please fill all fields'); return; }
   if(fromDate>toDate){ statMsg('From date must be before To date'); return; }
@@ -6228,8 +6442,8 @@ function _renderSupplyViewInner(wrap){
                   const lvlColor=invLevelColor(v, siloMax);
                   const cellWeight=inv.isActual?'700':'400';
                   const cellClass=inv.isActual?'cell-real':'';
-                  const lvlTitle=siloMax>0?`${Math.round(v/siloMax*100)}% of ${siloMax.toLocaleString()}t capacity${inv.isActual?' · actual':''}`:'';
-                  h+=`<td class="sup-day-${mon.ym} ${cellClass}" title="${lvlTitle}" style="font-size:9px;color:${v>0?lvlColor:'rgba(0,217,163,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${cellWeight};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
+                  const lvlTitle=(siloMax>0?`${Math.round(v/siloMax*100)}% of ${siloMax.toLocaleString()}t capacity${inv.isActual?' · actual':''}`:'')+' · click to set real inventory';
+                  h+=`<td class="sup-day-${mon.ym} ${cellClass}" title="${lvlTitle}" onclick="showInventoryPopup('${silo.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?lvlColor:'rgba(0,217,163,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${cellWeight};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
                 });
               }
             });
@@ -6540,7 +6754,7 @@ function _renderSupplyViewInner(wrap){
                   const cellColor=inv.isActual?'var(--real)':clinkerInvColor;
                   const cellClass=inv.isActual?'cell-real':'';
                   const cellWeight=inv.isActual?'700':'400';
-                  h+=`<td class="sup-day-${mon.ym} ${cellClass}" style="font-size:9px;color:${v>0?cellColor:'rgba(255,140,66,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${cellWeight};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
+                  h+=`<td class="sup-day-${mon.ym} ${cellClass}" title="click to set real inventory${inv.isActual?' · actual':''}" onclick="showInventoryPopup('${silo.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?cellColor:'rgba(255,140,66,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${cellWeight};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
                 });
               }
             });
