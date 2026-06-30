@@ -852,7 +852,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
     <div class="nav-sec">
       <div class="nav-sec-hdr">Results</div>
       <div class="nav-cat" onclick="switchView('dashboard')">Dashboard</div>
-      <div class="nav-cat" onclick="switchView('results')">Daily Results Table</div>
+      <div class="nav-cat" onclick="switchView('results')">Push to BI</div>
     </div>
   </div>
 </div>
@@ -1492,25 +1492,44 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
     </div>
 
     <!-- ANALYSIS VIEW -->
-    <!-- DAILY RESULTS VIEW -->
-    <div id="results-view" class="view-panel">
-      <div class="results-toolbar">
-        <span class="results-toolbar-label">Daily Results Table</span>
-        <div class="tb-div"></div>
-        <button class="results-filter-btn active" onclick="setResultsFilter('all',this)">All Columns</button>
-        <button class="results-filter-btn" onclick="setResultsFilter('demand',this)">Demand</button>
-        <button class="results-filter-btn" onclick="setResultsFilter('inventory',this)">Inventory</button>
-        <button class="results-filter-btn" onclick="setResultsFilter('production',this)">Production</button>
-        <button class="results-export-btn" onclick="exportResultsCSV()">↓ Export CSV</button>
-      </div>
-      <div class="results-top-scroll" id="results-top-scroll">
-        <div class="results-top-scroll-inner" id="results-top-scroll-inner"></div>
-      </div>
-      <div class="results-table-wrap" id="results-table-wrap">
-        <div class="results-empty">
-          <div style="font-size:24px;color:var(--border2)">◇</div>
-          Run simulation to see daily results
-          <div style="font-size:9px;opacity:.6;max-width:200px;line-height:1.8">Configure simulation horizon and run to populate this table with day-by-day demand, inventory and production values</div>
+    <!-- PUSH TO BI VIEW -->
+    <div id="results-view" class="view-panel" style="overflow:auto;padding:24px">
+      <div style="max-width:760px;margin:0 auto;font-family:var(--mono);color:var(--text)">
+        <div style="font-size:16px;letter-spacing:2px;color:var(--green);margin-bottom:4px">PUSH TO POWER BI</div>
+        <div style="font-size:10px;color:var(--text-dim);letter-spacing:1px;margin-bottom:24px">Star-schema XLSX export — all facilities, actuals + forecast in one file</div>
+
+        <div style="border:1px solid var(--border2);background:var(--surface2);padding:20px;margin-bottom:20px">
+          <div style="font-size:11px;color:var(--text);margin-bottom:12px;letter-spacing:1px">▾ WHAT GETS EXPORTED</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;font-size:10px;line-height:1.7">
+            <div>
+              <div style="color:var(--blue);margin-bottom:4px">DIMENSIONS</div>
+              <div style="color:var(--text-dim)">dim_date · dim_facility · dim_element · dim_product</div>
+            </div>
+            <div>
+              <div style="color:var(--green);margin-bottom:4px">FACTS</div>
+              <div style="color:var(--text-dim)">fact_production · fact_inventory · fact_demand · fact_unloading · fact_rail_movement · fact_stop_events</div>
+            </div>
+          </div>
+          <div style="margin-top:14px;padding-top:12px;border-top:1px dashed var(--border2);font-size:9px;color:var(--text-dim);line-height:1.6">
+            Every fact row is tagged with <span style="color:var(--amber)">scenario_type</span> = <i>actual</i> or <i>forecast</i> and stamped with a <span style="color:var(--amber)">scenario_run_id</span> + <span style="color:var(--amber)">as_of_date</span>. Open the file in Power BI and build relationships from each fact's element_id / facility_id / product_id / date back to the dim_* tables.
+          </div>
+        </div>
+
+        <div style="border:1px solid var(--amber);background:rgba(245,197,66,.05);padding:12px 16px;margin-bottom:20px;font-size:9px;color:var(--text-dim);line-height:1.7">
+          <span style="color:var(--amber)">◆ Scope:</span> actuals span every facility in the catalog. <b style="color:var(--text)">Forecast rows only cover the facility the simulation last ran for (<span id="bi-active-fac">—</span>)</b> — run a sim for each facility you want forecast data on before exporting.
+        </div>
+
+        <button id="bi-push-btn" onclick="pushToBI()" style="width:100%;padding:18px;font-family:var(--mono);font-size:13px;letter-spacing:3px;background:var(--green);color:#000;border:none;cursor:pointer;font-weight:700;transition:opacity .2s">
+          📤 PUSH TO BI
+        </button>
+        <div id="bi-push-msg" style="margin-top:14px;font-size:10px;text-align:center;min-height:14px"></div>
+
+        <div style="margin-top:28px;font-size:9px;color:var(--text-dim);line-height:1.6">
+          <div style="color:var(--text);margin-bottom:6px;letter-spacing:1px">▾ POWER BI MODEL HINTS</div>
+          • In Power BI, mark <code>dim_date.date</code> as a date table.<br>
+          • Relate facts to dimensions: <code>fact_*.date → dim_date.date</code>, <code>.element_id → dim_element.element_id</code>, <code>.facility_id → dim_facility.facility_id</code>, <code>.product_id → dim_product.product_id</code>.<br>
+          • Filter visuals by <code>scenario_type</code> to switch between an actual line and a forecast line on the same chart.<br>
+          • Multiple exports can coexist — slice by <code>scenario_run_id</code> to compare runs.
         </div>
       </div>
     </div>
@@ -12180,6 +12199,342 @@ function renderResultsTable(){
   }
 }
 
+// ════════════════════════════════════════════════════════════════
+// PUSH TO BI — star-schema XLSX export for Power BI consumption
+// ════════════════════════════════════════════════════════════════
+// Emits one workbook with dim_* + fact_* sheets. Forecast rows come
+// from S.simResults (active facility only). Actual rows come from
+// DB.real_*_daily and span every facility present in those tables.
+// Every fact row is stamped with scenario_run_id + as_of_date so
+// multiple exports can coexist in the Power BI model.
+async function pushToBI(){
+  const btn=document.getElementById('bi-push-btn');
+  const setMsg=(html)=>{ const m=document.getElementById('bi-push-msg'); if(m) m.innerHTML=html; };
+  try{
+    if(btn) btn.disabled=true;
+    setMsg('<span style="color:var(--amber)">Loading XLSX engine…</span>');
+    if(typeof XLSX==='undefined'){
+      await new Promise((res,rej)=>{
+        const s=document.createElement('script');
+        s.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+        s.onload=res; s.onerror=()=>rej(new Error('Could not load SheetJS — check internet connection'));
+        document.head.appendChild(s);
+      });
+    }
+    setMsg('<span style="color:var(--amber)">Building star schema…</span>');
+    const tables=_pushBIBuildTables();
+    const wb=XLSX.utils.book_new();
+    Object.keys(tables).forEach(name=>{
+      const rows=tables[name];
+      const ws=XLSX.utils.json_to_sheet(rows.length?rows:[{note:'(no rows)'}]);
+      XLSX.utils.book_append_sheet(wb,ws,name);
+    });
+    const stamp=new Date()._ymd();
+    XLSX.writeFile(wb,`AVILA_BI_${stamp}.xlsx`);
+    const total=Object.values(tables).reduce((a,t)=>a+t.length,0);
+    setMsg(`<span style="color:var(--green)">✓ Exported ${total.toLocaleString()} rows across ${Object.keys(tables).length} sheets</span>`);
+  }catch(e){
+    setMsg(`<span style="color:var(--red)">Export failed: ${e.message}</span>`);
+  }finally{
+    if(btn) btn.disabled=false;
+  }
+}
+
+function _pushBIBuildTables(){
+  const asOf=new Date()._ymd();
+  const r=S.simResults||null;
+  const runId=r?.runId||`actual_only_${Date.now()}`;
+  const horizon=r?r.elementStates&&Object.values(r.elementStates)[0]?.length||0:0;
+  const simStart=S.simCfg.start_date;
+  const offsetToDate=(off)=>{
+    const d=new Date(simStart+'T00:00:00');
+    d.setDate(d.getDate()+off);
+    return d._ymd();
+  };
+  const stamp=(row)=>({as_of_date:asOf, scenario_run_id:runId, ...row});
+
+  // ── DIMENSIONS ─────────────────────────────────────────
+  // dim_date — every date that appears anywhere in the facts (forecast + actual)
+  const dateSet=new Set();
+  if(r) for(let d=0;d<horizon;d++) dateSet.add(offsetToDate(d));
+  ['real_production_daily','real_inventory_daily','real_shipping_daily',
+   'real_unloading_daily','real_rail_daily','real_transfers_daily','real_shipments_daily']
+   .forEach(k=>(DB[k]||[]).forEach(row=>row.date&&dateSet.add(row.date)));
+  const dim_date=[...dateSet].sort().map(ds=>{
+    const d=new Date(ds+'T00:00:00');
+    const dow=d.getDay();
+    return {
+      date:ds,
+      year:d.getFullYear(),
+      quarter:`Q${Math.floor(d.getMonth()/3)+1}`,
+      month:d.getMonth()+1,
+      month_name:d.toLocaleString('en',{month:'short'}),
+      week:_isoWeek(d),
+      day_of_week:['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][dow],
+      is_weekend:dow===0||dow===6
+    };
+  });
+
+  // dim_facility — every facility known to the catalog
+  const dim_facility=DB.facilities.map(f=>{
+    const sub=DB.sub_regions.find(s=>s.id===f.sub_region_id);
+    const reg=sub?DB.regions.find(r=>r.id===sub.region_id):null;
+    const cty=reg?DB.countries.find(c=>c.id===reg.country_id):null;
+    return {
+      facility_id:f.id,
+      facility_name:f.name,
+      facility_type:f.type||'',
+      status:f.status||'',
+      sub_region:sub?.name||'',
+      region:reg?.name||'',
+      country:cty?.name||''
+    };
+  });
+
+  // dim_element — every element across every facility
+  const dim_element=DB.elements.map(e=>{
+    const capRows=DB.element_product_capacities.filter(c=>c.element_id===e.id);
+    const rated=capRows.reduce((a,c)=>a+(parseFloat(c.capacity_tpd)||0),0)
+                 || parseFloat(e.props?.rated_capacity_tpd)
+                 || parseFloat(e.props?.rated_capacity_pallets_day)*parseFloat(e.props?.tonnes_per_pallet)
+                 || 0;
+    return {
+      element_id:e.id,
+      element_name:e.name,
+      element_type:e.type,
+      facility_id:e.facility_id||'',
+      assigned_facility_id:e.assigned_facility_id||e.facility_id||'',
+      rated_capacity_tpd:Math.round(rated)||null,
+      max_capacity_t:parseFloat(e.props?.max_capacity)||null,
+      start_inventory_t:parseFloat(e.props?.start_inventory)||null,
+      product_id:e.props?.product_id||'',
+      output_product_id:e.props?.output_product_id||'',
+      berth_type:e.props?.berth_type||'',
+      dispatch_type:e.props?.dispatch_type||''
+    };
+  });
+
+  // dim_product
+  const dim_product=DB.products.map(p=>({
+    product_id:p.id,
+    product_name:p.name,
+    category:p.category||'',
+    material_code:p.material_code||''
+  }));
+
+  // Lookup map: element_id → facility_id (assigned takes priority — that's what UIs trust)
+  const elFac={};
+  DB.elements.forEach(e=>{ elFac[e.id]=e.assigned_facility_id||e.facility_id||''; });
+  const elType={}; DB.elements.forEach(e=>{ elType[e.id]=e.type; });
+
+  // ── FACT: PRODUCTION ───────────────────────────────────
+  const fact_production=[];
+  // Actuals
+  (DB.real_production_daily||[]).forEach(row=>{
+    fact_production.push(stamp({
+      scenario_type:'actual', date:row.date,
+      facility_id:row.facility_id||elFac[row.element_id]||'',
+      element_id:row.element_id, element_type:elType[row.element_id]||'',
+      product_id:row.product_id, tonnes:parseFloat(row.volume_t)||0,
+      status:'', stop_cause:''
+    }));
+  });
+  // Forecast — kilns (actual sim tonnes)
+  if(r){
+    Object.keys(r.kilnProdHistory||{}).forEach(kid=>{
+      const arr=r.kilnProdHistory[kid]||[];
+      const states=r.elementStates[kid]||[];
+      arr.forEach((t,i)=>{
+        if(t<=0&&states[i]==='running') return; // noise filter
+        fact_production.push(stamp({
+          scenario_type:'forecast', date:offsetToDate(i),
+          facility_id:elFac[kid]||'', element_id:kid, element_type:'kiln',
+          product_id:'', // kiln product is implicit (its clinker); leave blank for v1
+          tonnes:Math.round(t)||0,
+          status:states[i]||'', stop_cause:''
+        }));
+      });
+    });
+    // Forecast — mills (estimated tonnes = rated_tpd for the chosen product)
+    const millCap={}; // millId → {productId → tpd}
+    DB.element_product_capacities.forEach(c=>{
+      if(elType[c.element_id]!=='finish_mill') return;
+      if(!millCap[c.element_id]) millCap[c.element_id]={};
+      millCap[c.element_id][c.product_id]=parseFloat(c.capacity_tpd)||0;
+    });
+    Object.keys(r.millProductHistory||{}).forEach(mid=>{
+      const arr=r.millProductHistory[mid]||[];
+      const states=r.elementStates[mid]||[];
+      arr.forEach((pid,i)=>{
+        if(!pid){ return; } // idle day — skip
+        const tpd=millCap[mid]?.[pid]||0;
+        fact_production.push(stamp({
+          scenario_type:'forecast', date:offsetToDate(i),
+          facility_id:elFac[mid]||'', element_id:mid, element_type:'finish_mill',
+          product_id:pid, tonnes:Math.round(tpd),
+          status:states[i]||'', stop_cause:''
+        }));
+      });
+    });
+  }
+
+  // ── FACT: INVENTORY ────────────────────────────────────
+  const fact_inventory=[];
+  (DB.real_inventory_daily||[]).forEach(row=>{
+    fact_inventory.push(stamp({
+      scenario_type:'actual', date:row.date,
+      facility_id:row.facility_id||elFac[row.silo_id]||'',
+      element_id:row.silo_id, element_type:elType[row.silo_id]||'',
+      product_id:row.product_id||'',
+      tonnes_eod:parseFloat(row.eod_volume_t)||0
+    }));
+  });
+  if(r){
+    Object.keys(r.inventoryHistory||{}).forEach(eid=>{
+      const t=elType[eid]; if(t!=='bulk_silo'&&t!=='packed_silo'&&t!=='raw_material_storage'&&t!=='fuel_storage') return;
+      const arr=r.inventoryHistory[eid]||[];
+      arr.forEach((tn,i)=>{
+        fact_inventory.push(stamp({
+          scenario_type:'forecast', date:offsetToDate(i),
+          facility_id:elFac[eid]||'', element_id:eid, element_type:t,
+          product_id:'', // sim aggregates inventory; product breakdown lost after run
+          tonnes_eod:Math.round(tn)||0
+        }));
+      });
+    });
+  }
+
+  // ── FACT: DEMAND ───────────────────────────────────────
+  const fact_demand=[];
+  (DB.demand_values||[]).forEach(row=>{
+    const dp=DB.demand_points.find(d=>d.element_id===row.element_id);
+    fact_demand.push(stamp({
+      scenario_type:row.source==='actual'?'actual':'forecast',
+      date:row.date,
+      facility_id:dp?(dp.assigned_facility_id||dp.facility_id):elFac[row.element_id]||'',
+      demand_point_id:row.element_id,
+      product_id:row.product_id||'',
+      ship_to:row.ship_to||'',
+      demand_t:parseFloat(row.value_t)||0
+    }));
+  });
+  (DB.real_shipments_daily||[]).forEach(row=>{
+    fact_demand.push(stamp({
+      scenario_type:'actual', date:row.date,
+      facility_id:'', // origin code is plant short-name; left for Power BI to relate
+      demand_point_id:'', origin:row.origin||'', product_id:'', product_key:row.product||'',
+      customer_type:row.customer_type||'', ship_to:row.ship_to||'',
+      sales_manager:row.sales_manager||'',
+      shipped_t:parseFloat(row.volume)||0
+    }));
+  });
+
+  // ── FACT: UNLOADING ────────────────────────────────────
+  const fact_unloading=[];
+  (DB.real_unloading_daily||[]).forEach(row=>{
+    fact_unloading.push(stamp({
+      scenario_type:'actual', date:row.date,
+      facility_id:row.facility_id||elFac[row.berth_id]||'',
+      berth_id:row.berth_id, mode:row.mode||'',
+      product_id:row.product_id||'',
+      value:parseFloat(row.value)||0, unit:row.unit||'t'
+    }));
+  });
+  if(r){
+    Object.keys(r.berthUnloadHistory||{}).forEach(bid=>{
+      const arr=r.berthUnloadHistory[bid]||[];
+      arr.forEach((t,i)=>{
+        if(t<=0) return;
+        fact_unloading.push(stamp({
+          scenario_type:'forecast', date:offsetToDate(i),
+          facility_id:elFac[bid]||'', berth_id:bid, mode:'',
+          product_id:'', value:Math.round(t), unit:'t'
+        }));
+      });
+    });
+  }
+
+  // ── FACT: RAIL MOVEMENT ────────────────────────────────
+  const fact_rail_movement=[];
+  (DB.rail_movements||[]).forEach(rm=>{
+    fact_rail_movement.push(stamp({
+      scenario_type:rm.status==='Confirmed'||rm.status==='Delivered'?'actual':'forecast',
+      departure_date:rm.departure_date||rm.date||'',
+      arrival_date:rm.departure_date
+        ?_addDays(rm.departure_date,parseInt(rm.transit_days)||1):'',
+      from_facility_id:rm.from_facility_id||'',
+      to_facility_id:rm.to_facility_id||'',
+      dispatch_id:rm.from_dispatch_id||'',
+      berth_id:rm.to_berth_id||'',
+      product_id:rm.product_id||'',
+      cars:parseInt(rm.wagon_count)||0,
+      tonnes:parseFloat(rm.total_capacity_t)||((parseInt(rm.wagon_count)||0)*(parseFloat(rm.wagon_capacity_t)||0)),
+      transit_days:parseInt(rm.transit_days)||1,
+      status:rm.status||''
+    }));
+  });
+  (DB.real_rail_daily||[]).forEach(row=>{
+    fact_rail_movement.push(stamp({
+      scenario_type:'actual',
+      departure_date:row.type==='loading'?row.date:'',
+      arrival_date:row.type==='delivered'?row.date:'',
+      from_facility_id:row.type==='loading'?row.facility_id:'',
+      to_facility_id:row.type==='delivered'?row.facility_id:'',
+      product_id:row.product_id||'',
+      cars:parseInt(row.cars)||0, tonnes:0, transit_days:null,
+      status:row.type||''
+    }));
+  });
+
+  // ── FACT: STOP EVENTS ──────────────────────────────────
+  const fact_stop_events=[];
+  if(r){
+    (r.stopEvents||[]).forEach(ev=>{
+      fact_stop_events.push(stamp({
+        scenario_type:'forecast',
+        date:offsetToDate((ev.day||1)-1),
+        facility_id:elFac[ev.element_id]||'',
+        element_id:ev.element_id, element_name:ev.element_name||'',
+        element_type:elType[ev.element_id]||'',
+        cause:ev.cause||'', type:ev.type||''
+      }));
+    });
+  }
+
+  // ── META ──────────────────────────────────────────────
+  const meta=[
+    {key:'as_of_date',value:asOf},
+    {key:'scenario_run_id',value:runId},
+    {key:'simulation_start_date',value:simStart},
+    {key:'simulation_horizon_days',value:horizon},
+    {key:'simulation_active_facility',value:getFacility()?.name||''},
+    {key:'note_forecast_scope',value:'Forecast rows cover only the simulation\'s active facility. Actuals span every facility present in real_* tables.'},
+    {key:'note_inventory_breakdown',value:'Forecast inventory is total per silo (product breakdown is not retained after the run). Actual inventory carries product_id.'},
+    {key:'note_mill_tonnes',value:'Forecast mill tonnes are estimated as rated_tpd for the chosen product on running days. Kiln tonnes are actual simulation outputs.'}
+  ];
+
+  return {
+    meta,
+    dim_date, dim_facility, dim_element, dim_product,
+    fact_production, fact_inventory, fact_demand,
+    fact_unloading, fact_rail_movement, fact_stop_events
+  };
+}
+
+function _isoWeek(d){
+  const t=new Date(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate()));
+  const dow=t.getUTCDay()||7;
+  t.setUTCDate(t.getUTCDate()+4-dow);
+  const yearStart=new Date(Date.UTC(t.getUTCFullYear(),0,1));
+  return Math.ceil((((t-yearStart)/86400000)+1)/7);
+}
+
+function _addDays(ymd,n){
+  const d=new Date(ymd+'T00:00:00');
+  d.setDate(d.getDate()+(n||0));
+  return d._ymd();
+}
+
 function exportJSON(){
   const payload={
     _version:'0.3',
@@ -17855,7 +18210,7 @@ function switchTopSection(section){
     ],
     results:[
       {label:'Dashboard',view:'dashboard'},
-      {label:'Daily Results',view:'results'}
+      {label:'Push to BI',view:'results'}
     ],
     configuration:[
       {label:'Organization',view:'location'},
@@ -17929,12 +18284,15 @@ function switchView(view){
   if(view==='supply') renderSupplyView();
   if(view==='schedules'){renderVesselTable();renderRailTable();renderTruckTable();renderMaintenanceCalendar();}
   // Show view window bar on result views
-  const vwViews=['dashboard','analysis','results'];
+  const vwViews=['dashboard','analysis'];
   const vwBar=document.getElementById('view-window-bar');
   if(vwBar) vwBar.style.display=vwViews.includes(view)?'flex':'none';
   if(vwViews.includes(view)) updateFacFilterBar();
 
-  if(view==='results') renderResultsTable();
+  if(view==='results'){
+    const af=document.getElementById('bi-active-fac');
+    if(af) af.textContent=getFacility()?.name||'no sim run yet';
+  }
 }
 
 function setTool(tool){
