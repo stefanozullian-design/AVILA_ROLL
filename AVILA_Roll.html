@@ -10738,6 +10738,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
     railHistory:{},           // railHistory[dispElId][day-1]
     berthArrivalHistory:{},   // berthArrivalHistory[berthId][day-1] = total tonnes arrived at berth
     berthUnloadHistory:{},    // berthUnloadHistory[berthId][day-1] = total tonnes unloaded from berth
+    berthVesselHistory:{},    // berthVesselHistory[berthId][day-1] = {docked, state:'unloading'|'anchorage'|'idle', waiting, waitingList:[{name,reason}]}
     vesselArrivalHistory:{},  // vesselArrivalHistory[siloId][day-1] = full vessel qty on arrival day, 0 otherwise
     siloUnloadHistory:{},     // siloUnloadHistory[siloId][day-1] = daily tonnes unloaded into that silo
     railShortfalls:[]         // {dpId, dpName, switchDay, date, toFacId, plannedCars, shippedCars, shortCars} — scheduled cars the origin could not load/ship in time
@@ -10775,6 +10776,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
       state[el.id].currentVessel=null;
       r.berthArrivalHistory[el.id]=[];
       r.berthUnloadHistory[el.id]=[];
+      r.berthVesselHistory[el.id]=[];
     }
     if(el.type==='bulk_silo'){
       r.vesselArrivalHistory[el.id]=[];
@@ -12205,8 +12207,9 @@ function simulate(elements, connections, horizon, includeProposed=false){
         if(curProd && !_canFullDay(curProd,bs.berthQueue[curProd],bs.currentVesselRate) && (bs.vesselPending||[]).length){
           const idx=bs.vesselPending.findIndex(p=>(p.quantity_t||0)>0 && _canFullDay(p.productId,p.quantity_t,p.rateTPH));
           if(idx>=0){
-            const demoted={productId:curProd, quantity_t:bs.berthQueue[curProd], rateTPH:bs.currentVesselRate, name:bs.currentVessel};
+            const demoted={productId:curProd, quantity_t:bs.berthQueue[curProd], rateTPH:bs.currentVesselRate, name:bs.currentVessel, _bumped:true};
             const incoming=bs.vesselPending.splice(idx,1)[0];
+            if(incoming) incoming._bumped=false; // it's docking now, no longer waiting
             bs.vesselPending.unshift(demoted);
             bs.berthQueue={}; bs.berthQueue[incoming.productId]=(incoming.quantity_t||0);
             bs.currentVessel=incoming.name; bs.currentVesselRate=incoming.rateTPH;
@@ -12321,6 +12324,19 @@ function simulate(elements, connections, horizon, includeProposed=false){
         bs.currentVessel=null;
         bs.currentVesselRate=0;
       }
+    });
+
+    // ── Record per-berth vessel state for the Gantt ──────────────────────
+    // docked vessel + its state (unloading vs at-anchorage/silo-full), plus every waiting
+    // vessel with WHY it waits: 'berth_occupied' (arrived, berth taken) or 'silo_full'
+    // (was unloading, bumped to anchorage when the silo filled).
+    elements.filter(e=>e.type==='berth').forEach(berth=>{
+      if(r.berthVesselHistory[berth.id]===undefined) return;
+      const bs=state[berth.id];
+      const docked=bs.currentVessel||null;
+      const st=docked?(bs.status==='running'?'unloading':'anchorage'):'idle';
+      const waitingList=(bs.vesselPending||[]).map(p=>({name:p.name||'vessel', reason:p._bumped?'silo_full':'berth_occupied'}));
+      r.berthVesselHistory[berth.id].push({docked, state:st, waiting:waitingList.length, waitingList});
     });
 
     // ── STEP 7: DEMAND OUTFLOW ────────────────────────
