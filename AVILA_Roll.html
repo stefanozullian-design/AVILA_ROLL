@@ -5790,7 +5790,7 @@ function _renderSupplyViewInner(wrap){
   // opens as a compact overview (headers + inventory charts) instead of a wall of rows.
   if(!window._supSecDefaultApplied){
     window._supSecDefaultApplied=true;
-    ['clinkerInv','clinkerReq','clinkerProd','cementInv','cementNeed','cementProd','railLoad'].forEach(k=>window._supSecCol.add(k));
+    ['clinkerInv','clinkerReq','clinkerProd','cementInv','cementNeed','cementProd','railLoad','termUnload'].forEach(k=>window._supSecCol.add(k));
   }
   if(!S.simCfg.start_date){
     wrap.innerHTML=`<div style="font-family:var(--mono);font-size:10px;color:var(--text-dim);padding:30px;text-align:center">Configure simulation dates in Configure first.</div>`;
@@ -5965,8 +5965,23 @@ function _renderSupplyViewInner(wrap){
     );
   }
 
-  if(!prodEls.length){
-    wrap.innerHTML=`<div style="font-family:var(--mono);font-size:10px;color:var(--text-dim);padding:30px;text-align:center">No kilns or finish mills in the topology.</div>`;
+  // ── Terminal facilities (receiving-only: silos + berths + demand, no mills) ──
+  // Collected here so the empty-topology guard below also allows terminal-only
+  // scenarios. Rendered as their own group AFTER the plant tree (see below).
+  const _termHasEls=f=>allEls.some(e=>(e.assigned_facility_id||e.facility_id)===f.id&&(e.type==='bulk_silo'||e.type==='demand_point'||e.type==='berth'));
+  let _termFacs=DB.facilities.filter(f=>f.type==='terminal').filter(_termHasEls);
+  if(_supFacFilter) _termFacs=_termFacs.filter(f=>f.id===_supFacFilter);
+  if(_supProdFilter) _termFacs=_termFacs.filter(f=>{
+    const fe=allEls.filter(e=>(e.assigned_facility_id||e.facility_id)===f.id);
+    return fe.some(e=>{
+      if(e.type==='bulk_silo') return getSiloProducts(e).includes(_supProdFilter);
+      if(e.type==='demand_point') return (DB.demand_points.find(dp=>dp.element_id===e.id)?.products||[]).some(p=>p.product_id===_supProdFilter);
+      return e.type==='berth';
+    });
+  });
+
+  if(!prodEls.length && !_termFacs.length){
+    wrap.innerHTML=`<div style="font-family:var(--mono);font-size:10px;color:var(--text-dim);padding:30px;text-align:center">No kilns, finish mills, or terminals in the topology.</div>`;
     return;
   }
 
@@ -6847,6 +6862,203 @@ function _renderSupplyViewInner(wrap){
       h+=`</tr>`;
     }
   });
+
+  // ══════════════════════════════════════════════════════════════════════
+  // TERMINALS — receiving facilities, grouped AFTER all plants.
+  // Same cement inventory chart + starting inventory + requirements as a
+  // plant, minus the clinker/mill sections. Finish-mill production is
+  // replaced by a PRODUCT RECEIVED section: per-berth, per-product unloading
+  // (actual from real_unloading_daily, else planned siloUnloadHistory).
+  // ══════════════════════════════════════════════════════════════════════
+  {
+    const _termRender=_termFacs.filter(f=>!relevantFacIds.has(f.id))
+      .sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+    if(_termRender.length){
+      const _allFE=getFacElements();
+      const _isCementPid=pid=>{ const pr=DB.products.find(x=>x.id===pid); return pr&&(pr.category==='cement_bulk'||pr.category==='cement_packed'); };
+      // Unloading helpers — plan = simulated unload into silos; real = entered actuals.
+      const _downSilosOf=berth=>_allFE.filter(e=>e.type==='bulk_silo'&&
+        DB.connections.some(c=>c.from_element_id===berth.id&&c.to_element_id===e.id));
+      const _unloadPlanSiloDay=(siloId,ds)=>{ const di=allDates.indexOf(ds); if(di<0) return 0;
+        return (r?.siloUnloadHistory?.[siloId]||[])[di]||0; };
+      const _berthProducts=berth=>{ const set=new Set();
+        _downSilosOf(berth).forEach(s=>getSiloProducts(s).forEach(p=>{ if(_isCementPid(p)) set.add(p); })); return [...set]; };
+      const _unloadPlanBerthProd=(berth,pid,ds)=>{ let t=0;
+        _downSilosOf(berth).forEach(s=>{ const ps=getSiloProducts(s); if(!ps.includes(pid)) return; t+=_unloadPlanSiloDay(s.id,ds)/ps.length; }); return t; };
+      const _unloadRealBerthProd=(berthId,pid,ds)=>(DB.real_unloading_daily||[])
+        .filter(u=>u.date===ds&&u.berth_id===berthId&&u.product_id===pid&&u.unit!=='cars')
+        .reduce((s,u)=>s+(parseFloat(u.value)||0),0);
+      const _facBerths=fac=>_allFE.filter(e=>e.type==='berth'&&(e.assigned_facility_id||e.facility_id)===fac.id);
+      // Received (throughput) on a date for a whole terminal = Σ berths/products (real else plan).
+      const _termRecvDay=(fac,ds)=>{ let t=0;
+        _facBerths(fac).forEach(b=>_berthProducts(b).forEach(pid=>{
+          const rv=_unloadRealBerthProd(b.id,pid,ds); t+=rv>0?rv:_unloadPlanBerthProd(b,pid,ds); })); return t; };
+
+      // ── Group divider row: TERMINALS ──
+      const _tGrp='_terminals_grp';
+      const _tCol=grpCol.has(_tGrp);
+      h+=`<tr onclick="_supToggleGrp('${_tGrp}')" style="cursor:pointer;background:rgba(77,166,255,.05);border-top:2px solid var(--border2)">
+        <td style="${stickyLeft('var(--surface2)',0,'border-bottom:1px solid var(--border2),')}color:var(--text);font-weight:700;font-size:9px;letter-spacing:.5px">
+          ${_tCol?'▶':'▼'} TERMINALS <span style="font-size:7px;opacity:.5;margin-left:4px">RECEIVING FACILITIES</span>
+        </td>`;
+      months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+        const mt=mon.dates.reduce((a,ds)=>a+_termRender.reduce((s,f)=>s+_termRecvDay(f,ds),0),0);
+        h+=`<td style="background:rgba(77,166,255,.06);border-left:2px solid rgba(77,166,255,.2);font-size:9px;font-weight:700;color:var(--text-dim);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border2)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+        if(!isCol) mon.dates.forEach(ds=>{ const v=_termRender.reduce((s,f)=>s+_termRecvDay(f,ds),0);
+          h+=`<td class="sup-day-${mon.ym}" style="background:rgba(77,166,255,.03);font-size:9px;color:var(--text-dim);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border2);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+      });
+      h+=`</tr>`;
+
+      if(!_tCol) _termRender.forEach(fac=>{
+        const depth=1;
+        const facEls=_allFE.filter(e=>(e.assigned_facility_id||e.facility_id)===fac.id);
+        const berths=_facBerths(fac);
+        const demandEls=facEls.filter(e=>e.type==='demand_point');
+        const demandPoints=DB.demand_points.filter(dp=>demandEls.some(el=>el.id===dp.element_id));
+        const _facCol=grpCol.has(fac.id);
+
+        // ── Terminal header (amber) — total = throughput received ──
+        h+=`<tr onclick="_supToggleGrp('${fac.id}')" style="cursor:pointer;background:rgba(255,184,48,.04);border-top:1px solid var(--border2)">
+          <td style="${stickyLeft('var(--surface2)',depth,'border-bottom:1px solid var(--border),')}color:var(--amber);font-weight:700;font-size:9px">
+            ${_facCol?'▶':'▼'} ${fac.name} <span style="font-size:7px;opacity:.5;margin-left:4px">TERMINAL</span>
+          </td>`;
+        months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+          const mt=mon.dates.reduce((a,ds)=>a+_termRecvDay(fac,ds),0);
+          h+=`<td style="background:rgba(255,184,48,.06);border-left:2px solid rgba(255,184,48,.2);font-size:9px;font-weight:700;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+          if(!isCol) mon.dates.forEach(ds=>{ const v=_termRecvDay(fac,ds);
+            h+=`<td class="sup-day-${mon.ym}" style="background:rgba(255,184,48,.04);font-size:9px;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+        });
+        h+=`</tr>`;
+
+        if(_facCol) return;
+
+        // ── 1) Cement inventory bar chart ──
+        h+=_invChartRow('Cement inventory','cement','#00d9a3',facEls,depth+1);
+
+        // ── 2) STARTING INVENTORY (cement, per silo) ──
+        const cementSilos=facEls.filter(e=>e.type==='bulk_silo').filter(s=>getSiloProducts(s).some(_isCementPid));
+        if(cementSilos.length){
+          const invColor='#00d9a3';
+          const getInv=(siloId,ds,startInv)=>{
+            const prev=new Date(ds+'T00:00:00'); prev.setDate(prev.getDate()-1);
+            const realInv=DB.real_inventory_daily.find(ri=>ri.date===prev._ymd()&&ri.silo_id===siloId);
+            if(realInv) return {value:parseFloat(realInv.eod_volume_t)||0,isActual:true};
+            const di=allDates.indexOf(ds); const hist=r?.inventoryHistory?.[siloId]||[];
+            return {value:di<=0?(parseFloat(startInv)||0):(hist[di-1]??0),isActual:false};
+          };
+          const _cemInvDay=ds=>cementSilos.reduce((s,si)=>s+getInv(si.id,ds,parseFloat(si.props?.start_inventory)||0).value,0);
+          h+=`<tr class="sup-sec-hdr" data-seckey="cementInv" onclick="_supToggleSec('cementInv')" style="cursor:pointer;background:rgba(0,217,163,.05);border-top:2px solid rgba(0,217,163,.3)">
+            <td style="${stickyLeft('var(--surface)',depth+1,'border-bottom:1px solid var(--border),')}color:${invColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('cementInv')}</span> STARTING INVENTORY (cement)</td>`;
+          months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+            const mt=mon.dates.reduce((a,ds)=>a+_cemInvDay(ds),0)/(mon.dates.length||1);
+            h+=`<td style="border-left:2px solid rgba(0,217,163,.2);font-size:9px;font-weight:700;color:${invColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+            if(!isCol) mon.dates.forEach(ds=>{ const v=_cemInvDay(ds);
+              h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${invColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
+          });
+          h+=`</tr>`;
+          cementSilos.forEach(silo=>{
+            const siloMax=parseFloat(silo.props?.max_capacity)||0;
+            const siloStart=parseFloat(silo.props?.start_inventory)||0;
+            const pnm=(getSiloProducts(silo).map(p=>DB.products.find(x=>x.id===p)?.name).filter(Boolean)[0])||'';
+            h+=`<tr class="supsec-cementInv">
+              <td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${invColor};font-size:9px">${silo.name}
+                <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${siloMax>0?'cap: '+siloMax.toLocaleString()+'t':''}${pnm?' · '+pnm:''}</span></td>`;
+            months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+              const mt=mon.dates.reduce((s,ds)=>s+getInv(silo.id,ds,siloStart).value,0)/(mon.dates.length||1);
+              h+=`<td style="border-left:2px solid rgba(0,217,163,.1);font-size:9px;color:${invColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+              if(!isCol) mon.dates.forEach(ds=>{
+                const inv=getInv(silo.id,ds,siloStart); const v=inv.value;
+                const lvlColor=invLevelColor(v,siloMax);
+                const cls=inv.isActual?'cell-real':''; const wt=inv.isActual?'700':'400';
+                const ttl=(siloMax>0?`${Math.round(v/siloMax*100)}% of ${siloMax.toLocaleString()}t${inv.isActual?' · actual':''}`:'')+' · click to set real inventory';
+                h+=`<td class="sup-day-${mon.ym} ${cls}" title="${ttl}" onclick="showInventoryPopup('${silo.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?lvlColor:'rgba(0,217,163,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${wt};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+            });
+            h+=`</tr>`;
+          });
+        }
+
+        // ── 3) CEMENT REQUIREMENTS (local demand, per product) ──
+        {
+          const reqColor='#4da6ff';
+          const productsSet=new Set();
+          demandPoints.forEach(dp=>(dp.products||[]).forEach(p=>productsSet.add(p.product_id)));
+          const totalNeed=(pid,ds)=>demandPoints.filter(dp=>dp.products?.some(p=>p.product_id===pid))
+            .reduce((s,dp)=>s+(_demandRate(dp.element_id,ds)||0),0);
+          if(productsSet.size){
+            h+=`<tr class="sup-sec-hdr" data-seckey="cementNeed" onclick="_supToggleSec('cementNeed')" style="cursor:pointer;background:rgba(77,166,255,.05);border-top:2px solid rgba(77,166,255,.3)">
+              <td style="${stickyLeft('var(--surface)',depth+1,'border-bottom:1px solid var(--border),')}color:${reqColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('cementNeed')}</span> CEMENT REQUIREMENTS <span style="font-size:7px;opacity:.6;font-weight:400;margin-left:4px">(local demand)</span></td>`;
+            months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+              const mt=[...productsSet].reduce((s,pid)=>s+mon.dates.reduce((a,ds)=>a+totalNeed(pid,ds),0),0);
+              h+=`<td style="border-left:2px solid rgba(77,166,255,.2);font-size:9px;font-weight:700;color:${reqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+              if(!isCol) mon.dates.forEach(ds=>{ const v=[...productsSet].reduce((s,pid)=>s+totalNeed(pid,ds),0);
+                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${reqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
+            });
+            h+=`</tr>`;
+            Array.from(productsSet).sort().forEach(pid=>{
+              const prodName=DB.products.find(p=>p.id===pid)?.name||pid;
+              h+=`<tr class="supsec-cementNeed"><td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${reqColor};font-size:9px">${prodName}</td>`;
+              months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+                const mt=mon.dates.reduce((s,ds)=>s+totalNeed(pid,ds),0);
+                h+=`<td style="border-left:2px solid rgba(77,166,255,.1);font-size:9px;color:${reqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                if(!isCol) mon.dates.forEach(ds=>{ const v=totalNeed(pid,ds);
+                  h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${v>0?reqColor:'rgba(77,166,255,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+              });
+              h+=`</tr>`;
+            });
+          }
+        }
+
+        // ── 4) PRODUCT RECEIVED (unloading, per berth → per product) ──
+        {
+          const rc='#b388ff';
+          h+=`<tr class="sup-sec-hdr" data-seckey="termUnload" onclick="_supToggleSec('termUnload')" style="cursor:pointer;background:rgba(179,136,255,.06);border-top:2px solid rgba(179,136,255,.4)">
+            <td style="${stickyLeft('var(--surface)',depth+1,'border-bottom:1px solid var(--border),')}color:${rc};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('termUnload')}</span> PRODUCT RECEIVED <span style="font-size:7px;opacity:.65;font-weight:400;margin-left:4px">(unloading · actual/plan · t)</span></td>`;
+          months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+            const mt=mon.dates.reduce((a,ds)=>a+_termRecvDay(fac,ds),0);
+            h+=`<td style="border-left:2px solid rgba(179,136,255,.2);font-size:9px;font-weight:700;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+            if(!isCol) mon.dates.forEach(ds=>{ const v=_termRecvDay(fac,ds);
+              h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
+          });
+          h+=`</tr>`;
+
+          const berthSorted=[...berths].sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+          const anyRow=berthSorted.some(b=>_berthProducts(b).length);
+          berthSorted.forEach(berth=>{
+            const prods=_berthProducts(berth); if(!prods.length) return;
+            const _berthDay=ds=>prods.reduce((s,pid)=>{ const rv=_unloadRealBerthProd(berth.id,pid,ds); return s+(rv>0?rv:_unloadPlanBerthProd(berth,pid,ds)); },0);
+            // Berth sub-header
+            h+=`<tr class="supsec-termUnload" style="background:rgba(179,136,255,.03)"><td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${rc};font-size:9px;font-weight:700">↳ ${berth.name} <span style="font-size:7px;opacity:.5">BERTH</span></td>`;
+            months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+              const mt=mon.dates.reduce((s,ds)=>s+_berthDay(ds),0);
+              h+=`<td style="border-left:2px solid rgba(179,136,255,.12);font-size:9px;font-weight:700;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+              if(!isCol) mon.dates.forEach(ds=>{ const v=_berthDay(ds);
+                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${v>0?rc:'rgba(179,136,255,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+            });
+            h+=`</tr>`;
+            // Per-product rows — actual bold-green where entered, else planned purple.
+            prods.sort((a,b)=>{ const na=DB.products.find(p=>p.id===a)?.name||a; const nb=DB.products.find(p=>p.id===b)?.name||b; return na.localeCompare(nb); }).forEach(pid=>{
+              const prodName=DB.products.find(p=>p.id===pid)?.name||pid;
+              h+=`<tr class="supsec-termUnload"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${rc};font-size:9px">${prodName}</td>`;
+              months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+                const mt=mon.dates.reduce((s,ds)=>{ const rv=_unloadRealBerthProd(berth.id,pid,ds); return s+(rv>0?rv:_unloadPlanBerthProd(berth,pid,ds)); },0);
+                h+=`<td style="border-left:2px solid rgba(179,136,255,.1);font-size:9px;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                if(!isCol) mon.dates.forEach(ds=>{
+                  const rv=_unloadRealBerthProd(berth.id,pid,ds);
+                  const isReal=rv>0; const v=isReal?rv:_unloadPlanBerthProd(berth,pid,ds);
+                  const cls=isReal?'cell-real':''; const col=isReal?'#00d9a3':(v>0?rc:'rgba(179,136,255,.25)');
+                  h+=`<td class="sup-day-${mon.ym} ${cls}" title="${prodName} · ${Math.round(v).toLocaleString()} t${isReal?' · actual':' · planned'}" style="font-size:9px;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${isReal?'700':'400'};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+              });
+              h+=`</tr>`;
+            });
+          });
+          if(!anyRow){
+            h+=`<tr class="supsec-termUnload"><td style="${stickyLeft('var(--surface)',depth+2)}color:var(--text-dim);font-size:8px;font-style:italic">no berths wired to cement silos</td><td style="border-left:2px solid var(--border2);border-bottom:1px solid var(--border)"></td></tr>`;
+          }
+        }
+
+      });
+    }
+  }
 
   h+=`</tbody></table>`;
   wrap.innerHTML=h;
