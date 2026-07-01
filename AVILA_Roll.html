@@ -4271,6 +4271,23 @@ function _termOriginForProduct(facId,pid){
   const best=Object.entries(c).sort((a,b)=>b[1]-a[1])[0];
   return best?best[0]:(S.facility_id||'');
 }
+// Real unloaded TONNES for a berth/product/date. Prefers tonne rows; converts genuine railcar
+// rows via the berth's car capacity. Dedups the mixed-unit case (a berth+product+day with both
+// a 'cars' row and a 't' row uses the tonne value, not their sum). Consumed by BOTH the display
+// and the simulation so entered real unloading feeds silo inventory.
+function realUnloadTonnesBerthProdDay(berthId,pid,ds){
+  const rows=(DB.real_unloading_daily||[]).filter(u=>u.berth_id===berthId&&u.product_id===pid&&u.date===ds);
+  if(!rows.length) return 0;
+  const tRows=rows.filter(u=>u.unit!=='cars');
+  if(tRows.length) return tRows.reduce((s,u)=>s+(parseFloat(u.value)||0),0);
+  const cc=parseFloat((DB.elements||[]).find(e=>e.id===berthId)?.props?.car_capacity_t)||112;
+  return rows.reduce((s,u)=>s+(parseFloat(u.value)||0),0)*cc;
+}
+// Sum real unloaded tonnes across a facility's berths for a product/date.
+function realUnloadTonnesFacProdDay(facId,pid,ds){
+  return (DB.elements||[]).filter(e=>e.type==='berth'&&(e.assigned_facility_id||e.facility_id)===facId)
+    .reduce((s,b)=>s+realUnloadTonnesBerthProdDay(b.id,pid,ds),0);
+}
 
 function showTermRealPopup(kind,facId,pid,ds){
   const fac=DB.facilities.find(f=>f.id===facId);
@@ -4279,9 +4296,9 @@ function showTermRealPopup(kind,facId,pid,ds){
   const label=isTr?'Transfer / Arrival':'Unloading';
   const existing=isTr
     ?(DB.real_transfers_daily||[]).filter(t=>t.date===ds&&t.dest_facility_id===facId&&t.product_id===pid)
-    :(DB.real_unloading_daily||[]).filter(u=>u.date===ds&&u.facility_id===facId&&u.product_id===pid&&u.unit!=='cars');
+    :(DB.real_unloading_daily||[]).filter(u=>u.date===ds&&u.facility_id===facId&&u.product_id===pid);
   const hasReal=existing.length>0;
-  const realSum=existing.reduce((s,x)=>s+(parseFloat(isTr?x.volume_t:x.value)||0),0);
+  const realSum=isTr?existing.reduce((s,x)=>s+(parseFloat(x.volume_t)||0),0):realUnloadTonnesFacProdDay(facId,pid,ds);
   const planVal=isTr?_termArrPlanAt(facId,pid,ds):_termUnloadPlanAt(facId,pid,ds);
   const initVal=Math.round(hasReal?realSum:planVal);
   window._termRealCtx={kind,facId,pid,ds};
@@ -4340,9 +4357,9 @@ function _termRealPrefill(){
   const isTr=ctx.kind==='transfer';
   const existing=isTr
     ?(DB.real_transfers_daily||[]).filter(t=>t.date===ds&&t.dest_facility_id===ctx.facId&&t.product_id===ctx.pid)
-    :(DB.real_unloading_daily||[]).filter(u=>u.date===ds&&u.facility_id===ctx.facId&&u.product_id===ctx.pid&&u.unit!=='cars');
+    :(DB.real_unloading_daily||[]).filter(u=>u.date===ds&&u.facility_id===ctx.facId&&u.product_id===ctx.pid);
   const val=existing.length
-    ?existing.reduce((s,x)=>s+(parseFloat(isTr?x.volume_t:x.value)||0),0)
+    ?(isTr?existing.reduce((s,x)=>s+(parseFloat(x.volume_t)||0),0):realUnloadTonnesFacProdDay(ctx.facId,ctx.pid,ds))
     :(isTr?_termArrPlanAt(ctx.facId,ctx.pid,ds):_termUnloadPlanAt(ctx.facId,ctx.pid,ds));
   const inp=document.getElementById('term-real-value'); if(inp) inp.value=Math.round(val);
 }
@@ -4357,8 +4374,11 @@ function applyTermReal(){
     DB.real_transfers_daily=(DB.real_transfers_daily||[]).filter(t=>!(t.date===ds&&t.dest_facility_id===ctx.facId&&t.product_id===ctx.pid));
     DB.real_transfers_daily.push({date:ds,origin_facility_id:_termOriginForProduct(ctx.facId,ctx.pid),dest_facility_id:ctx.facId,mode:'rail',product_id:ctx.pid,volume_t:value,source:'actual',created_at:now,updated_at:now});
   } else {
-    DB.real_unloading_daily=(DB.real_unloading_daily||[]).filter(u=>!(u.date===ds&&u.facility_id===ctx.facId&&u.product_id===ctx.pid&&u.unit!=='cars'));
-    DB.real_unloading_daily.push({date:ds,facility_id:ctx.facId,berth_id:_termBerthForProduct(ctx.facId,ctx.pid),product_id:ctx.pid,mode:'ship',value,unit:'t',source:'actual',created_at:now,updated_at:now});
+    // Remove ANY prior rows for this berth/product/day (incl. stale 'cars' rows from the Daily
+    // Data form) so the two input paths don't leave duplicates that double-count.
+    const berthId=_termBerthForProduct(ctx.facId,ctx.pid);
+    DB.real_unloading_daily=(DB.real_unloading_daily||[]).filter(u=>!(u.date===ds&&u.product_id===ctx.pid&&(u.facility_id===ctx.facId||u.berth_id===berthId)));
+    DB.real_unloading_daily.push({date:ds,facility_id:ctx.facId,berth_id:berthId,product_id:ctx.pid,mode:'ship',value,unit:'t',source:'actual',created_at:now,updated_at:now});
   }
   closeTermRealPopup();
   autoSave();
@@ -4374,7 +4394,8 @@ function clearTermReal(){
   if(ctx.kind==='transfer'){
     DB.real_transfers_daily=(DB.real_transfers_daily||[]).filter(t=>!(t.date===ds&&t.dest_facility_id===ctx.facId&&t.product_id===ctx.pid));
   } else {
-    DB.real_unloading_daily=(DB.real_unloading_daily||[]).filter(u=>!(u.date===ds&&u.facility_id===ctx.facId&&u.product_id===ctx.pid&&u.unit!=='cars'));
+    const berthId=_termBerthForProduct(ctx.facId,ctx.pid);
+    DB.real_unloading_daily=(DB.real_unloading_daily||[]).filter(u=>!(u.date===ds&&u.product_id===ctx.pid&&(u.facility_id===ctx.facId||u.berth_id===berthId)));
   }
   closeTermRealPopup();
   autoSave();
@@ -7060,9 +7081,7 @@ function _renderSupplyViewInner(wrap){
         _downSilosOf(berth).forEach(s=>getSiloProducts(s).forEach(p=>{ if(_isCementPid(p)) set.add(p); })); return [...set]; };
       const _unloadPlanBerthProd=(berth,pid,ds)=>{ let t=0;
         _downSilosOf(berth).forEach(s=>{ const ps=getSiloProducts(s); if(!ps.includes(pid)) return; t+=_unloadPlanSiloDay(s.id,ds)/ps.length; }); return t; };
-      const _unloadRealBerthProd=(berthId,pid,ds)=>(DB.real_unloading_daily||[])
-        .filter(u=>u.date===ds&&u.berth_id===berthId&&u.product_id===pid&&u.unit!=='cars')
-        .reduce((s,u)=>s+(parseFloat(u.value)||0),0);
+      const _unloadRealBerthProd=(berthId,pid,ds)=>realUnloadTonnesBerthProdDay(berthId,pid,ds);
       const _facBerths=fac=>_allFE.filter(e=>e.type==='berth'&&(e.assigned_facility_id||e.facility_id)===fac.id);
       // Received (throughput) on a date for a whole terminal = Σ berths/products (real else plan).
       const _termRecvDay=(fac,ds)=>{ let t=0;
@@ -7216,7 +7235,7 @@ function _renderSupplyViewInner(wrap){
           const _arrDay=(pid,ds)=>{ const rv=_arrReal(pid,ds); return rv>0?rv:_arrPlan(pid,ds); };
           const _prodSilos=pid=>cementSilos.filter(s=>getSiloProducts(s).includes(pid));
           const _unlPlan=(pid,ds)=>{ const di=allDates.indexOf(ds); if(di<0)return 0; return _prodSilos(pid).reduce((s,si)=>s+((r&&r.siloUnloadHistory&&r.siloUnloadHistory[si.id]||[])[di]||0),0); };
-          const _unlReal=(pid,ds)=>(DB.real_unloading_daily||[]).filter(u=>u.date===ds&&u.facility_id===fac.id&&u.product_id===pid&&u.unit!=='cars').reduce((s,u)=>s+(parseFloat(u.value)||0),0);
+          const _unlReal=(pid,ds)=>realUnloadTonnesFacProdDay(fac.id,pid,ds);
 
           // Products handled = cement silo products ∪ arriving products
           const _termProds=[...new Set([
@@ -12126,6 +12145,38 @@ function simulate(elements, connections, horizon, includeProposed=false){
       const bs=state[berth.id];
       // Record arrivals for this berth today
       r.berthArrivalHistory[berth.id].push(Math.round(berthArrivedToday[berth.id]||0));
+
+      // ── REAL UNLOADING OVERRIDE ─────────────────────────────────────────
+      // If the user entered actual unloading for this berth+date (Daily Data form OR the
+      // terminal "Product Transferred" popup), use it as the actual inflow into the downstream
+      // silo(s) and SKIP the simulated queue-unload for this berth today. Cars→tonnes via car
+      // capacity; tonne rows preferred (see realUnloadTonnesBerthProdDay). This is what makes
+      // entered real unloading actually raise silo inventory (mirrors real production for mills).
+      {
+        const _ulDate=new Date(simStartDate.getTime()+(day-1)*864e5)._ymd();
+        const _ulRows=(DB.real_unloading_daily||[]).filter(u=>u.berth_id===berth.id&&u.date===_ulDate);
+        if(_ulRows.length&&_ulRows.some(u=>(parseFloat(u.value)||0)>0)){
+          const _downS=(dn[berth.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='bulk_silo');
+          let totUL=0;
+          [...new Set(_ulRows.map(u=>u.product_id))].forEach(pid=>{
+            const amt=realUnloadTonnesBerthProdDay(berth.id,pid,_ulDate);
+            if(amt<=0) return;
+            const sil=_downS.find(s=>getSiloProducts(s).includes(pid))||_downS[0];
+            if(!sil) return;
+            siloInflow[sil.id]=(siloInflow[sil.id]||0)+amt;
+            state[sil.id].composition[pid]=(state[sil.id].composition[pid]||0)+amt;
+            if(r.siloUnloadHistory[sil.id]!==undefined){ const li=r.siloUnloadHistory[sil.id].length-1; if(li>=0) r.siloUnloadHistory[sil.id][li]=(r.siloUnloadHistory[sil.id][li]||0)+Math.round(amt); }
+            totUL+=amt;
+          });
+          // Consume forecast berth queue by the real unloaded amount (so it isn't re-unloaded later).
+          const _q=Object.values(bs.berthQueue||{}).reduce((a,b)=>a+b,0);
+          if(_q>0&&totUL>0){ const _ratio=Math.min(1,totUL/_q); Object.keys(bs.berthQueue).forEach(p=>{ bs.berthQueue[p]=Math.max(0,(bs.berthQueue[p]||0)*(1-_ratio)); }); }
+          r.berthUnloadHistory[berth.id].push(Math.round(totUL));
+          bs.status=totUL>0?'running':'idle';
+          bs.runDays=(bs.runDays||0)+(totUL>0?1:0);
+          return;
+        }
+      }
 
       // ── Ship-berth YIELD: if the berthed vessel is blocked (its silo can't take a full
       //    day's discharge) but a pending vessel's silo CAN, the blocked vessel steps back
