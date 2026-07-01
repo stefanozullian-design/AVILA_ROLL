@@ -4823,20 +4823,27 @@ function supOnFacChange(){
 
 function supPopulateProductFilter(facId){
   const sel=document.getElementById('sup-prod-filter'); if(!sel) return;
-  // Get products from all production elements in the selected facility
-  const els=facId
-    ? DB.elements.filter(e=>(e.assigned_facility_id===facId||e.facility_id===facId)&&['kiln','finish_mill','packing_plant'].includes(e.type))
-    : DB.elements.filter(e=>['kiln','finish_mill','packing_plant'].includes(e.type));
   const prodIds=new Set();
-  els.forEach(el=>{
-    DB.element_product_capacities.filter(c=>c.element_id===el.id).forEach(c=>{ if(c.product_id) prodIds.add(c.product_id); });
-  });
+  const inFac=e=>!facId||(e.assigned_facility_id===facId||e.facility_id===facId);
+  // Plant production products (kilns / finish mills / packing plants).
+  DB.elements.filter(e=>['kiln','finish_mill','packing_plant'].includes(e.type)).filter(inFac)
+    .forEach(el=>DB.element_product_capacities.filter(c=>c.element_id===el.id)
+      .forEach(c=>{ if(c.product_id) prodIds.add(c.product_id); }));
+  // Terminal-handled products — cement stored in silos + products demanded there —
+  // so the dropdown reflects what receiving facilities actually handle.
+  const termFacIds=new Set(DB.facilities.filter(f=>f.type==='terminal').map(f=>f.id));
+  const isTermEl=e=>termFacIds.has(e.assigned_facility_id||e.facility_id);
+  DB.elements.filter(e=>e.type==='bulk_silo').filter(inFac).filter(isTermEl)
+    .forEach(s=>getSiloProducts(s).forEach(p=>{ const pr=DB.products.find(x=>x.id===p);
+      if(pr&&(pr.category==='cement_bulk'||pr.category==='cement_packed')) prodIds.add(p); }));
+  DB.elements.filter(e=>e.type==='demand_point').filter(inFac).filter(isTermEl)
+    .forEach(el=>{ const dp=DB.demand_points.find(d=>d.element_id===el.id);
+      (dp?.products||[]).forEach(p=>{ if(p.product_id) prodIds.add(p.product_id); }); });
   const cur=sel.value;
   sel.innerHTML='<option value="">All Products</option>'+
-    [...prodIds].sort().map(pid=>{
-      const p=DB.products.find(pr=>pr.id===pid);
-      return `<option value="${pid}" ${pid===cur?'selected':''}>${p?.name||pid}</option>`;
-    }).join('');
+    [...prodIds].map(pid=>({pid,name:DB.products.find(pr=>pr.id===pid)?.name||pid}))
+      .sort((a,b)=>a.name.localeCompare(b.name))
+      .map(o=>`<option value="${o.pid}" ${o.pid===cur?'selected':''}>${o.name}</option>`).join('');
 }
 
 function supInitFilters(){
@@ -4849,6 +4856,15 @@ function supInitFilters(){
       .map(e=>e.assigned_facility_id||e.facility_id)
       .filter(Boolean)
   );
+  // Terminals (receiving facilities) qualify too — any facility of type 'terminal'
+  // that has silos / demand points / berths, so it can be filtered like a plant.
+  const _termElFacs=new Set(
+    DB.elements
+      .filter(e=>['bulk_silo','demand_point','berth'].includes(e.type))
+      .map(e=>e.assigned_facility_id||e.facility_id)
+      .filter(Boolean)
+  );
+  DB.facilities.filter(f=>f.type==='terminal'&&_termElFacs.has(f.id)).forEach(f=>qualFacIds.add(f.id));
   const cur=window._supView.facId||'';
   wrap.innerHTML=
     `<button class="vw-btn ${cur===''?'active':''}" onclick="supSelectFac('')">All Facilities</button>`+
