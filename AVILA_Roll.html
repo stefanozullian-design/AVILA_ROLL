@@ -5986,7 +5986,7 @@ function _renderSupplyViewInner(wrap){
   // opens as a compact overview (headers + inventory charts) instead of a wall of rows.
   if(!window._supSecDefaultApplied){
     window._supSecDefaultApplied=true;
-    ['clinkerInv','clinkerReq','clinkerProd','cementInv','cementNeed','cementProd','railLoad','termUnload'].forEach(k=>window._supSecCol.add(k));
+    ['clinkerInv','clinkerReq','clinkerProd','cementInv','cementNeed','cementProd','railLoad','termUnload','scmInv'].forEach(k=>window._supSecCol.add(k));
   }
   if(!S.simCfg.start_date){
     wrap.innerHTML=`<div style="font-family:var(--mono);font-size:10px;color:var(--text-dim);padding:30px;text-align:center">Configure simulation dates in Configure first.</div>`;
@@ -7072,6 +7072,7 @@ function _renderSupplyViewInner(wrap){
     if(_termRender.length){
       const _allFE=getFacElements();
       const _isCementPid=pid=>{ const pr=DB.products.find(x=>x.id===pid); return pr&&(pr.category==='cement_bulk'||pr.category==='cement_packed'); };
+      const _isScmPid=pid=>{ const pr=DB.products.find(x=>x.id===pid); return pr&&pr.category==='additive'; };
       // Unloading helpers — plan = simulated unload into silos; real = entered actuals.
       const _downSilosOf=berth=>_allFE.filter(e=>e.type==='bulk_silo'&&
         DB.connections.some(c=>c.from_element_id===berth.id&&c.to_element_id===e.id));
@@ -7129,47 +7130,54 @@ function _renderSupplyViewInner(wrap){
         // ── 1) Cement inventory bar chart ──
         h+=_invChartRow('Cement inventory','cement','#00d9a3',facEls,depth+1);
 
-        // ── 2) STARTING INVENTORY (cement, per silo) ──
-        const cementSilos=facEls.filter(e=>e.type==='bulk_silo').filter(s=>getSiloProducts(s).some(_isCementPid));
-        if(cementSilos.length){
-          const invColor='#00d9a3';
-          const getInv=(siloId,ds,startInv)=>{
-            const prev=new Date(ds+'T00:00:00'); prev.setDate(prev.getDate()-1);
-            const realInv=DB.real_inventory_daily.find(ri=>ri.date===prev._ymd()&&ri.silo_id===siloId);
-            if(realInv) return {value:parseFloat(realInv.eod_volume_t)||0,isActual:true};
-            const di=allDates.indexOf(ds); const hist=r?.inventoryHistory?.[siloId]||[];
-            return {value:di<=0?(parseFloat(startInv)||0):(hist[di-1]??0),isActual:false};
-          };
-          const _cemInvDay=ds=>cementSilos.reduce((s,si)=>s+getInv(si.id,ds,parseFloat(si.props?.start_inventory)||0).value,0);
-          h+=`<tr class="sup-sec-hdr" data-seckey="cementInv" onclick="_supToggleSec('cementInv')" style="cursor:pointer;background:rgba(0,217,163,.05);border-top:2px solid rgba(0,217,163,.3)">
-            <td style="${stickyLeft('var(--surface)',depth+1,'border-bottom:1px solid var(--border),')}color:${invColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('cementInv')}</span> STARTING INVENTORY (cement)</td>`;
+        // ── 2) STARTING INVENTORY — cement, then SCM (each per silo) ──
+        // Beginning-of-day level = real (prev-day EOD) if entered, else simulated.
+        const getInv=(siloId,ds,startInv)=>{
+          const prev=new Date(ds+'T00:00:00'); prev.setDate(prev.getDate()-1);
+          const realInv=DB.real_inventory_daily.find(ri=>ri.date===prev._ymd()&&ri.silo_id===siloId);
+          if(realInv) return {value:parseFloat(realInv.eod_volume_t)||0,isActual:true};
+          const di=allDates.indexOf(ds); const hist=r?.inventoryHistory?.[siloId]||[];
+          return {value:di<=0?(parseFloat(startInv)||0):(hist[di-1]??0),isActual:false};
+        };
+        // Reusable inventory-section renderer — cement and SCM share it.
+        const _invSection=(silos,seckey,label,invColor,rgba)=>{
+          if(!silos.length) return;
+          const dimCol='rgba('+rgba+',.3)';
+          const _invDay=ds=>silos.reduce((s,si)=>s+getInv(si.id,ds,parseFloat(si.props?.start_inventory)||0).value,0);
+          h+=`<tr class="sup-sec-hdr" data-seckey="${seckey}" onclick="_supToggleSec('${seckey}')" style="cursor:pointer;background:rgba(${rgba},.05);border-top:2px solid rgba(${rgba},.3)">
+            <td style="${stickyLeft('var(--surface)',depth+1,'border-bottom:1px solid var(--border),')}color:${invColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow(seckey)}</span> ${label}</td>`;
           months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-            const mt=mon.dates.reduce((a,ds)=>a+_cemInvDay(ds),0)/(mon.dates.length||1);
-            h+=`<td style="border-left:2px solid rgba(0,217,163,.2);font-size:9px;font-weight:700;color:${invColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
-            if(!isCol) mon.dates.forEach(ds=>{ const v=_cemInvDay(ds);
+            const mt=mon.dates.reduce((a,ds)=>a+_invDay(ds),0)/(mon.dates.length||1);
+            h+=`<td style="border-left:2px solid rgba(${rgba},.2);font-size:9px;font-weight:700;color:${invColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+            if(!isCol) mon.dates.forEach(ds=>{ const v=_invDay(ds);
               h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${invColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
           });
           h+=`</tr>`;
-          cementSilos.forEach(silo=>{
+          silos.forEach(silo=>{
             const siloMax=parseFloat(silo.props?.max_capacity)||0;
             const siloStart=parseFloat(silo.props?.start_inventory)||0;
             const pnm=(getSiloProducts(silo).map(p=>DB.products.find(x=>x.id===p)?.name).filter(Boolean)[0])||'';
-            h+=`<tr class="supsec-cementInv">
+            h+=`<tr class="supsec-${seckey}">
               <td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${invColor};font-size:9px">${silo.name}
                 <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${siloMax>0?'cap: '+siloMax.toLocaleString()+'t':''}${pnm?' · '+pnm:''}</span></td>`;
             months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
               const mt=mon.dates.reduce((s,ds)=>s+getInv(silo.id,ds,siloStart).value,0)/(mon.dates.length||1);
-              h+=`<td style="border-left:2px solid rgba(0,217,163,.1);font-size:9px;color:${invColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+              h+=`<td style="border-left:2px solid rgba(${rgba},.1);font-size:9px;color:${invColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
               if(!isCol) mon.dates.forEach(ds=>{
                 const inv=getInv(silo.id,ds,siloStart); const v=inv.value;
                 const lvlColor=invLevelColor(v,siloMax);
                 const cls=inv.isActual?'cell-real':''; const wt=inv.isActual?'700':'400';
                 const ttl=(siloMax>0?`${Math.round(v/siloMax*100)}% of ${siloMax.toLocaleString()}t${inv.isActual?' · actual':''}`:'')+' · click to set real inventory';
-                h+=`<td class="sup-day-${mon.ym} ${cls}" title="${ttl}" onclick="showInventoryPopup('${silo.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?lvlColor:'rgba(0,217,163,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${wt};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+                h+=`<td class="sup-day-${mon.ym} ${cls}" title="${ttl}" onclick="showInventoryPopup('${silo.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?lvlColor:dimCol};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${wt};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
             });
             h+=`</tr>`;
           });
-        }
+        };
+        const cementSilos=facEls.filter(e=>e.type==='bulk_silo').filter(s=>getSiloProducts(s).some(_isCementPid));
+        // SCM silos = additive-holding silos that aren't cement silos.
+        const scmSilos=facEls.filter(e=>e.type==='bulk_silo').filter(s=>getSiloProducts(s).some(_isScmPid)&&!getSiloProducts(s).some(_isCementPid));
+        _invSection(cementSilos,'cementInv','STARTING INVENTORY (cement)','#00d9a3','0,217,163');
+        _invSection(scmSilos,'scmInv','STARTING INVENTORY (SCM)','#c8a96a','200,169,106');
 
         // ── 3) CEMENT REQUIREMENTS (local demand, per product) ──
         {
