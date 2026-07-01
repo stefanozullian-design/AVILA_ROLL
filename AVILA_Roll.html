@@ -4229,6 +4229,165 @@ function closeInventoryPopup(){
   if(ov) ov.style.display='none';
 }
 
+// ── Terminal "Product Transferred" real-data entry (arrival + unloading) ──────
+// Standalone forecast recompute for a terminal/product/date (mirrors the render).
+function _termArrPlanAt(facId,pid,ds){
+  const simStart=S.simCfg?.start_date?new Date(S.simCfg.start_date+'T00:00:00'):null;
+  if(!simStart) return 0;
+  let t=0;
+  (DB.rail_movements||[]).filter(rm=>rm.to_facility_id===facId&&rm.product_id===pid).forEach(rm=>{
+    let depDay=null;
+    if(rm.departure_date) depDay=Math.round((new Date(rm.departure_date)-simStart)/864e5)+1;
+    else if(rm.switch_day) depDay=rm.switch_day;
+    if(!depDay) return;
+    const arrDs=new Date(simStart.getTime()+(depDay+(parseInt(rm.transit_days)||1)-1)*864e5)._ymd();
+    if(arrDs===ds) t+=parseFloat(rm.total_capacity_t)||0;
+  });
+  const berthIds=new Set((DB.elements||[]).filter(e=>e.type==='berth'&&(e.assigned_facility_id||e.facility_id)===facId).map(b=>b.id));
+  (DB.vessel_calls||[]).forEach(vc=>{
+    const legs=(vc.legs&&vc.legs.length)?vc.legs:[{berth_element_id:vc.berth_element_id,arrival_date:vc.arrival_date,product_id:vc.product_id,quantity_t:vc.quantity_t||vc.total_quantity_t}];
+    legs.forEach(l=>{ if(berthIds.has(l.berth_element_id)&&(l.arrival_date||'').slice(0,10)===ds&&(l.product_id||vc.product_id)===pid) t+=parseFloat(l.quantity_t)||0; });
+  });
+  return t;
+}
+function _termUnloadPlanAt(facId,pid,ds){
+  const r=S.simResults, simStart=S.simCfg?.start_date; if(!r||!simStart) return 0;
+  const dayIdx=Math.round((new Date(ds+'T00:00:00')-new Date(simStart+'T00:00:00'))/86400000);
+  const silos=(DB.elements||[]).filter(e=>e.type==='bulk_silo'&&(e.assigned_facility_id||e.facility_id)===facId&&getSiloProducts(e).includes(pid));
+  return silos.reduce((s,si)=>s+((r.siloUnloadHistory?.[si.id]||[])[dayIdx]||0),0);
+}
+// Pick a berth at the facility that feeds this product (for real_unloading_daily.berth_id).
+function _termBerthForProduct(facId,pid){
+  const berths=(DB.elements||[]).filter(e=>e.type==='berth'&&(e.assigned_facility_id||e.facility_id)===facId);
+  const fed=berths.find(b=>(DB.elements||[]).some(s=>s.type==='bulk_silo'&&getSiloProducts(s).includes(pid)
+    &&(DB.connections||[]).some(c=>c.from_element_id===b.id&&c.to_element_id===s.id)));
+  return (fed||berths[0])?.id||'';
+}
+// Infer the dominant origin facility shipping this product to the terminal (for real_transfers_daily).
+function _termOriginForProduct(facId,pid){
+  const c={};
+  (DB.rail_movements||[]).filter(rm=>rm.to_facility_id===facId&&rm.product_id===pid&&rm.from_facility_id)
+    .forEach(rm=>{ c[rm.from_facility_id]=(c[rm.from_facility_id]||0)+1; });
+  const best=Object.entries(c).sort((a,b)=>b[1]-a[1])[0];
+  return best?best[0]:(S.facility_id||'');
+}
+
+function showTermRealPopup(kind,facId,pid,ds){
+  const fac=DB.facilities.find(f=>f.id===facId);
+  const prod=DB.products.find(p=>p.id===pid);
+  const isTr=kind==='transfer';
+  const label=isTr?'Transfer / Arrival':'Unloading';
+  const existing=isTr
+    ?(DB.real_transfers_daily||[]).filter(t=>t.date===ds&&t.dest_facility_id===facId&&t.product_id===pid)
+    :(DB.real_unloading_daily||[]).filter(u=>u.date===ds&&u.facility_id===facId&&u.product_id===pid&&u.unit!=='cars');
+  const hasReal=existing.length>0;
+  const realSum=existing.reduce((s,x)=>s+(parseFloat(isTr?x.volume_t:x.value)||0),0);
+  const planVal=isTr?_termArrPlanAt(facId,pid,ds):_termUnloadPlanAt(facId,pid,ds);
+  const initVal=Math.round(hasReal?realSum:planVal);
+  window._termRealCtx={kind,facId,pid,ds};
+
+  const html=`
+  <div style="font-family:var(--mono);font-size:9px;min-width:320px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <div>
+        <div style="font-size:11px;font-weight:700;color:${hasReal?'#b388ff':'var(--text)'}">${hasReal?'✏️ Edit Real '+label:'✏️ Set Real '+label}</div>
+        <div style="color:var(--text-dim);margin-top:2px">${fac?.name||facId} · ${prod?.name||pid} · ${ds}</div>
+      </div>
+      <button onclick="closeTermRealPopup()" style="background:transparent;border:none;color:var(--text-dim);cursor:pointer;font-size:16px">✕</button>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <div class="fr s2">
+        <div class="ff">
+          <div class="fl">${label} (t)</div>
+          <input class="fi" id="term-real-value" type="number" value="${initVal}" min="0" step="10" style="width:100%">
+        </div>
+        <div style="font-size:8px;color:var(--text-dim);align-self:flex-end;padding-bottom:6px">${hasReal?'actual':'override forecast'}</div>
+      </div>
+      <div class="fr s1">
+        <div class="ff">
+          <div class="fl">Date</div>
+          <input class="fi" id="term-real-date" type="date" value="${ds}" onchange="_termRealPrefill()" style="width:100%">
+        </div>
+      </div>
+      <div style="font-size:8px;color:var(--text-dim);line-height:1.4">${isTr?'Actual tonnage transferred/arrived at this terminal for this product.':'Actual tonnage unloaded into this terminal\'s silos for this product.'} Treated as real data, like the Daily Data form.</div>
+    </div>
+    <div style="margin-top:12px;display:flex;gap:8px;justify-content:space-between;align-items:center">
+      <div style="display:flex;gap:6px">
+        ${hasReal?`<button onclick="clearTermReal()" style="padding:5px 10px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid rgba(255,61,90,.5);color:var(--red);cursor:pointer;border-radius:2px">✕ Clear Real Value</button>`:''}
+      </div>
+      <div style="display:flex;gap:6px">
+        <button onclick="closeTermRealPopup()" style="padding:5px 12px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid var(--border2);color:var(--text-dim);cursor:pointer;border-radius:2px">Cancel</button>
+        <button onclick="applyTermReal()" style="padding:5px 14px;font-family:var(--mono);font-size:9px;background:#b388ff;border:none;color:#1a1024;cursor:pointer;font-weight:700;border-radius:2px">✅ Save Real ${label}</button>
+      </div>
+    </div>
+  </div>`;
+
+  let ov=document.getElementById('term-real-overlay');
+  if(!ov){
+    ov=document.createElement('div');
+    ov.id='term-real-overlay';
+    ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:20000;display:flex;align-items:center;justify-content:center';
+    ov.onclick=e=>{ if(e.target===ov) closeTermRealPopup(); };
+    document.body.appendChild(ov);
+  }
+  ov.innerHTML=`<div style="background:var(--surface);border:1px solid #b388ff;padding:18px;border-radius:6px;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.6)">${html}</div>`;
+  ov.style.display='flex';
+}
+
+function _termRealPrefill(){
+  const ctx=window._termRealCtx; if(!ctx) return;
+  const ds=document.getElementById('term-real-date')?.value; if(!ds) return;
+  const isTr=ctx.kind==='transfer';
+  const existing=isTr
+    ?(DB.real_transfers_daily||[]).filter(t=>t.date===ds&&t.dest_facility_id===ctx.facId&&t.product_id===ctx.pid)
+    :(DB.real_unloading_daily||[]).filter(u=>u.date===ds&&u.facility_id===ctx.facId&&u.product_id===ctx.pid&&u.unit!=='cars');
+  const val=existing.length
+    ?existing.reduce((s,x)=>s+(parseFloat(isTr?x.volume_t:x.value)||0),0)
+    :(isTr?_termArrPlanAt(ctx.facId,ctx.pid,ds):_termUnloadPlanAt(ctx.facId,ctx.pid,ds));
+  const inp=document.getElementById('term-real-value'); if(inp) inp.value=Math.round(val);
+}
+
+function applyTermReal(){
+  const ctx=window._termRealCtx; if(!ctx) return;
+  const ds=document.getElementById('term-real-date')?.value;
+  const value=parseFloat(document.getElementById('term-real-value')?.value);
+  if(!ds||isNaN(value)||value<0){ statMsg('Enter a valid date and a non-negative tonnage'); return; }
+  const now=new Date().toISOString();
+  if(ctx.kind==='transfer'){
+    DB.real_transfers_daily=(DB.real_transfers_daily||[]).filter(t=>!(t.date===ds&&t.dest_facility_id===ctx.facId&&t.product_id===ctx.pid));
+    DB.real_transfers_daily.push({date:ds,origin_facility_id:_termOriginForProduct(ctx.facId,ctx.pid),dest_facility_id:ctx.facId,mode:'rail',product_id:ctx.pid,volume_t:value,source:'actual',created_at:now,updated_at:now});
+  } else {
+    DB.real_unloading_daily=(DB.real_unloading_daily||[]).filter(u=>!(u.date===ds&&u.facility_id===ctx.facId&&u.product_id===ctx.pid&&u.unit!=='cars'));
+    DB.real_unloading_daily.push({date:ds,facility_id:ctx.facId,berth_id:_termBerthForProduct(ctx.facId,ctx.pid),product_id:ctx.pid,mode:'ship',value,unit:'t',source:'actual',created_at:now,updated_at:now});
+  }
+  closeTermRealPopup();
+  autoSave();
+  renderSupplyView();
+  statMsg('Real value saved — running simulation…');
+  if(typeof runSimulation==='function') runSimulation();
+}
+
+function clearTermReal(){
+  const ctx=window._termRealCtx; if(!ctx) return;
+  const ds=document.getElementById('term-real-date')?.value||ctx.ds;
+  if(!confirm('Clear this real value for '+ds+'?\nThe forecast will resume for this cell.')) return;
+  if(ctx.kind==='transfer'){
+    DB.real_transfers_daily=(DB.real_transfers_daily||[]).filter(t=>!(t.date===ds&&t.dest_facility_id===ctx.facId&&t.product_id===ctx.pid));
+  } else {
+    DB.real_unloading_daily=(DB.real_unloading_daily||[]).filter(u=>!(u.date===ds&&u.facility_id===ctx.facId&&u.product_id===ctx.pid&&u.unit!=='cars'));
+  }
+  closeTermRealPopup();
+  autoSave();
+  renderSupplyView();
+  statMsg('Real value cleared — running simulation…');
+  if(typeof runSimulation==='function') runSimulation();
+}
+
+function closeTermRealPopup(){
+  const ov=document.getElementById('term-real-overlay');
+  if(ov) ov.style.display='none';
+}
+
 function applyCampaign(elId){
   const productId=document.getElementById('camp-product')?.value;
   const rateTpd=parseFloat(document.getElementById('camp-rate')?.value)||0;
@@ -7024,52 +7183,89 @@ function _renderSupplyViewInner(wrap){
           }
         }
 
-        // ── 4) PRODUCT RECEIVED (unloading, per berth → per product) ──
+        // ── 4) PRODUCT TRANSFERRED — per product: Transfer/Arrival + Unloading ──
+        // Mirrors the Logistics page: arrivals (rail movements + vessel calls) then the
+        // volume unloaded into silos. Forecast by default; double-click a cell to enter
+        // real data (real_transfers_daily for arrivals, real_unloading_daily for unloads).
         {
-          const rc='#b388ff';
+          const rc='#b388ff';       // forecast (planned) colour
+          const rcReal='#00d9a3';   // actual colour
+          // Build per-product arrival map (tonnes/day) from rail movements + vessel calls.
+          const _termArr={};
+          const _addArr=(pid,ds,t)=>{ if(!pid||!ds||!(t>0))return; (_termArr[pid]=_termArr[pid]||{}); _termArr[pid][ds]=(_termArr[pid][ds]||0)+t; };
+          const _dayToDs=day=>new Date(simStart.getTime()+(day-1)*864e5)._ymd();
+          (DB.rail_movements||[]).filter(rm=>rm.to_facility_id===fac.id).forEach(rm=>{
+            let depDay=null;
+            if(rm.departure_date&&S.simCfg.start_date) depDay=Math.round((new Date(rm.departure_date)-simStart)/864e5)+1;
+            else if(rm.switch_day) depDay=rm.switch_day;
+            if(!depDay) return;
+            _addArr(rm.product_id,_dayToDs(depDay+(parseInt(rm.transit_days)||1)),parseFloat(rm.total_capacity_t)||0);
+          });
+          const _berthIds=new Set(berths.map(b=>b.id));
+          (DB.vessel_calls||[]).forEach(vc=>{
+            if(vc.legs&&vc.legs.length){
+              vc.legs.filter(l=>_berthIds.has(l.berth_element_id)&&l.arrival_date).forEach(l=>
+                _addArr(l.product_id||vc.product_id,(l.arrival_date||'').slice(0,10),parseFloat(l.quantity_t)||0));
+            } else if(_berthIds.has(vc.berth_element_id)&&vc.arrival_date){
+              _addArr(vc.product_id,(vc.arrival_date||'').slice(0,10),parseFloat(vc.quantity_t)||parseFloat(vc.total_quantity_t)||0);
+            }
+          });
+          // Forecast / real accessors
+          const _arrPlan=(pid,ds)=>(_termArr[pid]&&_termArr[pid][ds])||0;
+          const _arrReal=(pid,ds)=>(DB.real_transfers_daily||[]).filter(t=>t.date===ds&&t.dest_facility_id===fac.id&&t.product_id===pid).reduce((s,t)=>s+(parseFloat(t.volume_t)||0),0);
+          const _arrDay=(pid,ds)=>{ const rv=_arrReal(pid,ds); return rv>0?rv:_arrPlan(pid,ds); };
+          const _prodSilos=pid=>cementSilos.filter(s=>getSiloProducts(s).includes(pid));
+          const _unlPlan=(pid,ds)=>{ const di=allDates.indexOf(ds); if(di<0)return 0; return _prodSilos(pid).reduce((s,si)=>s+((r&&r.siloUnloadHistory&&r.siloUnloadHistory[si.id]||[])[di]||0),0); };
+          const _unlReal=(pid,ds)=>(DB.real_unloading_daily||[]).filter(u=>u.date===ds&&u.facility_id===fac.id&&u.product_id===pid&&u.unit!=='cars').reduce((s,u)=>s+(parseFloat(u.value)||0),0);
+
+          // Products handled = cement silo products ∪ arriving products
+          const _termProds=[...new Set([
+            ...cementSilos.flatMap(s=>getSiloProducts(s)).filter(_isCementPid),
+            ...Object.keys(_termArr)
+          ])].sort((a,b)=>{ const na=DB.products.find(p=>p.id===a)?.name||a; const nb=DB.products.find(p=>p.id===b)?.name||b; return na.localeCompare(nb); });
+          const _termArrAll=ds=>_termProds.reduce((s,pid)=>s+_arrDay(pid,ds),0);
+
+          // Section header — total = transferred (arrivals) across products
           h+=`<tr class="sup-sec-hdr" data-seckey="termUnload" onclick="_supToggleSec('termUnload')" style="cursor:pointer;background:rgba(179,136,255,.06);border-top:2px solid rgba(179,136,255,.4)">
-            <td style="${stickyLeft('var(--surface)',depth+1,'border-bottom:1px solid var(--border),')}color:${rc};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('termUnload')}</span> PRODUCT RECEIVED <span style="font-size:7px;opacity:.65;font-weight:400;margin-left:4px">(unloading · actual/plan · t)</span></td>`;
+            <td style="${stickyLeft('var(--surface)',depth+1,'border-bottom:1px solid var(--border),')}color:${rc};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('termUnload')}</span> PRODUCT TRANSFERRED <span style="font-size:7px;opacity:.65;font-weight:400;margin-left:4px">(arrival + unloading · dbl-click a cell to set actual · t)</span></td>`;
           months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-            const mt=mon.dates.reduce((a,ds)=>a+_termRecvDay(fac,ds),0);
+            const mt=mon.dates.reduce((a,ds)=>a+_termArrAll(ds),0);
             h+=`<td style="border-left:2px solid rgba(179,136,255,.2);font-size:9px;font-weight:700;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
-            if(!isCol) mon.dates.forEach(ds=>{ const v=_termRecvDay(fac,ds);
+            if(!isCol) mon.dates.forEach(ds=>{ const v=_termArrAll(ds);
               h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
           });
           h+=`</tr>`;
 
-          const berthSorted=[...berths].sort((a,b)=>(a.name||'').localeCompare(b.name||''));
-          const anyRow=berthSorted.some(b=>_berthProducts(b).length);
-          berthSorted.forEach(berth=>{
-            const prods=_berthProducts(berth); if(!prods.length) return;
-            const _berthDay=ds=>prods.reduce((s,pid)=>{ const rv=_unloadRealBerthProd(berth.id,pid,ds); return s+(rv>0?rv:_unloadPlanBerthProd(berth,pid,ds)); },0);
-            // Berth sub-header
-            h+=`<tr class="supsec-termUnload" style="background:rgba(179,136,255,.03)"><td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${rc};font-size:9px;font-weight:700">↳ ${berth.name} <span style="font-size:7px;opacity:.5">BERTH</span></td>`;
+          if(!_termProds.length){
+            h+=`<tr class="supsec-termUnload"><td style="${stickyLeft('var(--surface)',depth+2)}color:var(--text-dim);font-size:8px;font-style:italic">no transfers or berths configured for this terminal</td><td style="border-left:2px solid var(--border2);border-bottom:1px solid var(--border)"></td></tr>`;
+          }
+
+          // Per product: Transfer/Arrival row, then Unloading row (both dbl-click to set actual).
+          _termProds.forEach(pid=>{
+            const prodName=DB.products.find(p=>p.id===pid)?.name||pid;
+            // Transfer / Arrival
+            h+=`<tr class="supsec-termUnload"><td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${rc};font-size:9px;font-weight:700">▸ ${prodName} <span style="font-size:7px;opacity:.6;font-weight:400">— Transfer / Arrival</span></td>`;
             months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-              const mt=mon.dates.reduce((s,ds)=>s+_berthDay(ds),0);
+              const mt=mon.dates.reduce((s,ds)=>s+_arrDay(pid,ds),0);
               h+=`<td style="border-left:2px solid rgba(179,136,255,.12);font-size:9px;font-weight:700;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
-              if(!isCol) mon.dates.forEach(ds=>{ const v=_berthDay(ds);
-                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${v>0?rc:'rgba(179,136,255,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+              if(!isCol) mon.dates.forEach(ds=>{
+                const rv=_arrReal(pid,ds); const isReal=rv>0; const v=isReal?rv:_arrPlan(pid,ds);
+                const col=isReal?rcReal:(v>0?rc:'rgba(179,136,255,.25)');
+                h+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''}" ondblclick="event.stopPropagation();showTermRealPopup('transfer','${fac.id}','${pid}','${ds}')" title="${prodName} arrival · ${Math.round(v).toLocaleString()} t${isReal?' · actual':' · planned'} — dbl-click to set actual" style="cursor:pointer;font-size:9px;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${isReal?'700':'400'};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
             });
             h+=`</tr>`;
-            // Per-product rows — actual bold-green where entered, else planned purple.
-            prods.sort((a,b)=>{ const na=DB.products.find(p=>p.id===a)?.name||a; const nb=DB.products.find(p=>p.id===b)?.name||b; return na.localeCompare(nb); }).forEach(pid=>{
-              const prodName=DB.products.find(p=>p.id===pid)?.name||pid;
-              h+=`<tr class="supsec-termUnload"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${rc};font-size:9px">${prodName}</td>`;
-              months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-                const mt=mon.dates.reduce((s,ds)=>{ const rv=_unloadRealBerthProd(berth.id,pid,ds); return s+(rv>0?rv:_unloadPlanBerthProd(berth,pid,ds)); },0);
-                h+=`<td style="border-left:2px solid rgba(179,136,255,.1);font-size:9px;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
-                if(!isCol) mon.dates.forEach(ds=>{
-                  const rv=_unloadRealBerthProd(berth.id,pid,ds);
-                  const isReal=rv>0; const v=isReal?rv:_unloadPlanBerthProd(berth,pid,ds);
-                  const cls=isReal?'cell-real':''; const col=isReal?'#00d9a3':(v>0?rc:'rgba(179,136,255,.25)');
-                  h+=`<td class="sup-day-${mon.ym} ${cls}" title="${prodName} · ${Math.round(v).toLocaleString()} t${isReal?' · actual':' · planned'}" style="font-size:9px;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${isReal?'700':'400'};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
-              });
-              h+=`</tr>`;
+            // Unloading
+            h+=`<tr class="supsec-termUnload"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${rc};font-size:9px">Unloading</td>`;
+            months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+              const mt=mon.dates.reduce((s,ds)=>{ const rv=_unlReal(pid,ds); return s+(rv>0?rv:_unlPlan(pid,ds)); },0);
+              h+=`<td style="border-left:2px solid rgba(179,136,255,.1);font-size:9px;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+              if(!isCol) mon.dates.forEach(ds=>{
+                const rv=_unlReal(pid,ds); const isReal=rv>0; const v=isReal?rv:_unlPlan(pid,ds);
+                const col=isReal?rcReal:(v>0?rc:'rgba(179,136,255,.25)');
+                h+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''}" ondblclick="event.stopPropagation();showTermRealPopup('unload','${fac.id}','${pid}','${ds}')" title="${prodName} unloading · ${Math.round(v).toLocaleString()} t${isReal?' · actual':' · planned'} — dbl-click to set actual" style="cursor:pointer;font-size:9px;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${isReal?'700':'400'};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
             });
+            h+=`</tr>`;
           });
-          if(!anyRow){
-            h+=`<tr class="supsec-termUnload"><td style="${stickyLeft('var(--surface)',depth+2)}color:var(--text-dim);font-size:8px;font-style:italic">no berths wired to cement silos</td><td style="border-left:2px solid var(--border2);border-bottom:1px solid var(--border)"></td></tr>`;
-          }
         }
 
       });
