@@ -16180,7 +16180,11 @@ function spRenderKPIs(){
   rows.forEach(r=>{ byDate[r.date]=(byDate[r.date]||0)+r.volume; });
   const dates=Object.keys(byDate).sort();
   const totals=dates.map(d=>byDate[d]);
-  const avgDaily=Math.round(totals.reduce((a,b)=>a+b,0)/totals.length);
+  // AVG daily sales — WEEKDAYS only (Sat/Sun excluded from both sum and day count),
+  // still scoped to the active filters. Peak/total below stay over all days.
+  const _isWd=ds=>{const d=new Date(ds+'T00:00:00').getDay(); return d>=1&&d<=5;};
+  const wdTotals=dates.filter(_isWd).map(d=>byDate[d]);
+  const avgDaily=wdTotals.length?Math.round(wdTotals.reduce((a,b)=>a+b,0)/wdTotals.length):0;
   const peakVal=Math.max(...totals);
   const peakDate=dates[totals.indexOf(peakVal)];
   const grandTotal=totals.reduce((a,b)=>a+b,0);
@@ -16272,14 +16276,21 @@ function spRenderChart(){
 
   // Chart is historical actuals only — no future/simulated data shown here
 
-  // Moving averages — computed on TOTAL of scoped rows per day
+  // Moving averages — computed on TOTAL of scoped rows per day, over WEEKDAYS ONLY
+  // (Sat/Sun are excluded from the window). Each MA is the mean of the last N weekday
+  // totals; on weekend x-positions the value is carried flat so the line stays continuous.
   const totByDate={};
   visRows.forEach(r=>{ totByDate[r.date]=(totByDate[r.date]||0)+r.volume; });
-  const totArr=labels.map(d=>totByDate[d]||0);
-  const ma=(arr,w)=>arr.map((_,i)=>i<w-1?null:Math.round(arr.slice(i-w+1,i+1).reduce((a,b)=>a+b,0)/w));
+  const _isWd=ds=>{const d=new Date(ds+'T00:00:00').getDay(); return d>=1&&d<=5;};
+  const maWd=(w)=>{ const out=[]; const wd=[]; let last=null;
+    labels.forEach(ds=>{
+      if(_isWd(ds)){ wd.push(totByDate[ds]||0); last=wd.length>=w?Math.round(wd.slice(-w).reduce((a,b)=>a+b,0)/w):null; out.push(last); }
+      else out.push(last);
+    });
+    return out; };
 
-  datasets.push({type:'line',label:'10D MA',data:ma(totArr,10),borderColor:'#4da6ff',borderWidth:1.5,pointRadius:0,tension:.4,fill:false,stack:'',order:0,_isMA:true});
-  datasets.push({type:'line',label:'30D MA',data:ma(totArr,30),borderColor:'#ff3d5a',borderWidth:1.5,borderDash:[5,4],pointRadius:0,tension:.4,fill:false,stack:'',order:0,_isMA:true});
+  datasets.push({type:'line',label:'10D MA',data:maWd(10),borderColor:'#4da6ff',borderWidth:1.5,pointRadius:0,tension:.4,fill:false,stack:'',order:0,_isMA:true});
+  datasets.push({type:'line',label:'30D MA',data:maWd(30),borderColor:'#ff3d5a',borderWidth:1.5,borderDash:[5,4],pointRadius:0,tension:.4,fill:false,stack:'',order:0,_isMA:true});
 
   // Build legend
   spRenderChartLegend(datasets, useProductStack);
