@@ -9817,34 +9817,11 @@ function vpRender(){
       const _colspan=days.length+months.length+1;
       destRows.push(`<tr><td colspan="${_colspan}" style="background:rgba(255,184,48,.06);color:var(--amber);font-family:var(--mono);font-size:8px;padding:3px 8px;letter-spacing:.06em;border-top:1px solid rgba(255,184,48,.15)">▸ ${destFac?.name||destFacId} / ${berth.name}</td></tr>`);
 
-      // ── Berth activity — ONE GANTT ROW PER VESSEL (like a finish mill) ──
-      // Solid green = actual unloading, hatched green = forecast unloading, red hatch =
-      // anchorage (silo full), amber hatch = arrived/waiting to dock.
-      {
-        const _bh=S.simResults?.berthVesselHistory?.[berth.id]||[];
-        const _vessels=_vesselTimelines(_bh);
-        const _realDay=new Set((DB.real_unloading_daily||[]).filter(u=>u.berth_id===berth.id&&u.unit!=='cars'&&(parseFloat(u.value)||0)>0).map(u=>u.date));
-        if(!_vessels.length){
-          destRows.push(`<tr class="tp-row-gantt"><td style="padding-left:14px;color:#7ec8e3;font-size:10px">Berth activity <span style="font-size:7px;opacity:.6">no vessel calls</span></td>${months.map(mon=>`<td class="logi-mcol" style="${_mTdSty}">—</td>`+mon.days.map(d=>`<td style="${_tpTdSty(d)}"></td>`).join('')).join('')}</tr>`);
-        }
-        _vessels.forEach(v=>{
-          let _pk=null;
-          const gCells=months.map(mon=>{
-            const unl=mon.days.reduce((s,d)=>s+(v.days[d-1]==='unloading'?1:0),0);
-            const mTd=`<td class="logi-mcol" style="${_mTdSty}">${unl>0?unl+'d':'—'}</td>`;
-            return mTd+mon.days.map(d=>{
-              const st=v.days[d-1]; const ds=vpDayDate(d);
-              const isReal=st==='unloading'&&_realDay.has(ds);
-              const p=_vesselCellParts(st,isReal);
-              const runStart=p.key!=='__i'&&p.key!==_pk; _pk=p.key;
-              const label=(runStart&&p.lblTxt)?`<span style="position:absolute;left:3px;top:0;line-height:12px;white-space:nowrap;font-size:8px;font-weight:700;color:${st==='unloading'?'#0a3a2c':'#fff'};pointer-events:none">${p.lblTxt}</span>`:'';
-              const ttl=st?(v.name+' — '+p.lbl):'';
-              return `<td title="${ttl}" style="position:relative;padding:2px 0;overflow:visible;${_tpTdSty(d)}"><div style="position:relative;height:12px;background:${p.bg}">${label}</div></td>`;
-            }).join('');
-          }).join('');
-          destRows.push(`<tr class="tp-row-gantt"><td style="padding-left:14px;color:#c9c6d0;font-size:10px">▸ ${v.name}</td>${gCells}</tr>`);
-        });
-      }
+      // Vessel status source for the per-product Gantt (drawn as each product's "Vessel unload"
+      // row below, replacing the flat tonnage row — same concept as the Supply page).
+      const _bh=S.simResults?.berthVesselHistory?.[berth.id]||[];
+      const _vpSets=_vesselProductSets();
+      const _carries=(n,pid)=>!!(_vpSets[n]&&_vpSets[n].has(pid));
 
       // Products at this berth — union of downstream silo products and products that actually arrive.
       // Vessel arrivals are now shown one row PER PRODUCT (no mixing) to avoid confusion.
@@ -9873,18 +9850,30 @@ function vpRender(){
           }).join('');
         }).join('');
         destRows.push(`<tr class="tp-row-arrival"><td style="padding-left:10px">${label}</td>${arrCells}</tr>`);
-        const prodSilos=pid?destSilos.filter(s=>getSiloProducts(s).includes(pid)):[];
-        if(_suh&&prodSilos.length){
-          const unldCells=months.map(mon=>{
-            const monT=mon.days.reduce((s,d)=>s+prodSilos.reduce((t,si)=>t+((_suh[si.id]||[])[d-1]||0),0),0);
-            const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString()+'t':'—'}</td>`;
-            return mTd+mon.days.map(d=>{
-              const v=prodSilos.reduce((t,si)=>t+((_suh[si.id]||[])[d-1]||0),0);
-              const tSty=_tpTdSty(d);
-              return `<td style="color:var(--real);font-size:10px;${tSty}">${v>0?Number(Math.round(v)).toLocaleString()+'t':'—'}</td>`;
+        // Vessel unload → status Gantt. Per-product (pid) shows that product's vessels
+        // (unloading/anchorage/waiting); the legacy no-product fallback shows one row per vessel.
+        if(_bh.length){
+          const realDay=new Set((DB.real_unloading_daily||[]).filter(u=>u.berth_id===berth.id&&(!pid||u.product_id===pid)&&u.unit!=='cars'&&(parseFloat(u.value)||0)>0).map(u=>u.date));
+          const ganttRow=(rowLbl, stateOf)=>{
+            let _pk=null;
+            const cells=months.map(mon=>{
+              const unl=mon.days.reduce((s,d)=>{ const c=stateOf(d); return s+(c&&c.state==='unloading'?1:0); },0);
+              const mTd=`<td class="logi-mcol" style="${_mTdSty}">${unl>0?unl+'d':'—'}</td>`;
+              return mTd+mon.days.map(d=>{
+                const c=stateOf(d); const st=c&&c.state; const vessel=(c&&c.vessel)||'';
+                const isReal=st==='unloading'&&realDay.has(vpDayDate(d));
+                const p=_vesselCellParts(st,isReal);
+                const key=(st||'__i')+'|'+vessel; const rs=!!st&&key!==_pk; _pk=key;
+                const glyph=st==='anchorage'?' ⚓':st==='waiting'?' ⏳':'';
+                const lbl=rs?`<span style="position:absolute;left:3px;top:0;line-height:12px;white-space:nowrap;font-size:8px;font-weight:700;color:${st==='unloading'?'#0a3a2c':'#fff'};pointer-events:none">${vessel}${glyph}</span>`:'';
+                const ttl=st?(vessel+' — '+p.lbl):'';
+                return `<td title="${ttl}" style="position:relative;padding:2px 0;overflow:visible;${_tpTdSty(d)}"><div style="position:relative;height:12px;background:${p.bg}">${lbl}</div></td>`;
+              }).join('');
             }).join('');
-          }).join('');
-          destRows.push(`<tr class="tp-row-unload"><td style="padding-left:14px;color:var(--real);font-size:10px">Vessel unload</td>${unldCells}</tr>`);
+            destRows.push(`<tr class="tp-row-unload"><td style="padding-left:14px;color:#7ec8e3;font-size:10px">${rowLbl}</td>${cells}</tr>`);
+          };
+          if(pid){ const tl=_berthProductTimeline(_bh,_carries,pid); ganttRow('Vessel unload', d=>tl[d-1]); }
+          else { _vesselTimelines(_bh).forEach(v=>ganttRow('▸ '+v.name, d=>v.days[d-1]?{state:v.days[d-1],vessel:v.name}:null)); }
         }
       };
 
@@ -9925,18 +9914,19 @@ function vpRender(){
           }).join('');
           destRows.push(`<tr class="tp-row-inv"><td style="padding-left:14px">${silo.name}</td>${invCells}</tr>`);
         });
-        // Demand rows for this product
-        demEls.filter(el=>_demElMatchesProd(el,pid)&&!_vtShownDemIds.has(el.id)).forEach(el=>{
-          _vtShownDemIds.add(el.id);
-          _vpPushDemandRows(destRows,el,months,_mTdSty,_tpTdSty);
-        });
+        // Demand — ONE consolidated row per product (sum of all matching demand points, EFFECTIVE
+        // = own − swapped-out + swapped-in), like the Supply page's product REQUIREMENTS summary.
+        const _pidDem=demEls.filter(el=>_demElMatchesProd(el,pid));
+        _pidDem.forEach(el=>_vtShownDemIds.add(el.id));
+        if(_pidDem.length){
+          const demCells=months.map(mon=>{
+            const monT=mon.days.reduce((s,d)=>s+_pidDem.reduce((q,el)=>q+rpDemandEff(el.id,d),0),0);
+            const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString():'—'}</td>`;
+            return mTd+mon.days.map(d=>{ const v=_pidDem.reduce((q,el)=>q+rpDemandEff(el.id,d),0); return `<td style="color:var(--simulated);${_tpTdSty(d)}">${v>0?Number(Math.round(v)).toLocaleString():'—'}</td>`; }).join('');
+          }).join('');
+          destRows.push(`<tr class="tp-row-dem"><td style="padding-left:14px">Demand — ${pName}</td>${demCells}</tr>`);
+        }
       });
-      // Demand points not matched to any product silo (only when no product filter)
-      if(!_vp.prodId){
-        demEls.filter(el=>!_vtShownDemIds.has(el.id)).forEach(el=>{
-          _vpPushDemandRows(destRows,el,months,_mTdSty,_tpTdSty);
-        });
-      }
     });
   });
   document.getElementById('vp-dest-tbody').innerHTML=destRows.join('');
