@@ -471,6 +471,7 @@ select.pi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
 .vw-btn{padding:3px 10px;font-family:var(--mono);font-size:9px;color:var(--text-dim);background:var(--surface2);border:1px solid var(--border2);cursor:pointer;transition:all .15s;white-space:nowrap;}
 .vw-btn:hover{color:var(--text);border-color:var(--text-dim);}
 .vw-btn.active{color:var(--green);border-color:var(--green);background:var(--green-faint);}
+.vw-btn.logi-sim-off{color:var(--simulated);border-color:var(--simulated);background:var(--simulated-faint);}
 #vw-custom-wrap{display:flex;align-items:center;gap:4px;}
 #vw-custom-wrap input{background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:9px;padding:3px 6px;outline:none;width:110px;}
 .vw-fac-filter{display:flex;align-items:center;gap:4px;margin-left:12px;padding-left:12px;border-left:1px solid var(--border2);}
@@ -1319,6 +1320,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
                 <button class="vw-btn"         onclick="vpSetView('eoy',this)">Rest of Year</button>
                 <span class="vw-range-lbl" id="vp-range-lbl"></span>
                 <button class="vw-btn logi-months-btn" onclick="_toggleLogiMonths()" title="Show/hide the monthly summary columns">Hide Monthly Totals</button>
+                <button class="vw-btn logi-sim-toggle" onclick="_toggleAutoPropose()" title="When ON, Run Simulation auto-proposes vessel calls to cover shortfalls. When OFF (Forecast mode), it only projects inventory from vessels/rail you have proposed — it adds nothing.">Auto-Propose: ON</button>
               </div>
               <div class="tp-header-right" style="flex-direction:column;align-items:flex-end;gap:5px">
                 <div style="display:flex;align-items:center;gap:6px">
@@ -1377,6 +1379,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
                 <button class="vw-btn"         id="rp-vw-eoy"    onclick="rpSetView('eoy',this)">Rest of Year</button>
                 <span class="vw-range-lbl" id="rp-range-lbl"></span>
                 <button class="vw-btn logi-months-btn" onclick="_toggleLogiMonths()" title="Show/hide the monthly summary columns">Hide Monthly Totals</button>
+                <button class="vw-btn logi-sim-toggle" onclick="_toggleAutoPropose()" title="When ON, Run Simulation auto-proposes vessel calls to cover shortfalls. When OFF (Forecast mode), it only projects inventory from vessels/rail you have proposed — it adds nothing.">Auto-Propose: ON</button>
               </div>
               <div class="tp-header-right" style="flex-direction:column;align-items:flex-end;gap:5px">
                 <div style="display:flex;align-items:center;gap:6px">
@@ -1870,7 +1873,7 @@ const S = {
   tool:'select', selectedEl:null, connectFrom:null,
   dragging:null, dragOff:{x:0,y:0},
   elCounter:0,
-  simCfg:{start_date:new Date()._ymd(), horizon:90, mode:'planning', conflict_resolution:'rolling_avg'},
+  simCfg:{start_date:new Date()._ymd(), horizon:90, mode:'planning', conflict_resolution:'rolling_avg', autoPropose:true},
   simResults:null, chatCollapsed:true, realDataCollapsed:true,
   realDataSelectedDate:new Date()._ymd(),
   realDataFacilityId:null,
@@ -8639,6 +8642,31 @@ function _toggleLogiMonths(){
   });
 }
 
+// Auto-Propose toggle (logistics rail + vessel planners). When ON, Run Simulation
+// proposes vessel calls to cover projected shortfalls. When OFF ("Forecast mode"),
+// the simulation adds nothing — it only projects inventory from the vessels/rail the
+// user has already proposed/confirmed. Both planner buttons stay in sync and the
+// setting is persisted in S.simCfg.
+function _toggleAutoPropose(){
+  S.simCfg.autoPropose=(S.simCfg.autoPropose===false); // flip
+  _syncSimToggle();
+  autoSave();
+  statMsg(S.simCfg.autoPropose
+    ? 'Auto-Propose ON — Run Simulation will propose vessel calls to cover shortfalls.'
+    : 'Forecast mode ON — Run Simulation will project inventory only, without adding vessels.');
+}
+
+// Reflect the current S.simCfg.autoPropose state on every toggle button. Treat an
+// undefined flag as ON (the default) so existing scenarios keep prior behaviour.
+function _syncSimToggle(){
+  const off=S.simCfg.autoPropose===false;
+  document.querySelectorAll('.logi-sim-toggle').forEach(b=>{
+    b.textContent=off?'Auto-Propose: OFF':'Auto-Propose: ON';
+    b.classList.toggle('active',!off);
+    b.classList.toggle('logi-sim-off',off);
+  });
+}
+
 // ── TRANSPORT STATUS WORKFLOW ────────────────────────────────
 // Shared by vessel_calls and rail_movements.
 const TRANSPORT_STATUSES=[
@@ -9302,6 +9330,7 @@ function rpAllocateLoading(movements, carsPerDay, isWorkDay){
 
 // ── Main render ───────────────────────────────────────────────────
 function rpRender(){
+  _syncSimToggle();
   if(!S.simCfg.start_date){
     document.getElementById('rp-rail-section').style.display='none';
     return;
@@ -9977,6 +10006,7 @@ function vpToggleProd(prodId){
 }
 
 function vpRender(){
+  _syncSimToggle();
   if(!S.simCfg.start_date){
     document.getElementById('vp-dest-section').style.display='none';
     document.getElementById('vp-orig-section').style.display='none';
@@ -11170,7 +11200,18 @@ async function runSimulation(){
     const rBase=simulate(els, getFacConnections(), effectiveHorizon, false);
     rBase.simHorizon=effectiveHorizon;
     _railClearAutoProposed(); // one-time cleanup of legacy auto-generated rail proposals
-    _writeProposedVesselCalls(rBase);
+    // Auto-Propose toggle (logistics pages): when ON, the simulation proposes vessel
+    // calls to cover projected shortfalls. When OFF ("Forecast mode"), it adds nothing
+    // — it only projects inventory behaviour from the vessels/rail the user has already
+    // proposed or confirmed. Any leftover auto-proposed vessels are cleared so the
+    // forecast reflects only the user's own plan.
+    if(S.simCfg.autoPropose!==false){
+      _writeProposedVesselCalls(rBase);
+    }else{
+      DB.vessel_calls=DB.vessel_calls.filter(v=>
+        v.status!=='Proposed'||!(v.notes?.startsWith('Auto-proposed'))
+      );
+    }
 
     // ── Pass 2: full plan including proposed vessels ────────
     // Proposed vessels are now in DB.vessel_calls — sim includes them.
