@@ -5980,6 +5980,32 @@ function _supToggleSec(key){
 }
 function _supSecArrow(key){ return (window._supSecCol&&window._supSecCol.has(key))?'▶':'▼'; }
 
+// Vessel/berth Gantt cell parts from a berthVesselHistory record. Shared by the terminal
+// Supply page and the Logistics vessel schedule so both look identical.
+//   unloading → green · anchorage (docked, silo full) → red hatch · arrived (waiting to
+//   dock) → amber hatch · idle → empty. ⧗N badge = extra vessels waiting (not on the bar).
+function _berthGanttParts(bv){
+  const state=bv?bv.state:'idle';
+  const wl=(bv&&bv.waitingList)||[];
+  const docked=(bv&&bv.docked)||'';
+  const vessel = docked || (state==='arrived'?((wl[0]&&wl[0].name)||''):'');
+  const barBg = state==='unloading'?'#00d9a3'
+    : state==='anchorage'?'repeating-linear-gradient(45deg,#ff3d5a,#ff3d5a 3px,#3a1f26 3px,#3a1f26 6px)'
+    : state==='arrived'?'repeating-linear-gradient(45deg,#ffb830,#ffb830 3px,#3a3020 3px,#3a3020 6px)'
+    : 'transparent';
+  const badgeN = docked ? wl.length : Math.max(0, wl.length-1);
+  const wBadge = badgeN>0?`<span style="position:absolute;right:1px;top:-1px;font-size:8px;color:#ffb830;font-weight:700;pointer-events:none">⧗${badgeN}</span>`:'';
+  const lblTxt = state==='unloading'?vessel : state==='anchorage'?(vessel+' ⚓') : state==='arrived'?(vessel+' ⏳') : '';
+  const lblCol = state==='unloading'?'#0a3a2c' : state==='arrived'?'#3a2e08' : '#fff';
+  const tp=[];
+  if(docked) tp.push(docked+(state==='unloading'?' — unloading':' — at anchorage (silo full)'));
+  else if(state==='arrived'&&vessel) tp.push(vessel+' — arrived, waiting to dock');
+  const others=docked?wl:wl.slice(1);
+  if(others.length) tp.push('also waiting: '+others.map(w=>w.name+' ('+(w.reason==='silo_full'?'bumped · silo full':'arrived · berth occupied')+')').join('; '));
+  const ttl=(tp.join(' · ')||'idle').replace(/"/g,'&quot;');
+  return {barBg, wBadge, lblTxt, lblCol, ttl, key:state==='idle'?'__i':state+'|'+vessel};
+}
+
 function _renderSupplyViewInner(wrap){
   if(!window._supSecCol) window._supSecCol=new Set();
   // First time the Supply page renders, start every section collapsed so the page
@@ -7142,7 +7168,7 @@ function _renderSupplyViewInner(wrap){
         if(_shipBerths.length && r&&r.berthVesselHistory){
           const bg='#7ec8e3';
           h+=`<tr class="sup-sec-hdr" data-seckey="berthGantt" onclick="_supToggleSec('berthGantt')" style="cursor:pointer;background:rgba(126,200,227,.06);border-top:2px solid rgba(126,200,227,.4)">
-            <td style="${stickyLeft('var(--surface)',depth+1,'border-bottom:1px solid var(--border),')}color:${bg};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('berthGantt')}</span> BERTH ACTIVITY <span style="font-size:7px;opacity:.7;font-weight:400;margin-left:4px;text-transform:none">docked+unloading · ▨ anchorage (silo full) · ⧗N waiting to dock</span></td>${_blankCells()}</tr>`;
+            <td style="${stickyLeft('var(--surface)',depth+1,'border-bottom:1px solid var(--border),')}color:${bg};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('berthGantt')}</span> BERTH ACTIVITY <span style="font-size:7px;opacity:.7;font-weight:400;margin-left:4px;text-transform:none">unloading · ▨ anchorage (silo full) · ▨ arrived/waiting · ⧗N more waiting</span></td>${_blankCells()}</tr>`;
           _shipBerths.forEach(berth=>{
             const hist=r.berthVesselHistory[berth.id]||[];
             h+=`<tr class="supsec-berthGantt"><td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${bg};font-size:9px">${berth.name} <span style="font-size:7px;opacity:.5">BERTH</span></td>`;
@@ -7152,18 +7178,10 @@ function _renderSupplyViewInner(wrap){
               h+=`<td style="border-left:2px solid rgba(126,200,227,.2);font-size:8px;color:${bg};text-align:center;padding:4px 6px;border-bottom:1px solid var(--border)">${unl>0?unl+'d':''}</td>`;
               if(!isCol) mon.dates.forEach(ds=>{
                 const bv=hist[allDates.indexOf(ds)]||null;
-                const state=bv?bv.state:'idle'; const waiting=bv?bv.waiting:0; const vessel=(bv&&bv.docked)||'';
-                const barBg=state==='unloading'?'#00d9a3':state==='anchorage'?'repeating-linear-gradient(45deg,#ff3d5a,#ff3d5a 3px,#3a1f26 3px,#3a1f26 6px)':'transparent';
-                const key=state==='idle'?'__i':state+'|'+vessel;
-                const runStart=state!=='idle'&&key!==_pk; _pk=key;
-                const lblName=state==='anchorage'?(vessel?vessel+' ⚓':'⚓ anchorage'):(vessel||'');
-                const label=runStart?`<span style="position:absolute;left:4px;top:0;line-height:12px;white-space:nowrap;font-size:8px;font-weight:700;color:${state==='unloading'?'#0a3a2c':'#fff'};pointer-events:none">${lblName}</span>`:'';
-                const wBadge=waiting>0?`<span style="position:absolute;right:1px;top:-1px;font-size:8px;color:#ffb830;font-weight:700;pointer-events:none">⧗${waiting}</span>`:'';
-                const wBorder=waiting>0?'border-top:2px solid #ffb830;':'';
-                const tp=[]; if(vessel) tp.push(vessel+(state==='unloading'?' — unloading':' — at anchorage (silo full)'));
-                if(bv&&bv.waitingList&&bv.waitingList.length) tp.push('waiting: '+bv.waitingList.map(w=>w.name+' ('+(w.reason==='silo_full'?'bumped · silo full':'berth occupied')+')').join('; '));
-                const ttl=(tp.join(' · ')||'idle').replace(/"/g,'&quot;');
-                h+=`<td class="sup-day-${mon.ym}" title="${ttl}" style="position:relative;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:12px;background:${barBg};${wBorder}">${label}${wBadge}</div></td>`;
+                const p=_berthGanttParts(bv);
+                const runStart=p.key!=='__i'&&p.key!==_pk; _pk=p.key;
+                const label=(runStart&&p.lblTxt)?`<span style="position:absolute;left:4px;top:0;line-height:12px;white-space:nowrap;font-size:8px;font-weight:700;color:${p.lblCol};pointer-events:none">${p.lblTxt}</span>`:'';
+                h+=`<td class="sup-day-${mon.ym}" title="${p.ttl}" style="position:relative;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:12px;background:${p.barBg}">${label}${p.wBadge}</div></td>`;
               });
             });
             h+=`</tr>`;
@@ -9623,21 +9641,13 @@ function vpRender(){
           const mTd=`<td class="logi-mcol" style="${_mTdSty}">${unl>0?unl+'d':'—'}</td>`;
           return mTd+mon.days.map(d=>{
             const bv=_bh[d-1]||null;
-            const state=bv?bv.state:'idle'; const waiting=bv?bv.waiting:0; const vessel=(bv&&bv.docked)||'';
-            const barBg=state==='unloading'?'#00d9a3':state==='anchorage'?'repeating-linear-gradient(45deg,#ff3d5a,#ff3d5a 3px,#3a1f26 3px,#3a1f26 6px)':'transparent';
-            const key=state==='idle'?'__i':state+'|'+vessel;
-            const runStart=state!=='idle'&&key!==_pk; _pk=key;
-            const lblName=state==='anchorage'?(vessel?vessel+' ⚓':'⚓ anchorage'):(vessel||'');
-            const label=runStart?`<span style="position:absolute;left:3px;top:0;line-height:12px;white-space:nowrap;font-size:8px;font-weight:700;color:${state==='unloading'?'#0a3a2c':'#fff'};pointer-events:none">${lblName}</span>`:'';
-            const wBadge=waiting>0?`<span style="position:absolute;right:1px;top:-1px;font-size:8px;color:#ffb830;font-weight:700;pointer-events:none">⧗${waiting}</span>`:'';
-            const wBorder=waiting>0?'border-top:2px solid #ffb830;':'';
-            const tp=[]; if(vessel) tp.push(vessel+(state==='unloading'?' — unloading':' — at anchorage (silo full)'));
-            if(bv&&bv.waitingList&&bv.waitingList.length) tp.push('waiting: '+bv.waitingList.map(w=>w.name+' ('+(w.reason==='silo_full'?'bumped · silo full':'berth occupied')+')').join('; '));
-            const ttl=(tp.join(' · ')||'idle').replace(/"/g,'&quot;');
-            return `<td title="${ttl}" style="position:relative;padding:2px 0;overflow:visible;${_tpTdSty(d)}"><div style="position:relative;height:12px;background:${barBg};${wBorder}">${label}${wBadge}</div></td>`;
+            const p=_berthGanttParts(bv);
+            const runStart=p.key!=='__i'&&p.key!==_pk; _pk=p.key;
+            const label=(runStart&&p.lblTxt)?`<span style="position:absolute;left:3px;top:0;line-height:12px;white-space:nowrap;font-size:8px;font-weight:700;color:${p.lblCol};pointer-events:none">${p.lblTxt}</span>`:'';
+            return `<td title="${p.ttl}" style="position:relative;padding:2px 0;overflow:visible;${_tpTdSty(d)}"><div style="position:relative;height:12px;background:${p.barBg}">${label}${p.wBadge}</div></td>`;
           }).join('');
         }).join('');
-        destRows.push(`<tr class="tp-row-gantt"><td style="padding-left:14px;color:#7ec8e3;font-size:10px">Berth activity <span style="font-size:7px;opacity:.6">▨ anchorage · ⧗ waiting</span></td>${gCells}</tr>`);
+        destRows.push(`<tr class="tp-row-gantt"><td style="padding-left:14px;color:#7ec8e3;font-size:10px">Berth activity <span style="font-size:7px;opacity:.6">▨ anchorage · ▨ arrived · ⧗ waiting</span></td>${gCells}</tr>`);
       }
 
       // Products at this berth — union of downstream silo products and products that actually arrive.
@@ -12395,8 +12405,9 @@ function simulate(elements, connections, horizon, includeProposed=false){
       if(r.berthVesselHistory[berth.id]===undefined) return;
       const bs=state[berth.id];
       const docked=bs.currentVessel||null;
-      const st=docked?(bs.status==='running'?'unloading':'anchorage'):'idle';
       const waitingList=(bs.vesselPending||[]).map(p=>({name:p.name||'vessel', reason:p._bumped?'silo_full':'berth_occupied'}));
+      // docked → unloading / anchorage(silo full); nobody docked but a vessel waiting → 'arrived'.
+      const st=docked?(bs.status==='running'?'unloading':'anchorage'):(waitingList.length?'arrived':'idle');
       r.berthVesselHistory[berth.id].push({docked, state:st, waiting:waitingList.length, waitingList});
     });
 
