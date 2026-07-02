@@ -5980,6 +5980,22 @@ function _supToggleSec(key){
 }
 function _supSecArrow(key){ return (window._supSecCol&&window._supSecCol.has(key))?'▶':'▼'; }
 
+// Real production for an element on a date, one entry PER DISTINCT PRODUCT (tonnes).
+// A finish mill can transition products mid-day and produce two (partially) the same day, so
+// real_production_daily may hold several rows per element/day. We group by product and, for the
+// SAME product recorded from two sources (e.g. Excel 'file' + a manual 'actual'), keep one — the
+// 'actual' — instead of summing, so duplicates don't double-count. Returns [{product_id, volume_t}].
+function _dedupRealProd(elId, ds){
+  const rows=(DB.real_production_daily||[]).filter(r=>r.date===ds&&r.element_id===elId);
+  if(!rows.length) return [];
+  const byProd={};
+  rows.forEach(r=>{
+    const pid=r.product_id; const v=parseFloat(r.volume_t)||0;
+    if(!(pid in byProd) || (r.source==='actual'&&byProd[pid].source!=='actual')) byProd[pid]={product_id:pid, volume_t:v, source:r.source};
+  });
+  return Object.values(byProd);
+}
+
 // Vessel/berth Gantt cell parts from a berthVesselHistory record. Shared by the terminal
 // Supply page and the Logistics vessel schedule so both look identical.
 //   unloading → green · anchorage (docked, silo full) → red hatch · arrived (waiting to
@@ -6101,12 +6117,12 @@ function _renderSupplyViewInner(wrap){
   const resolveProduction=(el, ds, dayIdx, maintDays)=>{
     if(maintDays.has(ds)) return {product_id:null, capacity_tpd:0};
 
-    // Tier 0: ACTUAL data from real_production_daily (highest priority)
-    const realProduction=DB.real_production_daily.filter(r=>r.date===ds&&r.element_id===el.id);
+    // Tier 0: ACTUAL data from real_production_daily (highest priority). Deduped per product.
+    const realProduction=_dedupRealProd(el.id, ds);
     if(realProduction.length>0){
       const totalActual=realProduction.reduce((sum,r)=>sum+(parseFloat(r.volume_t)||0),0);
       const firstProd=realProduction[0];
-      return {product_id:firstProd.product_id, capacity_tpd:totalActual, isActual:true};
+      return {product_id:firstProd.product_id, capacity_tpd:totalActual, isActual:true, products:realProduction};
     }
 
     // Tier 0.5: Manager campaign — locked, overrides simulation
@@ -6153,6 +6169,18 @@ function _renderSupplyViewInner(wrap){
     // For kilns: pick first, they're exclusive; for mills: first product
     const first=caps[0];
     return {product_id:first.product_id, capacity_tpd:parseFloat(first.capacity_tpd)||0};
+  };
+
+  // Per-product production breakdown for a day. On a real-data day a mill may have produced
+  // TWO products (mid-day changeover) → returns one entry per product; otherwise returns the
+  // single resolved product. Used for the finish-mill display + clinker consumption (each
+  // product draws clinker at its own recipe %).
+  const resolveProductionAll=(el, ds, dayIdx, maintDays)=>{
+    if(maintDays.has(ds)) return [];
+    const real=_dedupRealProd(el.id, ds);
+    if(real.length>0) return real.filter(rp=>(rp.volume_t||0)>0).map(rp=>({product_id:rp.product_id, capacity_tpd:parseFloat(rp.volume_t)||0, isActual:true}));
+    const single=resolveProduction(el, ds, dayIdx, maintDays);
+    return (single.product_id&&single.capacity_tpd>0)?[single]:[];
   };
 
   // For group totals — sum daily output across all elements
@@ -6760,11 +6788,16 @@ function _renderSupplyViewInner(wrap){
                 const run=_runByDate[ds];
                 const campArgs=run?`'${el.id}','${ds}','${run.start}','${run.end}','${run.product}'`:`'${el.id}','${ds}'`;
                 const clickFn=isMaint?`openMaintenanceEventById('${maintDays.get(ds)}')`:`showCampaignPopup(${campArgs})`;
-                // REAL value (from file or daily-data input): show the tonnage colour-coded by
-                // product, no Gantt bar and no product-name label (the colour already signals it).
+                // REAL value (from file or daily-data input): show the day's total tonnage,
+                // colour-coded by product. A mill can change product mid-day and make TWO the
+                // same day → show a ▾N marker and list every product+tonnage in the tooltip.
                 if(isReal){
                   _gPrev='__real';
-                  h+=`<td class="sup-day-${mon.ym}" title="${(prod?.name||'')} · ${Math.round(v)} t/d · actual" onclick="event.stopPropagation();${clickFn}" style="cursor:pointer;font-size:9px;color:${barColor};font-weight:700;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${Math.round(v).toLocaleString()}</td>`;
+                  const _allP=resolveProductionAll(el,ds,dayIdx,maintDays);
+                  const _multi=_allP.length>1;
+                  const _tip=(_allP.length?_allP.map(p=>(DB.products.find(x=>x.id===p.product_id)?.name||p.product_id)+' '+Math.round(p.capacity_tpd).toLocaleString()+'t').join(' + '):(prod?.name||''))+' · actual';
+                  const _mk=_multi?`<span style="font-size:7px;color:var(--amber);vertical-align:super;margin-left:1px">▾${_allP.length}</span>`:'';
+                  h+=`<td class="sup-day-${mon.ym}" title="${_tip}" onclick="event.stopPropagation();${clickFn}" style="cursor:pointer;font-size:9px;color:${barColor};font-weight:700;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${Math.round(v).toLocaleString()}${_mk}</td>`;
                   return;
                 }
                 // FORECAST / maintenance: Gantt bar — colour = product, label once per run.
@@ -6879,10 +6912,13 @@ function _renderSupplyViewInner(wrap){
             // Clinker consumed on a date = Σ over mills of (actual production × clinker recipe %).
             // clkId optional → restrict to a single clinker product (for the per-type rows below).
             const _clkReqDay=(ds,clkId)=>{ const dayIdx=allDates.indexOf(ds); let t=0;
-              _clkFinishMills.forEach(m=>{ const res=resolveProduction(m,ds,dayIdx,maintSetFor(m.id));
-                if(!res.product_id||!res.capacity_tpd) return;
-                DB.recipes.filter(rc=>rc.product_id===res.product_id&&clinkerProdsSet.has(rc.material_id)&&(!clkId||rc.material_id===clkId))
-                  .forEach(rc=>{ t+=res.capacity_tpd*(parseFloat(rc.pct)||0)/100; }); });
+              _clkFinishMills.forEach(m=>{
+                // Each product produced that day (a mill may make two on a real changeover day)
+                // draws clinker at ITS OWN recipe %, not the day's total at one recipe.
+                resolveProductionAll(m,ds,dayIdx,maintSetFor(m.id)).forEach(res=>{
+                  if(!res.product_id||!res.capacity_tpd) return;
+                  DB.recipes.filter(rc=>rc.product_id===res.product_id&&clinkerProdsSet.has(rc.material_id)&&(!clkId||rc.material_id===clkId))
+                    .forEach(rc=>{ t+=res.capacity_tpd*(parseFloat(rc.pct)||0)/100; }); }); });
               return t; };
             // Section header — total = sum of all clinker types below
             h+=`<tr class="sup-sec-hdr" data-seckey="clinkerReq" onclick="_supToggleSec('clinkerReq')" style="cursor:pointer;background:rgba(255,157,92,.05);border-top:2px solid rgba(255,157,92,.3)">
@@ -10102,7 +10138,7 @@ function safeNum(v){ const n=parseFloat(v); return (isFinite(n)&&!isNaN(n))?n:0;
 
 function _demandRate(elId, dateStr){
   // PHASE 4: Check REAL DATA first (actual production inputs)
-  const realProduction=(DB.real_production_daily||[]).filter(r=>r.date===dateStr&&r.element_id===elId);
+  const realProduction=_dedupRealProd(elId, dateStr);
   if(realProduction.length>0){
     const realTotal=realProduction.reduce((sum,r)=>sum+(parseFloat(r.volume_t)||0),0);
     return realTotal;
@@ -11370,14 +11406,22 @@ function simulate(elements, connections, horizon, includeProposed=false){
       for(let d=rm.load_start_day;d<=rm.switch_day;d++) plannedLoadWindowMap[rm.from_dispatch_id].add(d);
     });
 
-  // Build real production lookup: elementId → dateStr → [{product_id, volume_t}]
+  // Build real production lookup: elementId → dateStr → [{product_id, volume_t}], ONE entry per
+  // distinct product. A mill may make two products the same day (mid-day changeover) — both are
+  // kept so both credit their silo. But the SAME product recorded from two sources (Excel 'file'
+  // + a manual 'actual') is a duplicate — keep the 'actual', don't sum, so it isn't double-counted.
   const realProdMap={};
-  (DB.real_production_daily||[]).forEach(rp=>{
-    if(!rp.element_id||!rp.date) return;
-    if(!realProdMap[rp.element_id]) realProdMap[rp.element_id]={};
-    if(!realProdMap[rp.element_id][rp.date]) realProdMap[rp.element_id][rp.date]=[];
-    realProdMap[rp.element_id][rp.date].push(rp);
-  });
+  { const _tmp={}; // elId → date → {pid: rp}
+    (DB.real_production_daily||[]).forEach(rp=>{
+      if(!rp.element_id||!rp.date) return;
+      const em=_tmp[rp.element_id]||(_tmp[rp.element_id]={});
+      const dm=em[rp.date]||(em[rp.date]={});
+      const pid=rp.product_id;
+      if(!(pid in dm) || (rp.source==='actual'&&dm[pid].source!=='actual')) dm[pid]=rp;
+    });
+    Object.entries(_tmp).forEach(([elId,dm2])=>{ realProdMap[elId]={};
+      Object.entries(dm2).forEach(([date,pm])=>{ realProdMap[elId][date]=Object.values(pm); }); });
+  }
 
   for(let day=1;day<=horizon;day++){
 
@@ -12805,7 +12849,7 @@ function renderResultsTable(){
 
         // Check for ACTUAL production data first
         let rate=0, cellColor='var(--simulated)', cellTitle=state, isActual=false;
-        const realProduction=DB.real_production_daily.filter(r=>r.date===dateStr&&r.element_id===el.id);
+        const realProduction=_dedupRealProd(el.id, dateStr);
         if(realProduction.length>0){
           rate=realProduction.reduce((sum,r)=>sum+(parseFloat(r.volume_t)||0),0);
           cellTitle=`Actual: ${rate}t`;
@@ -13615,7 +13659,7 @@ function renderDtree(r){
     const dateStr=currentDate._ymd();
 
     // Check for ACTUAL production data first
-    const realProduction=DB.real_production_daily.filter(r=>r.date===dateStr&&r.element_id===elId);
+    const realProduction=_dedupRealProd(elId, dateStr);
     if(realProduction.length>0){
       return realProduction.reduce((sum,r)=>sum+(parseFloat(r.volume_t)||0),0);
     }
