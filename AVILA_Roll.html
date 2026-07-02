@@ -7129,6 +7129,47 @@ function _renderSupplyViewInner(wrap){
 
         if(_facCol) return;
 
+        // Blank month/day cells (for full-width divider / header rows).
+        const _blankCells=()=>{ let s=''; months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+          s+=`<td style="border-left:2px solid var(--border2);border-bottom:1px solid var(--border)"></td>`;
+          if(!isCol) mon.dates.forEach(ds=>{ s+=`<td class="sup-day-${mon.ym}" style="border-bottom:1px solid var(--border);${tdSty(ds)}"></td>`; }); });
+          return s; };
+
+        // ── BERTH ACTIVITY (vessel Gantt) — one row per SHIP berth ─────────
+        // Green = docked & unloading · red hatch = at anchorage (silo full) ·
+        // amber ⧗N = vessels waiting to dock. Source: r.berthVesselHistory.
+        const _shipBerths=berths.filter(b=>(b.props?.berth_type||'Ship Berth')==='Ship Berth');
+        if(_shipBerths.length && r&&r.berthVesselHistory){
+          const bg='#7ec8e3';
+          h+=`<tr class="sup-sec-hdr" data-seckey="berthGantt" onclick="_supToggleSec('berthGantt')" style="cursor:pointer;background:rgba(126,200,227,.06);border-top:2px solid rgba(126,200,227,.4)">
+            <td style="${stickyLeft('var(--surface)',depth+1,'border-bottom:1px solid var(--border),')}color:${bg};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('berthGantt')}</span> BERTH ACTIVITY <span style="font-size:7px;opacity:.7;font-weight:400;margin-left:4px;text-transform:none">docked+unloading · ▨ anchorage (silo full) · ⧗N waiting to dock</span></td>${_blankCells()}</tr>`;
+          _shipBerths.forEach(berth=>{
+            const hist=r.berthVesselHistory[berth.id]||[];
+            h+=`<tr class="supsec-berthGantt"><td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${bg};font-size:9px">${berth.name} <span style="font-size:7px;opacity:.5">BERTH</span></td>`;
+            let _pk=null;
+            months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+              const unl=mon.dates.reduce((s,ds)=>{ const bv=hist[allDates.indexOf(ds)]; return s+(bv&&bv.state==='unloading'?1:0); },0);
+              h+=`<td style="border-left:2px solid rgba(126,200,227,.2);font-size:8px;color:${bg};text-align:center;padding:4px 6px;border-bottom:1px solid var(--border)">${unl>0?unl+'d':''}</td>`;
+              if(!isCol) mon.dates.forEach(ds=>{
+                const bv=hist[allDates.indexOf(ds)]||null;
+                const state=bv?bv.state:'idle'; const waiting=bv?bv.waiting:0; const vessel=(bv&&bv.docked)||'';
+                const barBg=state==='unloading'?'#00d9a3':state==='anchorage'?'repeating-linear-gradient(45deg,#ff3d5a,#ff3d5a 3px,#3a1f26 3px,#3a1f26 6px)':'transparent';
+                const key=state==='idle'?'__i':state+'|'+vessel;
+                const runStart=state!=='idle'&&key!==_pk; _pk=key;
+                const lblName=state==='anchorage'?(vessel?vessel+' ⚓':'⚓ anchorage'):(vessel||'');
+                const label=runStart?`<span style="position:absolute;left:4px;top:0;line-height:12px;white-space:nowrap;font-size:8px;font-weight:700;color:${state==='unloading'?'#0a3a2c':'#fff'};pointer-events:none">${lblName}</span>`:'';
+                const wBadge=waiting>0?`<span style="position:absolute;right:1px;top:-1px;font-size:8px;color:#ffb830;font-weight:700;pointer-events:none">⧗${waiting}</span>`:'';
+                const wBorder=waiting>0?'border-top:2px solid #ffb830;':'';
+                const tp=[]; if(vessel) tp.push(vessel+(state==='unloading'?' — unloading':' — at anchorage (silo full)'));
+                if(bv&&bv.waitingList&&bv.waitingList.length) tp.push('waiting: '+bv.waitingList.map(w=>w.name+' ('+(w.reason==='silo_full'?'bumped · silo full':'berth occupied')+')').join('; '));
+                const ttl=(tp.join(' · ')||'idle').replace(/"/g,'&quot;');
+                h+=`<td class="sup-day-${mon.ym}" title="${ttl}" style="position:relative;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:12px;background:${barBg};${wBorder}">${label}${wBadge}</div></td>`;
+              });
+            });
+            h+=`</tr>`;
+          });
+        }
+
         // ── PER-PRODUCT BLOCKS ─────────────────────────────────────────────
         // Each product handled at this terminal (CEMENT first, then SCM, then others)
         // gets its own: inventory bar chart → starting inventory → requirements →
@@ -7179,12 +7220,6 @@ function _renderSupplyViewInner(wrap){
         const _pNameOf=pid=>DB.products.find(p=>p.id===pid)?.name||pid;
         const _prods=[...new Set([...allSilos.flatMap(getSiloProducts),..._demProdIds,...Object.keys(_termArr)])].filter(Boolean)
           .sort((a,b)=>_catRank(a)-_catRank(b)||_pNameOf(a).localeCompare(_pNameOf(b)));
-
-        // Blank month/day cells (for full-width divider rows).
-        const _blankCells=()=>{ let s=''; months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-          s+=`<td style="border-left:2px solid var(--border2);border-bottom:1px solid var(--border)"></td>`;
-          if(!isCol) mon.dates.forEach(ds=>{ s+=`<td class="sup-day-${mon.ym}" style="border-bottom:1px solid var(--border);${tdSty(ds)}"></td>`; }); });
-          return s; };
 
         if(!_prods.length){
           h+=`<tr><td style="${stickyLeft('var(--surface)',depth+1)}color:var(--text-dim);font-size:8px;font-style:italic">no products configured for this terminal</td>${_blankCells()}</tr>`;
@@ -9578,6 +9613,32 @@ function vpRender(){
 
       const _colspan=days.length+months.length+1;
       destRows.push(`<tr><td colspan="${_colspan}" style="background:rgba(255,184,48,.06);color:var(--amber);font-family:var(--mono);font-size:8px;padding:3px 8px;letter-spacing:.06em;border-top:1px solid rgba(255,184,48,.15)">▸ ${destFac?.name||destFacId} / ${berth.name}</td></tr>`);
+
+      // ── Berth activity Gantt: docked+unloading (green) · anchorage/silo-full (red hatch) · ⧗N waiting ──
+      {
+        const _bh=S.simResults?.berthVesselHistory?.[berth.id]||[];
+        let _pk=null;
+        const gCells=months.map(mon=>{
+          const unl=mon.days.reduce((s,d)=>{ const bv=_bh[d-1]; return s+(bv&&bv.state==='unloading'?1:0); },0);
+          const mTd=`<td class="logi-mcol" style="${_mTdSty}">${unl>0?unl+'d':'—'}</td>`;
+          return mTd+mon.days.map(d=>{
+            const bv=_bh[d-1]||null;
+            const state=bv?bv.state:'idle'; const waiting=bv?bv.waiting:0; const vessel=(bv&&bv.docked)||'';
+            const barBg=state==='unloading'?'#00d9a3':state==='anchorage'?'repeating-linear-gradient(45deg,#ff3d5a,#ff3d5a 3px,#3a1f26 3px,#3a1f26 6px)':'transparent';
+            const key=state==='idle'?'__i':state+'|'+vessel;
+            const runStart=state!=='idle'&&key!==_pk; _pk=key;
+            const lblName=state==='anchorage'?(vessel?vessel+' ⚓':'⚓ anchorage'):(vessel||'');
+            const label=runStart?`<span style="position:absolute;left:3px;top:0;line-height:12px;white-space:nowrap;font-size:8px;font-weight:700;color:${state==='unloading'?'#0a3a2c':'#fff'};pointer-events:none">${lblName}</span>`:'';
+            const wBadge=waiting>0?`<span style="position:absolute;right:1px;top:-1px;font-size:8px;color:#ffb830;font-weight:700;pointer-events:none">⧗${waiting}</span>`:'';
+            const wBorder=waiting>0?'border-top:2px solid #ffb830;':'';
+            const tp=[]; if(vessel) tp.push(vessel+(state==='unloading'?' — unloading':' — at anchorage (silo full)'));
+            if(bv&&bv.waitingList&&bv.waitingList.length) tp.push('waiting: '+bv.waitingList.map(w=>w.name+' ('+(w.reason==='silo_full'?'bumped · silo full':'berth occupied')+')').join('; '));
+            const ttl=(tp.join(' · ')||'idle').replace(/"/g,'&quot;');
+            return `<td title="${ttl}" style="position:relative;padding:2px 0;overflow:visible;${_tpTdSty(d)}"><div style="position:relative;height:12px;background:${barBg};${wBorder}">${label}${wBadge}</div></td>`;
+          }).join('');
+        }).join('');
+        destRows.push(`<tr class="tp-row-gantt"><td style="padding-left:14px;color:#7ec8e3;font-size:10px">Berth activity <span style="font-size:7px;opacity:.6">▨ anchorage · ⧗ waiting</span></td>${gCells}</tr>`);
+      }
 
       // Products at this berth — union of downstream silo products and products that actually arrive.
       // Vessel arrivals are now shown one row PER PRODUCT (no mixing) to avoid confusion.
