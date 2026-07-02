@@ -1828,11 +1828,10 @@ const ET = {
     {k:'start_product_id',l:'Starting Product',t:'catalog',cat:'products'}
   ]},
   packing_plant:{label:'Packing Plant',shape:'diamond',color:'#4da6ff',cat:'transform',fields:[
-    {k:'output_product_id',l:'Output Product (packed presentation produced)',t:'catalog',cat:'products'},
-    {k:'rated_capacity_pallets_day',l:'Rated Capacity (pallets/day)',t:'number'},
-    {k:'tonnes_per_pallet',l:'Tonnes per Pallet (bulk consumed per pallet)',t:'number'},
     {k:'changeover_hrs',l:'Changeover Time (hours)',t:'number'},
     {k:'start_state',l:'Starting State',t:'select',opts:['Running','Stopped','Maintenance']}
+    // Product lines (input bulk → output packed, pallets/day, tonnes/pallet, recipe) are
+    // configured per-product in the "Packing Lines" panel below, like a Finish Mill.
   ]},
   berth:{label:'Berth / Unloading Point',shape:'rect',color:'#4da6ff',cat:'movement',fields:[
     {k:'berth_type',l:'Type',t:'select',opts:['Ship Berth','Truck Receiving','Rail Receiving']},
@@ -2911,6 +2910,42 @@ function renderProps(id){
     h+=`</select></div><button class="add-btn" style="border-color:var(--green);color:var(--green)" onclick="addProductCap('${id}')">+ Add Product Capacity</button></div>`;
   }
 
+  // ── PACKING PLANT lines — multi-product, like a Finish Mill ──────────────
+  // Each line: input bulk product → output packed product, machine rate (pallets/day),
+  // tonnes/pallet, and recipe (bulk tonnes per output tonne). Stored in
+  // element_product_capacities (product_id = output; packing_* fields hold the rest).
+  if(el.type==='packing_plant'){
+    const lines=DB.element_product_capacities.filter(c=>c.element_id===id);
+    const bulkProds=DB.products.filter(p=>p.category==='cement_bulk');
+    const packProds=DB.products.filter(p=>p.category==='cement_packed');
+    h+=`<div class="pg"><div class="pg-title">Packing Lines — element_product_capacities</div>`;
+    lines.forEach(pc=>{
+      const oname=DB.products.find(p=>p.id===pc.product_id)?.name||pc.product_id;
+      h+=`<div class="prod-cap-row">
+        <div class="prod-cap-row-hdr"><span class="prod-cap-name">${oname}</span>
+          <span class="prod-cap-del" onclick="removeProductCap('${id}','${pc.id}')">✕</span></div>
+        <div class="prod-cap-fields" style="flex-wrap:wrap">
+          <div class="pf" style="min-width:130px"><div class="pl">Input bulk product</div>
+            <select class="pi" id="ppk-in-${pc.id}">
+              ${(bulkProds.length?bulkProds:DB.products).map(p=>`<option value="${p.id}" ${pc.packing_input_id===p.id?'selected':''}>${p.name}</option>`).join('')}
+            </select></div>
+          <div class="pf"><div class="pl">Pallets/day</div><input class="pi" type="number" id="ppk-pal-${pc.id}" value="${pc.pallets_per_day||0}"></div>
+          <div class="pf"><div class="pl">Tonnes/pallet</div><input class="pi" type="number" id="ppk-tpp-${pc.id}" value="${pc.tonnes_per_pallet||0}"></div>
+          <div class="pf"><div class="pl">Bulk t per output t</div><input class="pi" type="number" step="0.01" id="ppk-ratio-${pc.id}" value="${pc.bulk_per_output_t||1}"></div>
+        </div>
+        <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);padding:2px 0">Max output ≈ ${( (parseFloat(pc.pallets_per_day)||0)*(parseFloat(pc.tonnes_per_pallet)||0) ).toLocaleString()} t/day · consumes ${( (parseFloat(pc.pallets_per_day)||0)*(parseFloat(pc.tonnes_per_pallet)||0)*(parseFloat(pc.bulk_per_output_t)||1) ).toLocaleString()} t bulk/day</div>
+      </div>`;
+    });
+    if(packProds.length){
+      h+=`<div class="pf"><div class="pl">Add Output (packed) Product</div><select class="pi" id="ppk-new-prod"><option value="">-- Select --</option>`;
+      packProds.filter(p=>!lines.find(c=>c.product_id===p.id)).forEach(p=>h+=`<option value="${p.id}">${p.name}</option>`);
+      h+=`</select></div><button class="add-btn" style="border-color:var(--green);color:var(--green)" onclick="addPackingLine('${id}')">+ Add Packing Line</button>`;
+    } else {
+      h+=`<div style="font-family:var(--mono);font-size:8px;color:var(--amber);padding:6px 0">◆ No packed products defined. Go to Products and add a product with category = Packed Cement first.</div>`;
+    }
+    h+=`</div>`;
+  }
+
   // ── DEMAND POINT — multi-product panel ────────────────
   if(el.type==='demand_point'){
     // Find existing record — search by element_id first, then by stable id
@@ -3059,7 +3094,7 @@ function saveProps(id){
     const inp=document.getElementById(`pp-${f.k}`);
     if(inp) el.props[f.k]=f.t==='number'?parseFloat(inp.value)||0:inp.value;
   });
-  // Save product cap edits — handles both finish_mill (cap+pwr) and kiln (cap+heat+rmr)
+  // Save product cap edits — finish_mill (cap+pwr), kiln (cap+heat+rmr), packing (line fields)
   DB.element_product_capacities.filter(c=>c.element_id===id).forEach(pc=>{
     const cap=document.getElementById(`ppc-cap-${pc.id}`);
     const pwr=document.getElementById(`ppc-pwr-${pc.id}`);
@@ -3069,6 +3104,18 @@ function saveProps(id){
     if(pwr) pc.power_kwh_t=parseFloat(pwr.value)||0;
     if(heat) pc.specific_heat_kcal_kg=parseFloat(heat.value)||800;
     if(rmr) pc.raw_meal_ratio=parseFloat(rmr.value)||1.55;
+    // Packing line fields
+    const pin=document.getElementById(`ppk-in-${pc.id}`);
+    const ppal=document.getElementById(`ppk-pal-${pc.id}`);
+    const ptpp=document.getElementById(`ppk-tpp-${pc.id}`);
+    const pratio=document.getElementById(`ppk-ratio-${pc.id}`);
+    if(pin){
+      pc.packing_input_id=pin.value;
+      pc.pallets_per_day=parseFloat(ppal?.value)||0;
+      pc.tonnes_per_pallet=parseFloat(ptpp?.value)||0;
+      pc.bulk_per_output_t=parseFloat(pratio?.value)||1;
+      pc.capacity_tpd=pc.pallets_per_day*pc.tonnes_per_pallet; // output tonnes/day (kept in sync)
+    }
   });
   // Save dispatch_point configuration
   if(el.type==='dispatch_point'){
@@ -3309,6 +3356,23 @@ function addProductCap(elId){
   const sel=document.getElementById('pp-new-prod'); if(!sel||!sel.value) return;
   if(DB.element_product_capacities.find(c=>c.element_id===elId&&c.product_id===sel.value)) return;
   DB.element_product_capacities.push({id:`epc_${Date.now()}`,element_id:elId,product_id:sel.value,capacity_tpd:0,power_kwh_t:0});
+  autoSave(); renderProps(elId);
+}
+
+// Add a packing line (output packed product) to a packing machine. Defaults the input bulk
+// product to the same base name if one exists (e.g. output BRS_SPC(HS)/PAK → input .../BLK).
+function addPackingLine(elId){
+  const sel=document.getElementById('ppk-new-prod'); if(!sel||!sel.value) return;
+  const outPid=sel.value;
+  if(DB.element_product_capacities.find(c=>c.element_id===elId&&c.product_id===outPid)) return;
+  const bulk=DB.products.filter(p=>p.category==='cement_bulk');
+  const outName=(DB.products.find(p=>p.id===outPid)?.name||'').replace(/\/PAK$/i,'').replace(/\/BLK$/i,'');
+  const guess=bulk.find(p=>(p.name||'').replace(/\/BLK$/i,'')===outName)||bulk[0];
+  DB.element_product_capacities.push({
+    id:`epc_${Date.now()}`, element_id:elId, product_id:outPid,
+    packing_input_id:guess?.id||'', pallets_per_day:0, tonnes_per_pallet:0, bulk_per_output_t:1,
+    capacity_tpd:0
+  });
   autoSave(); renderProps(elId);
 }
 
@@ -5980,6 +6044,19 @@ function _supToggleSec(key){
 }
 function _supSecArrow(key){ return (window._supSecCol&&window._supSecCol.has(key))?'▶':'▼'; }
 
+// ── PACKING helpers ──────────────────────────────────────────────────────
+// Packing machines reuse element_product_capacities, one row per PACKING LINE with extra
+// fields: packing_input_id (bulk product consumed), pallets_per_day, tonnes_per_pallet,
+// bulk_per_output_t (recipe ratio, default 1). product_id = the packed OUTPUT product.
+function _isPackingRow(c){ return !!(c && c.packing_input_id); }
+function _packLineCapT(c){ return (parseFloat(c&&c.pallets_per_day)||0)*(parseFloat(c&&c.tonnes_per_pallet)||0); } // max output tonnes/day
+function _packLineRatio(c){ const r=parseFloat(c&&c.bulk_per_output_t); return r>0?r:1; }                          // bulk tonnes per output tonne
+// Packed silos store PALLETS; the simulation runs packed cement in TONNES like bulk, so convert
+// start/max via tonnes-per-pallet. Non-packed silos are already in tonnes.
+function _siloTPP(el){ return parseFloat(el&&el.props&&el.props.tonnes_per_pallet)||1; }
+function _siloStartT(el){ return el&&el.type==='packed_silo' ? (parseFloat(el.props&&el.props.start_inventory)||0)*_siloTPP(el) : (parseFloat(el&&el.props&&el.props.start_inventory)||0); }
+function _siloMaxT(el){ return el&&el.type==='packed_silo' ? (parseFloat(el.props&&el.props.max_capacity)||0)*_siloTPP(el) : (parseFloat(el&&el.props&&el.props.max_capacity)||0); }
+
 // Real production for an element on a date, one entry PER DISTINCT PRODUCT (tonnes).
 // A finish mill can transition products mid-day and produce two (partially) the same day, so
 // real_production_daily may hold several rows per element/day. We group by product and, for the
@@ -8225,7 +8302,9 @@ function getReachableProducts(elementId){
     const el=getEl(id);
     if(!el) continue;
 
-    if(el.type==='bulk_silo'){
+    // Bulk OR packed silo → its stored product is what this demand point can request.
+    // (A demand point behind a packing plant sees the PACKED product, not the bulk input.)
+    if(el.type==='bulk_silo'||el.type==='packed_silo'){
       const prods=getSiloProducts(el);
       if(prods.length){
         prods.forEach(pid=>{
@@ -8237,6 +8316,17 @@ function getReachableProducts(elementId){
       } else {
         unassigned.push(el.name);
       }
+      continue; // stop — do not trace upstream past a silo
+    }
+
+    // Packing plant → it OUTPUTS packed products (element_product_capacities.product_id).
+    // Offer those (not the bulk input) and stop tracing upstream through the machine.
+    if(el.type==='packing_plant'){
+      DB.element_product_capacities.filter(c=>c.element_id===el.id).forEach(c=>{
+        const prod=DB.products.find(p=>p.id===c.product_id);
+        if(prod&&!results.find(r=>r.product_id===prod.id))
+          results.push({product_id:prod.id, product_name:prod.name, silo_name:el.name+' (packed)'});
+      });
       continue;
     }
 
@@ -10859,8 +10949,9 @@ function simulate(elements, connections, horizon, includeProposed=false){
   const state={};
   elements.forEach(el=>{
     state[el.id]={
-      inventory: parseFloat(el.props.start_inventory)||0,
-      maxCap:    parseFloat(el.props.max_capacity)||0,
+      // Packed silos store pallets; the sim runs them in TONNES (× tonnes/pallet) like bulk.
+      inventory: _siloStartT(el),
+      maxCap:    _siloMaxT(el),
       status:    'idle',
       runDays:   0,
       loadedCars:0,
@@ -10903,6 +10994,12 @@ function simulate(elements, connections, horizon, includeProposed=false){
       const share=inv/prods.length;
       prods.forEach(pid=>state[el.id].composition[pid]=share);
     }
+  });
+  // Packed silos: composition in TONNES (state.inventory is already tonnes = pallets×t/pallet).
+  elements.filter(e=>e.type==='packed_silo').forEach(el=>{
+    const invT=state[el.id].inventory||0; if(invT<=0) return;
+    const pid=el.props.product_id||getSiloProducts(el)[0];
+    if(pid) state[el.id].composition[pid]=invT;
   });
 
   // ── PRE-BUILD LOOKUP MAPS ────────────────────────────
@@ -11109,7 +11206,10 @@ function simulate(elements, connections, horizon, includeProposed=false){
   const simStartDate=new Date(S.simCfg.start_date+'T00:00:00');
 
   // Build demandSiloMap FIRST so we can use it for product fallback.
-  // Walks upstream from each demand_point element to collect all feeding bulk_silos.
+  // Walks upstream from each demand_point to the silos that FEED it — stopping at the first
+  // silo on each path. A packed silo (fed by a packing plant) is the finished-goods store, so
+  // the walk STOPS there and does NOT trace through the packing plant to the bulk sourcing silo
+  // (otherwise the demand point would be mapped to the bulk input product instead of the packed one).
   const demandSiloMap={}; // demandPointId → Set<siloId>
   elements.filter(e=>e.type==='demand_point').forEach(dpEl=>{
     const silos=new Set();
@@ -11122,7 +11222,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
         visited.add(upId);
         const el=elMap[upId];
         if(!el) return;
-        if(el.type==='bulk_silo') silos.add(upId);
+        if(el.type==='bulk_silo'||el.type==='packed_silo') silos.add(upId); // stop at the silo
         else queue.push(upId);
       });
     }
@@ -12047,23 +12147,76 @@ function simulate(elements, connections, horizon, includeProposed=false){
     });
 
     // ── STEP 5: PACKING PLANTS ────────────────────────
+    // Integrated flow (per packing line = one element_product_capacities row):
+    //   sourcing bulk silo → packing machine → packed silo → demand.
+    // For each line: output tonnes/day = min(machine capacity, available bulk ÷ recipe ratio,
+    // packed-silo space). Withdraw bulk (× ratio) from the source silo; add packed to the packed
+    // silo. All in TONNES. A machine can run several lines (multiple packed products).
     elements.filter(e=>e.type==='packing_plant').forEach(el=>{
       const s=state[el.id];
-      if(s.status==='maintenance') return;
-      const rate=((el.props.rated_capacity_pallets_day||0)*(el.props.tonnes_per_pallet||1)||
-                   el.props.rated_capacity_tpd||0)*(s.status==='rampup'?s._rampPct||1:1);
-      const dnFull=(dn[el.id]||[]).map(id=>state[id]).some(d=>d?.inventory>=(d?.maxCap||0)*0.98);
-      const upEmpty=(up[el.id]||[]).map(id=>state[id]).some(u=>(u?.inventory||0)<=0);
-      if(dnFull){ s.status='blocked'; return; }
-      if(upEmpty){ s.status='starved'; logStop(el.id,el.name,day,'starved','Upstream empty'); return; }
-      s.status=s.status==='rampup'?'rampup':'running';
-      s.runDays++;
-      // Inflow to downstream packed silos
-      (dn[el.id]||[]).forEach(dnId=>{
-        const dnEl=elMap[dnId];
-        if(dnEl?.type==='packed_silo')
-          siloInflow[dnId]=(siloInflow[dnId]||0)+rate;
+      if(s.status==='maintenance'){ s.runDays=s.runDays; return; }
+      const ramp=s.status==='rampup'?(s._rampPct||1):1;
+      const lines=(capMap[el.id]||DB.element_product_capacities.filter(c=>c.element_id===el.id)).filter(_isPackingRow);
+      let anyRun=false, anyStarved=false, anyBlocked=false;
+      // Route each output product to a downstream packed silo, each input to an upstream bulk silo.
+      const downPacked=(dn[el.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='packed_silo');
+      const upBulk=(up[el.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='bulk_silo');
+      lines.forEach(line=>{
+        const outPid=line.product_id, inPid=line.packing_input_id;
+        const ratio=_packLineRatio(line);
+        const machineCapT=_packLineCapT(line)*ramp;              // max output tonnes/day
+        if(machineCapT<=0||!outPid||!inPid) return;
+        // Sourcing silos that hold the input bulk product (upstream; fall back to any upstream bulk silo).
+        let srcSilos=upBulk.filter(si=>getSiloProducts(si).includes(inPid));
+        if(!srcSilos.length) srcSilos=upBulk;
+        // Packed silos that hold the output product (downstream; fall back to any downstream packed silo).
+        let outSilos=downPacked.filter(si=>(si.props.product_id||getSiloProducts(si)[0])===outPid);
+        if(!outSilos.length) outSilos=downPacked;
+        // Available bulk of the input product, net of same-day outflow already committed.
+        const availBulk=srcSilos.reduce((a,si)=>{
+          const comp=state[si.id].composition||{};
+          const have=(comp[inPid]!==undefined)?comp[inPid]:(state[si.id].inventory||0);
+          return a+Math.max(0, have-(siloOutflow[si.id]||0));
+        },0);
+        // Packed-silo space (tonnes), net of same-day inflow.
+        const packSpace=outSilos.reduce((a,si)=>a+Math.max(0,(state[si.id].maxCap||Infinity)-(state[si.id].inventory||0)-(siloInflow[si.id]||0)),0);
+        const outputT=Math.max(0, Math.min(machineCapT, availBulk/ratio, packSpace));
+        if(outputT<=0){
+          if(availBulk<=0) anyStarved=true; else if(packSpace<=0) anyBlocked=true;
+          return;
+        }
+        anyRun=true;
+        const bulkNeeded=outputT*ratio;
+        // Withdraw bulk from sourcing silos (proportional to availability).
+        let remBulk=bulkNeeded;
+        srcSilos.forEach(si=>{
+          if(remBulk<=0) return;
+          const comp=state[si.id].composition||{};
+          const have=Math.max(0,((comp[inPid]!==undefined)?comp[inPid]:(state[si.id].inventory||0))-(siloOutflow[si.id]||0));
+          const take=Math.min(remBulk, have);
+          if(take>0){
+            siloOutflow[si.id]=(siloOutflow[si.id]||0)+take;
+            if(comp[inPid]!==undefined) state[si.id].composition[inPid]=Math.max(0,comp[inPid]-take);
+            remBulk-=take;
+          }
+        });
+        // Add packed product to packed silos (fill until each is full).
+        let remOut=outputT;
+        outSilos.forEach(si=>{
+          if(remOut<=0) return;
+          const space=Math.max(0,(state[si.id].maxCap||Infinity)-(state[si.id].inventory||0)-(siloInflow[si.id]||0));
+          const put=Math.min(remOut, space);
+          if(put>0){
+            siloInflow[si.id]=(siloInflow[si.id]||0)+put;
+            state[si.id].composition[outPid]=(state[si.id].composition[outPid]||0)+put;
+            remOut-=put;
+          }
+        });
       });
+      if(anyRun){ s.status=(s.status==='rampup')?'rampup':'running'; s.runDays++; }
+      else if(anyStarved){ s.status='starved'; logStop(el.id,el.name,day,'starved','No bulk cement in sourcing silo'); }
+      else if(anyBlocked){ s.status='blocked'; logStop(el.id,el.name,day,'blocked','Packed silo full'); }
+      else s.status='idle';
     });
 
     // ── STEP 6: RAIL DISPATCH ─────────────────────────
@@ -12554,8 +12707,8 @@ function simulate(elements, connections, horizon, includeProposed=false){
       let inflow=siloInflow[el.id]||0;
       let outflow=siloOutflow[el.id]||0;
 
-      // Update composition for bulk silos
-      if(el.type==='bulk_silo'){
+      // Update composition for bulk + packed silos
+      if(el.type==='bulk_silo'||el.type==='packed_silo'){
         // Outflow: deduct proportionally from all products present
         const totalComp=Object.values(s.composition).reduce((a,b)=>a+b,0);
         if(totalComp>0&&outflow>0){
@@ -12573,7 +12726,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
       r.inventoryHistory[el.id].push(Math.round(s.inventory));
 
       // Drift correction on composition
-      if(el.type==='bulk_silo'){
+      if(el.type==='bulk_silo'||el.type==='packed_silo'){
         const compTotal=Object.values(s.composition).reduce((a,b)=>a+b,0);
         if(compTotal>0&&Math.abs(compTotal-s.inventory)>1){
           const scale=s.inventory/compTotal;
