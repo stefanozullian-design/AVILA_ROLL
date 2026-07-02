@@ -6087,6 +6087,28 @@ function _vesselTimelines(hist){
   });
   return order.map(name=>({name, days:byName[name]}));
 }
+// Which product(s) each vessel carries, from vessel_calls (name → Set of product_ids).
+function _vesselProductSets(){
+  const m={};
+  (DB.vessel_calls||[]).forEach(vc=>{
+    const add=(name,pid)=>{ if(!name||!pid)return; (m[name]=m[name]||new Set()).add(pid); };
+    if(vc.legs&&vc.legs.length) vc.legs.forEach(l=>add(vc.name,l.product_id||vc.product_id));
+    else add(vc.name, vc.product_id);
+  });
+  return m;
+}
+// Per-day vessel status for ONE product at a berth: the vessel of this product that is docked
+// (unloading/anchorage), else a waiting vessel of this product. → [{state, vessel}|null].
+function _berthProductTimeline(hist, carries, pid){
+  return (hist||[]).map(bv=>{
+    if(!bv) return null;
+    if(bv.docked && carries(bv.docked,pid)) return {state: bv.state==='unloading'?'unloading':'anchorage', vessel:bv.docked};
+    const w=(bv.waitingList||[]).find(x=>carries(x.name,pid));
+    if(w) return {state: w.reason==='silo_full'?'anchorage':'waiting', vessel:w.name};
+    return null;
+  });
+}
+
 // One vessel-status cell. Forecast unloading = hatched green; ACTUAL unloading (a day the user
 // entered real unload) = solid green. Anchorage = red hatch, waiting-to-dock = amber hatch.
 function _vesselCellParts(state, isReal){
@@ -7304,44 +7326,11 @@ function _renderSupplyViewInner(wrap){
           if(!isCol) mon.dates.forEach(ds=>{ s+=`<td class="sup-day-${mon.ym}" style="border-bottom:1px solid var(--border);${tdSty(ds)}"></td>`; }); });
           return s; };
 
-        // ── BERTH ACTIVITY (vessel Gantt) — ONE ROW PER VESSEL ─────────────
-        // Like a finish mill: each vessel gets its own status timeline. Solid green =
-        // actual unloading (real data entered), hatched green = forecast unloading,
-        // red hatch = anchorage (silo full), amber hatch = arrived/waiting to dock.
+        // Ship berths + which product each vessel carries — used by the per-product vessel
+        // Gantt below (it replaces the flat "Unloading" tonnage row inside each product block).
         const _shipBerths=berths.filter(b=>(b.props?.berth_type||'Ship Berth')==='Ship Berth');
-        if(_shipBerths.length && r&&r.berthVesselHistory){
-          const bg='#7ec8e3';
-          h+=`<tr class="sup-sec-hdr" data-seckey="berthGantt" onclick="_supToggleSec('berthGantt')" style="cursor:pointer;background:rgba(126,200,227,.06);border-top:2px solid rgba(126,200,227,.4)">
-            <td style="${stickyLeft('var(--surface)',depth+1,'border-bottom:1px solid var(--border),')}color:${bg};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('berthGantt')}</span> BERTH ACTIVITY <span style="font-size:7px;opacity:.7;font-weight:400;margin-left:4px;text-transform:none">per vessel · unloading (✓=actual) · ▨ anchorage · ▨ waiting to dock</span></td>${_blankCells()}</tr>`;
-          _shipBerths.forEach(berth=>{
-            const hist=r.berthVesselHistory[berth.id]||[];
-            const vessels=_vesselTimelines(hist);
-            const realDaySet=new Set((DB.real_unloading_daily||[]).filter(u=>u.berth_id===berth.id&&u.unit!=='cars'&&(parseFloat(u.value)||0)>0).map(u=>u.date));
-            // Berth sub-header
-            h+=`<tr class="supsec-berthGantt" style="background:rgba(126,200,227,.03)"><td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${bg};font-size:9px;font-weight:700">${berth.name} <span style="font-size:7px;opacity:.5">BERTH</span></td>${_blankCells()}</tr>`;
-            if(!vessels.length){
-              h+=`<tr class="supsec-berthGantt"><td style="${stickyLeft('var(--surface)',depth+3)}color:var(--text-dim);font-size:8px;font-style:italic">no vessel calls</td>${_blankCells()}</tr>`;
-            }
-            vessels.forEach(v=>{
-              h+=`<tr class="supsec-berthGantt"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:#c9c6d0;font-size:9px">▸ ${v.name}</td>`;
-              let _pk=null;
-              months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-                const unl=mon.dates.reduce((s,ds)=>{ const di=allDates.indexOf(ds); return s+(v.days[di]==='unloading'?1:0); },0);
-                h+=`<td style="border-left:2px solid rgba(126,200,227,.2);font-size:8px;color:${bg};text-align:center;padding:4px 6px;border-bottom:1px solid var(--border)">${unl>0?unl+'d':''}</td>`;
-                if(!isCol) mon.dates.forEach(ds=>{
-                  const di=allDates.indexOf(ds); const st=v.days[di];
-                  const isReal=st==='unloading'&&realDaySet.has(ds);
-                  const p=_vesselCellParts(st,isReal);
-                  const runStart=p.key!=='__i'&&p.key!==_pk; _pk=p.key;
-                  const label=(runStart&&p.lblTxt)?`<span style="position:absolute;left:4px;top:0;line-height:12px;white-space:nowrap;font-size:8px;font-weight:700;color:${st==='unloading'?'#0a3a2c':'#fff'};pointer-events:none">${p.lblTxt}</span>`:'';
-                  const ttl=st?(v.name+' — '+p.lbl):'';
-                  h+=`<td class="sup-day-${mon.ym}" title="${ttl}" style="position:relative;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:12px;background:${p.bg}">${label}</div></td>`;
-                });
-              });
-              h+=`</tr>`;
-            });
-          });
-        }
+        const _vpSets=_vesselProductSets();
+        const _carries=(name,pid)=>!!(_vpSets[name]&&_vpSets[name].has(pid));
 
         // ── PER-PRODUCT BLOCKS ─────────────────────────────────────────────
         // Each product handled at this terminal (CEMENT first, then SCM, then others)
@@ -7482,17 +7471,45 @@ function _renderSupplyViewInner(wrap){
                 h+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''}" ondblclick="event.stopPropagation();showTermRealPopup('transfer','${fac.id}','${pid}','${ds}')" title="${pname} arrival · ${Math.round(v).toLocaleString()} t${isReal?' · actual':' · planned'} — dbl-click to set actual" style="cursor:pointer;font-size:9px;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${isReal?'700':'400'};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
             });
             h+=`</tr>`;
-            // Unloading
-            h+=`<tr class="supsec-termUnload"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${rc};font-size:9px">Unloading</td>`;
-            months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-              const mt=mon.dates.reduce((s,ds)=>{ const rv=_unlReal(pid,ds); return s+(rv>0?rv:_unlPlan(pid,ds)); },0);
-              h+=`<td style="border-left:2px solid rgba(179,136,255,.1);font-size:9px;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
-              if(!isCol) mon.dates.forEach(ds=>{
-                const rv=_unlReal(pid,ds); const isReal=rv>0; const v=isReal?rv:_unlPlan(pid,ds);
-                const col=isReal?rcReal:(v>0?rc:'rgba(179,136,255,.25)');
-                h+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''}" ondblclick="event.stopPropagation();showTermRealPopup('unload','${fac.id}','${pid}','${ds}')" title="${pname} unloading · ${Math.round(v).toLocaleString()} t${isReal?' · actual':' · planned'} — dbl-click to set actual" style="cursor:pointer;font-size:9px;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${isReal?'700':'400'};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
-            });
-            h+=`</tr>`;
+            // Unloading — SHIP berths: one vessel-status Gantt line per berth (all vessels of
+            // THIS product on the timeline: unloading / anchorage / waiting to dock). RAIL-fed
+            // products keep the flat tonnage row. dbl-click a cell still sets actual unloading.
+            const _pidShipBerths=_shipBerths.filter(b=>{ const hh=(r&&r.berthVesselHistory&&r.berthVesselHistory[b.id])||[]; return _berthProductTimeline(hh,_carries,pid).some(x=>x); });
+            if(_pidShipBerths.length){
+              _pidShipBerths.forEach(berth=>{
+                const hist=(r.berthVesselHistory[berth.id])||[];
+                const tl=_berthProductTimeline(hist,_carries,pid);
+                const realDaySet=new Set((DB.real_unloading_daily||[]).filter(u=>u.berth_id===berth.id&&u.product_id===pid&&u.unit!=='cars'&&(parseFloat(u.value)||0)>0).map(u=>u.date));
+                h+=`<tr class="supsec-termUnload"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${rc};font-size:9px">${berth.name} <span style="font-size:7px;opacity:.55">UNLOADING</span></td>`;
+                let _pk=null;
+                months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+                  const unl=mon.dates.reduce((s,ds)=>{ const c=tl[allDates.indexOf(ds)]; return s+(c&&c.state==='unloading'?1:0); },0);
+                  h+=`<td style="border-left:2px solid rgba(179,136,255,.1);font-size:8px;color:${rc};text-align:center;padding:4px 6px;border-bottom:1px solid var(--border)">${unl>0?unl+'d':''}</td>`;
+                  if(!isCol) mon.dates.forEach(ds=>{
+                    const c=tl[allDates.indexOf(ds)]; const st=c&&c.state; const vessel=(c&&c.vessel)||'';
+                    const isReal=st==='unloading'&&realDaySet.has(ds);
+                    const p=_vesselCellParts(st,isReal);
+                    const key=(st||'__i')+'|'+vessel; const runStart=!!st&&key!==_pk; _pk=key;
+                    const glyph=st==='anchorage'?' ⚓':st==='waiting'?' ⏳':'';
+                    const label=runStart?`<span style="position:absolute;left:4px;top:0;line-height:12px;white-space:nowrap;font-size:8px;font-weight:700;color:${st==='unloading'?'#0a3a2c':'#fff'};pointer-events:none">${vessel}${glyph}</span>`:'';
+                    const ttl=st?(vessel+' — '+p.lbl):'';
+                    h+=`<td class="sup-day-${mon.ym}" title="${ttl}" ondblclick="event.stopPropagation();showTermRealPopup('unload','${fac.id}','${pid}','${ds}')" style="cursor:pointer;position:relative;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:12px;background:${p.bg}">${label}</div></td>`;
+                  });
+                });
+                h+=`</tr>`;
+              });
+            } else {
+              h+=`<tr class="supsec-termUnload"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${rc};font-size:9px">Unloading</td>`;
+              months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+                const mt=mon.dates.reduce((s,ds)=>{ const rv=_unlReal(pid,ds); return s+(rv>0?rv:_unlPlan(pid,ds)); },0);
+                h+=`<td style="border-left:2px solid rgba(179,136,255,.1);font-size:9px;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                if(!isCol) mon.dates.forEach(ds=>{
+                  const rv=_unlReal(pid,ds); const isReal=rv>0; const v=isReal?rv:_unlPlan(pid,ds);
+                  const col=isReal?rcReal:(v>0?rc:'rgba(179,136,255,.25)');
+                  h+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''}" ondblclick="event.stopPropagation();showTermRealPopup('unload','${fac.id}','${pid}','${ds}')" title="${pname} unloading · ${Math.round(v).toLocaleString()} t${isReal?' · actual':' · planned'} — dbl-click to set actual" style="cursor:pointer;font-size:9px;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${isReal?'700':'400'};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+              });
+              h+=`</tr>`;
+            }
           }
         });
 
