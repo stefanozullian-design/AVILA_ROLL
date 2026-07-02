@@ -6516,11 +6516,15 @@ function _renderSupplyViewInner(wrap){
     return dayIdx<=0?(parseFloat(startInv)||0):(hist[dayIdx-1]??0);
   };
   const _invChartRow=(label, cat, accent, scopeEls, depth, onlyPid)=>{
-    const _catOk=pr=>pr&&(cat==='cement'?(pr.category==='cement_bulk'||pr.category==='cement_packed')
+    // 'packed' reads packed_silo elements (any product they hold); everything else reads bulk_silo.
+    const _catOk=pr=>cat==='packed'?true:(pr&&(cat==='cement'?(pr.category==='cement_bulk'||pr.category==='cement_packed')
                         :cat==='scm'?(pr.category==='additive')
-                        :(pr.category==='clinker'));
-    const silos=(scopeEls||getFacElements()).filter(e=>e.type==='bulk_silo').filter(s=>getSiloProducts(s).some(p=>_catOk(DB.products.find(x=>x.id===p))));
+                        :(pr.category==='clinker')));
+    const _siloType=cat==='packed'?'packed_silo':'bulk_silo';
+    const silos=(scopeEls||getFacElements()).filter(e=>e.type===_siloType).filter(s=>getSiloProducts(s).some(p=>_catOk(DB.products.find(x=>x.id===p))));
     if(!silos.length) return '';
+    // Packed silos store pallets; the sim runs them in tonnes → convert start inventory for day-0 bars.
+    const _startInvOf=s=>cat==='packed'?_siloStartT(s):s.props?.start_inventory;
     const prodMap={};
     silos.forEach(s=>{ const pid=getSiloProducts(s)[0]; if(!pid) return; (prodMap[pid]=prodMap[pid]||[]).push(s); });
     let prodIds=Object.keys(prodMap); if(!prodIds.length) return '';
@@ -6533,7 +6537,7 @@ function _renderSupplyViewInner(wrap){
     const colorFor=pid=>{ const nm=DB.products.find(p=>p.id===pid)?.name||pid; return (typeof spProdColor==='function')?spProdColor(nm,false):accent; };
     const nameOf=pid=>DB.products.find(p=>p.id===pid)?.name||pid;
     const inv={}; let gmax=0;
-    prodIds.forEach(pid=>{ inv[pid]={}; allDates.forEach(ds=>{ const v=prodMap[pid].reduce((a,si)=>a+_chartInvVal(si.id,ds,si.props?.start_inventory),0); inv[pid][ds]=v; if(v>gmax)gmax=v; }); });
+    prodIds.forEach(pid=>{ inv[pid]={}; allDates.forEach(ds=>{ const v=prodMap[pid].reduce((a,si)=>a+_chartInvVal(si.id,ds,_startInvOf(si)),0); inv[pid][ds]=v; if(v>gmax)gmax=v; }); });
     if(gmax<=0) gmax=1;
     const H=88;
     // ── Days-of-cover denominator: FORWARD-LOOKING future requirements — average
@@ -6632,6 +6636,17 @@ function _renderSupplyViewInner(wrap){
         const demandEls=facEls.filter(e=>e.type==='demand_point');
         const demandPoints=DB.demand_points.filter(dp=>demandEls.some(el=>el.id===dp.element_id));
 
+        // ── PACKED-product scope (for the packing block) ──
+        // Packed products = outputs of this facility's packing lines ∪ products held in its packed
+        // silos. These are pulled OUT of the CEMENT block (requirements/inventory) and shown in
+        // their own packing block so the two streams don't double-count.
+        const _packEls=facEls.filter(e=>e.type==='packing_plant');
+        const _packedSilos=facEls.filter(e=>e.type==='packed_silo');
+        const packedProductIds=new Set();
+        _packEls.forEach(pk=>DB.element_product_capacities.filter(c=>c.element_id===pk.id&&_isPackingRow(c))
+          .forEach(c=>{ if(c.product_id) packedProductIds.add(c.product_id); }));
+        _packedSilos.forEach(si=>getSiloProducts(si).forEach(p=>packedProductIds.add(p)));
+
         // Capture the CEMENT block separately so it can be emitted AFTER the
         // CLINKER block (display order: clinker first, then a thick line, then cement).
         const _cemStart=h.length;
@@ -6716,6 +6731,8 @@ function _renderSupplyViewInner(wrap){
           // this facility — when one of this facility's demand points switched to
           // it (swappedIn>0) — so the "swapped in" breakdown has a row to hang on.
           (DB.demand_substitutions||[]).forEach(s=>{ if(allDates.some(ds=>swappedIn(s.to_product_id,ds)>0)) productsSet.add(s.to_product_id); });
+          // Packed products belong to the packing block — drop them from CEMENT REQUIREMENTS.
+          packedProductIds.forEach(pid=>productsSet.delete(pid));
 
           if(productsSet.size>0){
             // Section header row
@@ -6964,6 +6981,97 @@ function _renderSupplyViewInner(wrap){
             });
             h+=`</tr>`;
           });
+        }
+
+        // ╔══════════════════════════════════════════════════════════════╗
+        // ║ PACKED block — its own inventory chart + starting inventory +  ║
+        // ║ requirements, mirroring the CEMENT / CLINKER blocks. Order:    ║
+        // ║ [chart] → [starting inventory] → [requirements] → [production] ║
+        // ╚══════════════════════════════════════════════════════════════╝
+        if(_packedSilos.length||_packEls.length){
+          const pkColor='#4da6ff';
+
+          // ── Packed inventory bar chart ──
+          h+=_invChartRow('Packed inventory','packed',pkColor,facEls,node.depth+1);
+
+          // ── STARTING INVENTORY (packed silos, per silo · tonnes) ──
+          if(_packedSilos.length){
+            const _packInvVal=(siloId,ds,startT)=>{
+              const prev=new Date(ds+'T00:00:00'); prev.setDate(prev.getDate()-1);
+              const realInv=DB.real_inventory_daily.find(ri=>ri.date===prev._ymd()&&ri.silo_id===siloId);
+              if(realInv) return {value:parseFloat(realInv.eod_volume_t)||0,isActual:true};
+              const dayIdx=allDates.indexOf(ds);
+              const hist=r?.inventoryHistory?.[siloId]||[];
+              const v=dayIdx<=0?startT:(hist[dayIdx-1]??0);
+              return {value:v,isActual:false};
+            };
+            const _pkInvDay=ds=>_packedSilos.reduce((s,si)=>s+_packInvVal(si.id,ds,_siloStartT(si)).value,0);
+            h+=`<tr class="sup-sec-hdr" data-seckey="packedInv" onclick="_supToggleSec('packedInv')" style="cursor:pointer;background:rgba(77,166,255,.05);border-top:2px solid rgba(77,166,255,.3)">
+              <td style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${pkColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('packedInv')}</span> STARTING INVENTORY (packed)</td>`;
+            months.forEach(mon=>{
+              const isCol=collapsed.has(mon.ym);
+              const mt=mon.dates.reduce((a,ds)=>a+_pkInvDay(ds),0)/(mon.dates.length||1);
+              h+=`<td style="border-left:2px solid rgba(77,166,255,.2);font-size:9px;font-weight:700;color:${pkColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+              if(!isCol) mon.dates.forEach(ds=>{ const v=_pkInvDay(ds);
+                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${pkColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
+            });
+            h+=`</tr>`;
+            _packedSilos.forEach(silo=>{
+              const siloMax=_siloMaxT(silo);
+              const siloStart=_siloStartT(silo);
+              h+=`<tr class="supsec-packedInv">
+                <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${pkColor};font-size:9px">${silo.name}
+                  <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${siloMax>0?'cap: '+Math.round(siloMax).toLocaleString()+'t':''}</span>
+                </td>`;
+              months.forEach(mon=>{
+                const isCol=collapsed.has(mon.ym);
+                const mt=mon.dates.reduce((s,ds)=>s+_packInvVal(silo.id,ds,siloStart).value,0)/(mon.dates.length||1);
+                h+=`<td style="border-left:2px solid rgba(77,166,255,.1);font-size:9px;color:${pkColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                if(!isCol) mon.dates.forEach(ds=>{
+                  const inv=_packInvVal(silo.id,ds,siloStart); const v=inv.value;
+                  const lvlColor=invLevelColor(v,siloMax);
+                  const cellWeight=inv.isActual?'700':'400';
+                  const cellClass=inv.isActual?'cell-real':'';
+                  const lvlTitle=(siloMax>0?`${Math.round(v/siloMax*100)}% of ${Math.round(siloMax).toLocaleString()}t capacity${inv.isActual?' · actual':''}`:'')+' · click to set real inventory';
+                  h+=`<td class="sup-day-${mon.ym} ${cellClass}" title="${lvlTitle}" onclick="showInventoryPopup('${silo.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?lvlColor:'rgba(77,166,255,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${cellWeight};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
+                });
+              });
+              h+=`</tr>`;
+            });
+          }
+
+          // ── PACKED REQUIREMENTS (demand for packed products) ──
+          {
+            const pkProds=[...packedProductIds].filter(pid=>DB.products.find(p=>p.id===pid))
+              .sort((a,b)=>(DB.products.find(p=>p.id===a)?.name||a).localeCompare(DB.products.find(p=>p.id===b)?.name||b));
+            const pkDemand=(pid,ds)=>demandPoints.filter(dp=>dp.products?.some(p=>p.product_id===pid))
+              .reduce((s,dp)=>s+(_demandRate(dp.element_id,ds)||0),0);
+            if(pkProds.length){
+              h+=`<tr class="sup-sec-hdr" data-seckey="packedNeed" onclick="_supToggleSec('packedNeed')" style="cursor:pointer;background:rgba(77,166,255,.05);border-top:2px solid rgba(77,166,255,.3)">
+                <td style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${pkColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('packedNeed')}</span> PACKED REQUIREMENTS <span style="font-size:7px;opacity:.6;font-weight:400;margin-left:4px">(packed-product demand)</span></td>`;
+              months.forEach(mon=>{
+                const isCol=collapsed.has(mon.ym);
+                const mt=pkProds.reduce((s,pid)=>s+mon.dates.reduce((a,ds)=>a+pkDemand(pid,ds),0),0);
+                h+=`<td style="border-left:2px solid rgba(77,166,255,.2);font-size:9px;font-weight:700;color:${pkColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                if(!isCol) mon.dates.forEach(ds=>{ const v=pkProds.reduce((s,pid)=>s+pkDemand(pid,ds),0);
+                  h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${pkColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
+              });
+              h+=`</tr>`;
+              pkProds.forEach(pid=>{
+                const prodName=DB.products.find(p=>p.id===pid)?.name||pid;
+                h+=`<tr class="supsec-packedNeed">
+                  <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${pkColor};font-size:9px">${prodName}</td>`;
+                months.forEach(mon=>{
+                  const isCol=collapsed.has(mon.ym);
+                  const mt=mon.dates.reduce((s,ds)=>s+pkDemand(pid,ds),0);
+                  h+=`<td style="border-left:2px solid rgba(77,166,255,.1);font-size:9px;color:${pkColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                  if(!isCol) mon.dates.forEach(ds=>{ const v=pkDemand(pid,ds);
+                    h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${v>0?pkColor:'rgba(77,166,255,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+                });
+                h+=`</tr>`;
+              });
+            }
+          }
         }
 
         // ── PACKING section (packing plants) ─────────────
@@ -12423,7 +12531,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
       // ── URGENCY SELECTION (one product/day) ──────────
       // Rank each line by the days-of-cover urgency of its OUTPUT packed silo; pick the highest
       // urgency line that can actually produce today (has bulk + packed-silo space).
-      let best=null, bestU=-1, anyStarved=false, anyBlocked=false, hadRunnable=false;
+      let best=null, bestU=-1, anyStarved=false, anyBlocked=false;
       lines.forEach(line=>{
         const outPid=line.product_id, inPid=line.packing_input_id;
         const machineCapT=_packLineCapT(line)*ramp;
@@ -12437,7 +12545,6 @@ function simulate(elements, connections, horizon, includeProposed=false){
           if(availBulk<=0) anyStarved=true; else if(packSpace<=0) anyBlocked=true;
           return;
         }
-        hadRunnable=true;
         // Urgency = lowest days-of-cover among this line's output silos (highest urgency wins).
         let u=0; outSilos.forEach(si=>{ u=Math.max(u, urgency(si.id, el.id)); });
         if(u>bestU){ bestU=u; best={line,outPid,inPid,ratio:_packLineRatio(line),outputT,srcSilos,outSilos}; }
