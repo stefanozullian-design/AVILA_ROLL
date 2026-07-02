@@ -4020,14 +4020,18 @@ function showCampaignPopup(elId, dateStr, runStart, runEnd, runProduct){
   // Pre-fill from the saved campaign if any, otherwise from the clicked Gantt run.
   const selProd=(defaultMode==='real'&&existingReal[0]?.product_id)||existing?.product_id||runProduct||caps[0].product_id;
 
+  // Rated output for an element_product_capacities row — packing lines are pallets/day × t/pallet,
+  // everything else uses the capacity_tpd field directly.
+  const _rowRate=c=>_isPackingRow(c)?_packLineCapT(c):(parseFloat(c.capacity_tpd)||0);
   // Product options
   const prodOpts=caps.map(c=>{
     const p=DB.products.find(pr=>pr.id===c.product_id);
-    return `<option value="${c.product_id}" data-rate="${c.capacity_tpd}" ${selProd===c.product_id?'selected':''}>${p?.name||c.product_id} (${c.capacity_tpd} t/d rated)</option>`;
+    const rr=_rowRate(c);
+    return `<option value="${c.product_id}" data-rate="${rr}" ${selProd===c.product_id?'selected':''}>${p?.name||c.product_id} (${rr} t/d rated)</option>`;
   }).join('');
 
   const selCap=caps.find(c=>c.product_id===selProd);
-  const currentRate=existing?.rate_tpd||(parseFloat(selCap?.capacity_tpd)||parseFloat(caps[0].capacity_tpd)||0);
+  const currentRate=existing?.rate_tpd||(selCap?_rowRate(selCap):_rowRate(caps[0]))||0;
   const fromVal=existing?.start_date||runStart||dateStr;
   const toVal=existing?.end_date||runEnd||dateStr;
   // In Real mode the rate field holds the actual produced tonnage for the clicked day.
@@ -6261,7 +6265,8 @@ function _renderSupplyViewInner(wrap){
     if(managerCampaign){
       const campRate=parseFloat(managerCampaign.rate_tpd)||0;
       const fallbackCap=DB.element_product_capacities.find(c=>c.element_id===el.id&&c.product_id===managerCampaign.product_id);
-      const rate=campRate||(parseFloat(fallbackCap?.capacity_tpd)||0);
+      const fbRate=_isPackingRow(fallbackCap)?_packLineCapT(fallbackCap):(parseFloat(fallbackCap?.capacity_tpd)||0);
+      const rate=campRate||fbRate;
       return {product_id:managerCampaign.product_id, capacity_tpd:rate, isCampaign:true};
     }
 
@@ -6282,6 +6287,15 @@ function _renderSupplyViewInner(wrap){
         return {product_id:pid, capacity_tpd:pid?parseFloat(cap?.capacity_tpd)||0:0};
       }
     }
+    // Tier 1: sim results (packing plants) — the machine packs ONE product/day (packProductHistory),
+    // at that line's rated output tonnes/day (pallets/day × tonnes/pallet).
+    if(hasSim&&el.type==='packing_plant'&&r.packProductHistory?.[el.id]){
+      const pid=r.packProductHistory[el.id][dayIdx]||null;
+      if(pid!==undefined){
+        const line=DB.element_product_capacities.find(c=>c.element_id===el.id&&c.product_id===pid);
+        return {product_id:pid, capacity_tpd:pid?_packLineCapT(line):0};
+      }
+    }
 
     // Tier 2: production_schedule rule
     const rule=(DB.production_schedule||[]).find(s=>
@@ -6297,7 +6311,8 @@ function _renderSupplyViewInner(wrap){
     if(!caps.length) return {product_id:null, capacity_tpd:0};
     // For kilns: pick first, they're exclusive; for mills: first product
     const first=caps[0];
-    return {product_id:first.product_id, capacity_tpd:parseFloat(first.capacity_tpd)||0};
+    const firstRate=_isPackingRow(first)?_packLineCapT(first):(parseFloat(first.capacity_tpd)||0);
+    return {product_id:first.product_id, capacity_tpd:firstRate};
   };
 
   // Per-product production breakdown for a day. On a real-data day a mill may have produced
@@ -6418,10 +6433,11 @@ function _renderSupplyViewInner(wrap){
           DB.facilities.filter(f=>f.sub_region_id===sub.id&&relevantFacIds.has(f.id)).forEach(fac=>{
             const facEls=subEls.filter(el=>facForEl(el)===fac.id);
             if(!facEls.length) return;
-            // Group kilns and mills under facility
+            // Group kilns, mills and packing plants under facility
             const kilns=facEls.filter(e=>e.type==='kiln');
             const mills=facEls.filter(e=>e.type==='finish_mill');
-            tree.push({type:'fac',id:fac.id,name:fac.name,depth:subDepth,ftype:fac.type,els:facEls,kilns,mills});
+            const packers=facEls.filter(e=>e.type==='packing_plant');
+            tree.push({type:'fac',id:fac.id,name:fac.name,depth:subDepth,ftype:fac.type,els:facEls,kilns,mills,packers});
           });
         });
       });
@@ -6432,7 +6448,8 @@ function _renderSupplyViewInner(wrap){
   const coveredEls=new Set(tree.filter(n=>n.type==='fac').flatMap(n=>n.els).map(e=>e.id));
   const orphans=prodEls.filter(el=>!coveredEls.has(el.id));
   if(orphans.length) tree.push({type:'fac',id:'_orphan',name:'Unassigned',depth:0,ftype:'plant',
-    els:orphans,kilns:orphans.filter(e=>e.type==='kiln'),mills:orphans.filter(e=>e.type==='finish_mill')});
+    els:orphans,kilns:orphans.filter(e=>e.type==='kiln'),mills:orphans.filter(e=>e.type==='finish_mill'),
+    packers:orphans.filter(e=>e.type==='packing_plant')});
 
   const indentPx=depth=>depth*14;
   const stickyLeft=(bg,depth,extra='')=>
@@ -6939,6 +6956,98 @@ function _renderSupplyViewInner(wrap){
                 const barBg=isMaint?maintBg:isStarved?starvedBg:(v>0?barColor:'transparent');
                 const campMark=(isCamp&&!isMaint)?'border-top:2px solid #4ade80;':'';
                 const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(isStarved?'⚠ Unplanned shortfall — mill could not produce (no clinker)':(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name?`${prod.name} · ${Math.round(v)} t/d`:'Idle')));
+                const lblName=(typeof spShortProd==='function')?spShortProd(prod?.name||''):(prod?.name||'');
+                const label=isRunStart?`<span style="position:absolute;left:5px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:9px;font-weight:700;color:${_barTextColor(barColor)};pointer-events:none">${lblName} · ${Math.round(v).toLocaleString()}${isCamp?' 🔒':''}</span>`:'';
+                const zpos=isRunStart?'position:relative;z-index:2;':'';
+                h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="${zpos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barBg};${campMark}">${label}</div></td>`;
+              });
+            });
+            h+=`</tr>`;
+          });
+        }
+
+        // ── PACKING section (packing plants) ─────────────
+        // Mirrors FINISH MILL PRODUCTION: a packing machine packs ONE product/day. Real days show
+        // the actual tonnage (colour-coded); forecast days show a Gantt bar of the simulator's
+        // proposed sequence. Click a cell to open the Campaign popup and override (lock) it.
+        if(node.packers&&node.packers.length){
+          const packColor='#4da6ff';
+          const packEls=node.packers;
+          const _packRated=el=>{ const ls=DB.element_product_capacities.filter(c=>c.element_id===el.id&&_isPackingRow(c));
+            return ls.length?Math.max(...ls.map(_packLineCapT)):0; };
+          h+=`<tr class="sup-sec-hdr" data-seckey="packProd" onclick="_supToggleSec('packProd')" style="cursor:pointer;background:rgba(77,166,255,.05);border-top:2px solid rgba(77,166,255,.3)">
+            <td style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${packColor};font-size:8px;letter-spacing:.5px;font-weight:700"><span class="sup-arrow">${_supSecArrow('packProd')}</span> PACKING PLANT PRODUCTION <span style="font-size:7px;opacity:.6;font-weight:400;margin-left:4px">(packed · t)</span></td>`;
+          months.forEach(mon=>{
+            const isCol=collapsed.has(mon.ym);
+            const mt=grpMonTotal(packEls,mon);
+            h+=`<td style="border-left:2px solid rgba(77,166,255,.2);font-size:9px;color:${packColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+            if(!isCol) mon.dates.forEach(ds=>{
+              const dayIdx=allDates.indexOf(ds);
+              const v=grpDailyTotal(packEls,ds,dayIdx);
+              h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${packColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
+            });
+          });
+          h+=`</tr>`;
+
+          node.packers.forEach(el=>{
+            const maintDays=maintSetFor(el.id);
+            const starvedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='starved').map(e=>allDates[e.day-1]).filter(Boolean));
+            const maxSingleCap=_packRated(el);
+            h+=`<tr class="supsec-packProd">
+              <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${packColor};font-size:9px">${el.name}
+                <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${maxSingleCap>0?maxSingleCap.toLocaleString()+' t/d rated':''}</span>
+              </td>`;
+            let _gPrev=null;
+            // Precompute contiguous production runs (same product) so a click pre-fills the campaign dialog.
+            const _runByDate={};
+            { let cs=null,cp=null,pd=null;
+              const _fin=(endDs)=>{ if(cs==null)return; let on=false; for(const d of allDates){ if(d===cs)on=true; if(on)_runByDate[d]={start:cs,end:endDs,product:cp}; if(d===endDs)break; } };
+              allDates.forEach(ds=>{
+                const rr=maintDays.has(ds)?{capacity_tpd:0,product_id:null}:resolveProduction(el,ds,allDates.indexOf(ds),maintDays);
+                const pid=(rr.capacity_tpd>0)?rr.product_id:null;
+                if(pid&&pid===cp){ pd=ds; }
+                else { if(cs!=null)_fin(pd); if(pid){cs=ds;cp=pid;pd=ds;}else{cs=null;cp=null;pd=null;} }
+              });
+              if(cs!=null)_fin(pd);
+            }
+            months.forEach(mon=>{
+              const isCol=collapsed.has(mon.ym);
+              const mt=mon.dates.reduce((s,ds)=>{
+                const dayIdx=allDates.indexOf(ds);
+                return s+resolveProduction(el,ds,dayIdx,maintDays).capacity_tpd;
+              },0);
+              h+=`<td style="border-left:2px solid rgba(77,166,255,.15);font-size:9px;color:${packColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+              if(!isCol) mon.dates.forEach(ds=>{
+                const dayIdx=allDates.indexOf(ds);
+                const res=resolveProduction(el,ds,dayIdx,maintDays);
+                const v=res.capacity_tpd;
+                const prod=DB.products.find(p=>p.id===res.product_id);
+                const isMaint=maintDays.has(ds);
+                const isCamp=res.isCampaign;
+                const isReal=!!res.isActual && v>0;
+                const barColor=prod?((typeof spProdColor==='function')?spProdColor(prod.name||prod.id,false):(PRODUCT_CAT_COLORS[prod.category||'']||packColor)):packColor;
+                const run=_runByDate[ds];
+                const campArgs=run?`'${el.id}','${ds}','${run.start}','${run.end}','${run.product}'`:`'${el.id}','${ds}'`;
+                const clickFn=isMaint?`openMaintenanceEventById('${maintDays.get(ds)}')`:`showCampaignPopup(${campArgs})`;
+                if(isReal){
+                  _gPrev='__real';
+                  const _allP=resolveProductionAll(el,ds,dayIdx,maintDays);
+                  const _multi=_allP.length>1;
+                  const _tip=(_allP.length?_allP.map(p=>(DB.products.find(x=>x.id===p.product_id)?.name||p.product_id)+' '+Math.round(p.capacity_tpd).toLocaleString()+'t').join(' + '):(prod?.name||''))+' · actual';
+                  const _mk=_multi?`<span style="font-size:7px;color:var(--amber);vertical-align:super;margin-left:1px">▾${_allP.length}</span>`:'';
+                  h+=`<td class="sup-day-${mon.ym}" title="${_tip}" onclick="event.stopPropagation();${clickFn}" style="cursor:pointer;font-size:9px;color:${barColor};font-weight:700;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${Math.round(v).toLocaleString()}${_mk}</td>`;
+                  return;
+                }
+                // FORECAST / maintenance: Gantt bar — colour = product, label once per run.
+                const runKey=isMaint?'__m':(v>0?(res.product_id||'__p'):'__idle');
+                const isRunStart=(!isMaint&&v>0&&runKey!==_gPrev);
+                _gPrev=runKey;
+                const maintBg='repeating-linear-gradient(45deg,#5f5e5a,#5f5e5a 3px,#383836 3px,#383836 6px)';
+                const starvedBg='repeating-linear-gradient(45deg,#5f5e5a,#5f5e5a 3px,#a32d2d 3px,#a32d2d 6px)';
+                const isStarved=(!isMaint&&v<=0&&starvedDays.has(ds));
+                const barBg=isMaint?maintBg:isStarved?starvedBg:(v>0?barColor:'transparent');
+                const campMark=(isCamp&&!isMaint)?'border-top:2px solid #4ade80;':'';
+                const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(isStarved?'⚠ Unplanned shortfall — packer could not run (no bulk cement)':(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name?`${prod.name} · ${Math.round(v)} t/d`:'Idle')));
                 const lblName=(typeof spShortProd==='function')?spShortProd(prod?.name||''):(prod?.name||'');
                 const label=isRunStart?`<span style="position:absolute;left:5px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:9px;font-weight:700;color:${_barTextColor(barColor)};pointer-events:none">${lblName} · ${Math.round(v).toLocaleString()}${isCamp?' 🔒':''}</span>`:'';
                 const zpos=isRunStart?'position:relative;z-index:2;':'';
@@ -10990,6 +11099,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
     elementStates:{},
     inventoryHistory:{},
     millProductHistory:{},
+    packProductHistory:{},   // packProductHistory[packerId][day-1] = OUTPUT packed product this machine ran that day (null = idle/maint), day-aligned like millProductHistory
     kilnProdHistory:{},      // kilnProdHistory[kilnId][day-1] = ACTUAL clinker produced that day (0 when blocked)
     demandSwapHistory:{},     // demandSwapHistory[demandPointId][day-1] = {own, swapped, toProduct, fromProduct} when a swap covers part of this DP's demand
     railHistory:{},           // railHistory[dispElId][day-1]
@@ -11022,6 +11132,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
     r.elementStates[el.id]=[];
     r.inventoryHistory[el.id]=[];
     if(el.type==='finish_mill') r.millProductHistory[el.id]=[];
+    if(el.type==='packing_plant') r.packProductHistory[el.id]=[];
     if(el.type==='kiln') r.kilnProdHistory[el.id]=[];
     if(el.type==='kiln') state[el.id]._blockedHighInv=false; // tracks restart_threshold rule
     if(el.type==='dispatch_point'&&el.props.dispatch_type==='Rail'){
@@ -11365,6 +11476,29 @@ function simulate(elements, connections, horizon, includeProposed=false){
       const silo=upClkSilos.find(s=>getSiloProducts(s).includes(clkIng.material_id))
                ||upClkSilos[0]||null;
       millProductClinkerMap[mill.id][cap.product_id]=silo;
+    });
+  });
+
+  // ── PACKING PLANT maps (mirror the mill maps) ────────────────────────────
+  // packLineMap[plantId]      = [packing-line rows] (element_product_capacities with packing_input_id)
+  // packOutSiloMap[plantId][outPid] = downstream packed silos holding that output product
+  // packInSiloMap[plantId][inPid]   = upstream bulk silos holding that input bulk product
+  const packLineMap={}, packOutSiloMap={}, packInSiloMap={};
+  elements.filter(e=>e.type==='packing_plant').forEach(pk=>{
+    const lines=(capMap[pk.id]||[]).filter(_isPackingRow);
+    packLineMap[pk.id]=lines;
+    packOutSiloMap[pk.id]={};
+    packInSiloMap[pk.id]={};
+    const downPacked=(dn[pk.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='packed_silo');
+    const upBulk=(up[pk.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='bulk_silo');
+    lines.forEach(line=>{
+      const outPid=line.product_id, inPid=line.packing_input_id;
+      let outSilos=downPacked.filter(si=>(si.props.product_id||getSiloProducts(si)[0])===outPid);
+      if(!outSilos.length) outSilos=downPacked;
+      packOutSiloMap[pk.id][outPid]=outSilos;
+      let srcSilos=upBulk.filter(si=>getSiloProducts(si).includes(inPid));
+      if(!srcSilos.length) srcSilos=upBulk;
+      packInSiloMap[pk.id][inPid]=srcSilos;
     });
   });
 
@@ -12207,48 +12341,22 @@ function simulate(elements, connections, horizon, includeProposed=false){
     });
 
     // ── STEP 5: PACKING PLANTS ────────────────────────
-    // Integrated flow (per packing line = one element_product_capacities row):
-    //   sourcing bulk silo → packing machine → packed silo → demand.
-    // For each line: output tonnes/day = min(machine capacity, available bulk ÷ recipe ratio,
-    // packed-silo space). Withdraw bulk (× ratio) from the source silo; add packed to the packed
-    // silo. All in TONNES. A machine can run several lines (multiple packed products).
+    // A packing machine packs ONE product at a time (like a finish mill runs one product/day).
+    // Each day the simulator proposes the most URGENT output product — the packed silo whose
+    // days-of-cover vs demand is lowest — then packs it, bounded by machine capacity, available
+    // bulk (÷ recipe ratio) and packed-silo space. The chosen output product is recorded in
+    // r.packProductHistory (day-aligned) so the Supply page can draw Gantt bars, and the user
+    // can override the proposed sequence with a manager campaign (locked product/rate).
+    // Integrated flow per line: sourcing bulk silo → packing machine → packed silo → demand.
     elements.filter(e=>e.type==='packing_plant').forEach(el=>{
       const s=state[el.id];
-      if(s.status==='maintenance'){ s.runDays=s.runDays; return; }
+      if(s.status==='maintenance'){ r.packProductHistory[el.id].push(null); return; }
       const ramp=s.status==='rampup'?(s._rampPct||1):1;
-      const lines=(capMap[el.id]||DB.element_product_capacities.filter(c=>c.element_id===el.id)).filter(_isPackingRow);
-      let anyRun=false, anyStarved=false, anyBlocked=false;
-      // Route each output product to a downstream packed silo, each input to an upstream bulk silo.
-      const downPacked=(dn[el.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='packed_silo');
-      const upBulk=(up[el.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='bulk_silo');
-      lines.forEach(line=>{
-        const outPid=line.product_id, inPid=line.packing_input_id;
-        const ratio=_packLineRatio(line);
-        const machineCapT=_packLineCapT(line)*ramp;              // max output tonnes/day
-        if(machineCapT<=0||!outPid||!inPid) return;
-        // Sourcing silos that hold the input bulk product (upstream; fall back to any upstream bulk silo).
-        let srcSilos=upBulk.filter(si=>getSiloProducts(si).includes(inPid));
-        if(!srcSilos.length) srcSilos=upBulk;
-        // Packed silos that hold the output product (downstream; fall back to any downstream packed silo).
-        let outSilos=downPacked.filter(si=>(si.props.product_id||getSiloProducts(si)[0])===outPid);
-        if(!outSilos.length) outSilos=downPacked;
-        // Available bulk of the input product, net of same-day outflow already committed.
-        const availBulk=srcSilos.reduce((a,si)=>{
-          const comp=state[si.id].composition||{};
-          const have=(comp[inPid]!==undefined)?comp[inPid]:(state[si.id].inventory||0);
-          return a+Math.max(0, have-(siloOutflow[si.id]||0));
-        },0);
-        // Packed-silo space (tonnes), net of same-day inflow.
-        const packSpace=outSilos.reduce((a,si)=>a+Math.max(0,(state[si.id].maxCap||Infinity)-(state[si.id].inventory||0)-(siloInflow[si.id]||0)),0);
-        const outputT=Math.max(0, Math.min(machineCapT, availBulk/ratio, packSpace));
-        if(outputT<=0){
-          if(availBulk<=0) anyStarved=true; else if(packSpace<=0) anyBlocked=true;
-          return;
-        }
-        anyRun=true;
-        const bulkNeeded=outputT*ratio;
-        // Withdraw bulk from sourcing silos (proportional to availability).
-        let remBulk=bulkNeeded;
+      const lines=packLineMap[el.id]||[];
+
+      // Withdraw `bulkNeeded` of inPid from sourcing silos + add `outputT` of outPid to packed silos.
+      const _runLine=(outPid,inPid,ratio,outputT,srcSilos,outSilos)=>{
+        let remBulk=outputT*ratio;
         srcSilos.forEach(si=>{
           if(remBulk<=0) return;
           const comp=state[si.id].composition||{};
@@ -12260,7 +12368,6 @@ function simulate(elements, connections, horizon, includeProposed=false){
             remBulk-=take;
           }
         });
-        // Add packed product to packed silos (fill until each is full).
         let remOut=outputT;
         outSilos.forEach(si=>{
           if(remOut<=0) return;
@@ -12272,11 +12379,82 @@ function simulate(elements, connections, horizon, includeProposed=false){
             remOut-=put;
           }
         });
+      };
+
+      // Available bulk of a product across its sourcing silos (net of same-day outflow).
+      const _availBulk=(inPid,srcSilos)=>srcSilos.reduce((a,si)=>{
+        const comp=state[si.id].composition||{};
+        const have=(comp[inPid]!==undefined)?comp[inPid]:(state[si.id].inventory||0);
+        return a+Math.max(0, have-(siloOutflow[si.id]||0));
+      },0);
+      // Packed-silo space (tonnes) toward the 98% stop level, net of same-day inflow.
+      const _packSpace=(outSilos)=>outSilos.reduce((a,si)=>a+Math.max(0,(state[si.id].maxCap||Infinity)*0.98-(state[si.id].inventory||0)-(siloInflow[si.id]||0)),0);
+
+      // ── MANAGER CAMPAIGN OVERRIDE ────────────────────
+      // A locked campaign forces this machine to pack a specific product at a set rate.
+      const packDate=new Date(simStartDate.getTime()+(day-1)*864e5)._ymd();
+      const camp=(DB.production_campaigns||[]).find(c=>
+        c.element_id===el.id && packDate>=c.start_date && packDate<=c.end_date);
+      if(camp){
+        const line=lines.find(l=>l.product_id===camp.product_id);
+        if(line){
+          const outPid=line.product_id, inPid=line.packing_input_id;
+          const ratio=_packLineRatio(line);
+          const campRate=parseFloat(camp.rate_tpd)||0;
+          const machineCapT=(campRate||_packLineCapT(line))*ramp;
+          const srcSilos=packInSiloMap[el.id][inPid]||[];
+          const outSilos=packOutSiloMap[el.id][outPid]||[];
+          const outputT=Math.max(0, Math.min(machineCapT, _availBulk(inPid,srcSilos)/ratio, _packSpace(outSilos)));
+          if(outputT>0){
+            _runLine(outPid,inPid,ratio,outputT,srcSilos,outSilos);
+            s.status=s.status==='rampup'?'rampup':'running'; s.runDays++;
+            s.currentProduct=outPid;
+            r.packProductHistory[el.id].push(outPid);
+            return;
+          }
+          // Campaign product can't run today (no bulk / packed silo full) → idle, still record intent as null
+          s.status='idle'; s.currentProduct=null;
+          logStop(el.id,el.name,day,'idle','Campaign product cannot run (no bulk or packed silo full)');
+          r.packProductHistory[el.id].push(null);
+          return;
+        }
+      }
+
+      // ── URGENCY SELECTION (one product/day) ──────────
+      // Rank each line by the days-of-cover urgency of its OUTPUT packed silo; pick the highest
+      // urgency line that can actually produce today (has bulk + packed-silo space).
+      let best=null, bestU=-1, anyStarved=false, anyBlocked=false, hadRunnable=false;
+      lines.forEach(line=>{
+        const outPid=line.product_id, inPid=line.packing_input_id;
+        const machineCapT=_packLineCapT(line)*ramp;
+        if(machineCapT<=0||!outPid||!inPid) return;
+        const srcSilos=packInSiloMap[el.id][inPid]||[];
+        const outSilos=packOutSiloMap[el.id][outPid]||[];
+        const availBulk=_availBulk(inPid,srcSilos);
+        const packSpace=_packSpace(outSilos);
+        const outputT=Math.max(0, Math.min(machineCapT, availBulk/(_packLineRatio(line)), packSpace));
+        if(outputT<=0){
+          if(availBulk<=0) anyStarved=true; else if(packSpace<=0) anyBlocked=true;
+          return;
+        }
+        hadRunnable=true;
+        // Urgency = lowest days-of-cover among this line's output silos (highest urgency wins).
+        let u=0; outSilos.forEach(si=>{ u=Math.max(u, urgency(si.id, el.id)); });
+        if(u>bestU){ bestU=u; best={line,outPid,inPid,ratio:_packLineRatio(line),outputT,srcSilos,outSilos}; }
       });
-      if(anyRun){ s.status=(s.status==='rampup')?'rampup':'running'; s.runDays++; }
-      else if(anyStarved){ s.status='starved'; logStop(el.id,el.name,day,'starved','No bulk cement in sourcing silo'); }
-      else if(anyBlocked){ s.status='blocked'; logStop(el.id,el.name,day,'blocked','Packed silo full'); }
-      else s.status='idle';
+
+      if(best){
+        _runLine(best.outPid,best.inPid,best.ratio,best.outputT,best.srcSilos,best.outSilos);
+        s.status=s.status==='rampup'?'rampup':'running'; s.runDays++;
+        s.currentProduct=best.outPid;
+        r.packProductHistory[el.id].push(best.outPid);
+      } else {
+        s.status='idle'; s.currentProduct=null;
+        if(!lines.length){ /* not configured */ }
+        else if(anyStarved) logStop(el.id,el.name,day,'starved','No bulk cement in sourcing silo');
+        else if(anyBlocked){ s.status='blocked'; logStop(el.id,el.name,day,'blocked','Packed silo full'); }
+        r.packProductHistory[el.id].push(null);
+      }
     });
 
     // ── STEP 6: RAIL DISPATCH ─────────────────────────
