@@ -7502,64 +7502,26 @@ function _renderSupplyViewInner(wrap){
         _facBerths(fac).forEach(b=>_berthProducts(b).forEach(pid=>{
           const rv=_unloadRealBerthProd(b.id,pid,ds); t+=rv>0?rv:_unloadPlanBerthProd(b,pid,ds); })); return t; };
 
-      // ── Group divider row: TRUCK TRANSFERS (inter-facility programs) ──
-      // Each active truck campaign shows a withdrawal row at the origin and an input
-      // row at the destination (arrival = departure + transit). Real actuals in
-      // real_transfers_daily (mode 'truck') override the planned daily rate.
+      // ── Truck transfer helpers — rendered as a per-facility subsection inside each
+      // facility block below (withdrawal when the facility is the origin, input when it
+      // is the destination). Real actuals in real_transfers_daily (mode 'truck')
+      // override the planned daily rate.
       const _ttCamps=(DB.truck_movements||[]).filter(tm=>!['Cancelled','Complete'].includes(tm.status||'Planned')&&tm.product_id&&tm.from_facility_id&&tm.to_facility_id);
-      if(_ttCamps.length){
-        const _ttFacName=id=>(DB.facilities.find(f=>f.id===id)||{}).name||id;
-        const _ttPName=pid=>(DB.products.find(p=>p.id===pid)||{}).name||pid;
-        // Tonnes shipped on a DEPARTURE date (real actual overrides the planned rate).
-        const _ttDep=(tm,ds)=>{
-          const real=(DB.real_transfers_daily||[]).filter(t=>t.date===ds&&t.mode==='truck'&&t.origin_facility_id===tm.from_facility_id&&t.dest_facility_id===tm.to_facility_id&&t.product_id===tm.product_id).reduce((s,t)=>s+(parseFloat(t.volume_t)||0),0);
-          if(real>0) return real;
-          const off=dateToDayOffset(ds,S.simCfg.start_date);
-          const so=dateToDayOffset(tm.date,S.simCfg.start_date);
-          const eo=tm.end_date?dateToDayOffset(tm.end_date,S.simCfg.start_date):1e9;
-          if(off<so||off>eo) return 0;
-          if(Array.isArray(tm.days_of_week)&&tm.days_of_week.length){ const dow=(new Date(ds+'T00:00:00').getDay()+6)%7; if(!tm.days_of_week.includes(dow)) return 0; }
-          return parseFloat(tm.daily_rate_t)||0;
-        };
-        const _ttOut=(tm,ds)=>_ttDep(tm,ds); // withdrawal on the departure date
-        const _ttIn=(tm,ds)=>{ const t=parseInt(tm.transit_days)||0; if(t<=0) return _ttDep(tm,ds); const dep=new Date(ds+'T00:00:00'); dep.setDate(dep.getDate()-t); return _ttDep(tm,dep._ymd()); }; // input on the arrival date
-        const _ttGrp='_trucktransfers_grp';
-        const _ttColG=grpCol.has(_ttGrp);
-        h+=`<tr onclick="_supToggleGrp('${_ttGrp}')" style="cursor:pointer;background:rgba(0,217,163,.05);border-top:2px solid var(--border2)">
-          <td style="${stickyLeft('var(--surface2)',0,'border-bottom:1px solid var(--border2),')}color:var(--text);font-weight:700;font-size:9px;letter-spacing:.5px">
-            ${_ttColG?'▶':'▼'} TRUCK TRANSFERS <span style="font-size:7px;opacity:.5;margin-left:4px">INTER-FACILITY PROGRAMS</span>
-          </td>`;
-        months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-          const mt=mon.dates.reduce((a,ds)=>a+_ttCamps.reduce((s,tm)=>s+_ttOut(tm,ds),0),0);
-          h+=`<td style="background:rgba(0,217,163,.06);border-left:2px solid rgba(0,217,163,.2);font-size:9px;font-weight:700;color:var(--text-dim);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border2)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
-          if(!isCol) mon.dates.forEach(ds=>{ const v=_ttCamps.reduce((s,tm)=>s+_ttOut(tm,ds),0);
-            h+=`<td class="sup-day-${mon.ym}" style="background:rgba(0,217,163,.03);font-size:9px;color:var(--text-dim);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border2);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
-        });
-        h+=`</tr>`;
-        if(!_ttColG) _ttCamps.forEach(tm=>{
-          const fromN=_ttFacName(tm.from_facility_id), toN=_ttFacName(tm.to_facility_id), pn=_ttPName(tm.product_id);
-          const dowNm=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
-          const sched=(Array.isArray(tm.days_of_week)&&tm.days_of_week.length)?tm.days_of_week.slice().sort((a,b)=>a-b).map(x=>dowNm[x]).join('/'):'daily';
-          h+=`<tr style="background:rgba(0,217,163,.02)"><td style="${stickyLeft('var(--surface)',1,'border-bottom:1px solid var(--border),')}color:var(--text);font-size:9px;font-weight:700">${fromN} → ${toN} · ${pn} <span style="color:var(--text-dim);font-size:8px;font-weight:400">${Number(tm.daily_rate_t||0).toLocaleString()} t/day · ${sched}${(parseInt(tm.transit_days)||0)>0?` · +${tm.transit_days}d`:''}</span></td>`;
-          months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-            h+=`<td style="border-left:2px solid rgba(0,217,163,.1);border-bottom:1px solid var(--border)"></td>`;
-            if(!isCol) mon.dates.forEach(ds=>{ h+=`<td class="sup-day-${mon.ym}" style="border-bottom:1px solid var(--border);${tdSty(ds)}"></td>`; });
-          });
-          h+=`</tr>`;
-          const _ttDataRow=(label,color,fn)=>{
-            let s=`<tr><td style="${stickyLeft('var(--surface)',2,'border-bottom:1px solid var(--border),')}color:${color};font-size:9px;font-weight:700">${label}</td>`;
-            months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-              const mt=mon.dates.reduce((a,ds)=>a+fn(ds),0);
-              s+=`<td style="border-left:2px solid var(--border2);font-size:9px;font-weight:700;color:${color};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
-              if(!isCol) mon.dates.forEach(ds=>{ const v=fn(ds);
-                s+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${v>0?color:'var(--text-dim)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
-            });
-            return s+`</tr>`;
-          };
-          h+=_ttDataRow('↑ Withdraw @ '+fromN, 'var(--simulated)', ds=>_ttOut(tm,ds));
-          h+=_ttDataRow('↓ Input @ '+toN, 'var(--real)', ds=>_ttIn(tm,ds));
-        });
-      }
+      const _ttFacName=id=>(DB.facilities.find(f=>f.id===id)||{}).name||id;
+      const _ttPName=pid=>(DB.products.find(p=>p.id===pid)||{}).name||pid;
+      // Tonnes shipped on a DEPARTURE date (real actual overrides the planned rate).
+      const _ttDep=(tm,ds)=>{
+        const real=(DB.real_transfers_daily||[]).filter(t=>t.date===ds&&t.mode==='truck'&&t.origin_facility_id===tm.from_facility_id&&t.dest_facility_id===tm.to_facility_id&&t.product_id===tm.product_id).reduce((s,t)=>s+(parseFloat(t.volume_t)||0),0);
+        if(real>0) return real;
+        const off=dateToDayOffset(ds,S.simCfg.start_date);
+        const so=dateToDayOffset(tm.date,S.simCfg.start_date);
+        const eo=tm.end_date?dateToDayOffset(tm.end_date,S.simCfg.start_date):1e9;
+        if(off<so||off>eo) return 0;
+        if(Array.isArray(tm.days_of_week)&&tm.days_of_week.length){ const dow=(new Date(ds+'T00:00:00').getDay()+6)%7; if(!tm.days_of_week.includes(dow)) return 0; }
+        return parseFloat(tm.daily_rate_t)||0;
+      };
+      const _ttOut=(tm,ds)=>_ttDep(tm,ds); // withdrawal shown on the departure date
+      const _ttIn=(tm,ds)=>{ const t=parseInt(tm.transit_days)||0; if(t<=0) return _ttDep(tm,ds); const dep=new Date(ds+'T00:00:00'); dep.setDate(dep.getDate()-t); return _ttDep(tm,dep._ymd()); }; // input on the arrival date
 
       // ── Group divider row: TERMINALS ──
       const _tGrp='_terminals_grp';
@@ -7604,6 +7566,34 @@ function _renderSupplyViewInner(wrap){
           s+=`<td style="border-left:2px solid var(--border2);border-bottom:1px solid var(--border)"></td>`;
           if(!isCol) mon.dates.forEach(ds=>{ s+=`<td class="sup-day-${mon.ym}" style="border-bottom:1px solid var(--border);${tdSty(ds)}"></td>`; }); });
           return s; };
+
+        // ── TRUCK TRANSFERS subsection (this facility only) ──
+        // Origin campaigns show a withdrawal row; destination campaigns show an input row.
+        {
+          const _ttOuts=_ttCamps.filter(tm=>tm.from_facility_id===fac.id);
+          const _ttIns=_ttCamps.filter(tm=>tm.to_facility_id===fac.id);
+          if(_ttOuts.length||_ttIns.length){
+            const _ttKey='truckXfer';
+            h+=`<tr class="sup-sec-hdr" data-seckey="${_ttKey}" onclick="_supToggleSec('${_ttKey}')" style="cursor:pointer;background:rgba(0,217,163,.05);border-top:1px solid rgba(0,217,163,.3)">
+              <td style="${stickyLeft('var(--surface)',depth+1,'border-bottom:1px solid var(--border),')}color:#00d9a3;font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow(_ttKey)}</span> TRUCK TRANSFERS</td>${_blankCells()}</tr>`;
+            const _ttRow=(tm,dir)=>{
+              const label=`${_ttFacName(tm.from_facility_id)} → ${_ttFacName(tm.to_facility_id)} · ${_ttPName(tm.product_id)}`;
+              const color=dir==='out'?'var(--simulated)':'var(--real)';
+              const tag=dir==='out'?'↑ out':'↓ in';
+              const fn=dir==='out'?(ds=>_ttOut(tm,ds)):(ds=>_ttIn(tm,ds));
+              let r=`<tr class="supsec-${_ttKey}"><td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${color};font-size:9px"><span style="font-size:8px;opacity:.85;margin-right:4px">${tag}</span>${label}</td>`;
+              months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+                const mt=mon.dates.reduce((a,ds)=>a+fn(ds),0);
+                r+=`<td style="border-left:2px solid rgba(0,217,163,.15);font-size:9px;font-weight:700;color:${color};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                if(!isCol) mon.dates.forEach(ds=>{ const v=fn(ds);
+                  r+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${v>0?color:'var(--text-dim)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+              });
+              return r+`</tr>`;
+            };
+            _ttOuts.forEach(tm=>h+=_ttRow(tm,'out'));
+            _ttIns.forEach(tm=>h+=_ttRow(tm,'in'));
+          }
+        }
 
         // Ship berths + which product each vessel carries — used by the per-product vessel
         // Gantt below (it replaces the flat "Unloading" tonnage row inside each product block).
