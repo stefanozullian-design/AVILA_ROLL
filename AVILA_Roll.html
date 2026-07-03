@@ -13133,11 +13133,24 @@ function simulate(elements, connections, horizon, includeProposed=false){
     // (real_transfers_daily, mode 'truck') override the planned daily rate.
     _truckCampaigns.forEach(tm=>{
       const pid=tm.product_id; if(!pid) return;
-      // ORIGIN: outflow leaves on `day` — drain silos of the origin facility present here.
+      // ORIGIN: outflow leaves on `day` — drain silos holding this product at the origin
+      // facility (any product category: cement, SCM, additive, clinker), narrowed to the
+      // silos feeding from_dispatch_id when one is set.
       if(_runFacs.has(tm.from_facility_id)){
         const realT=_truckRealT(tm,_ds7);
-        const outRate=realT!=null?realT:_truckPlanRate(tm,day);
-        if(outRate>0) _pullDemand([pid], outRate, _truckOriginSilos[tm.id]||new Set(), tm.from_facility_id, false);
+        let outRate=realT!=null?realT:_truckPlanRate(tm,day);
+        if(outRate>0){
+          const topo=_truckOriginSilos[tm.id]||new Set(); const useTopo=topo.size>0;
+          const originSilos=elements.filter(e=>(e.type==='bulk_silo'||e.type==='packed_silo')&&
+            (useTopo?topo.has(e.id):(e.assigned_facility_id||e.facility_id)===tm.from_facility_id)&&
+            getSiloProducts(e).includes(pid));
+          for(const si of originSilos){
+            if(outRate<=0) break;
+            const ss=state[si.id];
+            const take=Math.min(outRate, Math.max(0,(ss.inventory||0)-(siloOutflow[si.id]||0)));
+            if(take>0){ siloOutflow[si.id]=(siloOutflow[si.id]||0)+take; outRate-=take; }
+          }
+        }
       }
       // DESTINATION: inflow arrives `transit_days` after departure — credit accepting
       // silos of the destination facility present in this run.
@@ -13149,7 +13162,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
           const realT=_truckRealT(tm,depDs);
           let remaining=realT!=null?realT:_truckPlanRate(tm,depDay);
           if(remaining>0){
-            const accept=elements.filter(e=>e.type==='bulk_silo'&&(e.assigned_facility_id||e.facility_id)===tm.to_facility_id&&getSiloProducts(e).includes(pid));
+            const accept=elements.filter(e=>(e.type==='bulk_silo'||e.type==='packed_silo')&&(e.assigned_facility_id||e.facility_id)===tm.to_facility_id&&getSiloProducts(e).includes(pid));
             for(const si of accept){
               if(remaining<=0) break;
               const ss=state[si.id];
@@ -15980,7 +15993,79 @@ function saveRail(){
 
 function editTransport(mode,idx){
   if(mode==='rail') _editRail(idx);
-  else if(mode==='truck') statMsg('Truck edit — coming soon');
+  else if(mode==='truck') _editTruck(idx);
+}
+
+function _editTruck(i){
+  const t=DB.truck_movements[i]; if(!t) return;
+  const pi='background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:10px;padding:5px 7px;outline:none;width:100%';
+  const pf='display:flex;flex-direction:column;gap:3px';
+  const pl='font-family:var(--mono);font-size:8px;color:var(--text-dim);letter-spacing:.5px;text-transform:uppercase';
+  const prods=DB.products.map(p=>`<option value="${p.id}" ${p.id===t.product_id?'selected':''}>${p.name}</option>`).join('');
+  const fromOpts=DB.facilities.map(f=>`<option value="${f.id}" ${f.id===t.from_facility_id?'selected':''}>${f.name}</option>`).join('');
+  const toOpts=DB.facilities.map(f=>`<option value="${f.id}" ${f.id===t.to_facility_id?'selected':''}>${f.name}</option>`).join('');
+  const statusOpts=TRANSPORT_STATUSES.map(s=>`<option value="${s.id}" ${s.id===(t.status||'Planned')?'selected':''}>${s.id}</option>`).join('');
+  const truckDisp=DB.elements.filter(e=>e.type==='dispatch_point'&&(e.props?.dispatch_type||'Truck')==='Truck');
+  const dispOpts=`<option value="">-- facility-level (any silo) --</option>`+truckDisp.map(d=>{
+    const fac=DB.facilities.find(f=>f.id===(d.assigned_facility_id||d.facility_id));
+    return `<option value="${d.id}" ${d.id===t.from_dispatch_id?'selected':''}>${d.name}${fac?` (${fac.name})`:''}</option>`;
+  }).join('');
+  const dowSet=new Set(Array.isArray(t.days_of_week)?t.days_of_week:[]);
+  const dowNames=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  const dowToggles=dowNames.map((n,idx)=>`<label style="display:inline-flex;align-items:center;gap:3px;font-family:var(--mono);font-size:9px;color:var(--text-dim);cursor:pointer"><input type="checkbox" class="etk-dow" value="${idx}" ${dowSet.has(idx)?'checked':''}> ${n}</label>`).join('');
+  let h=`<div class="modal-hdr"><span class="modal-title">Edit Truck Movement</span><span class="modal-close" onclick="closeModal()">✕</span></div>
+  <div style="padding:16px;display:flex;flex-direction:column;gap:12px">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div style="${pf}"><div style="${pl}">Reference</div><input style="${pi}" id="etk-ref" value="${t.reference||''}"></div>
+      <div style="${pf}"><div style="${pl}">Product</div><select style="${pi}" id="etk-prod"><option value="">-- Select --</option>${prods}</select></div>
+    </div>
+    <div style="${pf}"><div style="${pl}">Origin Dispatch Point (optional)</div><select style="${pi}" id="etk-disp">${dispOpts}</select></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div style="${pf}"><div style="${pl}">From Facility</div><select style="${pi}" id="etk-from">${fromOpts}</select></div>
+      <div style="${pf}"><div style="${pl}">To Facility</div><select style="${pi}" id="etk-to">${toOpts}</select></div>
+    </div>
+    <div style="${pf}"><div style="${pl}">Ship on Days (none checked = every day)</div><div style="display:flex;gap:12px;flex-wrap:wrap;padding:4px 0">${dowToggles}</div></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div style="${pf}"><div style="${pl}">Start Date</div><input style="${pi}" type="date" id="etk-date" value="${t.date||''}"></div>
+      <div style="${pf}"><div style="${pl}">End Date (blank = open)</div><input style="${pi}" type="date" id="etk-end" value="${t.end_date||''}"></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+      <div style="${pf}"><div style="${pl}">Daily Rate (t/day)</div><input style="${pi}" type="number" id="etk-rate" value="${t.daily_rate_t||0}"></div>
+      <div style="${pf}"><div style="${pl}">Truck Capacity (t)</div><input style="${pi}" type="number" id="etk-cap" value="${t.truck_capacity_t||0}"></div>
+      <div style="${pf}"><div style="${pl}">Transit Days</div><input style="${pi}" type="number" id="etk-transit" min="0" value="${parseInt(t.transit_days)||0}"></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div style="${pf}"><div style="${pl}">Status</div><select style="${pi}" id="etk-status">${statusOpts}</select></div>
+      <div style="${pf}"><div style="${pl}">Notes</div><input style="${pi}" id="etk-notes" value="${t.notes||''}"></div>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="tb-btn sec" onclick="closeModal()">Close</button>
+      <button class="tb-btn" onclick="_saveEditTruck(${i})">Save Changes</button>
+    </div>
+  </div>`;
+  showModal('_custom');
+  document.getElementById('modal-content').innerHTML=h;
+}
+
+function _saveEditTruck(i){
+  const t=DB.truck_movements[i]; if(!t) return;
+  const fromId=document.getElementById('etk-from')?.value||t.from_facility_id;
+  const toId=document.getElementById('etk-to')?.value||t.to_facility_id;
+  if(!toId||toId===fromId){ alert('Select a different destination facility.'); return; }
+  const rate=parseFloat(document.getElementById('etk-rate')?.value)||0;
+  const cap=parseFloat(document.getElementById('etk-cap')?.value)||0;
+  t.reference=document.getElementById('etk-ref')?.value||t.reference;
+  t.product_id=document.getElementById('etk-prod')?.value||t.product_id;
+  t.from_dispatch_id=document.getElementById('etk-disp')?.value||null;
+  t.from_facility_id=fromId; t.to_facility_id=toId;
+  t.days_of_week=[...document.querySelectorAll('.etk-dow:checked')].map(c=>parseInt(c.value));
+  t.date=document.getElementById('etk-date')?.value||t.date;
+  t.end_date=document.getElementById('etk-end')?.value||null;
+  t.daily_rate_t=rate; t.truck_capacity_t=cap; t.trips_per_day=cap>0?Math.ceil(rate/cap):0;
+  t.transit_days=parseInt(document.getElementById('etk-transit')?.value)||0;
+  t.status=document.getElementById('etk-status')?.value||t.status;
+  t.notes=document.getElementById('etk-notes')?.value??t.notes;
+  autoSave(); closeModal(); renderTruckTable(); if(typeof runSimulation==='function') runSimulation(); statMsg('Truck movement updated');
 }
 
 function _editRail(i){
@@ -16079,7 +16164,7 @@ function truckHTML(){
       <select class="fi" id="tk-disp" onchange="_tkDispChange(this)"><option value="">-- facility-level (any silo) --</option>${dispOpts}</select>
       <div class="fhint">Pick a Truck dispatch set to “External” to tap its silos and auto-fill From/To. Leave blank to pull from any origin silo of the product.</div></div></div>
     <div class="fr"><div class="ff"><div class="fl">From Facility</div><select class="fi" id="tk-from">${allFacOpts}</select></div>
-      <div class="ff"><div class="fl">To Facility</div><select class="fi" id="tk-to">${allFacOpts}</select></div></div>
+      <div class="ff"><div class="fl">To Facility</div><select class="fi" id="tk-to"><option value="">-- Select destination --</option>${DB.facilities.map(f=>`<option value="${f.id}">${f.name}</option>`).join('')}</select></div></div>
     <div class="fr s1"><div class="ff"><div class="fl">Ship on Days (leave all unchecked = every day)</div>
       <div style="display:flex;gap:12px;flex-wrap:wrap;padding:4px 0">${dowToggles}</div></div></div>
     <div class="fr"><div class="ff"><div class="fl">Product</div><select class="fi" id="tk-prod"><option value="">-- Select --</option>${prods}</select></div>
@@ -20066,7 +20151,7 @@ function renderRealDataSections(){
         return {labels:[`→ ${dest?.name||'?'}`, prod?.name||'?'],
           cell:{elemId:facId,prodId:tm.product_id,type:'trucktransfer',dest:tm.to_facility_id,unit:'t',value:val}};
       });
-      html+=rdListSection('CEMENT TRANSFERING (Truck)',`Actual tonnes trucked out on ${dateStr} — overrides the planned rate`,['DESTINATION','PRODUCT'],rows,'STn');
+      html+=rdListSection('TRUCK TRANSFERS (OUTBOUND)',`Actual tonnes trucked out on ${dateStr} — overrides the planned rate`,['DESTINATION','PRODUCT'],rows,'STn');
     }
   }
 
