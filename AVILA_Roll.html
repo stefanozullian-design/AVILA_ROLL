@@ -1664,7 +1664,7 @@ const DB = {
   vessel_calls:       [], // { id, facility_id, berth_element_id, berth_name, name, arrival_date, cargo_type, quantity_t, unload_rate_tph, transit_days, status, notes }
   rail_movements:     [], // { id, from_facility_id, to_facility_id, from_dispatch_id, to_berth_id, reference, departure_date, wagon_count, wagon_capacity_t, total_capacity_t, product_id, loading_rate_tph, min_load_pct, transit_days, switch_day, status, notes } — also used for manager "push" allocations (status Confirmed)
   rail_loading_plan:  [], // { id, dispatch_id, product_id, cars_per_day, date_from?, date_to? } — ops loading plan: cars/day to load per product at a rail dispatch point. No dates = base rate; dated rows override that range.
-  truck_movements:    [], // { id, from_facility_id, to_facility_id, from_dispatch_id, to_element_id, reference, date (start), end_date, daily_rate_t, truck_capacity_t, trips_per_day, product_id, days_of_week:[0=Mon..6=Sun] (empty=every day), transit_days (default 0=same day), status, notes } — inter-facility truck transfer "campaign": ships daily_rate_t/day of product from origin to destination over the date range on the selected weekdays. Actuals in real_transfers_daily (mode 'truck') override the plan.
+  truck_movements:    [], // { id, from_facility_id, to_facility_id, from_dispatch_id (LOAD node = Truck dispatch point), to_element_id (UNLOAD node = Truck Receiving berth), reference, date (start), end_date, daily_rate_t, truck_capacity_t, trips_per_day, product_id, days_of_week:[0=Mon..6=Sun] (empty=every day), transit_days (default 0=same day), status, notes } — inter-facility truck transfer "campaign" between a LOAD node and an UNLOAD node: drains the silos feeding the LOAD point, credits the silos fed by the UNLOAD point (after transit) with only what the origin could supply. from/to_facility_id are derived from the nodes. Actuals in real_transfers_daily (mode 'truck') override the plan.
   transport_links:    [], // { id, from_facility_id, to_facility_id, mode:'truck'|'rail'|'vessel', transit_days, notes } — network level links
   in_transit_inventory:[], // { id, mode, reference_id, product_id, quantity_t, departure_date, arrival_date, to_facility_id, to_element_id, status:'in_transit'|'arrived'|'unloading'|'complete' }
   fuel_deliveries:    [], // future
@@ -7567,21 +7567,23 @@ function _renderSupplyViewInner(wrap){
           if(!isCol) mon.dates.forEach(ds=>{ s+=`<td class="sup-day-${mon.ym}" style="border-bottom:1px solid var(--border);${tdSty(ds)}"></td>`; }); });
           return s; };
 
-        // ── TRUCK TRANSFERS subsection (this facility only) ──
-        // Origin campaigns show a withdrawal row; destination campaigns show an input row.
+        // ── TRUCK TRANSFERS subsection — grouped by truck node ──
+        // Origin facility: one collapsible parent per LOAD point (dispatch) = total
+        // dispatched, children = per-destination lanes. Destination facility: one parent
+        // per UNLOAD point (receiving berth) = total received, children = per-origin lanes.
         {
-          const _ttOuts=_ttCamps.filter(tm=>tm.from_facility_id===fac.id);
-          const _ttIns=_ttCamps.filter(tm=>tm.to_facility_id===fac.id);
-          if(_ttOuts.length||_ttIns.length){
-            const _ttKey='truckXfer';
-            h+=`<tr class="sup-sec-hdr" data-seckey="${_ttKey}" onclick="_supToggleSec('${_ttKey}')" style="cursor:pointer;background:rgba(0,217,163,.05);border-top:1px solid rgba(0,217,163,.3)">
-              <td style="${stickyLeft('var(--surface)',depth+1,'border-bottom:1px solid var(--border),')}color:#00d9a3;font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow(_ttKey)}</span> TRUCK TRANSFERS</td>${_blankCells()}</tr>`;
-            const _ttRow=(tm,dir)=>{
-              const label=`${_ttFacName(tm.from_facility_id)} → ${_ttFacName(tm.to_facility_id)} · ${_ttPName(tm.product_id)}`;
-              const color=dir==='out'?'var(--simulated)':'var(--real)';
-              const tag=dir==='out'?'↑ out':'↓ in';
-              const fn=dir==='out'?(ds=>_ttOut(tm,ds)):(ds=>_ttIn(tm,ds));
-              let r=`<tr class="supsec-${_ttKey}"><td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${color};font-size:9px"><span style="font-size:8px;opacity:.85;margin-right:4px">${tag}</span>${label}</td>`;
+          const _elById=id=>DB.elements.find(e=>e.id===id);
+          const loadGroups={}, unloadGroups={};
+          _ttCamps.forEach(tm=>{
+            const disp=_elById(tm.from_dispatch_id), recv=_elById(tm.to_element_id);
+            const oFac=disp?_elFac(disp):tm.from_facility_id;
+            const dFac=recv?_elFac(recv):tm.to_facility_id;
+            if(oFac===fac.id){ const k=tm.from_dispatch_id||('_of_'+tm.from_facility_id); (loadGroups[k]=loadGroups[k]||[]).push(tm); }
+            if(dFac===fac.id){ const k=tm.to_element_id||('_df_'+tm.to_facility_id); (unloadGroups[k]=unloadGroups[k]||[]).push(tm); }
+          });
+          if(Object.keys(loadGroups).length||Object.keys(unloadGroups).length){
+            const _ttNodeRow=(label,dep,color,fn,trAttr,strong)=>{
+              let r=`<tr ${trAttr||''}><td style="${stickyLeft('var(--surface)',dep,'border-bottom:1px solid var(--border),')}color:${color};font-size:9px;${strong?'font-weight:700':''}">${label}</td>`;
               months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
                 const mt=mon.dates.reduce((a,ds)=>a+fn(ds),0);
                 r+=`<td style="border-left:2px solid rgba(0,217,163,.15);font-size:9px;font-weight:700;color:${color};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
@@ -7590,8 +7592,25 @@ function _renderSupplyViewInner(wrap){
               });
               return r+`</tr>`;
             };
-            _ttOuts.forEach(tm=>h+=_ttRow(tm,'out'));
-            _ttIns.forEach(tm=>h+=_ttRow(tm,'in'));
+            // Subsection header
+            h+=`<tr style="background:rgba(0,217,163,.05);border-top:1px solid rgba(0,217,163,.3)">
+              <td style="${stickyLeft('var(--surface)',depth+1,'border-bottom:1px solid var(--border),')}color:#00d9a3;font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase">TRUCK TRANSFERS</td>${_blankCells()}</tr>`;
+            const renderNode=(nodeId,list,dir)=>{
+              const node=_elById(nodeId);
+              const nodeName=node?node.name:(dir==='out'?'Truck loading (facility)':'Truck receiving (facility)');
+              const color=dir==='out'?'var(--simulated)':'var(--real)';
+              const fnFor=tm=>(dir==='out'?(ds=>_ttOut(tm,ds)):(ds=>_ttIn(tm,ds)));
+              const nodeFn=ds=>list.reduce((s,tm)=>s+fnFor(tm)(ds),0);
+              const gkey='trucknode_'+dir+'_'+nodeId;
+              const col=grpCol.has(gkey);
+              h+=_ttNodeRow(`${col?'▶':'▼'} ${nodeName}`, depth+2, color, nodeFn, `onclick="_supToggleGrp('${gkey}')" style="cursor:pointer"`, true);
+              if(!col) list.forEach(tm=>{
+                const lane=`${_ttFacName(tm.from_facility_id)} → ${_ttFacName(tm.to_facility_id)} · ${_ttPName(tm.product_id)}`;
+                h+=_ttNodeRow(`&nbsp;&nbsp;&nbsp;${lane}`, depth+3, color, fnFor(tm));
+              });
+            };
+            Object.entries(loadGroups).forEach(([k,list])=>renderNode(k,list,'out'));
+            Object.entries(unloadGroups).forEach(([k,list])=>renderNode(k,list,'in'));
           }
         }
 
@@ -11690,6 +11709,20 @@ function simulate(elements, connections, horizon, includeProposed=false){
     }
     _truckOriginSilos[tm.id]=set;
   });
+  // Destination silo set per campaign = silos fed by its to_element_id (UNLOAD node).
+  const _truckDestSilos={};
+  _truckCampaigns.forEach(tm=>{
+    const set=new Set();
+    if(tm.to_element_id&&elMap[tm.to_element_id]){
+      const seen=new Set([tm.to_element_id]); const q=[tm.to_element_id];
+      while(q.length){ const id=q.shift();
+        (dn[id]||[]).forEach(did=>{ if(seen.has(did)) return; seen.add(did);
+          const el=elMap[did]; if(!el) return;
+          if(el.type==='bulk_silo'||el.type==='packed_silo') set.add(did); else q.push(did); });
+      }
+    }
+    _truckDestSilos[tm.id]=set;
+  });
   // Actual tonnes shipped per campaign per departure day (capped by origin availability).
   // The destination credits from this — never more than the origin could supply — so mass
   // is conserved. Only populated when the origin facility is simulated in this run.
@@ -13222,7 +13255,10 @@ function simulate(elements, connections, horizon, includeProposed=false){
             ? ((_truckShipped[tm.id]||{})[depDay]||0)
             : (realT!=null?realT:_truckPlanRate(tm,depDay));
           if(remaining>0){
-            const accept=elements.filter(e=>(e.type==='bulk_silo'||e.type==='packed_silo')&&(e.assigned_facility_id||e.facility_id)===tm.to_facility_id&&getSiloProducts(e).includes(pid));
+            const dtopo=_truckDestSilos[tm.id]||new Set(); const useDtopo=dtopo.size>0;
+            const accept=elements.filter(e=>(e.type==='bulk_silo'||e.type==='packed_silo')&&
+              (useDtopo?dtopo.has(e.id):(e.assigned_facility_id||e.facility_id)===tm.to_facility_id)&&
+              getSiloProducts(e).includes(pid));
             for(const si of accept){
               if(remaining<=0) break;
               const ss=state[si.id];
@@ -16062,14 +16098,9 @@ function _editTruck(i){
   const pf='display:flex;flex-direction:column;gap:3px';
   const pl='font-family:var(--mono);font-size:8px;color:var(--text-dim);letter-spacing:.5px;text-transform:uppercase';
   const prods=DB.products.map(p=>`<option value="${p.id}" ${p.id===t.product_id?'selected':''}>${p.name}</option>`).join('');
-  const fromOpts=DB.facilities.map(f=>`<option value="${f.id}" ${f.id===t.from_facility_id?'selected':''}>${f.name}</option>`).join('');
-  const toOpts=DB.facilities.map(f=>`<option value="${f.id}" ${f.id===t.to_facility_id?'selected':''}>${f.name}</option>`).join('');
   const statusOpts=TRANSPORT_STATUSES.map(s=>`<option value="${s.id}" ${s.id===(t.status||'Planned')?'selected':''}>${s.id}</option>`).join('');
-  const truckDisp=DB.elements.filter(e=>e.type==='dispatch_point'&&(e.props?.dispatch_type||'Truck')==='Truck');
-  const dispOpts=`<option value="">-- facility-level (any silo) --</option>`+truckDisp.map(d=>{
-    const fac=DB.facilities.find(f=>f.id===(d.assigned_facility_id||d.facility_id));
-    return `<option value="${d.id}" ${d.id===t.from_dispatch_id?'selected':''}>${d.name}${fac?` (${fac.name})`:''}</option>`;
-  }).join('');
+  const loadOpts=`<option value="">-- Select loading point --</option>`+_truckLoadNodes().map(d=>_truckNodeOpt(d,t.from_dispatch_id)).join('');
+  const unloadOpts=`<option value="">-- Select receiving point --</option>`+_truckUnloadNodes().map(d=>_truckNodeOpt(d,t.to_element_id)).join('');
   const dowSet=new Set(Array.isArray(t.days_of_week)?t.days_of_week:[]);
   const dowNames=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
   const dowToggles=dowNames.map((n,idx)=>`<label style="display:inline-flex;align-items:center;gap:3px;font-family:var(--mono);font-size:9px;color:var(--text-dim);cursor:pointer"><input type="checkbox" class="etk-dow" value="${idx}" ${dowSet.has(idx)?'checked':''}> ${n}</label>`).join('');
@@ -16079,10 +16110,9 @@ function _editTruck(i){
       <div style="${pf}"><div style="${pl}">Reference</div><input style="${pi}" id="etk-ref" value="${t.reference||''}"></div>
       <div style="${pf}"><div style="${pl}">Product</div><select style="${pi}" id="etk-prod"><option value="">-- Select --</option>${prods}</select></div>
     </div>
-    <div style="${pf}"><div style="${pl}">Origin Dispatch Point (optional)</div><select style="${pi}" id="etk-disp">${dispOpts}</select></div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-      <div style="${pf}"><div style="${pl}">From Facility</div><select style="${pi}" id="etk-from">${fromOpts}</select></div>
-      <div style="${pf}"><div style="${pl}">To Facility</div><select style="${pi}" id="etk-to">${toOpts}</select></div>
+      <div style="${pf}"><div style="${pl}">Origin Dispatch Point (LOAD) *</div><select style="${pi}" id="etk-disp">${loadOpts}</select></div>
+      <div style="${pf}"><div style="${pl}">Destination Receiving Point (UNLOAD) *</div><select style="${pi}" id="etk-recv">${unloadOpts}</select></div>
     </div>
     <div style="${pf}"><div style="${pl}">Ship on Days (none checked = every day)</div><div style="display:flex;gap:12px;flex-wrap:wrap;padding:4px 0">${dowToggles}</div></div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
@@ -16109,15 +16139,20 @@ function _editTruck(i){
 
 function _saveEditTruck(i){
   const t=DB.truck_movements[i]; if(!t) return;
-  const fromId=document.getElementById('etk-from')?.value||t.from_facility_id;
-  const toId=document.getElementById('etk-to')?.value||t.to_facility_id;
-  if(!toId||toId===fromId){ alert('Select a different destination facility.'); return; }
+  const dispId=document.getElementById('etk-disp')?.value;
+  const recvId=document.getElementById('etk-recv')?.value;
+  const disp=DB.elements.find(e=>e.id===dispId);
+  const recv=DB.elements.find(e=>e.id===recvId);
+  if(!disp){ alert('Select an Origin Dispatch Point (LOAD).'); return; }
+  if(!recv){ alert('Select a Destination Receiving Point (UNLOAD).'); return; }
+  const fromFac=_elFac(disp), toFac=_elFac(recv);
+  if(fromFac===toFac){ alert('Origin and destination must be different facilities.'); return; }
   const rate=parseFloat(document.getElementById('etk-rate')?.value)||0;
   const cap=parseFloat(document.getElementById('etk-cap')?.value)||0;
   t.reference=document.getElementById('etk-ref')?.value||t.reference;
   t.product_id=document.getElementById('etk-prod')?.value||t.product_id;
-  t.from_dispatch_id=document.getElementById('etk-disp')?.value||null;
-  t.from_facility_id=fromId; t.to_facility_id=toId;
+  t.from_dispatch_id=dispId; t.to_element_id=recvId;
+  t.from_facility_id=fromFac; t.to_facility_id=toFac;
   t.days_of_week=[...document.querySelectorAll('.etk-dow:checked')].map(c=>parseInt(c.value));
   t.date=document.getElementById('etk-date')?.value||t.date;
   t.end_date=document.getElementById('etk-end')?.value||null;
@@ -16200,31 +16235,34 @@ function _saveEditRail(i){
   autoSave(); closeModal(); renderRailTable(); rpRender(); statMsg('Rail movement updated');
 }
 
+// Truck loading (LOAD) nodes = Truck dispatch points; receiving (UNLOAD) nodes =
+// berths of type 'Truck Receiving'. A truck movement is defined between one of each.
+function _truckLoadNodes(){ return DB.elements.filter(e=>e.type==='dispatch_point'&&(e.props?.dispatch_type||'Truck')==='Truck'); }
+function _truckUnloadNodes(){ return DB.elements.filter(e=>e.type==='berth'&&(e.props?.berth_type||'')==='Truck Receiving'); }
+function _elFac(el){ return el?(el.assigned_facility_id||el.facility_id):null; }
+function _elFacName(el){ const f=DB.facilities.find(x=>x.id===_elFac(el)); return f?f.name:''; }
+function _truckNodeOpt(el,sel){ return `<option value="${el.id}" ${el.id===sel?'selected':''}>${el.name}${_elFacName(el)?` (${_elFacName(el)})`:''}</option>`; }
+
 function truckHTML(){
   const prods=DB.products.map(p=>`<option value="${p.id}">${p.name}</option>`).join('');
-  const allFacOpts=DB.facilities.map(f=>`<option value="${f.id}" ${f.id===S.facility_id?'selected':''}>${f.name}</option>`).join('');
-  // Truck dispatch points (origin taps). External ones carry a destination facility we can auto-fill.
-  const truckDisp=DB.elements.filter(e=>e.type==='dispatch_point'&&(e.props?.dispatch_type||'Truck')==='Truck');
-  const dispOpts=truckDisp.map(d=>{
-    const fac=DB.facilities.find(f=>f.id===(d.assigned_facility_id||d.facility_id));
-    const ext=d.props?.truck_destination==='external'?' · external':'';
-    return `<option value="${d.id}" data-fac="${d.assigned_facility_id||d.facility_id||''}" data-dest="${d.props?.truck_dest_facility_id||''}">${d.name}${fac?` (${fac.name})`:''}${ext}</option>`;
-  }).join('');
+  const loadOpts=_truckLoadNodes().map(d=>_truckNodeOpt(d)).join('');
+  const unloadOpts=_truckUnloadNodes().map(d=>_truckNodeOpt(d)).join('');
   const dowNames=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
   const dowToggles=dowNames.map((n,i)=>`<label style="display:inline-flex;align-items:center;gap:3px;font-family:var(--mono);font-size:9px;color:var(--text-dim);cursor:pointer"><input type="checkbox" class="tk-dow" value="${i}"> ${n}</label>`).join('');
   return `
   <div class="modal-hdr"><span class="modal-title">Add Truck Movement — truck_movements</span><span class="modal-close" onclick="closeModal()">✕</span></div>
   <div class="modal-body">
     <div style="font-family:var(--mono);font-size:9px;color:var(--green);padding:8px;background:rgba(0,255,157,.05);border:1px solid rgba(0,255,157,.2);margin-bottom:10px">
-      ◆ Truck: Same-day delivery. Inventory deducted from source and added to destination on the same simulation day. No transit lag.
+      ◆ Truck: mass-balanced transfer between two topology nodes. Inventory is drained from the silos feeding the LOAD point and added to the silos fed by the UNLOAD point (after any transit days). The destination receives only what the origin can supply.
     </div>
     <div class="fr"><div class="ff"><div class="fl">Reference</div><input class="fi" id="tk-ref" placeholder="TRUCK-001"></div>
       <div class="ff"><div class="fl">Start Date</div><input class="fi" type="date" id="tk-date" value="${new Date()._ymd()}"></div></div>
-    <div class="fr s1"><div class="ff"><div class="fl">Origin Dispatch Point (optional)</div>
-      <select class="fi" id="tk-disp" onchange="_tkDispChange(this)"><option value="">-- facility-level (any silo) --</option>${dispOpts}</select>
-      <div class="fhint">Pick a Truck dispatch set to “External” to tap its silos and auto-fill From/To. Leave blank to pull from any origin silo of the product.</div></div></div>
-    <div class="fr"><div class="ff"><div class="fl">From Facility</div><select class="fi" id="tk-from">${allFacOpts}</select></div>
-      <div class="ff"><div class="fl">To Facility</div><select class="fi" id="tk-to"><option value="">-- Select destination --</option>${DB.facilities.map(f=>`<option value="${f.id}">${f.name}</option>`).join('')}</select></div></div>
+    <div class="fr"><div class="ff"><div class="fl">Origin Dispatch Point (LOAD) *</div>
+      <select class="fi" id="tk-disp"><option value="">-- Select loading point --</option>${loadOpts}</select>
+      <div class="fhint">Truck loading node — its facility is the origin.</div></div>
+      <div class="ff"><div class="fl">Destination Receiving Point (UNLOAD) *</div>
+      <select class="fi" id="tk-recv"><option value="">-- Select receiving point --</option>${unloadOpts}</select>
+      <div class="fhint">Truck unloading node — its facility is the destination.</div></div></div>
     <div class="fr s1"><div class="ff"><div class="fl">Ship on Days (leave all unchecked = every day)</div>
       <div style="display:flex;gap:12px;flex-wrap:wrap;padding:4px 0">${dowToggles}</div></div></div>
     <div class="fr"><div class="ff"><div class="fl">Product</div><select class="fi" id="tk-prod"><option value="">-- Select --</option>${prods}</select></div>
@@ -16243,16 +16281,21 @@ function truckHTML(){
     <button class="btn-pri" onclick="saveTruck()">Add Truck Movement</button></div>`;}
 
 function saveTruck(){
-  const fromId=document.getElementById('tk-from')?.value;
-  const toId=document.getElementById('tk-to')?.value;
-  if(!toId||toId===fromId){alert('Select a different destination facility.');return;}
+  const dispId=document.getElementById('tk-disp')?.value;
+  const recvId=document.getElementById('tk-recv')?.value;
+  const disp=DB.elements.find(e=>e.id===dispId);
+  const recv=DB.elements.find(e=>e.id===recvId);
+  if(!disp){ alert('Select an Origin Dispatch Point (LOAD).'); return; }
+  if(!recv){ alert('Select a Destination Receiving Point (UNLOAD).'); return; }
+  const fromFac=_elFac(disp), toFac=_elFac(recv);
+  if(fromFac===toFac){ alert('Origin and destination must be different facilities.'); return; }
   const rate=parseFloat(document.getElementById('tk-rate')?.value)||0;
   const cap=parseFloat(document.getElementById('tk-cap')?.value)||25;
   const daysOfWeek=[...document.querySelectorAll('.tk-dow:checked')].map(c=>parseInt(c.value));
   DB.truck_movements.push({
     id:`tk_${Date.now()}`,
-    from_facility_id:fromId, to_facility_id:toId,
-    from_dispatch_id:document.getElementById('tk-disp')?.value||null,
+    from_facility_id:fromFac, to_facility_id:toFac,
+    from_dispatch_id:dispId, to_element_id:recvId,
     reference:document.getElementById('tk-ref')?.value||`TRUCK-${Date.now()}`,
     date:document.getElementById('tk-date')?.value,
     end_date:document.getElementById('tk-end')?.value||null,
@@ -16264,17 +16307,6 @@ function saveTruck(){
     notes:document.getElementById('tk-notes')?.value||'', status:'Planned'
   });
   autoSave(); closeModal(); renderTruckTable(); if(typeof runSimulation==='function') runSimulation(); statMsg('Truck movement added');
-}
-
-// Origin-dispatch picker in the Truck Movement modal: auto-fill From (the dispatch's
-// facility) and, when the dispatch is set to External, the To facility (its destination).
-function _tkDispChange(sel){
-  const opt=sel.options[sel.selectedIndex]; if(!opt) return;
-  const fac=opt.getAttribute('data-fac')||'';
-  const dest=opt.getAttribute('data-dest')||'';
-  const fromSel=document.getElementById('tk-from'), toSel=document.getElementById('tk-to');
-  if(fac&&fromSel) fromSel.value=fac;
-  if(dest&&toSel) toSel.value=dest;
 }
 
 
