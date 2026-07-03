@@ -11690,6 +11690,10 @@ function simulate(elements, connections, horizon, includeProposed=false){
     }
     _truckOriginSilos[tm.id]=set;
   });
+  // Actual tonnes shipped per campaign per departure day (capped by origin availability).
+  // The destination credits from this — never more than the origin could supply — so mass
+  // is conserved. Only populated when the origin facility is simulated in this run.
+  const _truckShipped={};
   // Is a campaign shipping on this 1-based sim day? (date range + weekday filter)
   const _truckActiveDay=(tm,day)=>{
     if(day<1) return false;
@@ -13188,6 +13192,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
       if(_runFacs.has(tm.from_facility_id)){
         const realT=_truckRealT(tm,_ds7);
         let outRate=realT!=null?realT:_truckPlanRate(tm,day);
+        let shipped=0;
         if(outRate>0){
           const topo=_truckOriginSilos[tm.id]||new Set(); const useTopo=topo.size>0;
           const originSilos=elements.filter(e=>(e.type==='bulk_silo'||e.type==='packed_silo')&&
@@ -13197,19 +13202,25 @@ function simulate(elements, connections, horizon, includeProposed=false){
             if(outRate<=0) break;
             const ss=state[si.id];
             const take=Math.min(outRate, Math.max(0,(ss.inventory||0)-(siloOutflow[si.id]||0)));
-            if(take>0){ siloOutflow[si.id]=(siloOutflow[si.id]||0)+take; outRate-=take; }
+            if(take>0){ siloOutflow[si.id]=(siloOutflow[si.id]||0)+take; outRate-=take; shipped+=take; }
           }
         }
+        // Record what actually left the origin so the destination credits exactly this.
+        (_truckShipped[tm.id]=_truckShipped[tm.id]||{})[day]=shipped;
       }
       // DESTINATION: inflow arrives `transit_days` after departure — credit accepting
-      // silos of the destination facility present in this run.
+      // silos of the destination facility present in this run. When the origin is also
+      // simulated here, credit ONLY what it actually shipped (mass conservation);
+      // otherwise fall back to the planned/real rate.
       if(_runFacs.has(tm.to_facility_id)){
         const transit=parseInt(tm.transit_days)||0;
         const depDay=day-transit;
         if(depDay>=1){
           const depDs=new Date(simStartDate.getTime()+(depDay-1)*864e5)._ymd();
           const realT=_truckRealT(tm,depDs);
-          let remaining=realT!=null?realT:_truckPlanRate(tm,depDay);
+          let remaining=_runFacs.has(tm.from_facility_id)
+            ? ((_truckShipped[tm.id]||{})[depDay]||0)
+            : (realT!=null?realT:_truckPlanRate(tm,depDay));
           if(remaining>0){
             const accept=elements.filter(e=>(e.type==='bulk_silo'||e.type==='packed_silo')&&(e.assigned_facility_id||e.facility_id)===tm.to_facility_id&&getSiloProducts(e).includes(pid));
             for(const si of accept){
