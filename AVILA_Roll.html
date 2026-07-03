@@ -7567,52 +7567,56 @@ function _renderSupplyViewInner(wrap){
           if(!isCol) mon.dates.forEach(ds=>{ s+=`<td class="sup-day-${mon.ym}" style="border-bottom:1px solid var(--border);${tdSty(ds)}"></td>`; }); });
           return s; };
 
-        // ── TRUCK TRANSFERS subsection — grouped by truck node ──
-        // Origin facility: one collapsible parent per LOAD point (dispatch) = total
-        // dispatched, children = per-destination lanes. Destination facility: one parent
-        // per UNLOAD point (receiving berth) = total received, children = per-origin lanes.
-        {
-          const _elById=id=>DB.elements.find(e=>e.id===id);
-          const loadGroups={}, unloadGroups={};
-          _ttCamps.forEach(tm=>{
-            const disp=_elById(tm.from_dispatch_id), recv=_elById(tm.to_element_id);
-            const oFac=disp?_elFac(disp):tm.from_facility_id;
-            const dFac=recv?_elFac(recv):tm.to_facility_id;
-            if(oFac===fac.id){ const k=tm.from_dispatch_id||('_of_'+tm.from_facility_id); (loadGroups[k]=loadGroups[k]||[]).push(tm); }
-            if(dFac===fac.id){ const k=tm.to_element_id||('_df_'+tm.to_facility_id); (unloadGroups[k]=unloadGroups[k]||[]).push(tm); }
+        // ── Truck transfer nodes at this facility (rendered per product block below) ──
+        // LOAD nodes = Truck dispatch points here; UNLOAD nodes = Truck Receiving berths here.
+        // A node is shown under the product block(s) of the silos it connects to (topology-
+        // driven: it appears even with no movement yet). Origin LOAD nodes get their own
+        // TRUCK TRANSFERS subsection; destination UNLOAD nodes sit inside TRANSFERRED.
+        const _elById=id=>DB.elements.find(e=>e.id===id);
+        const _nodeProducts=(nodeId,dir)=>{ const set=new Set();
+          (DB.connections||[]).forEach(c=>{
+            let sid=null;
+            if(dir==='load'&&c.to_element_id===nodeId) sid=c.from_element_id;   // silo → LOAD node
+            if(dir==='unload'&&c.from_element_id===nodeId) sid=c.to_element_id;  // UNLOAD node → silo
+            if(sid){ const el=_elById(sid); if(el&&(el.type==='bulk_silo'||el.type==='packed_silo')) getSiloProducts(el).forEach(p=>set.add(p)); }
           });
-          if(Object.keys(loadGroups).length||Object.keys(unloadGroups).length){
-            const _ttNodeRow=(label,dep,color,fn,trAttr,strong)=>{
-              let r=`<tr ${trAttr||''}><td style="${stickyLeft('var(--surface)',dep,'border-bottom:1px solid var(--border),')}color:${color};font-size:9px;${strong?'font-weight:700':''}">${label}</td>`;
-              months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-                const mt=mon.dates.reduce((a,ds)=>a+fn(ds),0);
-                r+=`<td style="border-left:2px solid rgba(0,217,163,.15);font-size:9px;font-weight:700;color:${color};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
-                if(!isCol) mon.dates.forEach(ds=>{ const v=fn(ds);
-                  r+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${v>0?color:'var(--text-dim)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
-              });
-              return r+`</tr>`;
-            };
-            // Subsection header
-            h+=`<tr style="background:rgba(0,217,163,.05);border-top:1px solid rgba(0,217,163,.3)">
-              <td style="${stickyLeft('var(--surface)',depth+1,'border-bottom:1px solid var(--border),')}color:#00d9a3;font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase">TRUCK TRANSFERS</td>${_blankCells()}</tr>`;
-            const renderNode=(nodeId,list,dir)=>{
-              const node=_elById(nodeId);
-              const nodeName=node?node.name:(dir==='out'?'Truck loading (facility)':'Truck receiving (facility)');
-              const color=dir==='out'?'var(--simulated)':'var(--real)';
-              const fnFor=tm=>(dir==='out'?(ds=>_ttOut(tm,ds)):(ds=>_ttIn(tm,ds)));
-              const nodeFn=ds=>list.reduce((s,tm)=>s+fnFor(tm)(ds),0);
-              const gkey='trucknode_'+dir+'_'+nodeId;
-              const col=grpCol.has(gkey);
-              h+=_ttNodeRow(`${col?'▶':'▼'} ${nodeName}`, depth+2, color, nodeFn, `onclick="_supToggleGrp('${gkey}')" style="cursor:pointer"`, true);
-              if(!col) list.forEach(tm=>{
-                const lane=`${_ttFacName(tm.from_facility_id)} → ${_ttFacName(tm.to_facility_id)} · ${_ttPName(tm.product_id)}`;
-                h+=_ttNodeRow(`&nbsp;&nbsp;&nbsp;${lane}`, depth+3, color, fnFor(tm));
-              });
-            };
-            Object.entries(loadGroups).forEach(([k,list])=>renderNode(k,list,'out'));
-            Object.entries(unloadGroups).forEach(([k,list])=>renderNode(k,list,'in'));
-          }
-        }
+          return set; };
+        // Only EXTERNAL truck dispatch points are inter-facility transfer LOAD nodes
+        // (local truck dispatch = local delivery, not a transfer).
+        const _facLoadNodes=_allFE.filter(e=>e.type==='dispatch_point'&&(e.props?.dispatch_type||'Truck')==='Truck'&&e.props?.truck_destination==='external'&&(e.assigned_facility_id||e.facility_id)===fac.id);
+        const _facUnloadNodes=_allFE.filter(e=>e.type==='berth'&&(e.props?.berth_type||'')==='Truck Receiving'&&(e.assigned_facility_id||e.facility_id)===fac.id);
+        const _loadNodeProds={}, _unloadNodeProds={}, _truckNodeProds=new Set();
+        _facLoadNodes.forEach(n=>{ const s=_nodeProducts(n.id,'load'); _loadNodeProds[n.id]=s; s.forEach(p=>_truckNodeProds.add(p)); });
+        _facUnloadNodes.forEach(n=>{ const s=_nodeProducts(n.id,'unload'); _unloadNodeProds[n.id]=s; s.forEach(p=>_truckNodeProds.add(p)); });
+        // Renders one truck node (collapsible) + its lanes, for product `pid`, at `dep`.
+        const _renderTruckNode=(node,dir,pid,seckey)=>{
+          const gkey='trucknode_'+dir+'_'+node.id+'_'+pid;
+          const col=grpCol.has(gkey);
+          const lanes=_ttCamps.filter(tm=>tm.product_id===pid&&(dir==='out'?tm.from_dispatch_id===node.id:tm.to_element_id===node.id));
+          const fnFor=tm=>(dir==='out'?(ds=>_ttOut(tm,ds)):(ds=>_ttIn(tm,ds)));
+          const nodeFn=ds=>lanes.reduce((s,tm)=>s+fnFor(tm)(ds),0);
+          const mkRow=(label,dep,fn,trAttr,strong)=>{
+            let r=`<tr class="supsec-${seckey}" ${trAttr||''}><td style="${stickyLeft('var(--surface)',dep,'border-bottom:1px solid var(--border),')}color:var(--text);font-size:9px;${strong?'font-weight:700':'font-weight:400'}">${label}</td>`;
+            months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+              const mt=mon.dates.reduce((a,ds)=>a+fn(ds),0);
+              r+=`<td style="border-left:2px solid var(--border2);font-size:9px;font-weight:700;color:var(--text);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+              if(!isCol) mon.dates.forEach(ds=>{ const v=fn(ds);
+                r+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${v>0?'var(--text)':'var(--text-dim)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+            });
+            return r+`</tr>`;
+          };
+          const arrow=lanes.length?(col?'▶ ':'▼ '):'&nbsp;&nbsp;';
+          let out=mkRow(`<span class="tri">${arrow}</span>${node.name}`, depth+3, nodeFn,
+            lanes.length?`onclick="_supToggleGrp('${gkey}')" style="cursor:pointer"`:'', false);
+          if(lanes.length&&!col) lanes.forEach(tm=>{
+            const lane=dir==='out'
+              ? `${_ttFacName(tm.from_facility_id)} → ${_ttFacName(tm.to_facility_id)}`
+              : `${_ttFacName(tm.from_facility_id)} → ${_ttFacName(tm.to_facility_id)} · ${_ttPName(tm.product_id)}`;
+            out+=mkRow(`&nbsp;&nbsp;&nbsp;${lane}`, depth+3, fnFor(tm), '', false);
+          });
+          return out;
+        };
+
 
         // Ship berths + which product each vessel carries — used by the per-product vessel
         // Gantt below (it replaces the flat "Unloading" tonnage row inside each product block).
@@ -7646,23 +7650,8 @@ function _renderSupplyViewInner(wrap){
           if(!depDay) return;
           _addArr(rm.product_id,_dayToDs(depDay+(parseInt(rm.transit_days)||1)),parseFloat(rm.total_capacity_t)||0);
         });
-        // Planned truck-transfer arrivals into this terminal (real actuals override via _arrReal).
-        (DB.truck_movements||[]).filter(tm=>tm.to_facility_id===fac.id&&tm.product_id&&
-          !['Cancelled','Complete'].includes(tm.status||'Planned')).forEach(tm=>{
-          const rate=parseFloat(tm.daily_rate_t)||0; if(rate<=0) return;
-          const transit=parseInt(tm.transit_days)||0;
-          const startOff=dateToDayOffset(tm.date,S.simCfg.start_date);
-          const endOff=tm.end_date?dateToDayOffset(tm.end_date,S.simCfg.start_date):Infinity;
-          allDates.forEach(ds=>{
-            const off=dateToDayOffset(ds,S.simCfg.start_date);
-            if(off<startOff||off>endOff) return;
-            if(Array.isArray(tm.days_of_week)&&tm.days_of_week.length){
-              const dow=(new Date(ds+'T00:00:00').getDay()+6)%7; if(!tm.days_of_week.includes(dow)) return;
-            }
-            const arr=new Date(ds+'T00:00:00'); arr.setDate(arr.getDate()+transit);
-            _addArr(tm.product_id, arr._ymd(), rate);
-          });
-        });
+        // (Truck arrivals are shown separately as UNLOAD-node rows inside TRANSFERRED,
+        // so they are intentionally NOT folded into the generic Transfer/Arrival row here.)
         const _berthIds=new Set(berths.map(b=>b.id));
         (DB.vessel_calls||[]).forEach(vc=>{
           if(vc.legs&&vc.legs.length){
@@ -7685,7 +7674,7 @@ function _renderSupplyViewInner(wrap){
         const _demProdIds=new Set(); demandPoints.forEach(dp=>(dp.products||[]).forEach(p=>_demProdIds.add(p.product_id)));
         const _catRank=pid=>{ const c=DB.products.find(p=>p.id===pid)?.category; return (c==='cement_bulk'||c==='cement_packed')?0:c==='additive'?1:c==='clinker'?2:3; };
         const _pNameOf=pid=>DB.products.find(p=>p.id===pid)?.name||pid;
-        const _prods=[...new Set([...allSilos.flatMap(getSiloProducts),..._demProdIds,...Object.keys(_termArr)])].filter(Boolean)
+        const _prods=[...new Set([...allSilos.flatMap(getSiloProducts),..._demProdIds,...Object.keys(_termArr),..._truckNodeProds])].filter(Boolean)
           .sort((a,b)=>_catRank(a)-_catRank(b)||_pNameOf(a).localeCompare(_pNameOf(b)));
 
         if(!_prods.length){
@@ -7697,8 +7686,9 @@ function _renderSupplyViewInner(wrap){
           const isCem=(cat==='cement_bulk'||cat==='cement_packed'); const isScm=cat==='additive';
           const chartCat=isCem?'cement':isScm?'scm':'clinker';
           const catLabel=isCem?'CEMENT':isScm?'SCM':(cat||'PRODUCT').toUpperCase();
-          const accent=isCem?'#00d9a3':isScm?'#c8a96a':'#4da6ff';
-          const rgba=isCem?'0,217,163':isScm?'200,169,106':'77,166,255';
+          const isClk=cat==='clinker';
+          const accent=isCem?'#00d9a3':(isScm||isClk)?'#ff8c42':'#4da6ff';
+          const rgba=isCem?'0,217,163':(isScm||isClk)?'255,140,66':'77,166,255';
           const invSeckey=isScm?'scmInv':'cementInv';
           const dimCol='rgba('+rgba+',.3)';
           const pKey=fac.id+'__'+pid; const pCol=grpCol.has(pKey);
@@ -7815,6 +7805,18 @@ function _renderSupplyViewInner(wrap){
               });
               h+=`</tr>`;
             }
+            // Destination truck receiving (UNLOAD) nodes for this product — beside ship unloading.
+            _facUnloadNodes.filter(n=>(_unloadNodeProds[n.id]||new Set()).has(pid))
+              .forEach(n=>{ h+=_renderTruckNode(n,'in',pid,'termUnload'); });
+          }
+
+          // 5) TRUCK TRANSFERS (origin) — LOAD nodes dispatching this product from here.
+          const _pidLoadNodes=_facLoadNodes.filter(n=>(_loadNodeProds[n.id]||new Set()).has(pid));
+          if(_pidLoadNodes.length){
+            const _tlKey='truckLoad';
+            h+=`<tr class="sup-sec-hdr" data-seckey="${_tlKey}" onclick="_supToggleSec('${_tlKey}')" style="cursor:pointer;background:rgba(255,255,255,.03);border-top:1px solid var(--border2)">
+              <td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:var(--text);font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow(_tlKey)}</span> TRUCK TRANSFERS</td>${_blankCells()}</tr>`;
+            _pidLoadNodes.forEach(n=>{ h+=_renderTruckNode(n,'out',pid,_tlKey); });
           }
         });
 
@@ -16237,7 +16239,7 @@ function _saveEditRail(i){
 
 // Truck loading (LOAD) nodes = Truck dispatch points; receiving (UNLOAD) nodes =
 // berths of type 'Truck Receiving'. A truck movement is defined between one of each.
-function _truckLoadNodes(){ return DB.elements.filter(e=>e.type==='dispatch_point'&&(e.props?.dispatch_type||'Truck')==='Truck'); }
+function _truckLoadNodes(){ return DB.elements.filter(e=>e.type==='dispatch_point'&&(e.props?.dispatch_type||'Truck')==='Truck'&&e.props?.truck_destination==='external'); }
 function _truckUnloadNodes(){ return DB.elements.filter(e=>e.type==='berth'&&(e.props?.berth_type||'')==='Truck Receiving'); }
 function _elFac(el){ return el?(el.assigned_facility_id||el.facility_id):null; }
 function _elFacName(el){ const f=DB.facilities.find(x=>x.id===_elFac(el)); return f?f.name:''; }
