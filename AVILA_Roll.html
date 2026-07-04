@@ -811,6 +811,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
   <div class="tb-div"></div>
   <button class="tb-btn sec" id="daily-data-btn" onclick="toggleRealDataPanel()">📋 Daily Data</button>
   <button class="tb-btn" onclick="runSimulation()">▶ Run Simulation</button>
+  <button class="tb-btn sec" onclick="stOpen()" title="Golden-scenario self-test — compare simulation output against a saved known-good baseline">🧪</button>
   <button id="ai-fab" onclick="toggleChat()" title="AI Agent">✦</button>
   <div class="mode-wrap">
     <span class="mode-lbl" id="mode-lbl" style="display:none"></span>
@@ -11124,6 +11125,21 @@ function _nrLoadEquipment(){
   });
 }
 
+// Auto-extend horizon to cover all planned/confirmed/in-transit movement
+// arrival days. Shared by runSimulation and the golden-scenario self-test so
+// baseline and check always simulate the same window.
+function _simEffectiveHorizon(){
+  let h=S.simCfg.horizon||90;
+  DB.rail_movements.forEach(rm=>{
+    if(['Planned','Confirmed','In Transit'].includes(rm.status||'Planned')){
+      const transit=parseInt(rm.transit_days)||1;
+      const latest=(rm.switch_day||0)+transit;
+      if(latest>h) h=latest;
+    }
+  });
+  return h;
+}
+
 // Debounced entry point — edit handlers call this instead of runSimulation()
 // directly so a burst of edits produces one run. A run already in progress
 // absorbs new requests into a single trailing re-run (reentrancy guard).
@@ -11159,15 +11175,7 @@ async function runSimulation(){
   document.getElementById('mode-lbl').textContent='Running';
   setTimeout(()=>{
     try{
-    // Auto-extend horizon to cover all planned/confirmed/in-transit movement arrival days
-    let effectiveHorizon=S.simCfg.horizon||90;
-    DB.rail_movements.forEach(rm=>{
-      if(['Planned','Confirmed','In Transit'].includes(rm.status||'Planned')){
-        const transit=parseInt(rm.transit_days)||1;
-        const latest=(rm.switch_day||0)+transit;
-        if(latest>effectiveHorizon) effectiveHorizon=latest;
-      }
-    });
+    const effectiveHorizon=_simEffectiveHorizon();
 
     // ── Pass 1: baseline without proposed vessels ──────────
     // Rail is now operator-driven (loading plan + manual pushes) — NO auto rail planner.
@@ -11910,8 +11918,15 @@ function simulate(elements, connections, horizon, includeProposed=false){
       Object.entries(dm2).forEach(([date,pm])=>{ realProdMap[elId][date]=Object.values(pm); }); });
   }
 
-  for(let day=1;day<=horizon;day++){
+  // Per-day flow accumulators shared across phases (reset each day in the loop;
+  // railFillTarget is rebuilt by simDayRailFillTargets).
+  let siloInflow,siloOutflow,siloSourceTracker,railFillTarget;
 
+  // ── DAY-LOOP PHASES ──────────────────────────────────
+  // One named function per step. They close over the simulate() locals above
+  // (state, r, maps, helpers) — extracted verbatim from the old inline loop.
+
+  function simDayRealDataAnchor(day){
     // ── REAL DATA ANCHOR ─────────────────────────────
     // At the start of each day, if real_inventory_daily has an EOD entry for
     // the PREVIOUS simulation day, override the silo's current state.
@@ -11936,12 +11951,9 @@ function simulate(elements, connections, horizon, includeProposed=false){
         }
       });
     }
+  }
 
-    // Per-day flow accumulators
-    const siloInflow={};   // siloId → tonnes in
-    const siloOutflow={};  // siloId → tonnes out
-    const siloSourceTracker={}; // siloId → Set of mill ids writing to it today
-
+  function simDayMaintenance(day){
     // ── STEP 1: MAINTENANCE ───────────────────────────
     elements.forEach(el=>{
       const s=state[el.id];
@@ -11979,7 +11991,9 @@ function simulate(elements, connections, horizon, includeProposed=false){
         s._rampPct=null;
       }
     });
+  }
 
+  function simDayKilns(day){
     // ── STEP 2: KILNS ─────────────────────────────────
     // Run at full capacity from element_product_capacities.
     // Raw meal: infinite supply (deferred).
@@ -12093,7 +12107,9 @@ function simulate(elements, connections, horizon, includeProposed=false){
       });
       recK(_kProd);
     });
+  }
 
+  function simDayRawMealMills(day){
     // ── STEP 3: RAW MEAL MILLS ────────────────────────
     // Infinite supply for now. Blocked only if downstream full.
     elements.filter(e=>e.type==='raw_meal_mill').forEach(el=>{
@@ -12109,12 +12125,14 @@ function simulate(elements, connections, horizon, includeProposed=false){
       downRM.filter(hs=>state[hs.id]?.inventory<(state[hs.id]?.maxCap||0)*0.98)
         .forEach(hs=>{ siloInflow[hs.id]=(siloInflow[hs.id]||0)+rate; });
     });
+  }
 
+  function simDayRailFillTargets(day){
     // ── PRE-STEP 4: RAIL FILL TRIGGER (loading-plan driven) ─────────────
     // Rail v2: keep each rail silo stocked to support today's LOADING PLAN, so the mill
     // prioritizes routing product into the rail silo. Target ≈ a few days of the planned
     // loading rate, capped by silo capacity. railFillTarget[railSiloId] = {tonnes, prodId}.
-    const railFillTarget={};
+    railFillTarget={};
     {
       const _ffDate=new Date(simStartDate.getTime()+(day-1)*864e5)._ymd();
       elements.filter(e=>e.type==='dispatch_point'&&e.props.dispatch_type==='Rail').forEach(dp=>{
@@ -12130,7 +12148,9 @@ function simulate(elements, connections, horizon, includeProposed=false){
         });
       });
     }
+  }
 
+  function simDayFinishMills(day){
     // ── STEP 4: FINISH MILLS ──────────────────────────
     // Each mill produces exactly one product per day.
     // Product selected by urgency of receiving silo, with clinker availability
@@ -12532,7 +12552,9 @@ function simulate(elements, connections, horizon, includeProposed=false){
       const csCem=state[chosen.bestSilo.id];
       csCem.composition[chosen.prodId]=(csCem.composition[chosen.prodId]||0)+actualRate;
     });
+  }
 
+  function simDayPacking(day){
     // ── STEP 5: PACKING PLANTS ────────────────────────
     // A packing machine packs ONE product at a time (like a finish mill runs one product/day).
     // Each day the simulator proposes the most URGENT output product — the packed silo whose
@@ -12648,7 +12670,9 @@ function simulate(elements, connections, horizon, includeProposed=false){
         r.packProductHistory[el.id].push(null);
       }
     });
+  }
 
+  function simDayRailDispatch(day){
     // ── STEP 6: RAIL DISPATCH ─────────────────────────
     // Each rail dispatch point:
     //   1. Loads cars from upstream silo (on working days) — proportional to silo composition
@@ -12753,7 +12777,9 @@ function simulate(elements, connections, horizon, includeProposed=false){
 
       if(!isWorking&&!isSwitch) s.status='idle';
     });
+  }
 
+  function simDayBerths(day){
     // ── STEP 6b: BERTH ARRIVALS & UNLOADING ──────────────
     // Order of operations matters:
     // 1. If a ship berth queue is empty, load the NEXT pending vessel that already arrived
@@ -13037,7 +13063,9 @@ function simulate(elements, connections, horizon, includeProposed=false){
       const st=docked?(bs.status==='running'?'unloading':'anchorage'):(waitingList.length?'arrived':'idle');
       r.berthVesselHistory[berth.id].push({docked, state:st, waiting:waitingList.length, waitingList});
     });
+  }
 
+  function simDayDemand(day){
     // ── STEP 7: DEMAND OUTFLOW ────────────────────────
     // Pull daily tonnage from cement silos in product priority order.
     // Pulls to zero — no minimum reservation.
@@ -13104,11 +13132,14 @@ function simulate(elements, connections, horizon, includeProposed=false){
         r.demandSwapHistory[dp.id][day-1]={own:ownRate, swappedOut:swOut, swappedIn:swIn, effective, toElement:swOutR?.toElement||null, toProduct:swOutR?.toProduct||null};
       }
     });
+  }
 
+  function simDayTruckTransfers(day){
     // ── STEP 7b: TRUCK TRANSFERS (inter-facility) ──────
     // Origin facility → drain silos (like demand). Destination facility → credit
     // accepting silos on the arrival day (departure + transit_days). Real actuals
     // (real_transfers_daily, mode 'truck') override the planned daily rate.
+    const _ds7=new Date(simStartDate.getTime()+(day-1)*864e5)._ymd();
     _truckCampaigns.forEach(tm=>{
       const pid=tm.product_id; if(!pid) return;
       // ORIGIN: outflow leaves on `day` — drain silos holding this product at the origin
@@ -13166,7 +13197,9 @@ function simulate(elements, connections, horizon, includeProposed=false){
         }
       }
     });
+  }
 
+  function simDayApplyInventory(day){
     // ── STEP 7: APPLY INVENTORY CHANGES ──────────────
     // Push daily entries for vessel arrival and silo unload histories.
     // vesselArrivalHistory: full vessel qty on the day it moors — 0 on all other days.
@@ -13256,7 +13289,25 @@ function simulate(elements, connections, horizon, includeProposed=false){
         r.inventoryHistory[el.id].push(0);
       }
     });
+  }
 
+  for(let day=1;day<=horizon;day++){
+    simDayRealDataAnchor(day);
+    // Per-day flow accumulators
+    siloInflow={};   // siloId → tonnes in
+    siloOutflow={};  // siloId → tonnes out
+    siloSourceTracker={}; // siloId → Set of mill ids writing to it today
+    simDayMaintenance(day);
+    simDayKilns(day);
+    simDayRawMealMills(day);
+    simDayRailFillTargets(day);
+    simDayFinishMills(day);
+    simDayPacking(day);
+    simDayRailDispatch(day);
+    simDayBerths(day);
+    simDayDemand(day);
+    simDayTruckTransfers(day);
+    simDayApplyInventory(day);
     r.days.push({day});
   }
 
@@ -13281,6 +13332,127 @@ function dateToDayOffset(dateStr,startStr){
   try{
     return Math.round((new Date(dateStr+'T00:00:00')-new Date(startStr+'T00:00:00'))/(864e5));
   }catch(e){return -1;}
+}
+
+// ═══════════════════════════════════════════════════════
+// GOLDEN-SCENARIO SELF-TEST
+// Captures a known-good simulation digest (per-element hashes of every
+// history series + the stop-event list) and compares any later run against
+// it. Identical inputs must produce identical output — a mismatch means
+// engine behaviour changed, and the report pinpoints element + series.
+// Baseline is tied to facility + scenario + start_date; retake it after an
+// INTENTIONAL behaviour change. simulate() itself is deterministic (only
+// runId/run_at vary, both excluded here) and only touches transient tables.
+// ═══════════════════════════════════════════════════════
+function _stHash(s){let h=2166136261;for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619);}return(h>>>0).toString(36);}
+function _stSeriesHashes(map){const out={};Object.keys(map||{}).sort().forEach(k=>{out[k]=_stHash(JSON.stringify(map[k]));});return out;}
+
+function stDigest(r){
+  return {
+    days:(r.days||[]).length,
+    fulfillmentPct:r.fulfillmentPct,
+    avgDailyProd:r.avgDailyProd,
+    stopEvents:(r.stopEvents||[]).map(e=>`d${e.day} ${e.element_name||e.element_id} ${e.type}`).sort(),
+    series:{
+      inventory:_stSeriesHashes(r.inventoryHistory),
+      mills:_stSeriesHashes(r.millProductHistory),
+      packers:_stSeriesHashes(r.packProductHistory),
+      kilns:_stSeriesHashes(r.kilnProdHistory),
+      rail:_stSeriesHashes(r.railHistory),
+      berthUnload:_stSeriesHashes(r.berthUnloadHistory),
+      demandSwaps:_stSeriesHashes(r.demandSwapHistory),
+    }
+  };
+}
+
+function _stFreshDigest(){
+  if(!S.facility_id) return null;
+  const els=getFacElements();
+  if(!els.length) return null;
+  return stDigest(simulate(els,getFacConnections(),_simEffectiveHorizon(),true));
+}
+
+function stSaveBaseline(){
+  const d=_stFreshDigest();
+  if(!d){alert('Select a facility with elements first.');return;}
+  localStorage.setItem('avila_golden',JSON.stringify({
+    digest:d,
+    meta:{
+      savedAt:new Date().toISOString(),
+      facility:S.facility_id,
+      scenario:(typeof SC!=='undefined'&&SC.activeId)?(SC.meta[SC.activeId]?.name||SC.activeId):'(none)',
+      start_date:S.simCfg.start_date,
+      horizon:_simEffectiveHorizon()
+    }
+  }));
+  stOpen('✓ Baseline saved. Future checks compare against this run.');
+}
+
+function stCompare(base,cur){
+  const diffs=[];
+  if(base.days!==cur.days) diffs.push(`sim length: ${base.days} → ${cur.days} days`);
+  if(base.fulfillmentPct!==cur.fulfillmentPct) diffs.push(`fulfillment: ${base.fulfillmentPct}% → ${cur.fulfillmentPct}%`);
+  if(base.avgDailyProd!==cur.avgDailyProd) diffs.push(`avg daily production: ${base.avgDailyProd} → ${cur.avgDailyProd}`);
+  if(JSON.stringify(base.stopEvents)!==JSON.stringify(cur.stopEvents)){
+    const bset=new Set(base.stopEvents),cset=new Set(cur.stopEvents);
+    const gone=base.stopEvents.filter(x=>!cset.has(x));
+    const added=cur.stopEvents.filter(x=>!bset.has(x));
+    let msg=`stop events: ${base.stopEvents.length} → ${cur.stopEvents.length}`;
+    if(gone.length) msg+=`\n    missing: ${gone.slice(0,3).join('; ')}${gone.length>3?` (+${gone.length-3} more)`:''}`;
+    if(added.length) msg+=`\n    new: ${added.slice(0,3).join('; ')}${added.length>3?` (+${added.length-3} more)`:''}`;
+    diffs.push(msg);
+  }
+  const elName=id=>DB.elements.find(e=>e.id===id)?.name||id;
+  Object.keys(base.series).forEach(sk=>{
+    const b=base.series[sk]||{},c=cur.series[sk]||{};
+    const keys=new Set([...Object.keys(b),...Object.keys(c)]);
+    const changed=[...keys].filter(k=>b[k]!==c[k]);
+    if(changed.length) diffs.push(`${sk}: ${changed.slice(0,5).map(elName).join(', ')}${changed.length>5?` (+${changed.length-5} more)`:''} differ${changed.length===1?'s':''}`);
+  });
+  return diffs;
+}
+
+function stRunCheck(){
+  const raw=localStorage.getItem('avila_golden');
+  if(!raw){stOpen('No baseline saved yet — click "Save baseline" first.');return;}
+  let base,meta;
+  try{ ({digest:base,meta}=JSON.parse(raw)); }catch(e){ stOpen('Saved baseline is unreadable — save a new one.',true); return; }
+  const cur=_stFreshDigest();
+  if(!cur){alert('Select a facility with elements first.');return;}
+  const ctxWarn=(meta.facility!==S.facility_id||meta.start_date!==S.simCfg.start_date)
+    ?`⚠ Baseline context differs (saved for "${meta.scenario}", start ${meta.start_date}) — differences below may only reflect that.\n\n`:'';
+  const diffs=stCompare(base,cur);
+  const when=(meta.savedAt||'').slice(0,16).replace('T',' ');
+  if(!diffs.length) stOpen(ctxWarn+`✓ MATCH — simulation output is identical to the baseline saved ${when} ("${meta.scenario}").`);
+  else stOpen(ctxWarn+`✗ ${diffs.length} difference(s) vs baseline saved ${when}:\n\n• `+diffs.join('\n• '),true);
+}
+
+function stOpen(message,isBad){
+  document.getElementById('st-backdrop')?.remove();
+  let baseLbl='No baseline saved yet.';
+  try{
+    const raw=localStorage.getItem('avila_golden');
+    if(raw){const m=JSON.parse(raw).meta;baseLbl=`Baseline: "${m.scenario}" — start ${m.start_date}, horizon ${m.horizon}d, saved ${(m.savedAt||'').slice(0,16).replace('T',' ')}`;}
+  }catch(e){}
+  const bd=document.createElement('div');
+  bd.id='st-backdrop';
+  bd.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:10000';
+  bd.onclick=e=>{if(e.target===bd)bd.remove();};
+  const dlg=document.createElement('div');
+  dlg.style.cssText='background:var(--surface,#12161f);border:1px solid var(--accent,#4da6ff);border-radius:8px;padding:20px;max-width:560px;width:90%;max-height:80vh;overflow:auto;box-shadow:0 8px 32px rgba(0,0,0,.4)';
+  const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');
+  const msg=message?`<div style="white-space:pre-wrap;font-family:var(--mono,monospace);font-size:11px;line-height:1.6;margin:10px 0;padding:10px;border-radius:6px;border:1px solid ${isBad?'#ff3d5a':'#2a3346'};color:${isBad?'#ff8fa0':'var(--text,#dfe6f3)'}">${esc(message)}</div>`:'';
+  dlg.innerHTML=`<h3 style="margin:0 0 4px">🧪 Golden-scenario self-test</h3>
+    <div style="font-size:10px;color:var(--text-dim,#8b93a7);margin-bottom:6px">Runs the simulation and compares its output against a saved known-good baseline. Any difference means engine behaviour changed. Retake the baseline after intentional changes.</div>
+    <div style="font-size:10px;color:var(--text-dim,#8b93a7)">${esc(baseLbl)}</div>
+    ${msg}
+    <div style="display:flex;gap:8px;margin-top:14px">
+      <button class="tb-btn" onclick="stRunCheck()">▶ Run check</button>
+      <button class="tb-btn sec" onclick="stSaveBaseline()">📸 Save baseline</button>
+      <button class="tb-btn sec" style="margin-left:auto" onclick="document.getElementById('st-backdrop').remove()">Close</button>
+    </div>`;
+  bd.appendChild(dlg);
+  document.body.appendChild(bd);
 }
 
 // ═══════════════════════════════════════════════════════
