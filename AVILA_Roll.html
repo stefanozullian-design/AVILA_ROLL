@@ -1669,10 +1669,12 @@ const DB = {
   element_raw_meal_recipes:   [], // { id, element_id, material_id, pct }
 
   // Schedules
-  vessel_calls:       [], // { id, facility_id, berth_element_id, berth_name, name, arrival_date, cargo_type, quantity_t, unload_rate_tph, transit_days, status, notes,
-                          //   campaign?: {dock_date, unload_start_date} } — optional manual override of the post-arrival sequence (single-leg
-                          //   vessels only): forces Waiting until dock_date, then At Dockage (occupying the berth, not discharging) until
-                          //   unload_start_date, then normal simulated unloading. Real-unloading entries (real_unloading_daily) still win per day.
+  vessel_calls:       [], // { id, facility_id, berth_element_id, berth_name, name, arrival_date, cargo_type, quantity_t, unload_rate_tph, transit_days, status, notes }
+  vessel_campaigns:   [], // { id, vessel_call_id, action:'anchorage'|'unloading', start_date, end_date } — manual override of a specific
+                          //   vessel's berth status for a date range (mirrors production_campaigns). 'anchorage' forces zero unload and
+                          //   frees the berth for the window; 'unloading' forces priority unloading (bypasses the queue/yield logic,
+                          //   still capped by destination silo space). Editable from the Supply-page vessel Gantt cell. Real unloading
+                          //   entries (real_unloading_daily) still win per day over either.
   rail_movements:     [], // { id, from_facility_id, to_facility_id, from_dispatch_id, to_berth_id, reference, departure_date, wagon_count, wagon_capacity_t, total_capacity_t, product_id, loading_rate_tph, min_load_pct, transit_days, switch_day, status, notes } — also used for manager "push" allocations (status Confirmed)
   rail_loading_plan:  [], // { id, dispatch_id, product_id, cars_per_day, date_from?, date_to? } — ops loading plan: cars/day to load per product at a rail dispatch point. No dates = base rate; dated rows override that range.
   truck_movements:    [], // { id, from_facility_id, to_facility_id, from_dispatch_id (LOAD node = Truck dispatch point), to_element_id (UNLOAD node = Truck Receiving berth), reference, date (start), end_date, daily_rate_t, truck_capacity_t, trips_per_day, product_id, days_of_week:[0=Mon..6=Sun] (empty=every day), transit_days (default 0=same day), status, notes } — inter-facility truck transfer "campaign" between a LOAD node and an UNLOAD node: drains the silos feeding the LOAD point, credits the silos fed by the UNLOAD point (after transit) with only what the origin could supply. from/to_facility_id are derived from the nodes. Actuals in real_transfers_daily (mode 'truck') override the plan.
@@ -4581,6 +4583,120 @@ function closeTermRealPopup(){
   if(ov) ov.style.display='none';
 }
 
+// ═══════════════════════════════════════════════════════
+// VESSEL CAMPAIGN POPUP — the FM-style manual override for a specific vessel's
+// berth status (Anchorage / Unloading) over a date range. Mirrors showCampaignPopup:
+// single click on a vessel's Gantt run, pre-filled from that run's current dates/state.
+// ═══════════════════════════════════════════════════════
+
+// Per-day Anchorage/Unloading timeline for ONE vessel at ONE berth, read straight from the
+// last simulation's berthVesselHistory (not re-simulated) — used only to find the contiguous
+// run containing the clicked date so the popup can pre-fill From/To.
+function _vesselOwnTimeline(berthId, vesselCallId){
+  const hist=S.simResults?.berthVesselHistory?.[berthId]||[];
+  return hist.map(bv=>{
+    if(!bv) return null;
+    if(bv.dockedCallId===vesselCallId) return bv.state==='unloading'?'unloading':'anchorage';
+    if((bv.waitingList||[]).some(w=>w.vesselCallId===vesselCallId)) return 'anchorage';
+    return null;
+  });
+}
+function _vesselRunAt(berthId, vesselCallId, dateStr){
+  const tl=_vesselOwnTimeline(berthId, vesselCallId);
+  const idx=dateToDayOffset(dateStr, S.simCfg.start_date);
+  const addDays=n=>{ const d=new Date(S.simCfg.start_date+'T00:00:00'); d.setDate(d.getDate()+n); return d._ymd(); };
+  if(idx<0||idx>=tl.length||!tl[idx]) return {start:dateStr, end:dateStr, state:'anchorage'};
+  const st=tl[idx];
+  let s=idx,e=idx;
+  while(s>0&&tl[s-1]===st) s--;
+  while(e<tl.length-1&&tl[e+1]===st) e++;
+  return {start:addDays(s), end:addDays(e), state:st};
+}
+
+function showVesselCampaignPopup(berthId, vesselCallId, dateStr){
+  if(!vesselCallId){ statMsg('No vessel scheduled here to override'); return; }
+  const v=DB.vessel_calls.find(x=>x.id===vesselCallId); if(!v) return;
+  const berth=getEl(berthId);
+  const existing=(DB.vessel_campaigns||[]).find(c=>c.vessel_call_id===vesselCallId&&dateStr>=c.start_date&&dateStr<=c.end_date);
+  const run=_vesselRunAt(berthId, vesselCallId, dateStr);
+  const fromVal=existing?.start_date||run.start||dateStr;
+  const toVal=existing?.end_date||run.end||dateStr;
+  const action=existing?.action||run.state||'anchorage';
+  window._vCampCtx={berthId, vesselCallId, existingId:existing?.id||null};
+
+  const html=`
+  <div style="font-family:var(--mono);font-size:9px;min-width:320px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <div>
+        <div style="font-size:11px;font-weight:700;color:${existing?'#4ade80':'var(--text)'}">${existing?'🔒 Edit Campaign':'+ New Campaign'}</div>
+        <div style="color:var(--text-dim);margin-top:2px">${v.name} · ${berth?.name||''} · ${dateStr}</div>
+      </div>
+      <button onclick="closeVesselCampaignPopup()" style="background:transparent;border:none;color:var(--text-dim);cursor:pointer;font-size:16px">✕</button>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <div class="fr s1">
+        <div class="ff">
+          <div class="fl">Action</div>
+          <select class="fi" id="vcamp-action" style="width:100%">
+            <option value="anchorage" ${action==='anchorage'?'selected':''}>⚓ Anchorage</option>
+            <option value="unloading" ${action==='unloading'?'selected':''}>Unloading</option>
+          </select>
+        </div>
+      </div>
+      <div class="fr s2">
+        <div class="ff"><div class="fl">From</div><input class="fi" id="vcamp-from" type="date" value="${fromVal}" style="width:100%"></div>
+        <div class="ff"><div class="fl">To</div><input class="fi" id="vcamp-to" type="date" value="${toVal}" style="width:100%"></div>
+      </div>
+    </div>
+    <div style="font-size:8px;color:var(--text-dim);line-height:1.5;margin-top:8px">Forces ${v.name}'s status at ${berth?.name||'this berth'} for the chosen dates, overriding the simulator's own logic. Unloading uses this vessel's own cargo/rate and gets priority over the normal berth queue (still capped by destination silo space). Real unloading entries (Daily Data) always win over this for the days they cover.</div>
+    <div style="margin-top:12px;display:flex;gap:8px;justify-content:space-between;align-items:center">
+      <div>${existing?`<button onclick="deleteVesselCampaign()" style="padding:5px 10px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid rgba(255,61,90,.5);color:var(--red);cursor:pointer;border-radius:2px">✕ Delete Campaign</button>`:''}</div>
+      <div style="display:flex;gap:6px">
+        <button onclick="closeVesselCampaignPopup()" style="padding:5px 12px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid var(--border2);color:var(--text-dim);cursor:pointer;border-radius:2px">Cancel</button>
+        <button onclick="applyVesselCampaign()" style="padding:5px 14px;font-family:var(--mono);font-size:9px;background:#4ade80;border:none;color:#000;cursor:pointer;font-weight:700;border-radius:2px">🔒 Apply Campaign</button>
+      </div>
+    </div>
+  </div>`;
+
+  let ov=document.getElementById('vcamp-overlay');
+  if(!ov){
+    ov=document.createElement('div');
+    ov.id='vcamp-overlay';
+    ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:20000;display:flex;align-items:center;justify-content:center';
+    ov.onclick=e=>{ if(e.target===ov) closeVesselCampaignPopup(); };
+    document.body.appendChild(ov);
+  }
+  ov.innerHTML=`<div style="background:var(--surface);border:1px solid #4ade80;padding:18px;border-radius:6px;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.6)">${html}</div>`;
+  ov.style.display='flex';
+}
+function closeVesselCampaignPopup(){
+  const ov=document.getElementById('vcamp-overlay');
+  if(ov) ov.style.display='none';
+}
+
+function applyVesselCampaign(){
+  const ctx=window._vCampCtx; if(!ctx) return;
+  const from=document.getElementById('vcamp-from')?.value;
+  const to=document.getElementById('vcamp-to')?.value;
+  const action=document.getElementById('vcamp-action')?.value;
+  if(!from||!to||from>to){ statMsg('Enter a valid date range'); return; }
+  if(!DB.vessel_campaigns) DB.vessel_campaigns=[];
+  // Remove any overlapping campaign for this SAME vessel — one forced action per day —
+  // mirroring applyCampaign()'s overlap handling for finish mills.
+  DB.vessel_campaigns=DB.vessel_campaigns.filter(c=>
+    c.vessel_call_id!==ctx.vesselCallId || c.end_date<from || c.start_date>to
+  );
+  DB.vessel_campaigns.push({id:ctx.existingId||`vcamp_${Date.now()}`, vessel_call_id:ctx.vesselCallId, action, start_date:from, end_date:to});
+  closeVesselCampaignPopup();
+  autoSave(); renderSupplyView(); statMsg('Campaign applied — running simulation…'); scheduleSimulation();
+}
+function deleteVesselCampaign(){
+  const ctx=window._vCampCtx; if(!ctx||!ctx.existingId) return;
+  DB.vessel_campaigns=(DB.vessel_campaigns||[]).filter(c=>c.id!==ctx.existingId);
+  closeVesselCampaignPopup();
+  autoSave(); renderSupplyView(); statMsg('Campaign deleted — running simulation…'); scheduleSimulation();
+}
+
 function applyCampaign(elId){
   const productId=document.getElementById('camp-product')?.value;
   const rateTpd=parseFloat(document.getElementById('camp-rate')?.value)||0;
@@ -6170,16 +6286,17 @@ function _dedupRealProd(elId, ds){
 }
 
 // Per-VESSEL status timelines from a berth's berthVesselHistory. One entry per vessel (in
-// order of first appearance); .days[dayIdx] = 'unloading' | 'anchorage' | 'waiting' (arrived,
-// berth occupied) | undefined (not present). Lets us draw one Gantt row per vessel — like a
-// finish mill — instead of cramming the docked/waiting swap onto a single berth row.
+// order of first appearance); .days[dayIdx] = 'unloading' | 'anchorage' | undefined (not
+// present). Only two states — anchorage covers not-yet-docked, berth-occupied, silo-full,
+// and manual-campaign holds alike. Lets us draw one Gantt row per vessel — like a finish
+// mill — instead of cramming the docked/waiting swap onto a single berth row.
 function _vesselTimelines(hist){
   const order=[], seen=new Set(), byName={};
   (hist||[]).forEach((bv,di)=>{
     if(!bv) return;
     const add=(name,st)=>{ if(!name)return; if(!seen.has(name)){seen.add(name);order.push(name);} (byName[name]=byName[name]||{})[di]=st; };
-    if(bv.docked) add(bv.docked, bv.state==='unloading'?'unloading':bv.state==='dockage'?'dockage':'anchorage');
-    (bv.waitingList||[]).forEach(w=>add(w.name, w.reason==='silo_full'?'anchorage':'waiting'));
+    if(bv.docked) add(bv.docked, bv.state==='unloading'?'unloading':'anchorage');
+    (bv.waitingList||[]).forEach(w=>add(w.name,'anchorage'));
   });
   return order.map(name=>({name, days:byName[name]}));
 }
@@ -6194,31 +6311,30 @@ function _vesselProductSets(){
   return m;
 }
 // Per-day vessel status for ONE product at a berth: the vessel of this product that is docked
-// (unloading/anchorage), else a waiting vessel of this product. → [{state, vessel}|null].
+// (unloading/anchorage), else a waiting vessel of this product. → [{state, vessel, vesselCallId}|null].
+// vesselCallId identifies which vessel_calls record a clicked Gantt cell belongs to, for the
+// campaign-override popup.
 function _berthProductTimeline(hist, carries, pid){
   return (hist||[]).map(bv=>{
     if(!bv) return null;
-    if(bv.docked && carries(bv.docked,pid)) return {state: bv.state==='unloading'?'unloading':bv.state==='dockage'?'dockage':'anchorage', vessel:bv.docked};
+    if(bv.docked && carries(bv.docked,pid)) return {state: bv.state==='unloading'?'unloading':'anchorage', vessel:bv.docked, vesselCallId:bv.dockedCallId||null};
     const w=(bv.waitingList||[]).find(x=>carries(x.name,pid));
-    if(w) return {state: w.reason==='silo_full'?'anchorage':'waiting', vessel:w.name};
+    if(w) return {state:'anchorage', vessel:w.name, vesselCallId:w.vesselCallId||null};
     return null;
   });
 }
 
 // One vessel-status cell. Forecast unloading = hatched green; ACTUAL unloading (a day the user
-// entered real unload) = solid green. Anchorage = red hatch, waiting-to-dock = amber hatch.
+// entered real unload) = solid green. Anchorage = red hatch (covers not-yet-docked, berth-
+// occupied, silo-full, and manual-campaign holds — only two vessel states exist).
 function _vesselCellParts(state, isReal){
   if(!state) return {bg:'transparent', lblTxt:'', lbl:'', key:'__i'};
   let bg, lblTxt, lbl;
   if(state==='unloading'){
     bg = isReal ? '#00d9a3' : 'repeating-linear-gradient(45deg,#00d9a3,#00d9a3 5px,#0c3d30 5px,#0c3d30 7px)';
     lblTxt = isReal?'unloading ✓':'unloading'; lbl = isReal?'unloading (actual)':'unloading (forecast)';
-  } else if(state==='dockage'){
-    bg='repeating-linear-gradient(45deg,#4da6ff,#4da6ff 3px,#0d2a3a 3px,#0d2a3a 6px)'; lblTxt='⚓ at dockage'; lbl='docked · not yet unloading (manual schedule)';
-  } else if(state==='anchorage'){
-    bg='repeating-linear-gradient(45deg,#ff3d5a,#ff3d5a 3px,#3a1f26 3px,#3a1f26 6px)'; lblTxt='⚓ anchorage'; lbl='at anchorage (silo full)';
-  } else { // waiting
-    bg='repeating-linear-gradient(45deg,#ffb830,#ffb830 3px,#3a3020 3px,#3a3020 6px)'; lblTxt='⏳ waiting'; lbl='arrived · waiting to dock';
+  } else { // anchorage
+    bg='repeating-linear-gradient(45deg,#ff3d5a,#ff3d5a 3px,#3a1f26 3px,#3a1f26 6px)'; lblTxt='⚓ anchorage'; lbl='at anchorage';
   }
   return {bg, lblTxt, lbl, key:state+(isReal?'R':'')};
 }
@@ -7825,7 +7941,7 @@ function _renderSupplyViewInner(wrap){
           if(pidSilos.length||_termArr[pid]){
             const rc='#b388ff', rcReal='#00d9a3';
             h+=`<tr class="sup-sec-hdr" data-seckey="termUnload" onclick="_supToggleSec('termUnload')" style="cursor:pointer;background:rgba(179,136,255,.06);border-top:1px solid rgba(179,136,255,.4)">
-              <td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${rc};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('termUnload')}</span> TRANSFERRED <span style="font-size:7px;opacity:.65;font-weight:400;margin-left:4px">(arrival + unloading · dbl-click to set actual · t)</span></td>${_blankCells()}</tr>`;
+              <td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${rc};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('termUnload')}</span> TRANSFERRED <span style="font-size:7px;opacity:.65;font-weight:400;margin-left:4px">(arrival + unloading · click a vessel cell to override Anchorage/Unloading · dbl-click to set actual · t)</span></td>${_blankCells()}</tr>`;
             // Transfer / Arrival
             h+=`<tr class="supsec-termUnload"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${rc};font-size:9px;font-weight:700">Transfer / Arrival</td>`;
             months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
@@ -7852,14 +7968,14 @@ function _renderSupplyViewInner(wrap){
                   const unl=mon.dates.reduce((s,ds)=>{ const c=tl[allDates.indexOf(ds)]; return s+(c&&c.state==='unloading'?1:0); },0);
                   h+=`<td style="border-left:2px solid rgba(179,136,255,.1);font-size:8px;color:${rc};text-align:center;padding:4px 6px;border-bottom:1px solid var(--border)">${unl>0?unl+'d':''}</td>`;
                   if(!isCol) mon.dates.forEach(ds=>{
-                    const c=tl[allDates.indexOf(ds)]; const st=c&&c.state; const vessel=(c&&c.vessel)||'';
+                    const c=tl[allDates.indexOf(ds)]; const st=c&&c.state; const vessel=(c&&c.vessel)||''; const vesselCallId=(c&&c.vesselCallId)||'';
                     const isReal=st==='unloading'&&realDaySet.has(ds);
                     const p=_vesselCellParts(st,isReal);
                     const key=(st||'__i')+'|'+vessel; const runStart=!!st&&key!==_pk; _pk=key;
-                    const glyph=st==='anchorage'?' ⚓':st==='waiting'?' ⏳':'';
+                    const glyph=st==='anchorage'?' ⚓':'';
                     const label=runStart?`<span style="position:absolute;left:4px;top:0;line-height:12px;white-space:nowrap;font-size:8px;font-weight:700;color:${st==='unloading'?'#0a3a2c':'#fff'};pointer-events:none">${vessel}${glyph}</span>`:'';
-                    const ttl=st?(vessel+' — '+p.lbl):'';
-                    h+=`<td class="sup-day-${mon.ym}" title="${ttl}" ondblclick="event.stopPropagation();showTermRealPopup('unload','${fac.id}','${pid}','${ds}')" style="cursor:pointer;position:relative;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:12px;background:${p.bg}">${label}</div></td>`;
+                    const ttl=(st?(vessel+' — '+p.lbl+' — '):'')+(vesselCallId?'click to override · ':'')+'dbl-click to set actual';
+                    h+=`<td class="sup-day-${mon.ym}" title="${ttl}" onclick="event.stopPropagation();showVesselCampaignPopup('${berth.id}','${vesselCallId}','${ds}')" ondblclick="event.stopPropagation();showTermRealPopup('unload','${fac.id}','${pid}','${ds}')" style="cursor:pointer;position:relative;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:12px;background:${p.bg}">${label}</div></td>`;
                   });
                 });
                 h+=`</tr>`;
@@ -8911,7 +9027,7 @@ function renderVesselTable(){
     let rows=`<tr style="${isSplit?'background:rgba(255,184,48,.04)':''}">
       <td style="color:var(--amber);font-weight:700">
         ${isSplit?`<span onclick="_vcToggle('${v.id}')" style="cursor:pointer;margin-right:4px;font-size:9px">${expanded?'▼':'▶'}</span>`:''}
-        ${v.name}${isSplit?` <span style="font-size:7px;color:var(--text-dim);margin-left:3px">SPLIT</span>`:''}${v.campaign&&(v.campaign.dock_date||v.campaign.unload_start_date)?` <span title="Manual schedule override active" style="color:var(--blue);margin-left:4px;font-size:9px">⏱</span>`:''}
+        ${v.name}${isSplit?` <span style="font-size:7px;color:var(--text-dim);margin-left:3px">SPLIT</span>`:''}${(DB.vessel_campaigns||[]).some(c=>c.vessel_call_id===v.id)?` <span title="Manual schedule override active" style="color:var(--blue);margin-left:4px;font-size:9px">⏱</span>`:''}
       </td>
       <td style="font-family:var(--mono)">${firstDate||'—'}</td>
       <td>${prod?.name||v.cargo_type||'—'}</td>
@@ -11538,12 +11654,22 @@ function simulate(elements, connections, horizon, includeProposed=false){
   // Pass 1 (includeProposed=false): excludes Proposed — baseline for proposal generation.
   // Pass 2 (includeProposed=true): includes Proposed — shown in dashboard and results.
   const canvasBerthIds=new Set(elements.filter(e=>e.type==='berth').map(e=>e.id));
-  // Manual schedule overrides ("campaigns"), keyed by vessel_calls id — see schema comment.
-  // Only single-leg vessels can have one (enforced by the editor UI, not here).
-  const vesselCampaignById={};
-  DB.vessel_calls.forEach(v=>{
-    if(v.campaign&&(v.campaign.dock_date||v.campaign.unload_start_date)) vesselCampaignById[v.id]=v.campaign;
+  // Manual schedule overrides ("campaigns") — see DB.vessel_campaigns schema comment.
+  // Grouped by vessel_calls id; a vessel can have several campaigns across different windows.
+  const vesselCampaignsById={};
+  (DB.vessel_campaigns||[]).forEach(c=>{
+    if(!c.vessel_call_id) return;
+    (vesselCampaignsById[c.vessel_call_id]=vesselCampaignsById[c.vessel_call_id]||[]).push(c);
   });
+  function _vesselCampaignAction(vesselCallId,day){
+    const list=vesselCampaignsById[vesselCallId]; if(!list||!list.length) return null;
+    for(const c of list){
+      const sd=dateToDayOffset(c.start_date,S.simCfg.start_date)+1;
+      const ed=dateToDayOffset(c.end_date,S.simCfg.start_date)+1;
+      if(day>=sd&&day<=ed) return c.action;
+    }
+    return null;
+  }
 
   const vesselArrivalsByDay={};
   DB.vessel_calls
@@ -12910,16 +13036,15 @@ function simulate(elements, connections, horizon, includeProposed=false){
     const berthArrivedToday={};
 
     // Step A: Promote yesterday's pending vessels to berthQueue (they arrived before today).
-    // A vessel with a manual schedule override (campaign) stays in vesselPending — reported
-    // as "waiting" — until its dock_date is reached, even if the berth is otherwise free.
+    // A vessel under an active 'anchorage' campaign stays in vesselPending — reported as
+    // anchorage — even if the berth is otherwise free.
     elements.filter(e=>e.type==='berth'&&(e.props.berth_type||'Ship Berth')==='Ship Berth').forEach(berth=>{
       const bs=state[berth.id];
       const queued=Object.values(bs.berthQueue||{}).reduce((a,b)=>a+b,0);
       if(queued<=0&&(bs.vesselPending||[]).length>0){
         const next=bs.vesselPending[0];
-        const camp=next.vesselCallId&&vesselCampaignById[next.vesselCallId];
-        const dockDay=camp?.dock_date?dateToDayOffset(camp.dock_date,S.simCfg.start_date)+1:null;
-        if(!dockDay||day>=dockDay){
+        const act=next.vesselCallId?_vesselCampaignAction(next.vesselCallId,day):null;
+        if(act!=='anchorage'){
           bs.vesselPending.shift();
           bs.currentVessel=next.name;
           bs.currentVesselRate=next.rateTPH;
@@ -13032,25 +13157,33 @@ function simulate(elements, connections, horizon, includeProposed=false){
         }
       }
 
-      // ── CAMPAIGN: forced "at dockage, not yet unloading" phase ──────────
-      // A vessel with a manual schedule override occupies the berth (blocking other vessels,
-      // exempt from the yield logic below) but discharges nothing until unload_start_date.
-      // Real-unloading entries (checked above) still win over this for any day they cover.
+      // ── CAMPAIGN: forced Anchorage — vessel vacates the berth entirely for the window ──
+      // Real unloading entries (checked above) still win over this for any day they cover.
+      // The vessel's remaining cargo goes back to vesselPending (same shape the ship-berth
+      // yield logic below uses) so it resumes exactly where it left off once the campaign ends.
+      let _forcedUnload=false;
       if(bs.currentVessel&&bs.currentVesselCallId){
-        const _camp=vesselCampaignById[bs.currentVesselCallId];
-        const _unloadStartDay=_camp?.unload_start_date?dateToDayOffset(_camp.unload_start_date,S.simCfg.start_date)+1:null;
-        if(_unloadStartDay&&day<_unloadStartDay){
-          bs.status='dockage';
+        const _act=_vesselCampaignAction(bs.currentVesselCallId,day);
+        if(_act==='anchorage'){
+          const curProd=Object.keys(bs.berthQueue||{}).find(pid=>(bs.berthQueue[pid]||0)>0);
+          if(curProd){
+            bs.vesselPending.unshift({productId:curProd, quantity_t:bs.berthQueue[curProd], rateTPH:bs.currentVesselRate, name:bs.currentVessel, vesselCallId:bs.currentVesselCallId});
+            bs.berthQueue={};
+          }
+          bs.currentVessel=null; bs.currentVesselRate=0; bs.currentVesselCallId=null;
+          bs.status='anchorage';
           r.berthUnloadHistory[berth.id].push(0);
           return;
         }
+        if(_act==='unloading') _forcedUnload=true;
       }
 
       // ── Ship-berth YIELD: if the berthed vessel is blocked (its silo can't take a full
       //    day's discharge) but a pending vessel's silo CAN, the blocked vessel steps back
       //    to anchorage and yields the berth so a full silo doesn't starve later vessels
-      //    whose silos have space (and may be heading to stockout).
-      if((berth.props.berth_type||'Ship Berth')==='Ship Berth'){
+      //    whose silos have space (and may be heading to stockout). A vessel under a forced
+      //    'unloading' campaign is exempt — it keeps the berth regardless.
+      if(!_forcedUnload&&(berth.props.berth_type||'Ship Berth')==='Ship Berth'){
         const _pickSilo=(productId)=>{
           const ds=(dn[berth.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='bulk_silo');
           let s=productId?ds.find(x=>{const p=getSiloProducts(x);return p.length>0&&p.includes(productId);}):null;
@@ -13070,7 +13203,11 @@ function simulate(elements, connections, horizon, includeProposed=false){
         };
         const curProd=Object.keys(bs.berthQueue||{}).find(pid=>(bs.berthQueue[pid]||0)>0);
         if(curProd && !_canFullDay(curProd,bs.berthQueue[curProd],bs.currentVesselRate) && (bs.vesselPending||[]).length){
-          const idx=bs.vesselPending.findIndex(p=>(p.quantity_t||0)>0 && _canFullDay(p.productId,p.quantity_t,p.rateTPH));
+          // A vessel held under an active 'anchorage' campaign is not an eligible swap-in —
+          // forcing it out defeats the whole point of the override.
+          const idx=bs.vesselPending.findIndex(p=>
+            (p.quantity_t||0)>0 && _canFullDay(p.productId,p.quantity_t,p.rateTPH) &&
+            !(p.vesselCallId&&_vesselCampaignAction(p.vesselCallId,day)==='anchorage'));
           if(idx>=0){
             const demoted={productId:curProd, quantity_t:bs.berthQueue[curProd], rateTPH:bs.currentVesselRate, name:bs.currentVessel, vesselCallId:bs.currentVesselCallId, _bumped:true};
             const incoming=bs.vesselPending.splice(idx,1)[0];
@@ -13143,9 +13280,11 @@ function simulate(elements, connections, horizon, includeProposed=false){
       // or nothing. If a full day's discharge would push the silo over max, the vessel waits
       // at anchorage (0 unloaded) until demand frees enough space, then returns and resumes
       // at the rate (the remainder unloads once it fits). Rail/Truck keep partial top-off.
+      // A forced-unloading campaign also gets partial top-off instead of all-or-nothing — it
+      // gets priority (see the yield-exemption above) but never overflows the silo either.
       const isShipBerth=berthType==='Ship Berth';
       let canUnload;
-      if(isShipBerth){
+      if(isShipBerth&&!_forcedUnload){
         const fullDaily=Math.min(dailyCap,queued);
         if(siloSpace>=fullDaily)   canUnload=fullDaily;             // full day's discharge fits
         else if(fullDaily>siloMax) canUnload=Math.max(0,siloSpace); // anti-deadlock: a day's rate exceeds total silo capacity
@@ -13193,18 +13332,17 @@ function simulate(elements, connections, horizon, includeProposed=false){
     });
 
     // ── Record per-berth vessel state for the Gantt ──────────────────────
-    // docked vessel + its state (unloading vs at-anchorage/silo-full), plus every waiting
-    // vessel with WHY it waits: 'berth_occupied' (arrived, berth taken) or 'silo_full'
-    // (was unloading, bumped to anchorage when the silo filled).
+    // Only two vessel states: 'unloading' (docked, actively discharging) and 'anchorage'
+    // (everything else — hasn't docked yet, berth occupied by another vessel, silo full,
+    // or held by a manual campaign). dockedCallId / vesselCallId let the Supply-page Gantt
+    // popup identify exactly which vessel a clicked cell belongs to.
     elements.filter(e=>e.type==='berth').forEach(berth=>{
       if(r.berthVesselHistory[berth.id]===undefined) return;
       const bs=state[berth.id];
       const docked=bs.currentVessel||null;
-      const waitingList=(bs.vesselPending||[]).map(p=>({name:p.name||'vessel', reason:p._bumped?'silo_full':'berth_occupied'}));
-      // docked → unloading / dockage(campaign hold) / anchorage(silo full); nobody docked but a
-      // vessel waiting → 'arrived'.
-      const st=docked?(bs.status==='dockage'?'dockage':(bs.status==='running'?'unloading':'anchorage')):(waitingList.length?'arrived':'idle');
-      r.berthVesselHistory[berth.id].push({docked, state:st, waiting:waitingList.length, waitingList});
+      const waitingList=(bs.vesselPending||[]).map(p=>({name:p.name||'vessel', reason:'anchorage', vesselCallId:p.vesselCallId||null}));
+      const st=docked?(bs.status==='running'?'unloading':'anchorage'):(waitingList.length?'anchorage':'idle');
+      r.berthVesselHistory[berth.id].push({docked, dockedCallId:bs.currentVesselCallId||null, state:st, waiting:waitingList.length, waitingList});
     });
   }
 
@@ -16045,19 +16183,12 @@ function editVessel(i){
    <div style="${pf};margin-top:8px"><div style="${pl}">Unload Rate (t/h) — 0 = use berth rate</div>
      <input ${dis} style="${pi}" type="number" id="ev-rate" value="${v.unload_rate_tph||0}"></div>`;
 
-  // Manual schedule override ("campaign") — single-leg vessels only. Always editable
-  // (unlike the locked fields above) since this is precisely the tool for amending an
-  // already-confirmed vessel's real-world sequence, not a planning-stage field.
-  const hasCamp=!!(v.campaign&&(v.campaign.dock_date||v.campaign.unload_start_date));
-  const campHTML=isSplit?'':`
-    <div style="padding:10px;border:1px solid var(--blue);background:rgba(77,166,255,.05)">
-      <div style="font-family:var(--mono);font-size:9px;color:var(--blue);letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px">⏱ Manual Schedule Override (Campaign)</div>
-      <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);line-height:1.6;margin-bottom:8px">Force the real-world sequence after arrival when the simulator's own logic doesn't match what's actually happening (customs, weather, congestion, etc). Leave both blank for normal automatic behavior. Real unloading entries (Daily Data) always win over this for the days they cover.</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-        <div style="${pf}"><div style="${pl}">Docks on (ends Waiting)</div><input style="${pi}" type="date" id="ev-camp-dock" min="${v.arrival_date||''}" value="${v.campaign?.dock_date||''}"></div>
-        <div style="${pf}"><div style="${pl}">Unloading starts on</div><input style="${pi}" type="date" id="ev-camp-unload" min="${v.arrival_date||''}" value="${v.campaign?.unload_start_date||''}"></div>
-      </div>
-      ${hasCamp?`<div style="margin-top:8px"><span class="tbl-act del" onclick="_clearVesselCampaign()">✕ Clear override</span></div>`:''}
+  // Manual schedule overrides ("campaigns") live on the Supply-page vessel Gantt now (click
+  // a cell in this vessel's run) — just a summary + pointer here, not a second editor.
+  const _vCamps=(DB.vessel_campaigns||[]).filter(c=>c.vessel_call_id===v.id);
+  const campHTML=`
+    <div style="padding:8px 10px;border:1px solid var(--blue);background:rgba(77,166,255,.05);font-family:var(--mono);font-size:9px;color:var(--text-dim)">
+      ⏱ ${_vCamps.length?`${_vCamps.length} manual schedule override${_vCamps.length>1?'s':''} active`:'No manual schedule overrides'} — edit by clicking this vessel's run on the Supply page (Production &gt; Supply &gt; TRANSFERRED).
     </div>`;
 
   let h=`<div class="modal-hdr">
@@ -16087,13 +16218,6 @@ function editVessel(i){
   </div>`;
   showModal('_custom');
   document.getElementById('modal-content').innerHTML=h;
-}
-
-// Clears the two schedule-override inputs in the currently open edit-vessel modal (DOM
-// only — like every other field here, persists on the next "Save Changes" click).
-function _clearVesselCampaign(){
-  const d=document.getElementById('ev-camp-dock'); if(d) d.value='';
-  const u=document.getElementById('ev-camp-unload'); if(u) u.value='';
 }
 
 function _saveEditVessel(i){
@@ -16127,15 +16251,6 @@ function _saveEditVessel(i){
       v.quantity_t=parseFloat(document.getElementById('ev-qty')?.value)||v.quantity_t;
       v.unload_rate_tph=parseFloat(document.getElementById('ev-rate')?.value)||0;
     }
-  }
-  // Schedule override — read regardless of `locked`: amending the real-world sequence
-  // after arrival is the whole point of this field, not something a confirmed status
-  // should protect against.
-  if(!isSplit && document.getElementById('ev-camp-dock')){
-    const campDock=document.getElementById('ev-camp-dock').value||'';
-    const campUnload=document.getElementById('ev-camp-unload')?.value||'';
-    if(campDock||campUnload) v.campaign={dock_date:campDock||null, unload_start_date:campUnload||null};
-    else delete v.campaign;
   }
   autoSave(); closeModal(); renderVesselTable(); vpRender(); statMsg('Vessel call updated');
 }
