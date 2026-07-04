@@ -950,6 +950,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
           <g id="conn-layer"></g>
           <g id="el-layer"></g>
           <line id="temp-line" x1="0" y1="0" x2="0" y2="0" stroke="var(--green)" stroke-width="1.5" stroke-dasharray="4 3" opacity="0" pointer-events="none"/>
+          <rect id="marquee-rect" x="0" y="0" width="0" height="0" fill="rgba(0,255,157,.08)" stroke="var(--green)" stroke-width="1" stroke-dasharray="4 3" opacity="0" pointer-events="none"/>
         </svg>
         <div id="canvas-empty" class="empty-state">
           <div class="empty-diamond">◇</div>
@@ -1609,6 +1610,12 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
   <div class="stat-sep"></div>
   <div class="stat-item"><span id="stat-maint">0 maintenance events</span></div>
   <div class="stat-sep"></div>
+  <div class="stat-item" id="ui-zoom-ctrl" title="App zoom — independent of the browser's own zoom">
+    <span onclick="zoomOutUi()" style="cursor:pointer;padding:0 6px;font-family:var(--mono);color:var(--text-dim)">−</span>
+    <span id="ui-zoom-lbl" onclick="zoomResetUi()" style="cursor:pointer;font-family:var(--mono);font-size:9px;min-width:32px;display:inline-block;text-align:center" title="Click to reset to 100%">100%</span>
+    <span onclick="zoomInUi()" style="cursor:pointer;padding:0 6px;font-family:var(--mono);color:var(--text-dim)">+</span>
+  </div>
+  <div class="stat-sep"></div>
   <div class="stat-item" style="margin-left:auto">
     <span id="stat-save">Ready</span>
     <input type="file" id="import-json-input" accept=".json" style="display:none" onchange="importJSON(this)">
@@ -1873,6 +1880,7 @@ const S = {
   level:'plant', view:'topology', topSection:'production', facility_id:null,
   tool:'select', selectedEl:null, connectFrom:null,
   dragging:null, dragOff:{x:0,y:0},
+  selectedEls:new Set(), marquee:null, groupDrag:null, _suppressNextClick:false,
   elCounter:0,
   simCfg:{start_date:new Date()._ymd(), horizon:90, mode:'planning', conflict_resolution:'rolling_avg', autoPropose:true},
   simResults:null, chatCollapsed:true, realDataCollapsed:true,
@@ -2460,16 +2468,34 @@ function mkShape(shape,color,state){
 }
 
 function onElMD(e,id){
-  if(S.tool==='select'){
-    S.dragging=id;
-    const el=getEl(id);
+  if(S.tool!=='select') return;
+  // Mousedown on an element that's part of the current multi-selection moves
+  // the WHOLE group together, preserving each element's offset from the others.
+  if(S.selectedEls.size>1&&S.selectedEls.has(id)){
     const sr=document.getElementById('topo-svg').getBoundingClientRect();
-    S.dragOff.x=e.clientX-sr.left-el.x; S.dragOff.y=e.clientY-sr.top-el.y;
+    const orig={};
+    S.selectedEls.forEach(eid=>{ const el=getEl(eid); if(el) orig[eid]={x:el.x,y:el.y}; });
+    S.groupDrag={ids:[...S.selectedEls], startX:e.clientX-sr.left, startY:e.clientY-sr.top, orig};
+    return;
   }
+  S.dragging=id;
+  const el=getEl(id);
+  const sr=document.getElementById('topo-svg').getBoundingClientRect();
+  S.dragOff.x=e.clientX-sr.left-el.x; S.dragOff.y=e.clientY-sr.top-el.y;
 }
 
 const GRID=32; // snap grid size in px — matches background grid
 function snap(v){ return Math.round(v/GRID)*GRID; }
+
+// Mousedown on empty canvas (select tool only) starts a rubber-band selection
+// rectangle. Bails out over the floating canvas-toolbar so its buttons still work.
+function onCanvasMD(e){
+  if(S.tool!=='select'||e.button!==0) return;
+  if(e.target.closest&&e.target.closest('#canvas-toolbar')) return;
+  const sr=document.getElementById('topo-svg').getBoundingClientRect();
+  const x=e.clientX-sr.left, y=e.clientY-sr.top;
+  S.marquee={x0:x,y0:y,x1:x,y1:y};
+}
 
 function onCanvasMove(e){
   const sr=document.getElementById('topo-svg').getBoundingClientRect();
@@ -2479,6 +2505,22 @@ function onCanvasMove(e){
     const g=document.getElementById(`eg-${S.dragging}`);
     if(g) g.setAttribute('transform',`translate(${el.x},${el.y})`);
     redrawConns();
+  } else if(S.groupDrag){
+    const gd=S.groupDrag;
+    const dx=snap(x-gd.startX), dy=snap(y-gd.startY);
+    gd.ids.forEach(eid=>{
+      const el=getEl(eid); const o=gd.orig[eid]; if(!el||!o) return;
+      el.x=o.x+dx; el.y=o.y+dy;
+      const g=document.getElementById(`eg-${eid}`);
+      if(g) g.setAttribute('transform',`translate(${el.x},${el.y})`);
+    });
+    redrawConns();
+  } else if(S.marquee){
+    S.marquee.x1=x; S.marquee.y1=y;
+    const mx=Math.min(S.marquee.x0,x), my=Math.min(S.marquee.y0,y);
+    const mw=Math.abs(x-S.marquee.x0), mh=Math.abs(y-S.marquee.y0);
+    const rect=document.getElementById('marquee-rect');
+    if(rect){ rect.setAttribute('x',mx); rect.setAttribute('y',my); rect.setAttribute('width',mw); rect.setAttribute('height',mh); rect.setAttribute('opacity','1'); }
   }
   if(S.connectFrom&&S.tool==='connect'){
     const fe=getEl(S.connectFrom);
@@ -2488,8 +2530,71 @@ function onCanvasMove(e){
   }
 }
 
-function onCanvasUp(){ if(S.dragging){S.dragging=null;autoSave();} }
-function onCanvasClick(){ if(S.tool==='select') deselect(); if(S.tool==='connect') cancelConn(); }
+function onCanvasUp(){
+  // A drag that moved the mouse ends with a native click bubbling up to the
+  // canvas wrap (mousedown/mouseup targets differ) — suppress that one click
+  // so it doesn't immediately deselect what was just selected/moved.
+  const mqDx=S.marquee?Math.abs(S.marquee.x1-S.marquee.x0):0;
+  const mqDy=S.marquee?Math.abs(S.marquee.y1-S.marquee.y0):0;
+  const realMarquee=S.marquee&&(mqDx>4||mqDy>4);
+  const hadInteraction=!!(S.dragging||S.groupDrag||realMarquee);
+
+  if(S.groupDrag){ S.groupDrag=null; autoSave(); }
+  if(S.dragging){ S.dragging=null; autoSave(); }
+  if(S.marquee){
+    document.getElementById('marquee-rect')?.setAttribute('opacity','0');
+    if(realMarquee){
+      const mx0=Math.min(S.marquee.x0,S.marquee.x1), my0=Math.min(S.marquee.y0,S.marquee.y1);
+      const mx1=Math.max(S.marquee.x0,S.marquee.x1), my1=Math.max(S.marquee.y0,S.marquee.y1);
+      selectElsInRect(mx0,my0,mx1,my1);
+    }
+    S.marquee=null;
+  }
+  if(hadInteraction) S._suppressNextClick=true;
+}
+
+function onCanvasClick(){
+  if(S._suppressNextClick){ S._suppressNextClick=false; return; }
+  if(S.tool==='select') deselect();
+  if(S.tool==='connect') cancelConn();
+}
+
+// Select every element whose ~40px footprint intersects the rectangle. 0 or 1
+// matches behaves like a normal single click-select; 2+ enters multi-select
+// mode (group-highlight + a props-panel summary with a group delete action).
+function selectElsInRect(x0,y0,x1,y1){
+  const pad=20; // matches the existing per-element hit-circle radius
+  const ids=getFacElements().filter(el=>
+    (el.x-pad)<x1&&(el.x+pad)>x0&&(el.y-pad)<y1&&(el.y+pad)>y0
+  ).map(el=>el.id);
+  if(ids.length<2){
+    deselect();
+    if(ids.length===1) selectEl(ids[0]);
+    return;
+  }
+  deselect(); // clears prior selection + highlight styling + props panel
+  S.selectedEls=new Set(ids);
+  ids.forEach(id=>{
+    const g=document.getElementById(`eg-${id}`);
+    const sh=g?.querySelector('.el-shape');
+    if(sh){ sh.setAttribute('filter','url(#glow)'); sh.setAttribute('stroke-width','2.5'); }
+  });
+  document.getElementById('props-body').innerHTML=`
+    <div class="props-empty">${ids.length} elements selected — drag any of them to move the group together.</div>
+    <div style="padding:0 10px 10px"><button class="btn-sec" style="width:100%" onclick="deleteSelectedEls()">🗑 Delete ${ids.length} Selected</button></div>`;
+}
+
+function deleteSelectedEls(){
+  const ids=[...S.selectedEls]; if(!ids.length) return;
+  if(!confirm(`Delete ${ids.length} selected elements?`)) return;
+  ids.forEach(id=>{
+    DB.elements=DB.elements.filter(e=>e.id!==id);
+    DB.connections=DB.connections.filter(c=>c.from_element_id!==id&&c.to_element_id!==id);
+    document.getElementById(`eg-${id}`)?.remove();
+  });
+  redrawConns(); updateEmpty(); updateStatusBar(); autoSave();
+  deselect();
+}
 
 function onElClick(id){
   if(S.tool==='delete'){deleteEl(id);return;}
@@ -2510,6 +2615,7 @@ function selectEl(id){
 
 function deselect(){
   S.selectedEl=null;
+  S.selectedEls=new Set();
   DB.elements.filter(e=>e.facility_id===S.facility_id).forEach(el=>{
     const g=document.getElementById(`eg-${el.id}`);
     if(g){const sh=g.querySelector('.el-shape');if(sh){sh.removeAttribute('filter');sh.setAttribute('stroke-width','1.5');}}
@@ -19022,6 +19128,34 @@ function setTool(tool){
   document.getElementById('topo-canvas-wrap').style.cursor=tool==='delete'?'crosshair':tool==='connect'?'cell':'default';
 }
 
+// ═══════════════════════════════════════════════════════
+// APP-WIDE UI ZOOM — a device-level display preference (not organizational
+// data), applied via CSS zoom on <body>. Deliberately independent of the
+// browser's own Ctrl+/Ctrl-/Ctrl+scroll page zoom: those stay untouched, this
+// is a separate control the app owns, persisted per-browser in localStorage.
+// ═══════════════════════════════════════════════════════
+let _uiZoom=1;
+function _uiZoomSupported(){ return typeof document.body.style.zoom!=='undefined'; }
+function applyUiZoom(z){
+  _uiZoom=Math.min(2,Math.max(0.5,Math.round(z*20)/20)); // clamp 50-200%, snap to 5%
+  if(_uiZoomSupported()) document.body.style.zoom=_uiZoom;
+  const lbl=document.getElementById('ui-zoom-lbl');
+  if(lbl) lbl.textContent=Math.round(_uiZoom*100)+'%';
+  try{ localStorage.setItem('avila_ui_zoom',String(_uiZoom)); }catch(e){}
+}
+function zoomInUi(){ applyUiZoom(_uiZoom+0.1); }
+function zoomOutUi(){ applyUiZoom(_uiZoom-0.1); }
+function zoomResetUi(){ applyUiZoom(1); }
+function initUiZoom(){
+  if(!_uiZoomSupported()){
+    const w=document.getElementById('ui-zoom-ctrl'); if(w) w.style.display='none';
+    return; // e.g. Firefox — no supported app-level zoom mechanism; browser zoom still works
+  }
+  let saved=1;
+  try{ saved=parseFloat(localStorage.getItem('avila_ui_zoom'))||1; }catch(e){}
+  applyUiZoom(saved);
+}
+
 function toggleChat(){
   S.chatCollapsed=!S.chatCollapsed;
   document.getElementById('chat-panel').classList.toggle('open',!S.chatCollapsed);
@@ -20091,11 +20225,14 @@ document.addEventListener('DOMContentLoaded',async()=>{
     renderRealDataSections();
   }
 
+  initUiZoom();
+
   // Attach canvas event listeners
   const canvas = document.getElementById('topo-canvas-wrap');
   if(canvas) {
     canvas.addEventListener('dragover', (e) => e.preventDefault());
     canvas.addEventListener('drop', (e) => onCanvasDrop(e));
+    canvas.addEventListener('mousedown', (e) => onCanvasMD(e));
     canvas.addEventListener('click', (e) => onCanvasClick(e));
     canvas.addEventListener('mousemove', (e) => onCanvasMove(e));
     canvas.addEventListener('mouseup', (e) => onCanvasUp(e));
