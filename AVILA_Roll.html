@@ -2243,9 +2243,7 @@ function getFacElements(){ return DB.elements.filter(e=>e.facility_id===S.facili
 
 // Get elements ASSIGNED TO current facility (regardless of canvas placement)
 // This is the authoritative source for facility-specific analysis and results
-function getFacAssignedElements(){
-  return DB.elements.filter(e=>(e.assigned_facility_id||e.facility_id)===S.facility_id);
-}
+
 
 function getFacConnections(){ return DB.connections.filter(c=>c.facility_id===S.facility_id); }
 
@@ -2366,13 +2364,7 @@ const PRODUCT_CAT_ICONS={
   '':          '·'    // unassigned
 };
 // Returns a tiny colored icon span for a product's category ('' if no product).
-function prodCatIcon(prod){
-  if(!prod) return '';
-  const cat=prod.category||'';
-  const icon=PRODUCT_CAT_ICONS[cat]||PRODUCT_CAT_ICONS[''];
-  const color=PRODUCT_CAT_COLORS[cat]||PRODUCT_CAT_COLORS[''];
-  return `<span style="font-size:7px;margin-right:3px;color:${color};vertical-align:middle" title="${cat||'unassigned'}">${icon}</span>`;
-}
+
 // Distinct glyph + colour per SPECIFIC product (e.g. MIA_IL(08) vs MIA_IL(11)), not by category.
 // Colour reuses spProdColor so it matches the Sales Performance view.
 const PROD_ICON_GLYPHS=['●','◆','■','▲','★','⬢','◐','✦','◣','⬟','❖','◥','▰','◑','◢','⬣'];
@@ -2451,7 +2443,7 @@ function isCementSilo(el){
     return cat==='cement_bulk'||cat==='cement_packed'||cat==='additive';
   });
 }
-function siloAccepts(el,productId){ return getSiloProducts(el).includes(productId); }
+
 
 function mkShape(shape,color,state){
   const sc=state==='running'?'var(--green)':state==='stopped'?'var(--red)':state==='warn'?'var(--amber)':color;
@@ -3636,7 +3628,6 @@ function _resolveDemandSwapIn(toElementId, dateStr, rateFn){
 function openDemandSwapManager(seedFromEl, seedDate, editId){
   const cementProds=(DB.products||[]).filter(p=>['cement_bulk','cement_packed'].includes(p.category||''))
     .sort((a,b)=>(a.name||a.id).localeCompare(b.name||b.id));
-  const matOpts=(sel)=>cementProds.map(p=>`<option value="${p.id}"${p.id===sel?' selected':''}>${p.name||p.id}</option>`).join('');
   const dpEls=(DB.elements||[]).filter(e=>e.type==='demand_point').slice().sort((a,b)=>(a.name||'').localeCompare(b.name||''));
   const dpOpts=(sel)=>dpEls.map(e=>`<option value="${e.id}"${e.id===sel?' selected':''}>${(e.name||e.id).replace(/"/g,'&quot;')}</option>`).join('');
   const pn=id=>DB.products.find(p=>p.id===id)?.name||id;
@@ -3721,7 +3712,7 @@ function _saveDemandSwap(){
   closeModal();
   renderDemandView();
   statMsg((editId?'Demand swap updated':'Demand swap saved')+' — running simulation…');
-  if(typeof runSimulation==='function') runSimulation();
+  scheduleSimulation();
 }
 // Open the manager with an existing swap loaded into the form for editing.
 function _editDemandSwap(id){
@@ -3960,7 +3951,7 @@ function _saveMillPolicy(){
   }
   autoSave(); closeModal();
   statMsg((editId?'Mill policy updated':'Mill policy saved')+' — running simulation…');
-  if(typeof runSimulation==='function') runSimulation();
+  scheduleSimulation();
 }
 function _editMillPolicy(id){ const p=(DB.mill_policies||[]).find(x=>x.id===id); if(!p){ openMillPolicyManager(); return; } openMillPolicyManager(id); }
 function _deleteMillPolicy(id){
@@ -3999,7 +3990,7 @@ function _saveMillFocus(){
   else DB.mill_product_focus.push({ id:'mpf_'+Date.now(), element_id:mill, date_from:from, date_to:to, products });
   autoSave(); closeModal();
   statMsg((editId?'Focus updated':'Focus saved')+' — running simulation…');
-  if(typeof runSimulation==='function') runSimulation();
+  scheduleSimulation();
 }
 function _editMillFocus(id){ const f=(DB.mill_product_focus||[]).find(x=>x.id===id); if(!f){ openMillPolicyManager(); return; } openMillPolicyManager(undefined,id); }
 function _deleteMillFocus(id){
@@ -4151,7 +4142,7 @@ function _campClearReal(elId, dateStr){
   _demandCacheInvalidate();
   renderSupplyView();
   statMsg('Real production cleared — running simulation…');
-  if(typeof runSimulation==='function') runSimulation();
+  scheduleSimulation();
 }
 
 function closeCampaignPopup(){
@@ -4279,7 +4270,7 @@ function applyInventory(siloId){
   autoSave();
   renderSupplyView();
   statMsg('Real inventory saved — running simulation…');
-  if(typeof runSimulation==='function') runSimulation();
+  scheduleSimulation();
 }
 
 function clearInventory(siloId){
@@ -4292,7 +4283,7 @@ function clearInventory(siloId){
   autoSave();
   renderSupplyView();
   statMsg('Real inventory cleared — running simulation…');
-  if(typeof runSimulation==='function') runSimulation();
+  scheduleSimulation();
 }
 
 function closeInventoryPopup(){
@@ -4455,7 +4446,7 @@ function applyTermReal(){
   autoSave();
   renderSupplyView();
   statMsg('Real value saved — running simulation…');
-  if(typeof runSimulation==='function') runSimulation();
+  scheduleSimulation();
 }
 
 function clearTermReal(){
@@ -4472,7 +4463,7 @@ function clearTermReal(){
   autoSave();
   renderSupplyView();
   statMsg('Real value cleared — running simulation…');
-  if(typeof runSimulation==='function') runSimulation();
+  scheduleSimulation();
 }
 
 function closeTermRealPopup(){
@@ -4500,7 +4491,7 @@ function applyCampaign(elId){
     _demandCacheInvalidate();
     renderSupplyView();
     statMsg('Real production saved — running simulation…');
-    if(typeof runSimulation==='function') runSimulation();
+    scheduleSimulation();
     return;
   }
 
@@ -4527,7 +4518,7 @@ function applyCampaign(elId){
   autoSave();
   renderSupplyView();
   statMsg('Campaign saved — running simulation…');
-  if(typeof runSimulation==='function') runSimulation();
+  scheduleSimulation();
 }
 
 // Apply a shorter end-date to an existing campaign (called from warning banner)
@@ -5063,14 +5054,7 @@ function supSetView(preset, btn){
   renderSupplyView();
 }
 
-function supOnFacChange(){
-  if(!window._supView) window._supView={preset:'rom',fromDate:'',toDate:'',facId:'',prodId:''};
-  const facId=document.getElementById('sup-fac-filter')?.value||'';
-  window._supView.facId=facId;
-  window._supView.prodId='';
-  supPopulateProductFilter(facId);
-  renderSupplyView();
-}
+
 
 function supPopulateProductFilter(facId){
   const sel=document.getElementById('sup-prod-filter'); if(!sel) return;
@@ -5971,12 +5955,7 @@ function _demClearFilters(){
   renderDemandView();
 }
 
-function _demToggleDp(dpKey){
-  if(!window._dpCol) window._dpCol=new Set();
-  if(window._dpCol.has(dpKey)) window._dpCol.delete(dpKey);
-  else window._dpCol.add(dpKey);
-  renderDemandView();
-}
+
 
 function _demToggleMonth(ym){
   if(!window._demColapsed) window._demColapsed=new Set();
@@ -6136,27 +6115,7 @@ function _vesselCellParts(state, isReal){
 // Supply page and the Logistics vessel schedule so both look identical.
 //   unloading → green · anchorage (docked, silo full) → red hatch · arrived (waiting to
 //   dock) → amber hatch · idle → empty. ⧗N badge = extra vessels waiting (not on the bar).
-function _berthGanttParts(bv){
-  const state=bv?bv.state:'idle';
-  const wl=(bv&&bv.waitingList)||[];
-  const docked=(bv&&bv.docked)||'';
-  const vessel = docked || (state==='arrived'?((wl[0]&&wl[0].name)||''):'');
-  const barBg = state==='unloading'?'#00d9a3'
-    : state==='anchorage'?'repeating-linear-gradient(45deg,#ff3d5a,#ff3d5a 3px,#3a1f26 3px,#3a1f26 6px)'
-    : state==='arrived'?'repeating-linear-gradient(45deg,#ffb830,#ffb830 3px,#3a3020 3px,#3a3020 6px)'
-    : 'transparent';
-  const badgeN = docked ? wl.length : Math.max(0, wl.length-1);
-  const wBadge = badgeN>0?`<span style="position:absolute;right:1px;top:-1px;font-size:8px;color:#ffb830;font-weight:700;pointer-events:none">⧗${badgeN}</span>`:'';
-  const lblTxt = state==='unloading'?vessel : state==='anchorage'?(vessel+' ⚓') : state==='arrived'?(vessel+' ⏳') : '';
-  const lblCol = state==='unloading'?'#0a3a2c' : state==='arrived'?'#3a2e08' : '#fff';
-  const tp=[];
-  if(docked) tp.push(docked+(state==='unloading'?' — unloading':' — at anchorage (silo full)'));
-  else if(state==='arrived'&&vessel) tp.push(vessel+' — arrived, waiting to dock');
-  const others=docked?wl:wl.slice(1);
-  if(others.length) tp.push('also waiting: '+others.map(w=>w.name+' ('+(w.reason==='silo_full'?'bumped · silo full':'arrived · berth occupied')+')').join('; '));
-  const ttl=(tp.join(' · ')||'idle').replace(/"/g,'&quot;');
-  return {barBg, wBadge, lblTxt, lblCol, ttl, key:state==='idle'?'__i':state+'|'+vessel};
-}
+
 
 function _renderSupplyViewInner(wrap){
   if(!window._supSecCol) window._supSecCol=new Set();
@@ -8785,11 +8744,7 @@ function _tsBadge(statusId){
   return `<span style="font-family:var(--mono);font-size:8px;padding:2px 7px;border:1px solid ${s.color};color:${s.color};background:${s.bg};white-space:nowrap">${lock}${s.id}</span>`;
 }
 
-function _tsStatusSelect(currentStatus, includeAll=false){
-  return `<select style="background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:10px;padding:4px 6px;outline:none">
-    ${TRANSPORT_STATUSES.map(s=>`<option value="${s.id}" ${s.id===currentStatus?'selected':''}>${s.id}</option>`).join('')}
-  </select>`;
-}
+
 
 function advanceVesselStatus(id){
   const v=DB.vessel_calls.find(x=>x.id===id); if(!v) return;
@@ -8989,14 +8944,7 @@ function rpGetOriginProdSilos(dpEl){
 }
 
 // Get destination silo for a berth (single — kept for legacy callers)
-function rpGetDestSilo(berthEl){
-  if(!berthEl) return null;
-  const allEls=getFacElements();
-  const allConns=DB.connections.filter(c=>c.facility_id===S.facility_id);
-  return (allConns.filter(c=>c.from_element_id===berthEl.id))
-    .map(c=>allEls.find(e=>e.id===c.to_element_id))
-    .find(e=>e?.type==='bulk_silo')||null;
-}
+
 
 // Get ALL destination silos for a berth (one per product at that terminal)
 function rpGetDestSilos(berthEl){
@@ -9071,7 +9019,7 @@ function rpDayDate(d){
   dt.setDate(dt.getDate()+d-1);
   return dt._ymd();
 }
-function rpDayDOW(d){return new Date(S.simCfg.start_date+'T00:00:00').getDay()==0?0:((new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5).getDay()+6)%7);}
+
 function rpIsSat(d){return new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5).getDay()===6;}
 function rpIsSun(d){return new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5).getDay()===0;}
 function rpIsSwitch(d,switchDays){const dow=(new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5).getDay()+6)%7;return switchDays.includes(dow);}
@@ -9184,31 +9132,11 @@ function rpDemandEff(elId,d){
   return Math.max(0,v);
 }
 // Tonnes swapped INTO a demand point on sim day d (for the breakout row) — same source as above.
-function rpSwapIn(elId,d){
-  if(typeof _resolveDemandSwapIn!=='function') return 0;
-  const ds=new Date(new Date(S.simCfg.start_date+'T00:00:00').getTime()+(d-1)*864e5)._ymd();
-  return _resolveDemandSwapIn(elId,ds,(id)=>_demGridVal(id,ds))||0;
-}
+
 // Push a demand point's rows into a logistics planner table: an EFFECTIVE-demand row
 // (own − swapped-out + swapped-in) plus, when relevant, an amber "↳ ⇄ swapped in" breakout
 // showing the extra demand relocated here from other points (e.g. MIA→PEV).
-function _vpPushDemandRows(rows, el, months, mSty, tpSty){
-  const demCells=months.map(mon=>{
-    const monT=mon.days.reduce((s,d)=>s+rpDemandEff(el.id,d),0);
-    const mTd=`<td class="logi-mcol" style="${mSty}">${monT>0?Number(Math.round(monT)).toLocaleString():'—'}</td>`;
-    return mTd+mon.days.map(d=>{const v=rpDemandEff(el.id,d);const tSty=tpSty(d);return `<td style="color:var(--simulated);${tSty}">${v>0?Number(v).toLocaleString():'—'}</td>`;}).join('');
-  }).join('');
-  rows.push(`<tr class="tp-row-dem"><td style="padding-left:14px">${el.name}</td>${demCells}</tr>`);
-  let swTot=0; months.forEach(mon=>mon.days.forEach(d=>{swTot+=rpSwapIn(el.id,d);}));
-  if(swTot>0){
-    const siCells=months.map(mon=>{
-      const monT=mon.days.reduce((s,d)=>s+rpSwapIn(el.id,d),0);
-      const mTd=`<td class="logi-mcol" style="${mSty}">${monT>0?'+'+Number(Math.round(monT)).toLocaleString():'—'}</td>`;
-      return mTd+mon.days.map(d=>{const v=rpSwapIn(el.id,d);const tSty=tpSty(d);return `<td style="color:#ffb830;font-size:9px;${tSty}">${v>0?'+'+Number(Math.round(v)).toLocaleString():'—'}</td>`;}).join('');
-    }).join('');
-    rows.push(`<tr class="tp-row-dem"><td style="padding-left:24px;color:#ffb830;font-style:italic;font-size:9px">↳ ⇄ swapped in (added coverage)</td>${siCells}</tr>`);
-  }
-}
+
 
 // ── Inventory snapshot from simulation results ────────────────────
 function rpInv(elId,d){
@@ -9246,27 +9174,7 @@ function rpPlannedArrivalsForDest(destFacId,berthId){
 }
 
 // Planned loading at origin per day
-function rpPlannedLoadingForDest(destFacId){
-  const map={};
-  const _simStart=S.simCfg?.start_date||'';
-  DB.rail_movements
-    .filter(rm=>rm.from_facility_id===S.facility_id&&rm.to_facility_id===destFacId
-      &&['Planned','Confirmed'].includes(rm.status||'')
-      &&(!rm.departure_date||!_simStart||rm.departure_date>=_simStart))
-    .forEach(rm=>{
-      const sw=rm.switch_day; const ls=rm.load_start_day;
-      if(!sw||!ls) return;
-      const carCap=parseFloat(rm.wagon_capacity_t)||112;
-      const cars=parseInt(rm.wagon_count)||0;
-      for(let d=ls;d<sw;d++){
-        map[d]=(map[d]||0)+Math.min(cars, parseInt(rm._carsPerDay||0)||cars);
-      }
-      // Dispatch on switch day
-      if(!map[`sw_${sw}`]) map[`sw_${sw}`]=0;
-      map[`sw_${sw}`]+=cars;
-    });
-  return map;
-}
+
 
 // ── Rail loading capacity helpers (shared by display + planner) ────
 // A rail dispatch point's siding can physically load only a fixed number of cars per
@@ -9317,7 +9225,7 @@ function _supSetRailRate(dispId, pid, value){
   if(row) row.cars_per_day=cars;
   else DB.rail_loading_plan.push({id:'lp_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),dispatch_id:dispId,product_id:pid,cars_per_day:cars});
   autoSave();
-  if(typeof runSimulation==='function') runSimulation();
+  scheduleSimulation();
 }
 // Override the loading rate for a single day (dated row), then re-run the sim.
 function _supSetRailDayRate(dispId, pid, ds){
@@ -9330,7 +9238,7 @@ function _supSetRailDayRate(dispId, pid, ds){
   if(row) row.cars_per_day=cars;
   else DB.rail_loading_plan.push({id:'lp_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),dispatch_id:dispId,product_id:pid,cars_per_day:cars,date_from:ds,date_to:ds});
   autoSave();
-  if(typeof runSimulation==='function') runSimulation();
+  scheduleSimulation();
 }
 // Operator "push": set how many cars of a product go from a dispatch point to a terminal on a
 // switch day. Upserts a Confirmed rail_movement (or removes it when 0). With skipRun=true it only
@@ -9347,7 +9255,7 @@ function _rpSetPush(dpId, destFacId, pid, dayNum, ds, value, skipRun){
   if(cars<=0){ if(row) DB.rail_movements=DB.rail_movements.filter(r=>r!==row); }
   else if(row){ row.wagon_count=cars; row.wagon_capacity_t=carCap; row.total_capacity_t=cars*carCap; row.status='Confirmed'; if(!row.to_berth_id) row.to_berth_id=berthId; }
   else DB.rail_movements.push({id:'push_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),from_facility_id:S.facility_id,to_facility_id:destFacId,from_dispatch_id:dpId,to_berth_id:berthId,product_id:pid,wagon_count:cars,wagon_capacity_t:carCap,total_capacity_t:cars*carCap,switch_day:dayNum,departure_date:ds,transit_days:transit,status:'Confirmed',notes:'Operator push'});
-  if(!skipRun){ autoSave(); if(typeof runSimulation==='function') runSimulation(); }
+  if(!skipRun){ autoSave(); scheduleSimulation(); }
 }
 // A push cell was edited — recolor it (green = matches the confirmed value, amber = unsaved draft).
 function _rpPushEdit(inp){
@@ -9363,7 +9271,7 @@ function _rpConfirmSwitch(dpId, sw){
   if(!inps.length) return;
   inps.forEach(inp=>{ _rpSetPush(dpId, inp.dataset.dest, inp.dataset.pid, parseInt(sw,10), inp.dataset.ds, inp.value, true); });
   autoSave();
-  if(typeof runSimulation==='function') runSimulation();
+  scheduleSimulation();
 }
 // Reset one switch's push inputs back to the suggested distribution (no commit, no re-run).
 function _rpResetSwitch(dpId, sw){
@@ -9388,32 +9296,7 @@ function railDpProducts(dp, connections){
 //   m.unplaced = cars that physically cannot be loaded in time (over-commitment)
 // Returns { byDay, overflow } where byDay[d] is the siding's TOTAL cars loaded on day d
 // (<= carsPerDay) and overflow lists movements with unplaced cars.
-function rpAllocateLoading(movements, carsPerDay, isWorkDay){
-  const cap=Math.max(0,carsPerDay||0);
-  const byDay={};
-  const overflow=[];
-  const sorted=[...movements]
-    .filter(m=>m.cars>0&&m.sw>=m.ls)
-    .sort((a,b)=>(a.sw-b.sw)||(a.ls-b.ls));
-  sorted.forEach(m=>{
-    m.placed={}; m.unplaced=0;
-    let rem=m.cars;
-    // INCLUSIVE of the switch day — cars loaded the morning of the switch ship that day.
-    for(let d=m.ls;d<=m.sw&&rem>0;d++){
-      if(!isWorkDay(d)) continue;
-      const free=cap-(byDay[d]||0);
-      if(free<=0) continue;
-      const put=Math.min(free,rem);
-      byDay[d]=(byDay[d]||0)+put;
-      m.placed[d]=(m.placed[d]||0)+put;
-      rem-=put;
-    }
-    if(rem>0){ m.unplaced=rem; overflow.push(m); }
-  });
-  // Movements with no valid window still get cleared fields for safe access downstream.
-  movements.forEach(m=>{ if(!m.placed){m.placed={};m.unplaced=m.cars>0?m.cars:0;} });
-  return {byDay,overflow};
-}
+
 
 // ── Main render ───────────────────────────────────────────────────
 function rpRender(){
@@ -9824,14 +9707,7 @@ function rpOpenArrivalDialog(destFacId,dayNum,arrDateStr){
 }
 
 
-function rpDeleteArrival(rmId){
-  DB.rail_movements=DB.rail_movements.filter(rm=>rm.id!==rmId);
-  autoSave();
-  document.getElementById('tp-arrival-modal')?.remove();
-  rpRender();
-  renderRailTable();
-  statMsg('Rail movement deleted');
-}
+
 
 // ── Rail planner charts ───────────────────────────────────────────
 function rpDestroyCharts(){
@@ -10621,7 +10497,7 @@ function removeMaintEventFromCalendar(id){
 // demand_values exist for this element at all.
 // Safe number parser — treats any non-numeric / null / symbol / text as 0
 // Used throughout simulation to prevent letters like "MAINT" or "—" from corrupting calculations
-function safeNum(v){ const n=parseFloat(v); return (isFinite(n)&&!isNaN(n))?n:0; }
+
 
 function _demandRate(elId, dateStr){
   // PHASE 4: Check REAL DATA first (actual production inputs)
@@ -10651,15 +10527,7 @@ function _demandRate(elId, dateStr){
 function _demandCacheInvalidate(){ _demandRate._cache={}; if(typeof _demGridVal==='function') _demGridVal._cache=null; if(typeof SP!=='undefined') SP._demIdx=null; }
 
 // ── Monthly demand total for an element (for dashboard summaries) ──
-function _demandMonthTotal(elId, year, month){
-  const dim=new Date(year,month,0).getDate();
-  let total=0;
-  for(let d=1;d<=dim;d++){
-    const ds=`${year}-${String(month).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
-    total+=_demandRate(elId,ds);
-  }
-  return total;
-}
+
 
 // ═══════════════════════════════════════════════════════
 // SIMULATION ENGINE
@@ -11256,24 +11124,41 @@ function _nrLoadEquipment(){
   });
 }
 
+// Debounced entry point — edit handlers call this instead of runSimulation()
+// directly so a burst of edits produces one run. A run already in progress
+// absorbs new requests into a single trailing re-run (reentrancy guard).
+const _simQ={timer:null,running:false,pending:false};
+function scheduleSimulation(delay=150){
+  clearTimeout(_simQ.timer);
+  _simQ.timer=setTimeout(()=>{runSimulation();},delay);
+}
+
 async function runSimulation(){
   if(!S.facility_id){alert('Select a facility first.');return;}
   const els=getFacElements();
   if(!els.length){alert('Add elements to the topology first.');return;}
+  if(_simQ.running){_simQ.pending=true;return;}
+  _simQ.running=true;
 
-  // Pre-interpret any rules that don't yet have a structured form
-  const uninterpreted=(DB.simulation_rules||[]).filter(r=>r.status==='active'&&!r.structured);
-  if(uninterpreted.length){
-    const names=uninterpreted.map(r=>`"${r.name}"`).join(', ');
-    statMsg(`⚠ ${uninterpreted.length} rule(s) not interpreted and will be skipped: ${names}. Export JSON and upload to claude.ai to interpret them.`);
-    const result=await _interpretPendingRules();
-    if(result.count>0) statMsg(`${result.count} rule(s) interpreted — running simulation…`);
-    else if(result.total>0) statMsg(`Rules could not be interpreted (API unavailable) — running without them…`);
+  try{
+    // Pre-interpret any rules that don't yet have a structured form
+    const uninterpreted=(DB.simulation_rules||[]).filter(r=>r.status==='active'&&!r.structured);
+    if(uninterpreted.length){
+      const names=uninterpreted.map(r=>`"${r.name}"`).join(', ');
+      statMsg(`⚠ ${uninterpreted.length} rule(s) not interpreted and will be skipped: ${names}. Export JSON and upload to claude.ai to interpret them.`);
+      const result=await _interpretPendingRules();
+      if(result.count>0) statMsg(`${result.count} rule(s) interpreted — running simulation…`);
+      else if(result.total>0) statMsg(`Rules could not be interpreted (API unavailable) — running without them…`);
+    }
+  }catch(e){
+    _simQ.running=false;
+    throw e;
   }
 
   statMsg('Running simulation…');
   document.getElementById('mode-lbl').textContent='Running';
   setTimeout(()=>{
+    try{
     // Auto-extend horizon to cover all planned/confirmed/in-transit movement arrival days
     let effectiveHorizon=S.simCfg.horizon||90;
     DB.rail_movements.forEach(rm=>{
@@ -11286,9 +11171,8 @@ async function runSimulation(){
 
     // ── Pass 1: baseline without proposed vessels ──────────
     // Rail is now operator-driven (loading plan + manual pushes) — NO auto rail planner.
-    // Pass 1 still generates vessel proposals from the clean inventory picture.
-    const rBase=simulate(els, getFacConnections(), effectiveHorizon, false);
-    rBase.simHorizon=effectiveHorizon;
+    // Pass 1 only exists to generate vessel proposals from the clean inventory
+    // picture, so it is skipped entirely in Forecast mode (Auto-Propose OFF).
     _railClearAutoProposed(); // one-time cleanup of legacy auto-generated rail proposals
     // Auto-Propose toggle (logistics pages): when ON, the simulation proposes vessel
     // calls to cover projected shortfalls. When OFF ("Forecast mode"), it adds nothing
@@ -11296,6 +11180,8 @@ async function runSimulation(){
     // proposed or confirmed. Any leftover auto-proposed vessels are cleared so the
     // forecast reflects only the user's own plan.
     if(S.simCfg.autoPropose!==false){
+      const rBase=simulate(els, getFacConnections(), effectiveHorizon, false);
+      rBase.simHorizon=effectiveHorizon;
       _writeProposedVesselCalls(rBase);
     }else{
       DB.vessel_calls=DB.vessel_calls.filter(v=>
@@ -11320,6 +11206,10 @@ async function runSimulation(){
     if(S.topSection==='logistics'){
       if(S.activeSchedTab==='rail') rpRender();
       if(S.activeSchedTab==='vessels') vpRender();
+    }
+    }finally{
+      _simQ.running=false;
+      if(_simQ.pending){_simQ.pending=false;scheduleSimulation(50);}
     }
   },80);
 }
@@ -13403,12 +13293,7 @@ function renderResults(r){ renderDtree(r);renderDashCharts(r);renderEvLog(r);ren
 // ═══════════════════════════════════════════════════════
 let resultsFilter='all';
 
-function setResultsFilter(f,btn){
-  resultsFilter=f;
-  document.querySelectorAll('.results-filter-btn').forEach(b=>b.classList.remove('active'));
-  btn.classList.add('active');
-  renderResultsTable();
-}
+
 
 function renderResultsTable(){
   const wrap=document.getElementById('results-table-wrap'); if(!wrap) return;
@@ -14164,35 +14049,7 @@ function importJSON(input){
   reader.readAsText(file);
 }
 
-function exportResultsCSV(){
-  const r=S.simResults;
-  if(!r){statMsg('Run simulation first');return;}
-  const tbl=document.getElementById('results-tbl');
-  if(!tbl){statMsg('No table to export');return;}
 
-  let csv='';
-  // Headers
-  const headers=[];
-  tbl.querySelectorAll('thead th').forEach(th=>headers.push('"'+th.innerText.replace(/\n/g,' ').replace(/"/g,'""')+'"'));
-  csv+=headers.join(',')+'\n';
-  // Rows
-  tbl.querySelectorAll('tbody tr').forEach(tr=>{
-    const cells=[];
-    tr.querySelectorAll('td').forEach(td=>cells.push('"'+td.innerText.replace(/"/g,'""')+'"'));
-    csv+=cells.join(',')+'\n';
-  });
-
-  const blob=new Blob([csv],{type:'text/csv'});
-  const url=URL.createObjectURL(blob);
-  const a=document.createElement('a');
-  a.href=url;
-  const facName=getFacility()?.name||'facility';
-  const dateStr=S.simCfg.start_date;
-  a.download=`AVILA_Roll_${facName}_${dateStr}_${S.simCfg.horizon}d.csv`.replace(/\s+/g,'_');
-  a.click();
-  URL.revokeObjectURL(url);
-  statMsg('CSV exported');
-}
 
 // ═══════════════════════════════════════════════════════
 // VIEW WINDOW — controls display range across all result views
@@ -14341,27 +14198,9 @@ function renderDashCharts(r){
   }
 }
 
-function renderAlerts(r){
-  const area=document.getElementById('alerts-area'); if(!area) return;
-  let h='';
-  if(r.stopEvents.length){
-    const f=r.stopEvents[0];
-    h+=`<div class="alert-banner ab-danger">◆ First stop: ${dayToDate(f.day)} — ${f.element_name} (${f.cause}) · Total: ${r.stopEvents.length} events</div>`;
-  }
-  getResultElements().forEach(el=>{
-  });
-  area.innerHTML=h;
-}
 
-function renderKPIs(r){
-  document.getElementById('kpi-prod').textContent=r.avgDailyProd?.toLocaleString()||'—';
-  document.getElementById('kpi-disp').textContent=r.avgDailyDisp?.toLocaleString()||'—';
-  document.getElementById('kpi-ful').textContent=(r.fulfillmentPct||0)+'%';
-  document.getElementById('kpi-stops').textContent=r.stopEvents.length;
-  document.getElementById('kpi-ful-card').className='kpi-card'+(r.fulfillmentPct<80?' danger':r.fulfillmentPct<95?' warn':'');
-  document.getElementById('kpi-stop-card').className='kpi-card'+(r.stopEvents.length>20?' danger':r.stopEvents.length>5?' warn':'');
-  updateViewRangeLabel();
-}
+
+
 
 // ── DATA TREE ─────────────────────────────────────────
 const _dtreeCollapsed={};
@@ -14446,30 +14285,7 @@ function renderDtree(r){
   const cementSilos=fac.filter(e=>e.type==='bulk_silo'&&isCementSilo(e));
 
   // ── HELPER: build a demand group for any set of demand_point elements ──
-  function buildDemandGroup(demEls, groupId){
-    if(!demEls.length) return null;
-    const children=demEls.map(el=>{
-      const dp=DB.demand_points.find(d=>d.element_id===el.id||d.id===`dp_el_${el.id}`);
-      const firstProd=(dp?.products||[])[0];
-      const prodName=firstProd
-        ?DB.products.find(p=>p.id===firstProd.product_id)?.name||firstProd.product_id
-        :el.name;
-      return {
-        id:`dem_el_${el.id}`, label:prodName,
-        days:days.map(d=>{
-          const dt=new Date(S.simCfg.start_date+'T00:00:00');
-          dt.setDate(dt.getDate()+(d-1));
-          return _demandRate(el.id,dt._ymd());
-        }),
-        color:C_L1, isRate:true
-      };
-    });
-    return {
-      id:groupId, label:'CEM Demand / Total', color:C_L0,
-      children,
-      totals:days.map((_,i)=>children.reduce((s,c)=>s+(c.days[i]||0),0))
-    };
-  }
+
 
   // ── COLORS BY LEVEL ──────────────────────────────────
   const C_L0='#00d68f';   // level 0 group headers — green
@@ -14886,31 +14702,8 @@ function toggleDtreeGroup(gid){
   if(icon) icon.classList.toggle('open',!_dtreeCollapsed[gid]);
 }
 
-function renderGantt(r){
-  const {startDay,endDay}=getViewRange();
-  const totalDays=endDay-startDay+1;
-  let html='';
-  getResultElements().forEach(el=>{
-    const states=r.elementStates[el.id]||[];
-    const sliced=states.slice(startDay-1,endDay);
-    html+=`<div class="gantt-row"><div class="gantt-lbl" title="${el.name}">${el.name}</div><div class="gantt-track">`;
-    let i=0;
-    while(i<sliced.length){
-      const st=sliced[i]; let j=i;
-      while(j<sliced.length&&sliced[j]===st) j++;
-      const pct=((j-i)/totalDays*100).toFixed(2);
-      const left=(i/totalDays*100).toFixed(2);
-      const cls=st==='running'||st==='normal'?'gb-run':st==='maintenance'?'gb-maint':st==='rampup'?'gb-ramp':st==='purity_hold'?'gb-purity':'gb-stop';
-      html+=`<div class="gantt-block ${cls}" style="left:${left}%;width:${pct}%" title="${st} ${dayToDate(startDay+i)}-${dayToDate(startDay+j-1)}"></div>`;
-      i=j;
-    }
-    html+=`</div></div>`;
-  });
-  document.getElementById('gantt-wrap').innerHTML=html||
-    '<div style="font-family:var(--mono);font-size:9px;color:var(--text-dim);padding:12px">No elements</div>';
-}
 
-function renderGauges(r){} // Gauges replaced by data tree
+
 
 // ═══════════════════════════════════════════════════════
 // CHART ENGINE v2 — bar+line hybrid with hover tooltips
@@ -15071,39 +14864,12 @@ function _drawLegend(legendId,series,lines){
 // ── CLINKER CHART — dual Y-axis: left=production, right=inventory ──
 let _clkSimResults=null; // cache last results for redraw on scale change
 
-function _getClkScale(inputId1, inputId2, inputId3){
-  for(const id of [inputId1, inputId2, inputId3].filter(Boolean)){
-    const v=document.getElementById(id)?.value;
-    if(v&&parseFloat(v)>0) return parseFloat(v);
-  }
-  return null;
-}
 
-function _redrawClinker(){
-  if(_clkSimResults) _drawClinkerChart('clk-chart',_clkSimResults);
-  const ov=document.getElementById('clk-overlay');
-  if(ov&&ov.style.display!=='none') _drawClinkerChart('clk-chart-big',_clkSimResults);
-}
+
+
 
 let _clkMaximized=false;
-function _toggleClkMaximize(){
-  const ov=document.getElementById('clk-overlay');
-  if(!ov) return;
-  _clkMaximized=!_clkMaximized;
-  ov.style.display=_clkMaximized?'flex':'none';
-  const btn=document.getElementById('clk-max-btn');
-  if(btn) btn.textContent=_clkMaximized?'⤡ collapse':'⤢ expand';
-  if(_clkMaximized){
-    // Sync scale inputs from normal to overlay
-    ['prod','inv'].forEach(k=>{
-      const v=document.getElementById(`clk-${k}-max`)?.value||'';
-      const t=document.getElementById(`clk-${k}-max-2`);
-      if(t) t.value=v;
-    });
-    _drawClinkerChart('clk-chart-big',_clkSimResults);
-    _attachTooltip('clk-chart-big');
-  }
-}
+
 
 // ── Right-panel legend helper ──────────────────────────────────────
 function _drawLegendPanel(panelId, groups){
@@ -16162,7 +15928,7 @@ function _saveEditTruck(i){
   t.transit_days=parseInt(document.getElementById('etk-transit')?.value)||0;
   t.status=document.getElementById('etk-status')?.value||t.status;
   t.notes=document.getElementById('etk-notes')?.value??t.notes;
-  autoSave(); closeModal(); renderTruckTable(); if(typeof runSimulation==='function') runSimulation(); statMsg('Truck movement updated');
+  autoSave(); closeModal(); renderTruckTable(); scheduleSimulation(); statMsg('Truck movement updated');
 }
 
 function _editRail(i){
@@ -16308,7 +16074,7 @@ function saveTruck(){
     transit_days:parseInt(document.getElementById('tk-transit')?.value)||0,
     notes:document.getElementById('tk-notes')?.value||'', status:'Planned'
   });
-  autoSave(); closeModal(); renderTruckTable(); if(typeof runSimulation==='function') runSimulation(); statMsg('Truck movement added');
+  autoSave(); closeModal(); renderTruckTable(); scheduleSimulation(); statMsg('Truck movement added');
 }
 
 
@@ -16843,22 +16609,12 @@ Respond with: {"type":"...", "params":{...}, "plain_summary":"one sentence descr
         return `${el?.name||eid} (${el?.type||'?'}, at ${fac?.name||'?'})`;
       }).join('; ');
 
-      const resp=await fetch('https://api.anthropic.com/v1/messages',{
-        method:'POST',
-        headers:{
-          'Content-Type':'application/json',
-          'x-api-key':getApiKey(),
-          'anthropic-version':'2023-06-01',
-          'anthropic-dangerous-direct-browser-access':'true'
-        },
-        body:JSON.stringify({
-          model:'claude-haiku-4-5-20251001',
-          max_tokens:300,
-          system:systemPrompt,
-          messages:[{role:'user',content:`Equipment: ${elContext}\nRule: "${rule.natural_text}"`}]
-        })
+      const data=await callClaude({
+        model:'claude-haiku-4-5-20251001',
+        maxTokens:300,
+        system:systemPrompt,
+        messages:[{role:'user',content:`Equipment: ${elContext}\nRule: "${rule.natural_text}"`}]
       });
-      const data=await resp.json();
       const raw=data.content?.[0]?.text||'{}';
       const parsed=JSON.parse(raw.replace(/```json|```/g,'').trim());
       rule.structured=parsed;
@@ -16873,14 +16629,9 @@ Respond with: {"type":"...", "params":{...}, "plain_summary":"one sentence descr
   return {ok:true, count:interpreted, total:pending.length};
 }
 
-function _nrSaveConfirmed(){
-  // Legacy alias — no longer used but keep to avoid any lingering references
-  _nrSave();
-}
 
-async function _nrInterpret(){
-  // Legacy — no longer called from UI but keep to avoid reference errors
-}
+
+
 
 function saveSimCfg(){
   S.simCfg.start_date=document.getElementById('sc-start')?.value||S.simCfg.start_date;
@@ -17546,14 +17297,7 @@ function spGetFcVal(dpElId, date, demIdx, shipTo){
 }
 
 // ── Collect demand_point element IDs from a row set ──
-function spGetDpElIds(rows){
-  const dpEls=(DB.elements||[]).filter(e=>e.type==='demand_point');
-  const dpMap={};
-  dpEls.forEach(el=>{ const k=(el.name||'').trim().toUpperCase(); if(k) dpMap[k]=el.id; const c=(el.props?.dp_code||'').trim().toUpperCase(); if(c) dpMap[c]=el.id; });
-  const ids=new Set();
-  rows.forEach(r=>{ const id=dpMap[(r.product||'').trim().toUpperCase()]; if(id) ids.add(id); });
-  return [...ids];
-}
+
 
 // ── Main table render ──────────────────────────────────
 function spRenderTable(skipThead=false){
@@ -17714,640 +17458,51 @@ function spRenderTable(skipThead=false){
 }
 
 // ── [old helpers removed — replaced by spBuildDateSpine / spBuildOrgTree] ──
-function spGetRestOfMonthDates(dateNow){
-  const [y,m,d] = dateNow.split('-');
-  const current = new Date(y, parseInt(m)-1, parseInt(d));
-  const monthEnd = new Date(y, parseInt(m), 0); // last day of month
-  const days = [];
-  for(let dt=new Date(current); dt<=monthEnd; dt=new Date(dt.getTime()+864e5)){
-    days.push(dt._ymd());
-  }
-  return days;
-}
+
 
 // ── Helper: sum volume by day for given rows ──
-function spGetDailyTotals(rows, dates){
-  const byDay = {};
-  rows.forEach(r=>{
-    if(dates.includes(r.date)){
-      byDay[r.date] = (byDay[r.date]||0) + r.volume;
-    }
-  });
-  return dates.map(d=>byDay[d]||0);
-}
+
 
 // ── Helper: get dates for a specific month (YYYY-MM) ──
-function spGetMonthDates(yearMonth){
-  const [y,m] = yearMonth.split('-');
-  const monthNum = parseInt(m);
-  const year = parseInt(y);
-  const firstDay = new Date(year, monthNum-1, 1);
-  const lastDay = new Date(year, monthNum, 0);
-  const days = [];
-  for(let dt=new Date(firstDay); dt<=lastDay; dt=new Date(dt.getTime()+864e5)){
-    days.push(dt._ymd());
-  }
-  return days;
-}
+
 
 // ── Helper: get months for rest of year (current month+1 through December) ──
-function spGetRestOfYearMonths(dateNow){
-  const [y,m] = dateNow.split('-');
-  const year = parseInt(y);
-  const curMonth = parseInt(m);
-  const months = [];
-  for(let mo=curMonth+1; mo<=12; mo++){
-    months.push(`${year}-${String(mo).padStart(2,'0')}`);
-  }
-  return months;
-}
+
 
 // ── Helper: calculate daily forecast based on basis method ──
 // basis: 'all10d', 'all15d', 'all30d' (or 'actual' to use actual historical data)
 // rows: shipment records, dates: days to calculate for, forecastDays: number of days to forecast
-function spCalcForecast(rows, historicalDateRange, forecastDays, basis='all10d'){
-  if(basis==='actual') return []; // Return empty to use actual data
 
-  // Get the average daily volume from the selected historical period
-  const historicalVals = spGetDailyTotals(rows, historicalDateRange);
-  const avgDaily = historicalVals.length > 0
-    ? historicalVals.reduce((s,v)=>s+v,0) / historicalVals.length
-    : 0;
-
-  // Create forecast: repeat the average for each day
-  return Array(forecastDays.length).fill(Math.round(avgDaily));
-}
 
 // ── Helper: get date ranges for forecast basis calculation ──
-function spGetHistoricalRange(basis, dateNow){
-  const today = new Date(dateNow+'T12:00:00');
-  const ranges = {
-    'all10d': { days: 10, label: 'Last 10d avg' },
-    'all15d': { days: 15, label: 'Last 15d avg' },
-    'all30d': { days: 30, label: 'Last 30d avg' }
-  };
 
-  const config = ranges[basis] || ranges['all10d'];
-  const dates = [];
-  for(let i = config.days - 1; i >= 0; i--){
-    const d = new Date(today);
-    d.setDate(d.getDate() - i);
-    dates.push(d._ymd());
-  }
-  return dates;
-}
 
 // ── HIERARCHICAL FORECAST BASIS SYSTEM ──
 // Get the applicable basis for a specific row by checking hierarchy:
 // 1. Check if this row has an override
 // 2. Otherwise check parent level
 // 3. Otherwise use system default
-function spGetBasisForRow(rKey, sKey, stKey, section=''){
-  const suffix = section ? `_${section}` : '';
-  const basisKey = `_basis${suffix}`;
 
-  // Check if Ship To has override
-  if(stKey && SP.basisByRow[rKey] && SP.basisByRow[rKey][sKey] && SP.basisByRow[rKey][sKey][stKey]){
-    return SP.basisByRow[rKey][sKey][stKey];
-  }
-  // Check if Sold To has section-specific override
-  if(section && sKey && SP.basisByRow[rKey] && SP.basisByRow[rKey][sKey] && SP.basisByRow[rKey][sKey][basisKey]){
-    return SP.basisByRow[rKey][sKey][basisKey];
-  }
-  // Check if Sold To has general override
-  if(sKey && SP.basisByRow[rKey] && SP.basisByRow[rKey][sKey] && SP.basisByRow[rKey][sKey]['_basis']){
-    return SP.basisByRow[rKey][sKey]['_basis'];
-  }
-  // Check if Rep has section-specific override
-  if(section && rKey && SP.basisByRow[rKey] && SP.basisByRow[rKey][basisKey]){
-    return SP.basisByRow[rKey][basisKey];
-  }
-  // Check if Rep has general override
-  if(rKey && SP.basisByRow[rKey] && SP.basisByRow[rKey]['_basis']){
-    return SP.basisByRow[rKey]['_basis'];
-  }
-  // Return system default
-  return SP.defaultBasis;
-}
 
 // Set basis override at a specific level with optional section
-function spSetBasisForRow(rKey, sKey, stKey, basis, section=''){
-  if(!SP.basisByRow[rKey]) SP.basisByRow[rKey] = {};
 
-  const basisKey = section ? `_basis_${section}` : '_basis';
-
-  if(stKey){
-    // Setting Ship To level
-    if(!SP.basisByRow[rKey][sKey]) SP.basisByRow[rKey][sKey] = {};
-    SP.basisByRow[rKey][sKey][stKey] = basis;
-  } else if(sKey){
-    // Setting Sold To level
-    if(!SP.basisByRow[rKey][sKey]) SP.basisByRow[rKey][sKey] = {};
-    SP.basisByRow[rKey][sKey][basisKey] = basis;
-  } else {
-    // Setting Rep level
-    SP.basisByRow[rKey][basisKey] = basis;
-  }
-
-  // Re-render table
-  spRenderTable();
-}
 
 // Get label for basis (e.g., "10d Primary", "15d Override")
-function spGetBasisLabel(rKey, sKey, stKey){
-  const basis = spGetBasisForRow(rKey, sKey, stKey);
-  const basisNum = basis.replace('all','');
 
-  // Determine status (primary, inherited, or override)
-  let status = 'Primary';
-
-  if(stKey && SP.basisByRow[rKey] && SP.basisByRow[rKey][sKey] && SP.basisByRow[rKey][sKey][stKey]){
-    status = 'Override';
-  } else if(sKey && SP.basisByRow[rKey] && SP.basisByRow[rKey][sKey] && SP.basisByRow[rKey][sKey]['_basis']){
-    status = stKey ? 'Inherited' : 'Override';
-  } else if(rKey && SP.basisByRow[rKey] && SP.basisByRow[rKey]['_basis']){
-    status = sKey ? 'Inherited' : 'Override';
-  } else {
-    status = sKey || stKey ? 'Default' : 'Primary';
-  }
-
-  return `${basisNum}d ${status}`;
-}
 
 // Render basis selector buttons for a row — with calculated daily average values
-function spRenderBasisButtons(rKey, sKey, stKey, section='', rowData=[]){
-  const currentBasis = spGetBasisForRow(rKey, sKey, stKey, section);
-  const btnStyle=(basis)=>`padding:2px 6px;background:${currentBasis===basis?'rgba(100,200,100,.3)':'transparent'};border:1px solid rgba(100,200,100,.5);color:#0f0;cursor:pointer;font-size:7px;text-align:center;min-width:50px`;
 
-  // Calculate daily averages for each basis if row data is provided
-  let buttonHtml = `<div style="display:flex;gap:2px;font-size:7px">`;
-
-  const bases = ['all10d', 'all15d', 'all30d'];
-  const labels = ['10D', '15D', '30D'];
-
-  if(rowData && rowData.length > 0){
-    // Calculate daily average for each basis
-    bases.forEach((basis, idx) => {
-      const histRange = spGetHistoricalRange(basis, new Date()._ymd());
-      const dailyVals = spCalcForecast(rowData, histRange, histRange, basis);
-      const dailyAvg = dailyVals.length > 0 ? dailyVals[0] : 0;
-      const label = labels[idx];
-      buttonHtml += `<button style="${btnStyle(basis)}" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey||''}','${stKey||''}','${basis}','${section}')" title="${label} daily average">${Math.round(dailyAvg).toLocaleString()} MT</button>`;
-    });
-  } else {
-    // Fallback: show simple labels if no data
-    bases.forEach((basis, idx) => {
-      const label = labels[idx];
-      buttonHtml += `<button style="${btnStyle(basis)}" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey||''}','${stKey||''}','${basis}','${section}')">${label}</button>`;
-    });
-  }
-
-  buttonHtml += `</div>`;
-  return buttonHtml;
-}
 
 // ── Helper: render daily columns as compact cells (editable) ──
-function spRenderDailyColumns(dailyValues, dates, rowKey, isEditable){
-  if(!dates.length) return '';
-  return dates.map((d,i)=>{
-    const val = dailyValues[i]||0;
-    const dayNum = d.split('-')[2]; // just the day part
-    if(isEditable){
-      return `<td class="sp-cell-day" data-key="${rowKey}" data-date="${d}" style="padding:1px;border:1px solid rgba(100,200,100,.2);text-align:right;font-size:6px;cursor:pointer" title="${d}">
-        <input type="number" value="${val}" style="width:24px;border:none;background:transparent;text-align:right;font-size:6px;padding:0" data-orig="${val}" onchange="spSaveDaily(this)">
-      </td>`;
-    }
-    return `<td style="padding:1px;border:1px solid rgba(100,200,100,.1);text-align:right;font-size:6px">${val||'—'}</td>`;
-  }).join('');
-}
 
-function _spRenderTable_legacy(){
-  const tbody=document.getElementById('sp-tbody'); if(!tbody) return;
-  const rows=SP.filteredRows;
-  if(!rows.length){ tbody.innerHTML=`<tr><td colspan="20" class="sp-no-data">No data for current filters</td></tr>`; return; }
 
-  const today=new Date()._ymd();
-  const isWkday=ds=>{ const d=new Date(ds+'T12:00:00').getDay(); return d!==0&&d!==6; };
 
-  // Generate dynamic header with basis and date labels based on selected forecast horizon
-  function spRenderHeaderRow(){
-    const romDates = spGetRestOfMonthDates(today); // ALL days including weekends
-    const nextMonth = new Date(new Date(today).setMonth(new Date(today).getMonth()+1)).toISOString().slice(0,7);
-    const month2 = new Date(new Date(today).setMonth(new Date(today).getMonth()+2)).toISOString().slice(0,7);
-    const month3 = new Date(new Date(today).setMonth(new Date(today).getMonth()+3)).toISOString().slice(0,7);
-    const restOfYearMonths = spGetRestOfYearMonths(today);
-    const royOnlyMonths = restOfYearMonths.filter(ym => ym > month3);
-
-    const formatDate = (ds) => {
-      const [y, m, d] = ds.split('-');
-      const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-      return `${d}-${months[parseInt(m)-1]}`;
-    };
-
-    const formatMonth = (ym) => {
-      const [y, m] = ym.split('-');
-      const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-      return `${months[parseInt(m)-1]}-${y.slice(2)}`;
-    };
-
-    let headerHtml = ``;
-    let dateLabelsHtml = ``;
-
-    if(SP.forecastHorizon === 'ROM'){
-      const colspan = 3 + romDates.length + 1;
-      headerHtml = `<th colspan="${colspan}" style="font-size:7px;text-align:center;background:rgba(255,184,48,.08);border:1px solid var(--border);padding:2px">FORECAST ROM</th>`;
-
-      ['10D', '15D', '30D'].forEach(basis => {
-        dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:center;background:rgba(255,200,0,.15);font-weight:600">${basis}</th>`;
-      });
-      romDates.forEach(d => {
-        dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:right">${formatDate(d)}</th>`;
-      });
-      dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:center;background:rgba(255,184,48,.15);font-weight:600">Total ROM</th>`;
-    }
-    else if(SP.forecastHorizon === 'N3M'){
-      headerHtml = `<th colspan="7" style="font-size:7px;text-align:center;background:rgba(100,180,200,.08);border:1px solid var(--border);padding:2px">FORECAST N3M</th>`;
-
-      ['10D', '15D', '30D'].forEach(basis => {
-        dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:center;background:rgba(100,200,200,.15);font-weight:600">${basis}</th>`;
-      });
-      [nextMonth, month2, month3].forEach(ym => {
-        dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:right">${formatMonth(ym)}</th>`;
-      });
-      dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:center;background:rgba(100,180,200,.15);font-weight:600">Total N3M</th>`;
-    }
-    else if(SP.forecastHorizon === 'ROY'){
-      const colspan = 3 + royOnlyMonths.length + 1;
-      headerHtml = `<th colspan="${colspan}" style="font-size:7px;text-align:center;background:rgba(200,150,100,.08);border:1px solid var(--border);padding:2px">FORECAST ROY</th>`;
-
-      ['10D', '15D', '30D'].forEach(basis => {
-        dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:center;background:rgba(200,180,100,.15);font-weight:600">${basis}</th>`;
-      });
-      royOnlyMonths.forEach(ym => {
-        dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:right">${formatMonth(ym)}</th>`;
-      });
-      dateLabelsHtml += `<th style="font-size:6px;padding:2px;border:1px solid var(--border);text-align:center;background:rgba(200,150,100,.15);font-weight:600">Total ROY</th>`;
-    }
-
-    return { headerHtml, dateLabelsHtml, romDates, royOnlyMonths, n3mMonths: [nextMonth, month2, month3] };
-  }
-
-  const { headerHtml, dateLabelsHtml, romDates, royOnlyMonths, n3mMonths } = spRenderHeaderRow();
-  const thead = document.querySelector('#sp-table thead');
-  if(thead) {
-    // Get the two header rows (static rows from template)
-    const headerRows = thead.querySelectorAll('tr');
-    if(headerRows.length >= 2) {
-      // Row 1: Section headers (FORECAST ROM, FORECAST N3M, FORECAST ROY)
-      const row1 = headerRows[0];
-      // Find the comment and replace everything after SPLY cell
-      const cells1 = row1.querySelectorAll('th');
-      if(cells1.length >= 4) {
-        // Remove all dynamic header cells after the PERFORMANCE section
-        const perfCell = cells1[3]; // The border-right:2px cell after SPLY
-        const toRemove = [];
-        let node = perfCell.nextSibling;
-        while(node) {
-          toRemove.push(node);
-          node = node.nextSibling;
-        }
-        toRemove.forEach(n => n.remove());
-        // Add new section headers
-        row1.innerHTML += headerHtml;
-      }
-
-      // Row 2: Column labels (10D, 15D, 30D + dates)
-      const row2 = headerRows[1];
-      const cells2 = row2.querySelectorAll('th');
-      if(cells2.length >= 4) {
-        // Remove all dynamic label cells
-        const perfCell = cells2[3]; // SPLY cell
-        const toRemove = [];
-        let node = perfCell.nextSibling;
-        while(node) {
-          toRemove.push(node);
-          node = node.nextSibling;
-        }
-        toRemove.forEach(n => n.remove());
-        // Add new column labels
-        row2.innerHTML += dateLabelsHtml;
-      }
-    }
-  }
-
-  // Collapse Sold To, Ship To, and Product levels by default for performance
-  // (keep Reps expanded so user sees the structure)
-  rows.forEach(r=>{
-    const rep=r.sales_manager||'—';
-    const soldTo=spExtractSoldTo(r.ship_to_name||'—');
-    const shipTo=r.ship_to_name||'—';
-    const rKey='rep_'+rep.replace(/[^\w]/g,'_');
-    const sKey='soldto_'+rKey+'_'+soldTo.replace(/[^\w]/g,'_');
-    const stKey='shipto_'+sKey+'_'+shipTo.replace(/[^\w]/g,'_');
-
-    // Default: collapse sold-to and ship-to, but NOT reps
-    if(!(sKey in SP._userExpanded)) SP.collapsed[sKey]=true;
-    if(!(stKey in SP._userExpanded)) SP.collapsed[stKey]=true;
-  });
-
-  // Performance metrics calculator
-  const spPerfMetrics=(arr, dateNow)=>{
-    const curMonth = dateNow.slice(0,7); // YYYY-MM
-    const curYear = dateNow.slice(0,4);  // YYYY
-    const lastYear = String(parseInt(curYear)-1); // last year
-
-    // MTD = current month to date
-    const mtdRows = arr.filter(r=> r.date.slice(0,7)===curMonth);
-    const mtd = mtdRows.reduce((s,r)=>s+r.volume,0);
-
-    // YTD = current year to date
-    const ytdRows = arr.filter(r=> r.date.slice(0,4)===curYear);
-    const ytd = ytdRows.reduce((s,r)=>s+r.volume,0);
-
-    // SPLY = same period last year (same day in last year)
-    const [,m,d] = dateNow.match(/(\d{2})-(\d{2})/) || ['','00','00'];
-    const spLastYearEnd = `${lastYear}-${m}-${d}`;
-    const spLastYearStart = dateNow.slice(0,7); // month in last year
-    const spLastYearStart2 = `${lastYear}-${dateNow.slice(5)}`; // YYYY-MM-DD last year
-    const splyRows = arr.filter(r=> r.date.slice(0,7)===`${lastYear}-${m}`);
-    const sply = splyRows.reduce((s,r)=>s+r.volume,0);
-
-    return {mtd,ytd,sply};
-  };
-
-  // Calculate date ranges for forecast sections (needed for calculations below)
-  const currentYearMonth = today.slice(0,7);
-  // Note: nextMonth, month2, month3, royOnlyMonths, n3mMonths are already destructured from spRenderHeaderRow() above
-
-  // Pre-calculate all daily totals for caching
-  const allRowsForCaching = SP.filteredRows;
-  const romDailyCache = {};
-  const juneDailyCache = {};
-  const julyDailyCache = {};
-  const royMonthlyCache = {};
-
-  // Build 4-level tree: rep → soldto → shipto → product
-  const repTree={};
-  rows.forEach(r=>{
-    const rep=r.sales_manager||'—';
-    const soldTo=spExtractSoldTo(r.ship_to_name||'—');
-    const shipTo=r.ship_to_name||'—';
-    const prod=r.product||r.origin;
-
-    if(!repTree[rep]) repTree[rep]={rows:[],segs:new Set(),soldtos:{}};
-    repTree[rep].rows.push(r);
-    repTree[rep].segs.add(r.customer_type||'EXT');
-
-    if(!repTree[rep].soldtos[soldTo]) repTree[rep].soldtos[soldTo]={rows:[],shiptos:{}};
-    repTree[rep].soldtos[soldTo].rows.push(r);
-
-    if(!repTree[rep].soldtos[soldTo].shiptos[shipTo]) repTree[rep].soldtos[soldTo].shiptos[shipTo]={rows:[],prods:{}};
-    repTree[rep].soldtos[soldTo].shiptos[shipTo].rows.push(r);
-
-    if(!repTree[rep].soldtos[soldTo].shiptos[shipTo].prods[prod]) repTree[rep].soldtos[soldTo].shiptos[shipTo].prods[prod]={rows:[]};
-    repTree[rep].soldtos[soldTo].shiptos[shipTo].prods[prod].rows.push(r);
-  });
-
-  // Helper: Generate basis cells and collapsed section based on selected horizon
-  function spRenderHorizonCells(rows, rKey, sKey='', stKey='', today){
-    if(rows.length === 0) return '';
-
-    let html = '';
-    const basis = ['all10d', 'all15d', 'all30d'];
-    const basisLabels = ['10D', '15D', '30D'];
-
-    if(SP.forecastHorizon === 'ROM'){
-      // ROM Basis cells
-      html += basis.map((b, i) => {
-        const histRange = spGetHistoricalRange(b, today);
-        const vals = spCalcForecast(rows, histRange, histRange, b);
-        const avg = vals.length > 0 ? vals[0] : 0;
-        return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(255,200,0,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey}','${stKey}','${b}','ROM')" title="${basisLabels[i]} daily avg">${Math.round(avg).toLocaleString()} MT</td>`;
-      }).join('');
-      // ROM daily columns + total
-      html += `<td colspan="${romDates.length + 1}" style="background:rgba(255,255,255,.01)"></td>`;
-    }
-    else if(SP.forecastHorizon === 'N3M'){
-      // N3M Basis cells
-      html += basis.map((b, i) => {
-        const histRange = spGetHistoricalRange(b, today);
-        const sampleDates = spGetMonthDates(n3mMonths[0]);
-        const vals = spCalcForecast(rows, histRange, sampleDates, b);
-        const avg = vals.length > 0 ? vals[0] : 0;
-        return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(100,200,200,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey}','${stKey}','${b}','N3M')" title="${basisLabels[i]} daily avg">${Math.round(avg).toLocaleString()} MT</td>`;
-      }).join('');
-      // N3M monthly columns + total
-      html += `<td colspan="4" style="background:rgba(255,255,255,.01)"></td>`;
-    }
-    else if(SP.forecastHorizon === 'ROY'){
-      // ROY Basis cells
-      html += basis.map((b, i) => {
-        const histRange = spGetHistoricalRange(b, today);
-        const sampleMonth = royOnlyMonths.length > 0 ? royOnlyMonths[0] : '';
-        const sampleDates = sampleMonth ? spGetMonthDates(sampleMonth) : [];
-        const vals = sampleDates.length > 0 ? spCalcForecast(rows, histRange, sampleDates, b) : [];
-        const avg = vals.length > 0 ? vals[0] : 0;
-        return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(200,180,100,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey}','${stKey}','${b}','ROY')" title="${basisLabels[i]} daily avg">${Math.round(avg).toLocaleString()} MT</td>`;
-      }).join('');
-      // ROY monthly columns + total
-      html += `<td colspan="${royOnlyMonths.length + 2}" style="background:rgba(255,255,255,.01)"></td>`;
-    }
-
-    return html;
-  }
-
-  // Render 4-level hierarchy: Rep (L0) → Sold To (L1) → Ship To (L2) → Product (L3)
-  let h='';
-  Object.keys(repTree).sort().forEach(rep=>{
-    const rKey=`rep_${rep}`.replace(/[^\w]/g,'_');
-    const rCol=SP.collapsed[rKey];
-    const perf=spPerfMetrics(repTree[rep].rows, today);
-    const segBadges=[...repTree[rep].segs].map(s=>
-      `<span class="sp-badge ${s==='EXT'?'sp-badge-ext':'sp-badge-int'}">${s}</span>`).join(' ');
-    const soldToCount=Object.keys(repTree[rep].soldtos).length;
-
-    h+=`<tr class="sp-row-l0" onclick="event.stopPropagation();spToggle('${rKey}')">
-      <td class="td-lbl" style="border-right:2px solid var(--border2);cursor:pointer;padding:3px 6px;font-size:7px">
-        <span class="sp-toggle" style="font-size:6px">${rCol?'▸':'▾'}</span> <strong>${rep}</strong> ${segBadges}
-        <span style="font-size:6px;color:var(--text-dim);margin-left:2px">[${soldToCount}]</span>
-      </td>
-      <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:1px solid var(--border)">${Math.round(perf.mtd).toLocaleString()}</td>
-      <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:1px solid var(--border)">${Math.round(perf.ytd).toLocaleString()}</td>
-      <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:2px solid var(--border2)">${Math.round(perf.sply).toLocaleString()}</td>
-      ${[...repTree[rep].rows].length > 0 ? spRenderHorizonCells(repTree[rep].rows, rKey, '', '', today) : '<td colspan="' + (SP.forecastHorizon === 'ROM' ? romDates.length + 4 : SP.forecastHorizon === 'N3M' ? 7 : royOnlyMonths.length + 5) + '"></td>'}
-    </tr>`;
-
-    if(!rCol){
-      Object.keys(repTree[rep].soldtos).sort().forEach(soldTo=>{
-        const sKey=`soldto_${rKey}_${soldTo}`.replace(/[^\w]/g,'_');
-        const sCol=SP.collapsed[sKey];
-        const sPerf=spPerfMetrics(repTree[rep].soldtos[soldTo].rows, today);
-        const shipToCount=Object.keys(repTree[rep].soldtos[soldTo].shiptos).length;
-
-        h+=`<tr class="sp-row-l1" style="background:rgba(100,150,200,.03)" onclick="event.stopPropagation();spToggle('${sKey}')">
-          <td class="td-lbl" style="border-right:2px solid var(--border2);cursor:pointer;padding:3px 6px 3px 20px;font-size:7px">
-            <span class="sp-toggle" style="font-size:6px">${sCol?'▸':'▾'}</span> <strong>${soldTo}</strong>
-            <span style="font-size:6px;color:var(--text-dim);margin-left:2px">[${shipToCount}]</span>
-          </td>
-          <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:1px solid var(--border)">${Math.round(sPerf.mtd).toLocaleString()}</td>
-          <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:1px solid var(--border)">${Math.round(sPerf.ytd).toLocaleString()}</td>
-          <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:2px solid var(--border2)">${Math.round(sPerf.sply).toLocaleString()}</td>
-          ${[...repTree[rep].soldtos[soldTo].rows].length > 0 ? spRenderHorizonCells(repTree[rep].soldtos[soldTo].rows, rKey, sKey, '', today) : '<td colspan="' + (SP.forecastHorizon === 'ROM' ? romDates.length + 4 : SP.forecastHorizon === 'N3M' ? 7 : royOnlyMonths.length + 5) + '"></td>'}
-        </tr>`;
-
-        if(!sCol){
-          Object.keys(repTree[rep].soldtos[soldTo].shiptos).sort().forEach(shipTo=>{
-            const stKey=`shipto_${sKey}_${shipTo}`.replace(/[^\w]/g,'_');
-            const stCol=SP.collapsed[stKey];
-            const stPerf=spPerfMetrics(repTree[rep].soldtos[soldTo].shiptos[shipTo].rows, today);
-            const prodCount=Object.keys(repTree[rep].soldtos[soldTo].shiptos[shipTo].prods).length;
-
-            h+=`<tr class="sp-row-l2" style="background:rgba(100,200,100,.03)" onclick="event.stopPropagation();spToggle('${stKey}')">
-              <td class="td-lbl" style="border-right:2px solid var(--border2);cursor:pointer;padding:3px 6px 3px 32px;font-size:7px">
-                <span class="sp-toggle" style="font-size:6px">${stCol?'▸':'▾'}</span> <strong>${shipTo}</strong>
-                <span style="font-size:6px;color:var(--text-dim);margin-left:2px">[${prodCount}]</span>
-              </td>
-              <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:1px solid var(--border)">${Math.round(stPerf.mtd).toLocaleString()}</td>
-              <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:1px solid var(--border)">${Math.round(stPerf.ytd).toLocaleString()}</td>
-              <td class="sp-cell-d" style="font-size:7px;padding:2px 3px;text-align:right;border-right:2px solid var(--border2)">${Math.round(stPerf.sply).toLocaleString()}</td>
-              ${[...repTree[rep].soldtos[soldTo].shiptos[shipTo].rows].length > 0 ? spRenderHorizonCells(repTree[rep].soldtos[soldTo].shiptos[shipTo].rows, rKey, sKey, stKey, today) : '<td colspan="' + (SP.forecastHorizon === 'ROM' ? romDates.length + 4 : SP.forecastHorizon === 'N3M' ? 7 : royOnlyMonths.length + 5) + '"></td>'}
-            </tr>`;
-
-            if(!stCol){
-              Object.keys(repTree[rep].soldtos[soldTo].shiptos[shipTo].prods).sort().forEach(prod=>{
-                const prodRows = repTree[rep].soldtos[soldTo].shiptos[shipTo].prods[prod].rows;
-                const pPerf=spPerfMetrics(prodRows, today);
-                const pKey=`prod_${stKey}_${prod}`.replace(/[^\w]/g,'_');
-
-                // Calculate forecast columns based on selected horizon only
-                let basisCells='', forecastCells='', totalVal=0;
-                const bases = ['all10d', 'all15d', 'all30d'];
-                const basisLabels = ['10D', '15D', '30D'];
-
-                if(SP.forecastHorizon === 'ROM'){
-                  // REST OF MONTH: Basis buttons + all daily columns
-                  const romDailyAvgs = {};
-                  bases.forEach(basis => {
-                    const histRange = spGetHistoricalRange(basis, today);
-                    const dailyVals = spCalcForecast(prodRows, histRange, romDates, basis);
-                    romDailyAvgs[basis] = dailyVals.length > 0 ? dailyVals[0] : 0;
-                  });
-
-                  basisCells = bases.map((basis, idx) => {
-                    const dailyAvg = romDailyAvgs[basis];
-                    return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(255,200,0,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey}','${stKey}','${basis}','ROM')" title="Click to apply ${basisLabels[idx]} basis (${Math.round(dailyAvg)} MT/day)">${Math.round(dailyAvg).toLocaleString()} MT</td>`;
-                  }).join('');
-
-                  const romBasis = spGetBasisForRow(rKey, sKey, stKey, 'ROM');
-                  const romHistRange = spGetHistoricalRange(romBasis, today);
-                  const romDailyVals = spCalcForecast(prodRows, romHistRange, romDates, romBasis);
-                  totalVal = romDailyVals.reduce((s,v)=>s+v,0);
-                  forecastCells = spRenderDailyColumns(romDailyVals, romDates, pKey, true);
-                }
-                else if(SP.forecastHorizon === 'N3M'){
-                  // NEXT 3 MONTHS: Basis buttons + monthly columns
-                  const n3mDailyAvgs = {};
-                  bases.forEach(basis => {
-                    const histRange = spGetHistoricalRange(basis, today);
-                    const sampleDates = spGetMonthDates(n3mMonths[0]);
-                    const sampleVals = spCalcForecast(prodRows, histRange, sampleDates, basis);
-                    n3mDailyAvgs[basis] = sampleVals.length > 0 ? sampleVals[0] : 0;
-                  });
-
-                  basisCells = bases.map((basis, idx) => {
-                    const dailyAvg = n3mDailyAvgs[basis];
-                    return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(100,200,200,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey}','${stKey}','${basis}','N3M')" title="Click to apply ${basisLabels[idx]} basis (${Math.round(dailyAvg)} MT/day)">${Math.round(dailyAvg).toLocaleString()} MT</td>`;
-                  }).join('');
-
-                  const n3mBasis = spGetBasisForRow(rKey, sKey, stKey, 'N3M');
-                  const n3mHistRange = spGetHistoricalRange(n3mBasis, today);
-                  totalVal = 0;
-                  const n3mMonthCells = [];
-                  n3mMonths.forEach(ym => {
-                    const monthDates = spGetMonthDates(ym);
-                    const monthlyVals = spCalcForecast(prodRows, n3mHistRange, monthDates, n3mBasis);
-                    const monthVal = monthlyVals.reduce((s,v)=>s+v,0);
-                    totalVal += monthVal;
-                    n3mMonthCells.push(`<td class="sp-cell-month" style="border-left:1px solid rgba(100,180,200,.2);background:rgba(100,180,200,.04);font-size:8px;text-align:right;padding:2px 4px">${Math.round(monthVal).toLocaleString()}</td>`);
-                  });
-                  forecastCells = n3mMonthCells.join('');
-                }
-                else if(SP.forecastHorizon === 'ROY'){
-                  // REST OF YEAR: Basis buttons + monthly columns
-                  const royDailyAvgs = {};
-                  bases.forEach(basis => {
-                    const histRange = spGetHistoricalRange(basis, today);
-                    const sampleMonth = royOnlyMonths.length > 0 ? royOnlyMonths[0] : '';
-                    const sampleDates = sampleMonth ? spGetMonthDates(sampleMonth) : [];
-                    const sampleVals = spCalcForecast(prodRows, histRange, sampleDates, basis);
-                    royDailyAvgs[basis] = sampleVals.length > 0 ? sampleVals[0] : 0;
-                  });
-
-                  basisCells = bases.map((basis, idx) => {
-                    const dailyAvg = royDailyAvgs[basis];
-                    return `<td style="padding:2px 2px;text-align:right;border:1px solid var(--border);background:rgba(200,180,100,.15);font-weight:600;cursor:pointer" onclick="event.stopPropagation();spSetBasisForRow('${rKey}','${sKey}','${stKey}','${basis}','ROY')" title="Click to apply ${basisLabels[idx]} basis (${Math.round(dailyAvg)} MT/day)">${Math.round(dailyAvg).toLocaleString()} MT</td>`;
-                  }).join('');
-
-                  const royBasis = spGetBasisForRow(rKey, sKey, stKey, 'ROY');
-                  const royHistRange = spGetHistoricalRange(royBasis, today);
-                  totalVal = 0;
-                  const royMonthCellsArr = royOnlyMonths.map(ym=>{
-                    const monthDates = spGetMonthDates(ym);
-                    const monthlyVals = spCalcForecast(prodRows, royHistRange, monthDates, royBasis);
-                    const monthVal = monthlyVals.reduce((s,v)=>s+v,0);
-                    totalVal += monthVal;
-                    return `<td class="sp-cell-month" style="border-left:1px solid rgba(200,150,100,.2);background:rgba(200,150,100,.04);font-size:8px;text-align:right;padding:2px 4px">${Math.round(monthVal).toLocaleString()}</td>`;
-                  });
-                  forecastCells = royMonthCellsArr.join('');
-                }
-
-                const dot=`<span style="display:inline-block;width:6px;height:6px;border-radius:1px;background:${spProdColor(prod,true)};margin-right:4px;vertical-align:middle"></span>`;
-                const totalBg = SP.forecastHorizon === 'ROM' ? 'rgba(255,184,48,.08)' : SP.forecastHorizon === 'N3M' ? 'rgba(100,180,200,.08)' : 'rgba(200,150,100,.1)';
-                const totalBorder = SP.forecastHorizon === 'ROM' ? 'var(--amber)' : SP.forecastHorizon === 'N3M' ? 'var(--blue)' : 'var(--orange)';
-
-                h+=`<tr class="sp-row-l3" style="background:rgba(200,200,100,.03);font-size:7px">
-                  <td class="td-lbl" style="border-right:2px solid var(--border2);padding:2px 6px 2px 40px;font-size:7px">
-                    ${dot}<span style="font-size:6px">${spShortProd(prod)}</span>
-                  </td>
-                  <td class="sp-cell-d" style="padding:2px 2px;text-align:right;border-right:1px solid var(--border)">${Math.round(pPerf.mtd).toLocaleString()}</td>
-                  <td class="sp-cell-d" style="padding:2px 2px;text-align:right;border-right:1px solid var(--border)">${Math.round(pPerf.ytd).toLocaleString()}</td>
-                  <td class="sp-cell-d" style="padding:2px 2px;text-align:right;border-right:2px solid var(--border2)">${Math.round(pPerf.sply).toLocaleString()}</td>
-                  ${basisCells}
-                  ${forecastCells}
-                  <td class="sp-cell-total" style="border-left:2px solid ${totalBorder};background:${totalBg};font-weight:700;text-align:right;padding:2px 2px;font-size:6px">${Math.round(totalVal).toLocaleString()}</td>
-                </tr>`;
-              });
-            }
-          });
-        }
-      });
-    }
-  });
-  tbody.innerHTML=h;
-}
 
 // ── Apply selected basis to row ──
-function spApplyBasisToRow(pKey, section, basis, totalVal){
-  // Extract row keys from pKey (format: prod_shipto_${shipTo}_${prod})
-  // For now, we'll just re-render the table after setting the basis
-  // In a real implementation, we'd update just this row
-  console.log(`Applied ${basis} basis to ${pKey} (${section}): ${totalVal}`);
-  spRenderTable();
-}
+
 
 // ── Save editable daily cell ──
-function spSaveDaily(input){
-  const newVal = parseInt(input.value)||0;
-  const origVal = parseInt(input.dataset.orig)||0;
-  if(newVal===origVal){
-    input.style.background='transparent';
-    return;
-  }
-  // Mark as edited (changed value)
-  input.style.background='rgba(255,200,0,.15)';
-  // TODO: persist to DB or local cache when user confirms
-  console.log(`Changed ${input.parentElement.dataset.date}: ${origVal} → ${newVal}`);
-}
+
 
 function spToggle(key){
   SP.collapsed[key]=!SP.collapsed[key];
@@ -18493,39 +17648,7 @@ function spSaveForecast(){
 // ── SCOPE SELECTION ──────────────────────────────────
 // Clicking a row in the table scopes the chart to that rep / customer / product.
 // Also cascades the top-bar dropdowns to match the selection.
-function spSelectScope(type, key, label, custType, custName, repName){
-  SP.selScope={type,key,label,custType};
 
-  // Push selection into cascade filters so dropdowns reflect the scope
-  const changes={};
-  if(repName  && repName!=='ALL')  changes.rep=repName;
-  if(custName && custName!=='ALL') changes.customer=custName;
-
-  if(Object.keys(changes).length){
-    Object.assign(SP.f, changes);
-    // Cascade: setting customer should not reset product in this case
-    spRebuildCascade();
-    spSyncFilterUI();
-    // Re-filter with new cascade selection
-    SP.filteredRows = DB.real_shipments_daily.filter(r=>{
-      const df=SP.f.dateFrom, dt=SP.f.dateTo;
-      if(df && r.date < df) return false;
-      if(dt && r.date > dt) return false;
-      if(SP.f.origin  !=='ALL' && r.origin               !==SP.f.origin)  return false;
-      if(SP.f.rep     !=='ALL' && (r.sales_manager||'—') !==SP.f.rep)     return false;
-      if(SP.f.customer!=='ALL' && r.ship_to_name         !==SP.f.customer)return false;
-      if(SP.f.custType!=='all' && r.customer_type        !==SP.f.custType)return false;
-      if(SP.f.product !=='ALL' && (r.product||'')        !==SP.f.product) return false;
-      return true;
-    });
-  }
-
-  SP.scopedRows = spGetScopeRows(SP.filteredRows, SP.selScope);
-  spRenderKPIs();
-  spRenderChart();
-  spRenderTable();
-  spFcUpdateFooter();
-}
 
 function spClearScope(){
   SP.selScope=null;
@@ -18579,306 +17702,49 @@ if(!SP.fcShowInp)   SP.fcShowInp={};
 
 const SP_FC_METHODS=['Hist','10d','15d','30d'];
 
-function spFcGetStatVal(stats, basis){
-  return basis==='Hist'?stats.hist:basis==='10d'?stats.d10:basis==='15d'?stats.d15:basis==='30d'?stats.d30:null;
-}
+
 
 // Resolve a customer's committed value for a given horizon.
 // Handles: stat method, custom absolute, rep-custom proportional spread.
 // repCusts = array of all customer stats objects for the rep (needed for proportional calc)
-function spFcResolve(custStats, custKey, repKey, hz, repCustStatsList){
-  const custBasis = SP.fcCustSel[custKey]?.[hz] || null;
-  const repBasis  = SP.fcRepSel[repKey]?.[hz]   || null;
 
-  // Customer has their own explicit selection
-  if(custBasis){
-    if(custBasis === 'custom') return SP.fcCustCustom[custKey]?.[hz] ?? null;
-    return spFcGetStatVal(custStats, custBasis);
-  }
-
-  // No rep selection → nothing committed
-  if(!repBasis) return null;
-
-  // Rep chose a stat method → inherit it
-  if(repBasis !== 'custom') return spFcGetStatVal(custStats, repBasis);
-
-  // Rep chose custom → proportional spread
-  const repTotal = SP.fcRepCustom[repKey]?.[hz] ?? null;
-  if(repTotal === null) return null;
-
-  // Separate customers into: fixed overrides vs proportional participants
-  const fixedSum = repCustStatsList.reduce((sum, {key, stats})=>{
-    const cb = SP.fcCustSel[key]?.[hz];
-    if(!cb) return sum; // participant
-    if(cb === 'custom') return sum + (SP.fcCustCustom[key]?.[hz] || 0);
-    return sum + (spFcGetStatVal(stats, cb) || 0);
-  }, 0);
-
-  const pool = Math.max(0, repTotal - fixedSum);
-
-  // Only non-overridden customers participate in proportional spread
-  const participants = repCustStatsList.filter(({key}) => !SP.fcCustSel[key]?.[hz]);
-  const total15 = participants.reduce((s, {stats}) => s + (stats.d15 || 0), 0);
-
-  if(!participants.find(p => p.key === custKey)) return SP.fcCustCustom[custKey]?.[hz] ?? null;
-  if(!total15 || !participants.length) return Math.round(pool / participants.length) || 0;
-  return Math.round(pool * ((custStats.d15 || 0) / total15));
-}
 
 // Build the pill strip for one horizon cell
-function spFcCell(rowKey, hz, isRep, repKey, stats, repCustStatsList){
-  const repBasis  = isRep ? null : (SP.fcRepSel[repKey]?.[hz] || null);
-  const ownBasis  = isRep ? (SP.fcRepSel[rowKey]?.[hz] || null) : (SP.fcCustSel[rowKey]?.[hz] || null);
-  const showInp   = SP.fcShowInp[rowKey]?.[hz] || false;
-  const hasCustOvr= !isRep && ownBasis;
-  const borderSty = hz==='rom' ? 'border-left:2px solid var(--border2)' : '';
 
-  // Resolved display value (shown left of pills)
-  let dispVal='', dispCls='sp-fc-disp';
-  if(isRep){
-    if(ownBasis==='custom'){
-      const cv = SP.fcRepCustom[rowKey]?.[hz];
-      dispVal = cv != null ? cv : '?'; dispCls='sp-fc-disp vc';
-    } else if(ownBasis){
-      dispVal = spFcGetStatVal(stats, ownBasis) || '';
-    }
-  } else {
-    const rv = spFcResolve(stats, rowKey, repKey, hz, repCustStatsList||[]);
-    if(rv !== null){
-      dispVal = rv;
-      if(ownBasis==='custom') dispCls='sp-fc-disp vc';
-      else if(!ownBasis && repBasis==='custom') dispCls='sp-fc-disp vc';
-    }
-  }
-
-  // Build pill strip: Hist 10d 15d 30d | cust
-  const pillsHtml = SP_FC_METHODS.map(m=>{
-    let cls='sp-pill';
-    if(isRep){
-      if(ownBasis===m) cls='sp-pill sp-pill-sel';
-    } else {
-      if(ownBasis===m)              cls='sp-pill sp-pill-ovr';
-      else if(!ownBasis && repBasis===m) cls='sp-pill sp-pill-inh';
-    }
-    const onclk = isRep
-      ? 'spFcRepPick(\''+rowKey+'\',\''+hz+'\',\''+m+'\')'
-      : 'spFcCustPick(\''+rowKey+'\',\''+repKey+'\',\''+hz+'\',\''+m+'\')';
-    const tip = spFcGetStatVal(stats,m);
-    return '<div class="'+cls+'" title="'+tip+' t/wkday" onclick="'+onclk+'">'+m+'</div>';
-  }).join('');
-
-  // Custom pill
-  let custCls='sp-pill';
-  if(isRep && ownBasis==='custom')                cls='sp-pill sp-pill-cust';
-  if(!isRep && ownBasis==='custom')               custCls='sp-pill sp-pill-cust';
-  else if(!isRep && !ownBasis && repBasis==='custom') custCls='sp-pill sp-pill-inh-cust';
-  const custOnclk = isRep
-    ? 'spFcRepPick(\''+rowKey+'\',\''+hz+'\',\'custom\')'
-    : 'spFcCustPick(\''+rowKey+'\',\''+repKey+'\',\''+hz+'\',\'custom\')';
-  const custPill = '<div class="'+custCls+'" onclick="'+custOnclk+'">cust</div>';
-
-  // Custom inline input
-  const saveFn = isRep
-    ? 'spFcRepSaveCustom(\''+rowKey+'\',\''+hz+'\')'
-    : 'spFcCustSaveCustom(\''+rowKey+'\',\''+repKey+'\',\''+hz+'\')';
-  const custInpVal = isRep ? (SP.fcRepCustom[rowKey]?.[hz]??'') : (SP.fcCustCustom[rowKey]?.[hz]??'');
-  const custInpHtml = showInp
-    ? '<input class="sp-fc-pill-inp" type="number" id="spci_'+rowKey+'_'+hz
-      +'" placeholder="'+(isRep?'group total':'t/d')+'" value="'+custInpVal
-      +'" onkeydown="if(event.key===\'Enter\')'+saveFn+'">'
-      +'<button class="sp-fc-pill-ok" onclick="'+saveFn+'">✓</button>'
-    : '';
-
-  // Spread tag (customer only, inheriting rep custom)
-  let spreadTag='';
-  if(!isRep && !ownBasis && repBasis==='custom' && stats.d15 && stats.d15>0){
-    const repTot = repBasis==='custom' && repCustStatsList
-      ? repCustStatsList.reduce((s,{stats:rs})=>s+(rs.d15||0),0) : 0;
-    if(repTot>0) spreadTag='<span class="sp-fc-spread">~'+Math.round((stats.d15/repTot)*100)+'%</span>';
-  }
-
-  // Reset link for customer overrides
-  const rstHtml = hasCustOvr
-    ? '<span class="sp-fc-rst" onclick="spFcCustReset(\''+rowKey+'\',\''+repKey+'\',\''+hz+'\')">↺</span>'
-    : '';
-
-  return '<td class="sp-fc-cell" style="'+borderSty+'">'
-    +'<div class="sp-fc-pill-wrap">'
-    +'<span class="'+dispCls+'">'+dispVal+'</span>'
-    +spreadTag
-    +'<div class="sp-fc-pills">'+pillsHtml+custPill+'</div>'
-    +custInpHtml+rstHtml
-    +'</div></td>';
-}
 
 // ── Pill interaction handlers ─────────────────────────
-function spFcRepPick(repKey, hz, method){
-  if(!SP.fcRepSel[repKey])  SP.fcRepSel[repKey]={};
-  if(!SP.fcShowInp[repKey]) SP.fcShowInp[repKey]={};
-  SP.fcRepSel[repKey][hz]  = SP.fcRepSel[repKey][hz]===method ? null : method;
-  SP.fcShowInp[repKey][hz] = (SP.fcRepSel[repKey][hz]==='custom');
-  spRenderTable(); spFcUpdateFooter();
-  if(SP.fcShowInp[repKey][hz])
-    setTimeout(()=>{ const i=document.getElementById('spci_'+repKey+'_'+hz); if(i) i.focus(); },20);
-}
 
-function spFcRepSaveCustom(repKey, hz){
-  const inp=document.getElementById('spci_'+repKey+'_'+hz); if(!inp) return;
-  const v=parseFloat(inp.value); if(isNaN(v)||v<0) return;
-  if(!SP.fcRepCustom[repKey]) SP.fcRepCustom[repKey]={};
-  SP.fcRepCustom[repKey][hz]=Math.round(v);
-  if(!SP.fcRepSel[repKey])  SP.fcRepSel[repKey]={};
-  SP.fcRepSel[repKey][hz]='custom';
-  SP.fcShowInp[repKey][hz]=false;
-  spRenderTable(); spFcUpdateFooter();
-}
 
-function spFcCustPick(custKey, repKey, hz, method){
-  if(!SP.fcCustSel[custKey])  SP.fcCustSel[custKey]={};
-  if(!SP.fcShowInp[custKey])  SP.fcShowInp[custKey]={};
-  SP.fcCustSel[custKey][hz]  = SP.fcCustSel[custKey][hz]===method ? null : method;
-  SP.fcShowInp[custKey][hz]  = (SP.fcCustSel[custKey][hz]==='custom');
-  spRenderTable(); spFcUpdateFooter();
-  if(SP.fcShowInp[custKey][hz])
-    setTimeout(()=>{ const i=document.getElementById('spci_'+custKey+'_'+hz); if(i) i.focus(); },20);
-}
 
-function spFcCustSaveCustom(custKey, repKey, hz){
-  const inp=document.getElementById('spci_'+custKey+'_'+hz); if(!inp) return;
-  const v=parseFloat(inp.value); if(isNaN(v)||v<0) return;
-  if(!SP.fcCustCustom[custKey]) SP.fcCustCustom[custKey]={};
-  SP.fcCustCustom[custKey][hz]=Math.round(v);
-  if(!SP.fcCustSel[custKey]) SP.fcCustSel[custKey]={};
-  SP.fcCustSel[custKey][hz]='custom';
-  SP.fcShowInp[custKey][hz]=false;
-  spRenderTable(); spFcUpdateFooter();
-}
 
-function spFcCustReset(custKey, repKey, hz){
-  if(SP.fcCustSel[custKey])    delete SP.fcCustSel[custKey][hz];
-  if(SP.fcCustCustom[custKey]) delete SP.fcCustCustom[custKey][hz];
-  if(SP.fcShowInp[custKey])    SP.fcShowInp[custKey][hz]=false;
-  spRenderTable(); spFcUpdateFooter();
-}
+
+
+
+
+
 
 // Stubs kept for backward compat with any lingering HTML refs
-function spFcRepChange(){}
-function spFcCustChange(){}
-function spFcSaveCustom(){}
-function spFcResetCust(ck,rk,hz){ spFcCustReset(ck,rk,hz); }
-function spFcEffective(ck,rk,hz){
-  const c=SP.fcCustSel[ck]?.[hz]; if(c) return {basis:c,src:'override'};
-  const r=SP.fcRepSel[rk]?.[hz];  if(r) return {basis:r,src:'inherited'};
-  return {basis:null,src:'none'};
-}
-function spFcResolvedVal(stats,custKey,repKey,hz){ return spFcResolve(stats,custKey,repKey,hz,[]); }
+
+
+
+
+
+
 
 // ── Footer ────────────────────────────────────────────
-function spFcUpdateFooter(){
-  const today=new Date()._ymd();
-  const df=SP.f.dateFrom||`${today.slice(0,4)}-01-01`;
-  const dt=SP.f.dateTo  ||`${today.slice(0,4)}-12-31`;
-  const actualsTotal=SP.filteredRows.filter(r=>r.date>=df&&r.date<=dt&&r.date<=today).reduce((s,r)=>s+(r.volume||0),0);
-  const dpElIds=spGetDpElIds(SP.filteredRows);
-  const demIdx=spBuildDemandIndex();
-  let fcTotal=0;
-  const fcStart=new Date(Math.max(new Date(today+'T00:00:00').getTime()+864e5, new Date(df+'T00:00:00').getTime()));
-  for(let d=new Date(fcStart); d._ymd()<=dt; d.setDate(d.getDate()+1)){
-    const ds=d._ymd();
-    dpElIds.forEach(id=>{ fcTotal+=spGetFcVal(id,ds,demIdx); });
-  }
-  const el=id=>document.getElementById(id);
-  if(el('sp-fc-scope'))    el('sp-fc-scope').textContent='Period total';
-  if(el('sp-fc-actuals'))  el('sp-fc-actuals').textContent=actualsTotal?Math.round(actualsTotal).toLocaleString()+' t':'—';
-  if(el('sp-fc-forecast')) el('sp-fc-forecast').textContent=fcTotal?Math.round(fcTotal).toLocaleString()+' t':'—';
-}
 
-function spCommit(){
-  const today=new Date()._ymd();
-  const isWkday=ds=>{ const d=new Date(ds+'T12:00:00').getDay(); return d!==0&&d!==6; };
 
-  const calcStats=arr=>{
-    const wk=arr.filter(r=>isWkday(r.date));
-    const byDate={}; wk.forEach(r=>{byDate[r.date]=(byDate[r.date]||0)+r.volume;});
-    const vals=Object.values(byDate);
-    if(!vals.length) return{hist:0,d10:0,d15:0,d30:0};
-    const hist=Math.round(vals.reduce((a,b)=>a+b,0)/vals.length);
-    const sorted=[...new Set(wk.map(r=>r.date))].sort();
-    const v10=sorted.slice(-10).map(d=>byDate[d]||0);
-    const d10=v10.length?Math.round(v10.reduce((a,b)=>a+b,0)/v10.length):0;
-    const d15cut=new Date(today); d15cut.setDate(d15cut.getDate()-15);
-    const d15s=d15cut._ymd();
-    const v15o=wk.filter(r=>r.date>=d15s).reduce((m,r)=>{m[r.date]=(m[r.date]||0)+r.volume;return m;},{});
-    const d15=Object.values(v15o).length?Math.round(Object.values(v15o).reduce((a,b)=>a+b,0)/Object.values(v15o).length):0;
-    const v30=sorted.slice(-30).map(d=>byDate[d]||0);
-    const d30=v30.length?Math.round(v30.reduce((a,b)=>a+b,0)/v30.length):0;
-    return{hist,d10,d15,d30};
-  };
 
-  const repTree={};
-  SP.filteredRows.forEach(r=>{
-    const rep=r.sales_manager||'—';
-    const cust=r.ship_to_name||String(r.ship_to||'Unknown');
-    const rKey='rep_'+rep.replace(/[^\w]/g,'_');
-    const cKey='cust_'+rKey+'_'+cust.replace(/[^\w]/g,'_');
-    if(!repTree[rKey]) repTree[rKey]={rows:[],custs:{}};
-    repTree[rKey].rows.push(r);
-    if(!repTree[rKey].custs[cKey]) repTree[rKey].custs[cKey]={rows:[],origin:r.origin,custType:r.customer_type};
-    repTree[rKey].custs[cKey].rows.push(r);
-  });
 
-  let committed=0;
-  Object.keys(repTree).forEach(rKey=>{
-    const repCusts=Object.keys(repTree[rKey].custs).map(ck=>({
-      key:ck, stats:calcStats(repTree[rKey].custs[ck].rows)
-    }));
-    Object.keys(repTree[rKey].custs).forEach(cKey=>{
-      const custData=repTree[rKey].custs[cKey];
-      const stats=calcStats(custData.rows);
-      ['rom','n3m','roy'].forEach(hz=>{
-        const rv=spFcResolve(stats,cKey,rKey,hz,repCusts);
-        if(rv===null) return;
-        DB.forecast_commitments=DB.forecast_commitments.filter(c=>
-          !(c.scope_key===cKey&&c.scope_type==='customer'&&c.horizon===hz));
-        DB.forecast_commitments.push({
-          id:'fc_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),
-          created_at:today, scope_type:'customer', scope_key:cKey,
-          horizon:hz, status:'approved', resolved_val:rv,
-          origin:custData.origin, customer_type:custData.custType, notes:''
-        });
-        spFcWriteDP(custData, rv);
-        committed++;
-      });
-    });
-  });
 
-  autoSave();
-  statMsg('Committed '+committed+' horizon selections');
-  spRenderKPIs(); spRenderTable(); spFcUpdateFooter();
-}
-
-function spFcWriteDP(custData, dailyVal){
-  const fac=DB.facilities.find(f=>(f.name||'').toUpperCase().includes(custData.origin)||f.code===custData.origin);
-  if(!fac) return;
-  const ct=custData.custType;
-  const dp=DB.demand_points.find(dp=>{
-    if((dp.assigned_facility_id||dp.facility_id)!==fac.id) return false;
-    const nm=(dp.element_name||'').toUpperCase();
-    return ct==='INT'?nm.includes('INT'):nm.includes('EXT');
-  })||DB.demand_points.find(dp=>(dp.assigned_facility_id||dp.facility_id)===fac.id);
-  if(!dp||!dailyVal) return;
-  dp.daily_tonnage=dailyVal;
-  const el=DB.elements.find(e=>e.id===dp.element_id);
-  if(el) el.props.daily_tonnage=dailyVal;
-}
 
 // Stubs
-function spSetHorizon(){}
+
 function spBuildForecastPanel(){}
-function spHorizonDates(){ return []; }
-function spUpdateEntry(){}
-function spResetEntry(){}
-function spUpdateFpTotal(){}
+
+
+
+
 
 
 // ══════════════════════════════════════════════════════
@@ -19726,12 +18592,7 @@ async function aiTestConnection(){
   if(!key){resultEl.style.color='var(--amber)';resultEl.textContent='No API key set.';return;}
   resultEl.style.color='var(--text-dim)';resultEl.textContent='Testing…';
   try{
-    const res=await fetch('https://api.anthropic.com/v1/messages',{
-      method:'POST',
-      headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body:JSON.stringify({model:'claude-haiku-4-5-20251001',max_tokens:10,messages:[{role:'user',content:'ping'}]})
-    });
-    const data=await res.json();
+    const data=await callClaude({model:'claude-haiku-4-5-20251001',maxTokens:10,messages:[{role:'user',content:'ping'}]});
     if(data.error){resultEl.style.color='var(--red)';resultEl.textContent='Error: '+data.error.message;}
     else{resultEl.style.color='var(--green)';resultEl.textContent='✓ Connected';}
   }catch(e){resultEl.style.color='var(--red)';resultEl.textContent='Failed: '+e.message;}
@@ -19870,11 +18731,7 @@ function dsWriteActualsToDemandGrid(){
 // ═══════════════════════════════════════════════════════
 // UI CONTROLS
 // ═══════════════════════════════════════════════════════
-function setLevel(level,el){
-  S.level=level;
-  document.querySelectorAll('.level-tab').forEach(t=>t.classList.remove('active'));
-  el.classList.add('active');
-}
+
 
 function switchTopSection(section){
   S.topSection=section;
@@ -20575,114 +19432,13 @@ function showPostSubmitDialog(dateStr, totalEntries, clearFormAfter, deletedCoun
   };
 }
 
-function saveRealProduction(inputEl){
-  const facId=S.realDataFacilityId || S.facility_id;
-  const dateStr=S.realDataSelectedDate;
-  const elemId=inputEl.dataset.elem;
-  const prodId=inputEl.dataset.prod;
-  const val=inputEl.value.trim();
 
-  if(val === ''){
-    deleteRealVal('production',elemId,prodId);
-    return;
-  }
 
-  const volume=parseFloat(val);
-  if(isNaN(volume) || volume<0){
-    inputEl.value='';
-    alert('Please enter a valid non-negative number');
-    return;
-  }
 
-  const existing=DB.real_production_daily.find(r=>r.date===dateStr && r.element_id===elemId && r.product_id===prodId);
-  if(existing){
-    existing.volume_t=volume;
-    existing.updated_at=new Date().toISOString();
-  } else {
-    DB.real_production_daily.push({
-      date:dateStr,
-      facility_id:facId,
-      element_id:elemId,
-      product_id:prodId,
-      volume_t:volume,
-      source:'actual',
-      created_at:new Date().toISOString(),
-      updated_at:new Date().toISOString()
-    });
-  }
-  autoSave();
-  _demandCacheInvalidate();
-  renderRealDataSections();
-}
 
-function saveRealInventory(inputEl){
-  const facId=S.realDataFacilityId || S.facility_id;
-  const dateStr=S.realDataSelectedDate;
-  const siloId=inputEl.dataset.elem;
-  const prodId=inputEl.dataset.prod;
-  const val=inputEl.value.trim();
 
-  if(val === ''){
-    deleteRealVal('inventory',siloId,prodId);
-    return;
-  }
 
-  const volume=parseFloat(val);
-  if(isNaN(volume) || volume<0){
-    inputEl.value='';
-    alert('Please enter a valid non-negative number');
-    return;
-  }
 
-  const existing=DB.real_inventory_daily.find(r=>r.date===dateStr && r.silo_id===siloId && r.product_id===prodId);
-  if(existing){
-    existing.eod_volume_t=volume;
-    existing.updated_at=new Date().toISOString();
-  } else {
-    DB.real_inventory_daily.push({
-      date:dateStr,
-      facility_id:facId,
-      silo_id:siloId,
-      product_id:prodId,
-      eod_volume_t:volume,
-      source:'actual',
-      created_at:new Date().toISOString(),
-      updated_at:new Date().toISOString()
-    });
-  }
-  autoSave();
-  _demandCacheInvalidate();
-  renderRealDataSections();
-}
-
-function deleteRealVal(type,elemId,prodId,subtype){
-  const dateStr=S.realDataSelectedDate;
-  if(type==='production'){
-    const idx=DB.real_production_daily.findIndex(r=>r.date===dateStr&&r.element_id===elemId&&r.product_id===prodId);
-    if(idx>=0) DB.real_production_daily.splice(idx,1);
-    _demandCacheInvalidate();
-  } else if(type==='inventory'){
-    const idx=DB.real_inventory_daily.findIndex(r=>r.date===dateStr&&r.silo_id===elemId&&r.product_id===prodId);
-    if(idx>=0) DB.real_inventory_daily.splice(idx,1);
-  } else if(type==='transfer'){
-    const idx=(DB.real_rail_daily||[]).findIndex(r=>r.date===dateStr&&r.facility_id===elemId&&r.product_id===prodId&&r.type===subtype);
-    if(idx>=0) DB.real_rail_daily.splice(idx,1);
-  } else if(type==='shipping'){
-    const idx=(DB.real_shipping_daily||[]).findIndex(r=>r.date===dateStr&&r.facility_id===elemId&&r.product_id===prodId);
-    if(idx>=0) DB.real_shipping_daily.splice(idx,1);
-  } else if(type==='unloading'){
-    const idx=(DB.real_unloading_daily||[]).findIndex(r=>r.date===dateStr&&r.berth_id===elemId&&r.product_id===prodId);
-    if(idx>=0) DB.real_unloading_daily.splice(idx,1);
-  }
-  autoSave();
-  renderRealDataSections();
-}
-
-function setChartFilter(btn,f){
-  document.querySelectorAll('.chart-ctrl').forEach(b=>b.classList.remove('active'));
-  btn.classList.add('active');
-  if(S.simResults) renderCharts(S.simResults);
-}
 
 function updateStatusBar(){
   document.getElementById('stat-macro').textContent=`${DB.macro_regions.length} macro region${DB.macro_regions.length!==1?'s':''}`;
@@ -20696,6 +19452,36 @@ function statMsg(msg){
   document.getElementById('stat-save').textContent=msg;
   setTimeout(()=>document.getElementById('stat-save').textContent='Auto-saved',2500);
 }
+
+// ── Global error catcher ────────────────────────────────
+// Uncaught exceptions used to fail silently (a bad record could blank a panel
+// with no clue). Surface them as a dismissible red toast with the source line.
+function _showErrorToast(text){
+  let t=document.getElementById('err-toast');
+  if(!t){
+    t=document.createElement('div');
+    t.id='err-toast';
+    t.style.cssText='position:fixed;bottom:14px;right:14px;max-width:440px;background:#3a0d14;color:#ff8fa0;border:1px solid #ff3d5a;border-radius:6px;padding:10px 32px 10px 12px;font:11px/1.5 monospace;z-index:99999;white-space:pre-wrap;word-break:break-word;box-shadow:0 4px 18px rgba(0,0,0,.5)';
+    const x=document.createElement('span');
+    x.textContent='✕';
+    x.style.cssText='position:absolute;top:6px;right:9px;cursor:pointer;color:#ff3d5a';
+    x.onclick=()=>t.remove();
+    t.appendChild(x);
+    const body=document.createElement('div');
+    body.id='err-toast-body';
+    t.appendChild(body);
+    document.body.appendChild(t);
+  }
+  document.getElementById('err-toast-body').textContent=text;
+}
+window.addEventListener('error',e=>{
+  const where=e.filename?` (${String(e.filename).split('/').pop()}:${e.lineno})`:'';
+  _showErrorToast('⚠ Uncaught error: '+(e.message||e.error?.message||'unknown')+where);
+});
+window.addEventListener('unhandledrejection',e=>{
+  const r=e.reason;
+  _showErrorToast('⚠ Unhandled promise rejection: '+(r&&r.message?r.message:String(r)));
+});
 
 // ═══════════════════════════════════════════════════════
 // TOOLTIP
@@ -20721,6 +19507,29 @@ function hideTip(){document.getElementById('tooltip').style.display='none';docum
 function chatKey(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChat();}}
 
 function getApiKey(){return localStorage.getItem('avila_api_key')||'';}
+
+// Single entry point for every Anthropic API call (rule interpreter, settings
+// connection test, agent chat). Returns the parsed response body — callers
+// keep their own data.error handling; network failures throw.
+async function callClaude({model, maxTokens=300, system, messages}){
+  const body={
+    model: model||localStorage.getItem('avila_ai_model')||'claude-haiku-4-5-20251001',
+    max_tokens: maxTokens,
+    messages
+  };
+  if(system) body.system=system;
+  const res=await fetch('https://api.anthropic.com/v1/messages',{
+    method:'POST',
+    headers:{
+      'Content-Type':'application/json',
+      'x-api-key':getApiKey(),
+      'anthropic-version':'2023-06-01',
+      'anthropic-dangerous-direct-browser-access':'true'
+    },
+    body:JSON.stringify(body)
+  });
+  return await res.json();
+}
 function updateKeyUI(){
   const k=getApiKey();
   const row=document.getElementById('chat-key-row');
@@ -20743,21 +19552,11 @@ async function sendChat(){
   try{
     const ctx=buildCtx();
     const model=localStorage.getItem('avila_ai_model')||'claude-haiku-4-5-20251001';
-    const res=await fetch('https://api.anthropic.com/v1/messages',{
-      method:'POST',
-      headers:{
-        'Content-Type':'application/json',
-        'x-api-key':apiKey,
-        'anthropic-version':'2023-06-01',
-        'anthropic-dangerous-direct-browser-access':'true'
-      },
-      body:JSON.stringify({model,max_tokens:1000,
+    const data=await callClaude({model,maxTokens:1000,
         system:`You are AVILA Roll, an AI simulation agent for cement production planning.
 Database tables: macro_regions, countries, regions, sub_regions, facilities, elements, connections, products, recipes, raw_materials, fuels, element_maintenance_events, element_product_capacities, vessel_calls, rail_movements, truck_movements, transport_links, in_transit_inventory, demand_points, simulation_runs, simulation_stop_events. Element types: raw_material_storage, fuel_storage, bulk_silo (replaces clinker_silo/cement_silo/homo_silo — color by product category), packed_silo, raw_meal_mill, kiln, finish_mill, packing_plant, berth, dispatch_point (truck=no constraint same-day; rail=car accumulation with switch days and transit lag), demand_point, supply_source. Products have category: clinker, raw_meal, cement_bulk, cement_packed, additive. Kiln product capacities include capacity_tpd, specific_heat_kcal_kg, raw_meal_ratio per clinker product. Rail dispatch points have: car_capacity_t, std_loading_cars_day, max_loading_cars_day, working_days, switch_days (array of 0-6 Mon-Sun), transit_days.
 Be concise, specific, reference table names and element names precisely. ${ctx}`,
-        messages:[{role:'user',content:msg}]})
-    });
-    const data=await res.json();
+        messages:[{role:'user',content:msg}]});
     hideTyping();
     if(data.error){addMsg('agent',`Error: ${data.error.message}`);return;}
     addMsg('agent',data.content?.map(c=>c.text||'').join('')||'Unable to process.');
@@ -20789,7 +19588,19 @@ function hideTyping(){if(typingEl){typingEl.remove();typingEl=null;}}
 // ═══════════════════════════════════════════════════════
 // SAVE / LOAD
 // ═══════════════════════════════════════════════════════
+// Debounced save — every mutation path calls autoSave(); the actual
+// serialization (full DB → localStorage) runs once per 500ms burst.
+// beforeunload flushes a pending save so closing the tab never loses an edit.
+let _autoSaveTimer=null;
 function autoSave(){
+  clearTimeout(_autoSaveTimer);
+  _autoSaveTimer=setTimeout(()=>{_autoSaveTimer=null;autoSaveNow();},500);
+}
+window.addEventListener('beforeunload',()=>{
+  if(_autoSaveTimer){clearTimeout(_autoSaveTimer);_autoSaveTimer=null;autoSaveNow();}
+});
+
+function autoSaveNow(){
   // Trim real data to last 90 days to prevent localStorage overflow
   const cutoffDate = new Date();
   cutoffDate.setDate(cutoffDate.getDate() - 90);
@@ -20830,7 +19641,8 @@ function autoSave(){
       DB: dbToSave,
       counter: S.elCounter,
       simCfg: S.simCfg,
-      simResults: S.simResults || null,  // Save simulation results so forecast is visible on load
+      // simResults intentionally NOT persisted to localStorage (large, regenerated
+      // on load; the active scenario file still carries a copy — see scWriteActive)
       savedAt: _saveStamp
     }));
   }catch(e){
@@ -20868,7 +19680,6 @@ function autoSave(){
         DB: minimalDB,
         counter: S.elCounter,
         simCfg: S.simCfg,
-        simResults: S.simResults || null,
         savedAt: _saveStamp
       }));
       statMsg('Saved (compact mode)');
@@ -21043,23 +19854,19 @@ document.addEventListener('DOMContentLoaded',async()=>{
 
   seedCatalogs();
 
-  // Initialize data sources FIRST (they take priority over seed files)
-  // Data sources will auto-refresh from configured file locations
-  await new Promise(resolve => {
-    (async () => {
-      dsInit();  // init data sources + auto-refresh on load
-      // Give dsInit() a moment to load configured sources
-      await new Promise(r => setTimeout(r, 100));
-      resolve();
-    })();
-  });
+  // Initialize data sources FIRST (they take priority over seed files).
+  // dsInit is async and resolves once all file handles are loaded from IDB —
+  // await it directly (the old fixed 100ms sleep raced on slow disks).
+  await dsInit();
 
   // Seed from the bundled server JSON only when localStorage is empty
   // AND no data source is configured (data sources take priority).
   // Never overwrite an existing saved state or configured data source.
   if(!hasSavedState && !DB.demand_points.length){
     try{
-      const resp=await fetch('./AVILA_Roll_BRS_2026-05-31.json');
+      // Stable name first; dated legacy name as fallback for old deployments
+      let resp=await fetch('./seed.json');
+      if(!resp.ok) resp=await fetch('./AVILA_Roll_BRS_2026-05-31.json');
       if(resp.ok){
         const saved=await resp.json();
         if(saved.DB){
@@ -21120,6 +19927,12 @@ document.addEventListener('DOMContentLoaded',async()=>{
     canvas.addEventListener('click', (e) => onCanvasClick(e));
     canvas.addEventListener('mousemove', (e) => onCanvasMove(e));
     canvas.addEventListener('mouseup', (e) => onCanvasUp(e));
+  }
+
+  // Forecast on load: simResults are no longer persisted in localStorage
+  // (too large). If the scenario file didn't restore them, regenerate.
+  if(!S.simResults && S.facility_id && getFacElements().length){
+    scheduleSimulation(400);
   }
 });
 
