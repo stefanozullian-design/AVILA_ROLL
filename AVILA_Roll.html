@@ -18081,6 +18081,7 @@ const DS = {
   meta: {},      // populated from localStorage on init
   handles: {},   // FileSystemFileHandle objects, loaded from IndexedDB
   refreshing: {},// { id: bool } — in-flight flags
+  pending: {},   // { id: {fileModTime, fileName} } — detected-but-not-yet-imported changes (in-memory only)
 };
 
 // ── IndexedDB for file handles ────────────────────────
@@ -18186,6 +18187,75 @@ async function dsAutoRefreshAll(){
     const m = DB.real_shipments_meta;
     metaLbl.textContent = `${Number(m.row_count||0).toLocaleString()} records · ${m.date_min||'?'} → ${m.date_max||'?'} · ${m.loaded_at||'?'}`;
   }
+}
+
+// ── Background change detection ───────────────────────
+// Cheaply checks whether the on-disk file for a slot has a newer
+// last-modified time than what was recorded at the last import, WITHOUT
+// reading or parsing the file's contents (handle.getFile() only stats the
+// file; reading bytes only happens via file.arrayBuffer(), which dsRefreshSlot
+// calls separately once the user opts in). Never prompts for permission —
+// a silent background poll must not surface an OS file-access dialog out of
+// nowhere; if permission isn't already granted, that slot is just skipped
+// until the user next interacts with it (e.g. a manual Refresh).
+async function dsPeekSlotChanged(id){
+  const handle=DS.handles[id]; if(!handle) return false;
+  try{
+    const perm=await handle.queryPermission({mode:'read'});
+    if(perm!=='granted') return false;
+    const file=await handle.getFile();
+    const prevModTime=DS.meta[id]?.lastFileModified;
+    if(prevModTime&&file.lastModified<=prevModTime) return false;
+    DS.pending[id]={fileModTime:file.lastModified, fileName:file.name};
+    return true;
+  }catch(e){ return false; } // transient/deleted file — a real refresh attempt will surface it
+}
+
+// Checks every connected slot and shows the "new version available" banner
+// if any changed. Called once shortly after boot, then every hour.
+async function dsCheckAllForUpdates(){
+  const slotsWithHandles=DS_SLOTS.filter(s=>DS.handles[s.id]);
+  for(const s of slotsWithHandles) await dsPeekSlotChanged(s.id);
+  if(Object.keys(DS.pending).length) _showPendingUpdateBanner();
+}
+
+let _dsCheckTimer=null;
+function dsStartAutoCheck(){
+  if(_dsCheckTimer) return; // idempotent — safe to call more than once
+  setTimeout(dsCheckAllForUpdates, 15000);         // catch a file changed while the app was closed
+  _dsCheckTimer=setInterval(dsCheckAllForUpdates, 60*60*1000); // then hourly
+}
+
+function _showPendingUpdateBanner(){
+  const ids=Object.keys(DS.pending); if(!ids.length) return;
+  let b=document.getElementById('data-pending-banner');
+  if(!b){
+    b=document.createElement('div');
+    b.id='data-pending-banner';
+    b.style.cssText='position:fixed;top:0;left:0;right:0;z-index:99999;background:#0d2a3a;border-bottom:2px solid var(--blue);color:#cfe8ff;font-family:var(--mono),monospace;font-size:11px;padding:8px 14px;display:flex;align-items:center;gap:12px;box-shadow:0 2px 14px rgba(0,0,0,.55)';
+    document.body.appendChild(b);
+  }
+  const names=ids.map(id=>DS.pending[id].fileName||DS_SLOTS.find(s=>s.id===id)?.label||id).join(', ');
+  b.innerHTML=`<span style="font-size:15px;line-height:1">🔔</span>
+    <span style="flex:1;line-height:1.35">New version available: ${names} — the source file has changed since it was last imported.</span>
+    <button onclick="dsApplyPendingUpdates()" style="background:var(--blue);color:#04101c;border:none;padding:6px 12px;font-family:inherit;font-size:10px;font-weight:700;cursor:pointer;border-radius:3px">↻ Update Now</button>
+    <button onclick="document.getElementById('data-pending-banner')?.remove()" style="background:transparent;color:#cfe8ff;border:1px solid var(--blue);padding:6px 11px;font-family:inherit;font-size:10px;cursor:pointer;border-radius:3px">Dismiss</button>`;
+}
+
+// User clicked "Update Now" — actually fetch + parse + import each pending
+// file (dsRefreshSlot re-checks lastModified itself and always reimports here
+// since this isn't a silent auto-refresh pass).
+async function dsApplyPendingUpdates(){
+  const ids=Object.keys(DS.pending); if(!ids.length) return;
+  document.getElementById('data-pending-banner')?.remove();
+  statMsg('Importing updated file(s)…');
+  for(const id of ids){
+    await dsRefreshSlot(id, true);
+    delete DS.pending[id];
+  }
+  dsRefreshConfigUI();
+  _showDataUpdateBanner('Real data updated');
+  scheduleSimulation(300);
 }
 
 // ── Refresh a single slot ─────────────────────────────
@@ -20226,6 +20296,7 @@ document.addEventListener('DOMContentLoaded',async()=>{
   }
 
   initUiZoom();
+  dsStartAutoCheck();
 
   // Attach canvas event listeners
   const canvas = document.getElementById('topo-canvas-wrap');
