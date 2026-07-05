@@ -7423,66 +7423,110 @@ function _renderSupplyViewInner(wrap){
           });
         }
 
-        // ── RAIL LOADING (plan vs real) — only for facilities that ship by rail ──
-        // Aggregate over all rail dispatch points at this facility (we don't break
-        // it down by destination terminal here). Plan = simulated cars loaded ×
-        // car capacity; Real = actual cars loaded (daily-data entry) × car capacity.
+        // ── RAIL LOADING — its own top-level block (same level as CLINKER / CEMENT /
+        // PACKED), emitted after the cement block with its own separator. One Gantt row
+        // per rail dispatch point ("Rail Car Loading"), mirroring the finish-mill pattern:
+        // real days (real_rail_daily) show the actual car count as a bold number; forecast
+        // days show a bar (colour = product) sized by the loading campaign / sim result in
+        // cars/day. Click a cell → rail loading campaign popup (edit campaign or enter real).
+        let _railHTML='';
         {
           const railDisp=facEls.filter(e=>e.type==='dispatch_point'&&e.props?.dispatch_type==='Rail');
           if(railDisp.length){
             const railColor='#b388ff';
-            const _carCap=parseFloat(railDisp[0]?.props?.car_capacity_t)||112;
-            const railPlanDay=ds=>{ const di=allDates.indexOf(ds); if(di<0) return 0;
-              return railDisp.reduce((sum,disp)=>{ const rh=r?.railHistory?.[disp.id]||[]; const e=rh[di]; if(!e) return sum;
-                const cc=parseFloat(disp.props?.car_capacity_t)||112;
-                const cars=Object.values(e.carsLoadedByProduct||{}).reduce((a,c)=>a+(c||0),0);
-                return sum+cars*cc; },0); };
-            const railRealDay=ds=>(DB.real_rail_daily||[]).filter(rr=>rr.date===ds&&rr.facility_id===node.id&&rr.type==='loading')
-              .reduce((s,rr)=>s+(parseFloat(rr.cars)||0)*_carCap,0);
-            // Section header (total row mirrors PLAN tonnage)
-            h+=`<tr class="sup-sec-hdr" data-seckey="railLoad" onclick="_supToggleSec('railLoad')" style="cursor:pointer;background:rgba(179,136,255,.05);border-top:2px solid rgba(179,136,255,.3)">
-              <td style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${railColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('railLoad')}</span> RAIL LOADING <span style="font-size:7px;opacity:.6;font-weight:400;margin-left:4px">(plan vs real · t)</span></td>`;
-            months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-              const mt=mon.dates.reduce((a,ds)=>a+railPlanDay(ds),0);
-              h+=`<td style="border-left:2px solid rgba(179,136,255,.2);font-size:9px;font-weight:700;color:${railColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
-              if(!isCol) mon.dates.forEach(ds=>{ const v=railPlanDay(ds);
-                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${railColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
-            });
-            h+=`</tr>`;
-            const railRow=(label,color,bg,fn,isReal)=>{
-              let rr=`<tr class="supsec-railLoad" style="background:${bg}"><td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${color};font-size:9px">${label}</td>`;
-              months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-                const mt=mon.dates.reduce((s,ds)=>s+fn(ds),0);
-                rr+=`<td style="border-left:2px solid rgba(179,136,255,.1);font-size:9px;color:${color};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
-                if(!isCol) mon.dates.forEach(ds=>{ const v=fn(ds); const cls=(isReal&&v>0)?'cell-real':'';
-                  rr+=`<td class="sup-day-${mon.ym} ${cls}" style="font-size:9px;color:${v>0?color:'rgba(179,136,255,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${(isReal&&v>0)?'700':'400'};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
-              });
-              return rr+`</tr>`;
-            };
-            h+=railRow('↳ Plan',railColor,'rgba(179,136,255,.04)',railPlanDay,false);
-            h+=railRow('↳ Real','#00d9a3','rgba(0,217,163,.05)',railRealDay,true);
-
-            // ── LOADING PLAN (editable, per product) ──────────────────────────
-            // Ops set cars/day per product at each rail dispatch point. Day cells show the
-            // actual cars loaded once a sim has run (else the planned rate); amber = loaded < plan.
-            railDisp.forEach(disp=>{
+            // Per-dispatch-point day resolver, memoised over allDates.
+            const dpDays=railDisp.map(disp=>{
               const _isW=_mkRailWorkDayFn(disp);
+              const carCap=parseFloat(disp.props?.car_capacity_t)||112;
+              const stdRate=_railCarsPerDay(disp);
+              const prods=railDpProducts(disp);
               const histArr=r?.railHistory?.[disp.id]||[];
-              const planCars=(pid,ds)=>{ const di=allDates.indexOf(ds); return (di>=0&&_isW(di+1))?railPlanRate(disp.id,pid,ds):0; };
-              const loadCars=(pid,ds)=>{ const di=allDates.indexOf(ds); if(di<0) return null; const e=histArr[di]; return e?(e.carsLoadedByProduct?.[pid]||0):null; };
-              railDpProducts(disp).forEach(pid=>{
-                const prod=DB.products.find(p=>p.id===pid);
-                const baseRate=railPlanRate(disp.id,pid,null);
-                let rr=`<tr class="supsec-railLoad" style="background:rgba(179,136,255,.02)"><td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${railColor};font-size:9px">↳ load ${prod?.name||pid} <input type="number" min="0" step="1" value="${baseRate}" title="Base cars/day to load" onclick="event.stopPropagation()" onchange="_supSetRailRate('${disp.id}','${pid}',this.value)" style="width:40px;margin-left:4px;background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:9px;padding:1px 3px"><span style="opacity:.5;margin-left:2px">cars/d</span></td>`;
-                months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-                  const mt=mon.dates.reduce((s,ds)=>{ const ac=loadCars(pid,ds); return s+(ac!=null?ac:planCars(pid,ds)); },0);
-                  rr+=`<td style="border-left:2px solid rgba(179,136,255,.1);font-size:9px;color:${railColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?mt:''}</td>`;
-                  if(!isCol) mon.dates.forEach(ds=>{ const pl=planCars(pid,ds); const ac=loadCars(pid,ds);
-                    const show=ac!=null?ac:pl; const shortfall=(ac!=null&&pl>0&&ac<pl);
-                    rr+=`<td class="sup-day-${mon.ym}" title="plan ${pl} / loaded ${ac!=null?ac:'—'} — dbl-click to override this day" ondblclick="_supSetRailDayRate('${disp.id}','${pid}','${ds}')" style="font-size:9px;color:${shortfall?'#ffb830':(show>0?railColor:'rgba(179,136,255,.25)')};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);cursor:pointer;${tdSty(ds)}">${show>0?show:0}</td>`; });
-                });
-                h+=rr+`</tr>`;
+              const byDate={};
+              allDates.forEach((ds,di)=>{
+                const realRows=(DB.real_rail_daily||[]).filter(rr=>rr.date===ds&&rr.facility_id===node.id&&rr.type==='loading');
+                if(realRows.length){
+                  const by={}; realRows.forEach(rr=>{ const pid=rr.product_id||prods[0]; if(pid) by[pid]=(by[pid]||0)+(parseFloat(rr.cars)||0); });
+                  const cars=Object.values(by).reduce((a,b)=>a+b,0);
+                  const pid=Object.keys(by).sort((a,b)=>by[b]-by[a])[0]||null;
+                  byDate[ds]={cars,pid,byProduct:by,isReal:true,plan:0,isCamp:false};
+                  return;
+                }
+                const planBy={}; prods.forEach(pid=>{ const pr=_isW(di+1)?railPlanRate(disp.id,pid,ds):0; if(pr>0) planBy[pid]=pr; });
+                const plan=Object.values(planBy).reduce((a,b)=>a+b,0);
+                const e=histArr[di];
+                const by=e?(e.carsLoadedByProduct||{}):planBy; // sim result if we have one, else the plan
+                const cars=Object.values(by).reduce((a,b)=>a+b,0);
+                const pid=Object.keys(by).sort((a,b)=>by[b]-by[a])[0]
+                        ||Object.keys(planBy).sort((a,b)=>planBy[b]-planBy[a])[0]||null;
+                byDate[ds]={cars,pid,byProduct:by,isReal:false,plan,isCamp:!!(pid&&_railActivePlan(disp.id,pid,ds))};
               });
+              return {disp,carCap,stdRate,byDate};
+            });
+            const railTonsDay=ds=>dpDays.reduce((s,d)=>{ const e=d.byDate[ds]; return s+(e?e.cars*d.carCap:0); },0);
+            // Section header — monthly totals in tonnes (cars × car capacity)
+            _railHTML+=`<tr class="sup-sec-hdr" data-seckey="railLoad" onclick="_supToggleSec('railLoad')" style="cursor:pointer;background:rgba(179,136,255,.05);border-top:2px solid rgba(179,136,255,.3)">
+              <td style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${railColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('railLoad')}</span> RAIL LOADING <span style="font-size:7px;opacity:.6;font-weight:400;margin-left:4px">(t · click a bar to plan)</span></td>`;
+            months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+              const mt=mon.dates.reduce((a,ds)=>a+railTonsDay(ds),0);
+              _railHTML+=`<td style="border-left:2px solid rgba(179,136,255,.2);font-size:9px;font-weight:700;color:${railColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+              if(!isCol) mon.dates.forEach(ds=>{ const v=railTonsDay(ds);
+                _railHTML+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${railColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
+            });
+            _railHTML+=`</tr>`;
+
+            // ── One "Rail Car Loading" Gantt row per dispatch point ──
+            dpDays.forEach(({disp,carCap,stdRate,byDate})=>{
+              let rr=`<tr class="supsec-railLoad" style="background:rgba(179,136,255,.03)">
+                <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${railColor};font-size:9px">Rail Car Loading${railDisp.length>1?' — '+disp.name:''}
+                  <span style="color:var(--text-dim);font-size:8px;margin-left:4px">max ${stdRate} cars/d · ${carCap}t/car</span>
+                </td>`;
+              let _gPrev=null;
+              // Contiguous same-product runs so a click pre-fills the campaign dialog with the run's range.
+              const _runByDate={};
+              { let cs=null,cp=null,pd=null;
+                const _fin=(endDs)=>{ if(cs==null)return; let on=false; for(const d of allDates){ if(d===cs)on=true; if(on)_runByDate[d]={start:cs,end:endDs,product:cp}; if(d===endDs)break; } };
+                allDates.forEach(ds=>{
+                  const e=byDate[ds]; const pid=(e&&!e.isReal&&e.cars>0)?e.pid:null;
+                  if(pid&&pid===cp){ pd=ds; }
+                  else { if(cs!=null)_fin(pd); if(pid){cs=ds;cp=pid;pd=ds;}else{cs=null;cp=null;pd=null;} }
+                });
+                if(cs!=null)_fin(pd);
+              }
+              months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+                const mt=mon.dates.reduce((s,ds)=>s+(byDate[ds]?.cars||0),0);
+                rr+=`<td title="cars loaded" style="border-left:2px solid rgba(179,136,255,.1);font-size:9px;color:${railColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                if(!isCol) mon.dates.forEach(ds=>{
+                  const e=byDate[ds]||{cars:0,pid:null,byProduct:{},isReal:false,plan:0,isCamp:false};
+                  const prod=e.pid?DB.products.find(p=>p.id===e.pid):null;
+                  const barColor=prod?((typeof spProdColor==='function')?spProdColor(prod.name||prod.id,false):railColor):railColor;
+                  const run=_runByDate[ds];
+                  const campArgs=run?`'${disp.id}','${ds}','${run.start}','${run.end}','${run.product}'`:`'${disp.id}','${ds}'`;
+                  const clickFn=`showRailCampaignPopup(${campArgs})`;
+                  if(e.isReal){
+                    _gPrev='__real';
+                    const tip=Object.keys(e.byProduct).map(pid=>(DB.products.find(x=>x.id===pid)?.name||pid)+' '+e.byProduct[pid]+' cars').join(' + ')+' · actual';
+                    rr+=`<td class="sup-day-${mon.ym} cell-real" title="${tip}" onclick="event.stopPropagation();${clickFn}" style="cursor:pointer;font-size:9px;color:${barColor};font-weight:700;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${Math.round(e.cars)}</td>`;
+                    return;
+                  }
+                  const runKey=e.cars>0?(e.pid||'__p'):'__idle';
+                  const isRunStart=(e.cars>0&&runKey!==_gPrev);
+                  _gPrev=runKey;
+                  const isStarved=(e.cars<=0&&e.plan>0);
+                  const isShort=(e.cars>0&&e.plan>e.cars);
+                  const starvedBg='repeating-linear-gradient(45deg,#5f5e5a,#5f5e5a 3px,#a32d2d 3px,#a32d2d 6px)';
+                  const barBg=isStarved?starvedBg:(e.cars>0?barColor:'transparent');
+                  const campMark=e.isCamp?'border-top:2px solid #4ade80;':'';
+                  const shortMark=isShort?'box-shadow:inset 0 -2px 0 #ffb830;':'';
+                  const cellTitle=isStarved?`⚠ plan ${e.plan} cars — nothing loaded (no cement in rail silo)`
+                    :(e.cars>0?`${prod?.name||''} · ${e.cars} cars/d${isShort?` (plan ${e.plan} — short ${e.plan-e.cars})`:''}${e.isCamp?' · 🔒 campaign':''}`
+                    :'Idle — click to plan loading');
+                  const lblName=(typeof spShortProd==='function')?spShortProd(prod?.name||''):(prod?.name||'');
+                  const label=isRunStart?`<span style="position:absolute;left:5px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:9px;font-weight:700;color:${_barTextColor(barColor)};pointer-events:none">${lblName} · ${e.cars} cars${e.isCamp?' 🔒':''}</span>`:'';
+                  const zpos=isRunStart?'position:relative;z-index:2;':'';
+                  rr+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="${zpos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barBg};${campMark}${shortMark}">${label}</div></td>`;
+                });
+              });
+              _railHTML+=rr+`</tr>`;
             });
           }
         }
@@ -7696,11 +7740,12 @@ function _renderSupplyViewInner(wrap){
           });
         }
 
-        // ── Emit in display order: CLINKER, thick line, CEMENT ──
+        // ── Emit in display order: CLINKER, thick line, CEMENT, thick line, RAIL LOADING ──
         const clinkerHTML=h.slice(_clkStart); h=h.slice(0,_clkStart);
         h += clinkerHTML
            + `<tr class="sup-sep-row" aria-hidden="true"><td colspan="999" style="padding:0;border:0"><div style="height:5px;background:linear-gradient(90deg,#ff8c42,#00d9a3);opacity:.85"></div></td></tr>`
-           + cementHTML;
+           + cementHTML
+           + (_railHTML?`<tr class="sup-sep-row" aria-hidden="true"><td colspan="999" style="padding:0;border:0"><div style="height:5px;background:linear-gradient(90deg,#00d9a3,#b388ff);opacity:.85"></div></td></tr>`+_railHTML:'');
 
       }
     } else {
@@ -9512,27 +9557,197 @@ function railPlanRate(dispatchId, productId, dateStr){
   });
   return override!==null?override:base;
 }
-// Set the base (undated) loading rate for a product at a dispatch point, then re-run the sim.
-function _supSetRailRate(dispId, pid, value){
-  const cars=Math.max(0,parseFloat(value)||0);
+// A dated loading-plan row (= a loading CAMPAIGN) covering dateStr for this dp+product, if any.
+function _railActivePlan(dpId, pid, ds){
+  return (DB.rail_loading_plan||[]).find(p=>p.dispatch_id===dpId&&p.product_id===pid&&(p.date_from||p.date_to)
+    &&ds>=(p.date_from||'0000-01-01')&&ds<=(p.date_to||'9999-12-31'));
+}
+// The facility a rail dispatch point belongs to (real_rail_daily rows are keyed by facility).
+function _railDpFacId(dp){ return dp?.assigned_facility_id||dp?.facility_id||S.facility_id; }
+
+// ── Rail loading campaign popup ──────────────────────────────────────────────
+// Mirrors showCampaignPopup (finish mills) but the rate is CARS/DAY. Forecast mode
+// saves a dated DB.rail_loading_plan row (the campaign); Real mode saves the actual
+// cars loaded for one day into DB.real_rail_daily (same store as the Daily Data form).
+function showRailCampaignPopup(dpId, dateStr, runStart, runEnd, runProduct){
+  const dp=getEl(dpId); if(!dp) return;
+  const prods=railDpProducts(dp);
+  if(!prods.length){ statMsg('No rail products configured for this dispatch point'); return; }
+  const facId=_railDpFacId(dp);
+  const stdRate=_railCarsPerDay(dp);
+  const existingReal=(DB.real_rail_daily||[]).filter(rr=>rr.date===dateStr&&rr.facility_id===facId&&rr.type==='loading');
+  const defaultMode=existingReal.length?'real':'forecast';
+  const selProd=(defaultMode==='real'&&existingReal[0]?.product_id)||runProduct||prods[0];
+  const existing=_railActivePlan(dpId, selProd, dateStr);
+  window._railCampHasExisting=!!existing;
+  const prodOpts=prods.map(pid=>{ const p=DB.products.find(x=>x.id===pid);
+    const base=railPlanRate(dpId,pid,null)||stdRate;
+    return `<option value="${pid}" data-rate="${base}" ${selProd===pid?'selected':''}>${p?.name||pid}</option>`; }).join('');
+  const currentRate=existing?(parseFloat(existing.cars_per_day)||0):(railPlanRate(dpId,selProd,dateStr)||railPlanRate(dpId,selProd,null)||stdRate);
+  const fromVal=existing?.date_from||runStart||dateStr;
+  const toVal=existing?.date_to||runEnd||dateStr;
+  const realVal=existingReal.find(rr=>rr.product_id===selProd)?.cars ?? existingReal[0]?.cars ?? '';
+  const initVal=defaultMode==='real'?realVal:currentRate;
+
+  const html=`
+  <div style="font-family:var(--mono);font-size:9px;min-width:320px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <div>
+        <div id="camp-title" style="font-size:11px;font-weight:700;color:${existing?'#4ade80':'var(--text)'}">
+          ${existing?'🔒 Edit Loading Campaign':'+ New Loading Campaign'}
+        </div>
+        <div style="color:var(--text-dim);margin-top:2px">${dp.name} · ${dateStr}</div>
+      </div>
+      <button onclick="closeCampaignPopup()" style="background:transparent;border:none;color:var(--text-dim);cursor:pointer;font-size:16px">✕</button>
+    </div>
+
+    <!-- Forecast vs Real toggle -->
+    <div style="display:flex;gap:0;margin-bottom:12px;border:1px solid var(--border2);border-radius:3px;overflow:hidden">
+      <button type="button" id="camp-mode-forecast" onclick="_railCampSetMode('forecast')"
+        style="flex:1;padding:6px 8px;font-family:var(--mono);font-size:9px;border:none;cursor:pointer">📈 Loading Campaign</button>
+      <button type="button" id="camp-mode-real" onclick="_railCampSetMode('real')"
+        style="flex:1;padding:6px 8px;font-family:var(--mono);font-size:9px;border:none;cursor:pointer">✅ Real Data</button>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <div class="fr s1">
+        <div class="ff">
+          <div class="fl">Product</div>
+          <select class="fi" id="camp-product" onchange="if(window._campMode!=='real')document.getElementById('camp-rate').value=this.options[this.selectedIndex].dataset.rate" style="width:100%">${prodOpts}</select>
+        </div>
+      </div>
+      <div class="fr s2">
+        <div class="ff">
+          <div class="fl" id="camp-rate-label">Cars per day</div>
+          <input class="fi" id="camp-rate" type="number" value="${initVal}" min="0" step="1" style="width:100%">
+        </div>
+        <div id="camp-rate-hint" style="font-size:8px;color:var(--text-dim);align-self:flex-end;padding-bottom:6px">max ${stdRate} cars/d</div>
+      </div>
+      <div class="fr s2">
+        <div class="ff">
+          <div class="fl" id="camp-from-label">From</div>
+          <input class="fi" id="camp-from" type="date" value="${fromVal}" style="width:100%">
+        </div>
+        <div class="ff" id="camp-to-field">
+          <div class="fl">To</div>
+          <input class="fi" id="camp-to" type="date" value="${toVal}" style="width:100%">
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-top:12px;display:flex;gap:8px;justify-content:space-between;align-items:center">
+      <div style="display:flex;gap:6px">
+        <span id="camp-del-wrap">${existing?`<button onclick="_railDeletePlanRow('${existing.id}')"
+          style="padding:5px 10px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid rgba(255,61,90,.5);color:var(--red);cursor:pointer;border-radius:2px">
+          ✕ Delete Campaign</button>`:''}</span>
+        <span id="camp-clear-real-wrap" style="display:none">${existingReal.length?`<button onclick="_railCampClearReal('${dpId}','${dateStr}')"
+          style="padding:5px 10px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid rgba(255,61,90,.5);color:var(--red);cursor:pointer;border-radius:2px">
+          ✕ Clear Real Value</button>`:''}</span>
+      </div>
+      <div style="display:flex;gap:6px">
+        <button onclick="closeCampaignPopup()" style="padding:5px 12px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid var(--border2);color:var(--text-dim);cursor:pointer;border-radius:2px">Cancel</button>
+        <button id="camp-apply-btn" onclick="applyRailCampaign('${dpId}')" style="padding:5px 14px;font-family:var(--mono);font-size:9px;background:#4ade80;border:none;color:#000;cursor:pointer;font-weight:700;border-radius:2px">🔒 Apply Campaign</button>
+      </div>
+    </div>
+  </div>`;
+
+  let ov=document.getElementById('camp-overlay');
+  if(!ov){
+    ov=document.createElement('div');
+    ov.id='camp-overlay';
+    ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:20000;display:flex;align-items:center;justify-content:center';
+    ov.onclick=e=>{ if(e.target===ov) closeCampaignPopup(); };
+    document.body.appendChild(ov);
+  }
+  ov.innerHTML=`<div style="background:var(--surface);border:1px solid #4ade80;padding:18px;border-radius:6px;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.6)">${html}</div>`;
+  ov.style.display='flex';
+  _railCampSetMode(defaultMode);
+}
+
+// Toggle the rail popup between Forecast (date-range campaign) and Real (single-day actual).
+function _railCampSetMode(mode){
+  window._campMode=mode;
+  const real=mode==='real';
+  const fBtn=document.getElementById('camp-mode-forecast');
+  const rBtn=document.getElementById('camp-mode-real');
+  const onSty='background:#4ade80;color:#000;font-weight:700';
+  const offSty='background:transparent;color:var(--text-dim);font-weight:400';
+  if(fBtn) fBtn.style.cssText='flex:1;padding:6px 8px;font-family:var(--mono);font-size:9px;border:none;cursor:pointer;'+(real?offSty:onSty);
+  if(rBtn) rBtn.style.cssText='flex:1;padding:6px 8px;font-family:var(--mono);font-size:9px;border:none;cursor:pointer;'+(real?onSty:offSty);
+  const toField=document.getElementById('camp-to-field'); if(toField) toField.style.display=real?'none':'';
+  const fromLbl=document.getElementById('camp-from-label'); if(fromLbl) fromLbl.textContent=real?'Date':'From';
+  const rateLbl=document.getElementById('camp-rate-label'); if(rateLbl) rateLbl.textContent=real?'Actual cars loaded':'Cars per day';
+  const rateHint=document.getElementById('camp-rate-hint'); if(rateHint) rateHint.style.display=real?'none':'';
+  const title=document.getElementById('camp-title'); if(title) title.textContent=real?'✅ Real Rail Loading':(window._railCampHasExisting?'🔒 Edit Loading Campaign':'+ New Loading Campaign');
+  const apply=document.getElementById('camp-apply-btn');
+  if(apply){ apply.textContent=real?'✅ Save Real Value':'🔒 Apply Campaign'; apply.style.background=real?'#3b82f6':'#4ade80'; apply.style.color=real?'#fff':'#000'; }
+  const delW=document.getElementById('camp-del-wrap'); if(delW) delW.style.display=real?'none':'';
+  const clrW=document.getElementById('camp-clear-real-wrap'); if(clrW) clrW.style.display=real?'':'none';
+}
+
+// Save the rail popup: Real mode → real_rail_daily (one day); Forecast → dated rail_loading_plan row.
+function applyRailCampaign(dpId){
+  const pid=document.getElementById('camp-product')?.value;
+  const cars=Math.max(0,parseFloat(document.getElementById('camp-rate')?.value)||0);
+  const fromDate=document.getElementById('camp-from')?.value;
+  const toDate=document.getElementById('camp-to')?.value;
+
+  if(window._campMode==='real'){
+    if(!pid||!fromDate){ statMsg('Please choose a product and date'); return; }
+    const facId=_railDpFacId(getEl(dpId));
+    const now=new Date().toISOString();
+    if(!DB.real_rail_daily) DB.real_rail_daily=[];
+    const ex=DB.real_rail_daily.find(rr=>rr.date===fromDate&&rr.facility_id===facId&&rr.product_id===pid&&rr.type==='loading');
+    if(ex){ ex.cars=cars; ex.updated_at=now; }
+    else DB.real_rail_daily.push({date:fromDate,facility_id:facId,product_id:pid,type:'loading',cars,source:'actual',created_at:now,updated_at:now});
+    closeCampaignPopup();
+    autoSave();
+    _demandCacheInvalidate();
+    renderSupplyView();
+    statMsg('Real rail loading saved — running simulation…');
+    scheduleSimulation();
+    return;
+  }
+
+  if(!pid||!fromDate||!toDate){ statMsg('Please fill all fields'); return; }
+  if(fromDate>toDate){ statMsg('From date must be before To date'); return; }
   if(!DB.rail_loading_plan) DB.rail_loading_plan=[];
-  let row=DB.rail_loading_plan.find(p=>p.dispatch_id===dispId&&p.product_id===pid&&!p.date_from&&!p.date_to);
-  if(row) row.cars_per_day=cars;
-  else DB.rail_loading_plan.push({id:'lp_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),dispatch_id:dispId,product_id:pid,cars_per_day:cars});
+  // Replace any overlapping campaigns (dated rows) for this dispatch point + product.
+  DB.rail_loading_plan=DB.rail_loading_plan.filter(p=>{
+    if(p.dispatch_id!==dpId||p.product_id!==pid||(!p.date_from&&!p.date_to)) return true;
+    const f=p.date_from||'0000-01-01', t=p.date_to||'9999-12-31';
+    return t<fromDate||f>toDate;
+  });
+  DB.rail_loading_plan.push({id:'lp_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),
+    dispatch_id:dpId,product_id:pid,cars_per_day:cars,date_from:fromDate,date_to:toDate});
+  closeCampaignPopup();
   autoSave();
+  renderSupplyView();
+  statMsg('Loading campaign saved — running simulation…');
   scheduleSimulation();
 }
-// Override the loading rate for a single day (dated row), then re-run the sim.
-function _supSetRailDayRate(dispId, pid, ds){
-  const cur=railPlanRate(dispId,pid,ds);
-  const v=prompt('Cars to load on '+ds+' (override base rate for this day):', cur);
-  if(v===null) return;
-  const cars=Math.max(0,parseFloat(v)||0);
-  if(!DB.rail_loading_plan) DB.rail_loading_plan=[];
-  let row=DB.rail_loading_plan.find(p=>p.dispatch_id===dispId&&p.product_id===pid&&p.date_from===ds&&p.date_to===ds);
-  if(row) row.cars_per_day=cars;
-  else DB.rail_loading_plan.push({id:'lp_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),dispatch_id:dispId,product_id:pid,cars_per_day:cars,date_from:ds,date_to:ds});
+
+// Delete a loading campaign (dated plan row) from the popup.
+function _railDeletePlanRow(rowId){
+  if(!confirm('Delete this loading campaign?\nLoading falls back to the base rate (if any) for these days.')) return;
+  DB.rail_loading_plan=(DB.rail_loading_plan||[]).filter(p=>p.id!==rowId);
+  closeCampaignPopup();
   autoSave();
+  renderSupplyView();
+  statMsg('Loading campaign deleted — running simulation…');
+  scheduleSimulation();
+}
+
+// Remove the real cars-loaded entry for one day (all products), then re-run.
+function _railCampClearReal(dpId, dateStr){
+  if(!confirm(`Clear real rail loading for ${dateStr}?\nSimulation will resume the loading plan for this day.`)) return;
+  const facId=_railDpFacId(getEl(dpId));
+  DB.real_rail_daily=(DB.real_rail_daily||[]).filter(rr=>!(rr.date===dateStr&&rr.facility_id===facId&&rr.type==='loading'));
+  closeCampaignPopup();
+  autoSave();
+  _demandCacheInvalidate();
+  renderSupplyView();
+  statMsg('Real rail loading cleared — running simulation…');
   scheduleSimulation();
 }
 // Operator "push": set how many cars of a product go from a dispatch point to a terminal on a
@@ -13041,12 +13256,33 @@ function simulate(elements, connections, horizon, includeProposed=false){
 
       const carsLoadedByProduct={};
 
+      // ── REAL loading override ───────────────────────────────────────────────
+      // Actual cars loaded entered for this date (Daily Data form / rail popup) trump the
+      // plan: they already happened, so load exactly those — no working-day or capacity
+      // check. Silo draw is clamped to what's physically there.
+      const _realLoadRows=(DB.real_rail_daily||[]).filter(rr=>rr.date===_dateStr
+        &&rr.facility_id===(el.assigned_facility_id||el.facility_id)&&rr.type==='loading'
+        &&(!rr.product_id||(railProdSilo[el.id]||{})[rr.product_id]!==undefined));
+      if(_realLoadRows.length){
+        _realLoadRows.forEach(rr=>{
+          const pid=rr.product_id||Object.keys(railProdSilo[el.id]||{})[0]; if(!pid) return;
+          const cars=Math.max(0,Math.round(parseFloat(rr.cars)||0)); if(cars<=0) return;
+          s.yardByProduct[pid]=(s.yardByProduct[pid]||0)+cars;
+          carsLoadedByProduct[pid]=(carsLoadedByProduct[pid]||0)+cars;
+          const siloId=(railProdSilo[el.id]||{})[pid]; const siloSt=siloId?state[siloId]:null;
+          if(siloSt){
+            const avail=Math.max(0,(siloSt.inventory+(siloInflow[siloId]||0))-(siloOutflow[siloId]||0));
+            siloOutflow[siloId]=(siloOutflow[siloId]||0)+Math.min(cars*carCap,avail);
+          }
+          s.status='running';
+        });
+      }
       // ── LOADING (plant, plan-driven) ─────────────────────────────────────────
       // Ops set how many cars/day of each product to load (DB.rail_loading_plan). Each working
       // day we load, per product, min(plan rate, remaining daily capacity, cement available in
       // that product's source silo). Loaded cars accumulate in the yard BY PRODUCT and stay
       // there until a switch. Loading is bounded by both the plan and physical supply.
-      if(isWorking&&stdRate>0){
+      else if(isWorking&&stdRate>0){
         let capRem=stdRate;
         Object.keys(railProdSilo[el.id]||{}).forEach(pid=>{
           if(capRem<=0) return;
