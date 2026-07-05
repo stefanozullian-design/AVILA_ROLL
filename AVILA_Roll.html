@@ -364,9 +364,16 @@ select.pi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
 .tp-row-loading td:first-child{color:#4da6ff;}
 .tp-row-dispatch td:first-child{color:#ff9433;}
 .rp-push-inp{width:38px;background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:9px;padding:1px 2px;text-align:right;}
-.rp-push-inp.rp-committed{background:rgba(0,229,160,.14);border-color:rgba(0,229,160,.55);}
-.rp-push-inp.rp-dirty{background:rgba(255,184,48,.16);border-color:rgba(255,184,48,.65);}
+/* Push-cell state colour code: purple dashed = proposed by the simulation (not saved),
+   amber = edited draft (unsaved), blue = planned (confirmed ✓), green = real (actual),
+   red = the switch total exceeds the cars available. */
+.rp-push-inp.rp-proposed{background:rgba(179,136,255,.08);border-color:rgba(179,136,255,.45);border-style:dashed;color:#b388ff;font-style:italic;}
+.rp-push-inp.rp-committed{background:rgba(56,189,248,.12);border-color:rgba(56,189,248,.6);color:#38bdf8;}
+.rp-push-inp.rp-dirty{background:rgba(255,184,48,.16);border-color:rgba(255,184,48,.65);color:var(--amber);}
+.rp-push-inp.rp-real{background:rgba(0,217,163,.14);border-color:rgba(0,217,163,.6);color:#00d9a3;font-weight:700;}
+.rp-push-inp.rp-over{border-color:#ff3d5a !important;background:rgba(255,61,90,.18) !important;color:#ff3d5a !important;}
 .rp-sw-icon{cursor:pointer;font-size:11px;padding:0 3px;opacity:.7;user-select:none;}
+.rp-lg{display:inline-block;width:14px;height:9px;vertical-align:-1px;margin-right:3px;border-radius:1px;}
 .rp-sw-icon:hover{opacity:1;}
 .tp-cell-clickable{cursor:pointer;transition:background .1s;}
 .tp-cell-clickable:hover{background:rgba(0,214,143,.12)!important;color:#00d68f!important;}
@@ -1400,6 +1407,8 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
             <div id="rp-charts-section" style="display:none;margin-bottom:16px">
               <div id="rp-charts-inner"></div>
             </div>
+            <!-- Push-cell colour legend (filled by rpRender) -->
+            <div id="rp-legend" style="font-family:var(--mono);font-size:8px;color:var(--text-dim);margin:4px 0 6px;display:flex;gap:14px;align-items:center;flex-wrap:wrap"></div>
             <!-- Single merged planner table: ORIGIN (plan switches) then DESTINATIONS, same date columns -->
             <div id="rp-rail-section">
               <div class="tp-table-wrap" id="rp-rail-table-wrap">
@@ -9761,32 +9770,87 @@ function _rpSetPush(dpId, destFacId, pid, dayNum, ds, value, skipRun){
   const transit=parseInt(destCfg?.transit_days)||1;
   const berth=DB.elements.find(e=>e.type==='berth'&&(e.props?.berth_type||'').includes('Rail')&&(e.assigned_facility_id||e.facility_id)===destFacId);
   const berthId=berth?berth.id:null;
-  let row=DB.rail_movements.find(rm=>rm.from_dispatch_id===dpId&&rm.to_facility_id===destFacId&&(rm.product_id||'')===pid&&rm.switch_day===dayNum);
+  // Match by DEPARTURE DATE (day numbers drift when the sim start date moves); legacy
+  // rows without a departure_date still match by switch_day.
+  let row=DB.rail_movements.find(rm=>rm.from_dispatch_id===dpId&&rm.to_facility_id===destFacId&&(rm.product_id||'')===pid
+    &&(rm.departure_date?rm.departure_date===ds:rm.switch_day===dayNum));
   if(cars<=0){ if(row) DB.rail_movements=DB.rail_movements.filter(r=>r!==row); }
-  else if(row){ row.wagon_count=cars; row.wagon_capacity_t=carCap; row.total_capacity_t=cars*carCap; row.status='Confirmed'; if(!row.to_berth_id) row.to_berth_id=berthId; }
+  else if(row){ row.wagon_count=cars; row.wagon_capacity_t=carCap; row.total_capacity_t=cars*carCap; row.status='Confirmed'; row.switch_day=dayNum; row.departure_date=ds; if(!row.to_berth_id) row.to_berth_id=berthId; }
   else DB.rail_movements.push({id:'push_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),from_facility_id:S.facility_id,to_facility_id:destFacId,from_dispatch_id:dpId,to_berth_id:berthId,product_id:pid,wagon_count:cars,wagon_capacity_t:carCap,total_capacity_t:cars*carCap,switch_day:dayNum,departure_date:ds,transit_days:transit,status:'Confirmed',notes:'Operator push'});
   if(!skipRun){ autoSave(); scheduleSimulation(); }
 }
-// A push cell was edited — recolor it (green = matches the confirmed value, amber = unsaved draft).
+// Record the REAL cars dispatched from a rail dp to one terminal on a (past) switch date.
+// Stored in real_rail_daily as type 'dispatched' (dest-tagged); coexists with the planned
+// movement so plan vs real stays comparable. A 0 is a valid record ("nothing went there").
+function _rpSetReal(dpId, destFacId, pid, ds, value, skipRun){
+  const cars=Math.max(0,parseInt(value)||0);
+  const facId=_railDpFacId(getEl(dpId));
+  if(!DB.real_rail_daily) DB.real_rail_daily=[];
+  const now=new Date().toISOString();
+  let row=DB.real_rail_daily.find(rr=>rr.type==='dispatched'&&rr.date===ds&&rr.facility_id===facId
+    &&rr.dest_facility_id===destFacId&&(rr.product_id||'')===pid);
+  if(row){ row.cars=cars; row.updated_at=now; }
+  else DB.real_rail_daily.push({date:ds,facility_id:facId,dest_facility_id:destFacId,product_id:pid,type:'dispatched',cars,source:'actual',created_at:now,updated_at:now});
+  if(!skipRun){ autoSave(); scheduleSimulation(); }
+}
+// A push cell was edited — stash the draft (survives re-renders) and recolor:
+// amber = differs from what the cell showed (unsaved), else back to its natural state colour.
+window._rpDrafts=window._rpDrafts||{};
+function _rpDraftKey(inp){ return inp.dataset.dp+'|'+inp.dataset.sw+'|'+inp.dataset.dest+'|'+inp.dataset.pid; }
 function _rpPushEdit(inp){
-  const committed=parseInt(inp.dataset.committed)||0;
   const v=Math.max(0,parseInt(inp.value)||0);
-  inp.classList.remove('rp-committed','rp-dirty');
-  if(v!==committed) inp.classList.add('rp-dirty');
-  else if(committed>0) inp.classList.add('rp-committed');
+  inp.classList.remove('rp-committed','rp-dirty','rp-proposed','rp-real');
+  if(v!==(parseInt(inp.dataset.base)||0)){ window._rpDrafts[_rpDraftKey(inp)]=v; inp.classList.add('rp-dirty'); }
+  else { delete window._rpDrafts[_rpDraftKey(inp)]; if(inp.dataset.cls) inp.classList.add(inp.dataset.cls); }
+  _rpValidateSwitch(inp.dataset.dp, inp.dataset.sw);
+}
+// Redistribution guard: per product, the switch total may not exceed the cars available in
+// the yard at that switch (pushing LESS is fine — the rest stays behind for the next switch).
+// Flags every cell of an over-allocated product red; returns false if any product is over.
+function _rpValidateSwitch(dpId, sw){
+  const inps=[...document.querySelectorAll(`input.rp-push-inp[data-dp="${dpId}"][data-sw="${sw}"]`)];
+  const byPid={};
+  inps.forEach(i=>{ (byPid[i.dataset.pid]=byPid[i.dataset.pid]||[]).push(i); });
+  let ok=true;
+  Object.values(byPid).forEach(list=>{
+    const avail=parseInt(list[0].dataset.avail)||0;
+    const tot=list.reduce((s,i)=>s+Math.max(0,parseInt(i.value)||0),0);
+    const over=tot>avail;
+    list.forEach(i=>i.classList.toggle('rp-over',over));
+    if(over) ok=false;
+  });
+  return ok;
 }
 // Confirm every push for one switch at the given dispatch point, then save + re-run once.
+// Future switch → planned (Confirmed) movements. Past switch → REAL dispatch records.
 function _rpConfirmSwitch(dpId, sw){
   const inps=document.querySelectorAll(`input.rp-push-inp[data-dp="${dpId}"][data-sw="${sw}"]`);
   if(!inps.length) return;
-  inps.forEach(inp=>{ _rpSetPush(dpId, inp.dataset.dest, inp.dataset.pid, parseInt(sw,10), inp.dataset.ds, inp.value, true); });
+  const ds=inps[0].dataset.ds;
+  const isPast=ds<new Date()._ymd();
+  if(!isPast&&!_rpValidateSwitch(dpId,sw)){
+    statMsg('⚠ Push total exceeds the cars available at this switch — reduce before confirming (unsent cars stay in the yard)');
+    return;
+  }
+  inps.forEach(inp=>{
+    if(isPast) _rpSetReal(dpId, inp.dataset.dest, inp.dataset.pid, inp.dataset.ds, inp.value, true);
+    else _rpSetPush(dpId, inp.dataset.dest, inp.dataset.pid, parseInt(sw,10), inp.dataset.ds, inp.value, true);
+    delete window._rpDrafts[_rpDraftKey(inp)];
+  });
   autoSave();
+  statMsg(isPast?'Real dispatch saved — running simulation…':'Pushes confirmed — running simulation…');
   scheduleSimulation();
 }
-// Reset one switch's push inputs back to the suggested distribution (no commit, no re-run).
+// Reset one switch's push inputs (drops drafts, no commit, no re-run): future switches go
+// back to the suggested distribution, past switches back to the planned (committed) values.
 function _rpResetSwitch(dpId, sw){
-  document.querySelectorAll(`input.rp-push-inp[data-dp="${dpId}"][data-sw="${sw}"]`).forEach(inp=>{
-    inp.value=inp.dataset.suggest||0; _rpPushEdit(inp);
+  const inps=document.querySelectorAll(`input.rp-push-inp[data-dp="${dpId}"][data-sw="${sw}"]`);
+  if(!inps.length) return;
+  const isPast=inps[0].dataset.ds<new Date()._ymd();
+  inps.forEach(inp=>{
+    delete window._rpDrafts[_rpDraftKey(inp)];
+    inp.value=isPast?(inp.dataset.committed||0):(inp.dataset.suggest||0);
+    _rpPushEdit(inp);
   });
 }
 // Products a rail dispatch point can load — the products held by its upstream bulk silos.
@@ -10032,7 +10096,15 @@ function rpRender(){
       // Cars available to push at switch S = yard carried from the previous switch + loaded since.
       const availAtSwitch=(pid,S)=>{ const P=prevSwitch(S); let a=yardAfter(pid,P); for(let x=P+1;x<=S;x++) a+=loadedOn(pid,x); return a; };
       const transitOf=fid=>{ const d=(dp.props?.destinations||[]).find(x=>x.facility_id===fid); return parseInt(d?.transit_days)||1; };
-      const existingPush=(pid,fid,d)=>DB.rail_movements.find(rm=>rm.from_dispatch_id===dp.id&&rm.to_facility_id===fid&&(rm.product_id||'')===pid&&rm.switch_day===d);
+      // Match saved pushes by DATE (day numbers drift when the sim start date moves).
+      const existingPush=(pid,fid,d)=>{ const ds=rpDayDate(d);
+        return DB.rail_movements.find(rm=>rm.from_dispatch_id===dp.id&&rm.to_facility_id===fid&&(rm.product_id||'')===pid
+          &&(rm.departure_date?rm.departure_date===ds:rm.switch_day===d)); };
+      // Real dispatched cars (actuals) recorded for this origin/dest/product/date.
+      const _rpFacId=_railDpFacId(dp);
+      const realPush=(pid,fid,ds)=>(DB.real_rail_daily||[]).find(rr=>rr.type==='dispatched'&&rr.date===ds
+        &&rr.facility_id===_rpFacId&&rr.dest_facility_id===fid&&(rr.product_id||'')===pid);
+      const _rpToday=new Date()._ymd();
 
       dpProducts.forEach(pid=>{
         const prod=DB.products.find(p=>p.id===pid);
@@ -10073,11 +10145,15 @@ function rpRender(){
           myDests.forEach((fid,i)=>{ let a= tw>0?(i===myDests.length-1?avail-assigned:Math.floor(avail*(w[fid]||0)/tw)):(i===0?avail:0); a=Math.max(0,a); suggest[d][fid]=a; assigned+=a; });
         });
 
-        // 3) Editable push row per terminal (only on switch-day columns)
+        // 3) Editable push row per terminal (only on switch-day columns).
+        // Cell value precedence: unsaved draft > real (actual) > planned (confirmed) > suggested.
+        // Colour code: amber = draft, green = real, blue = planned, purple dashed = suggested.
         myDests.forEach(fid=>{
           const destFac=DB.facilities.find(f=>f.id===fid);
           const pushCells=months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
-            const mc=mon.days.reduce((s,d)=>{ if(!rpIsSwitch(d,switchDays))return s; const ex=existingPush(pid,fid,d); return s+(ex?(parseInt(ex.wagon_count)||0):(suggest[d]?.[fid]||0)); },0);
+            const mc=mon.days.reduce((s,d)=>{ if(!rpIsSwitch(d,switchDays))return s;
+              const rl=realPush(pid,fid,rpDayDate(d)); if(rl) return s+(parseInt(rl.cars)||0);
+              const ex=existingPush(pid,fid,d); return s+(ex?(parseInt(ex.wagon_count)||0):(suggest[d]?.[fid]||0)); },0);
             const mTd=`<td class="logi-mcol" style="${_mTdSty}">${mc>0?mc+' cars':'—'}</td>`;
             return mTd+(isCol?[]:mon.days).map(d=>{ const tSty=_tpTdSty(d); const sw=rpIsSwitch(d,switchDays);
               if(!sw) return `<td${tSty?` style="${tSty}"`:''}></td>`;
@@ -10085,9 +10161,19 @@ function rpRender(){
               const ex=existingPush(pid,fid,d);
               const committed=ex?(parseInt(ex.wagon_count)||0):0;
               const sg=suggest[d]?.[fid]||0;
-              const val=ex?committed:sg;
-              const isSet=!!ex;
-              return `<td class="tp-col-switch"${tSty?` style="${tSty}"`:''}><input type="number" min="0" step="1" value="${val}" data-dp="${dp.id}" data-sw="${d}" data-dest="${fid}" data-pid="${pid}" data-ds="${ds}" data-committed="${committed}" data-suggest="${sg}" title="${isSet?'Confirmed push — edit & click ✓ to update':'Suggested — adjust then click ✓ under this switch to confirm'}" onchange="_rpPushEdit(this)" class="rp-push-inp${isSet?' rp-committed':''}"></td>`; }).join('');
+              const rl=realPush(pid,fid,ds);
+              const realVal=rl?(parseInt(rl.cars)||0):null;
+              const isPast=ds<_rpToday;
+              // Natural (saved) state of the cell + its base value
+              let base, cls, ttl;
+              if(realVal!==null){ base=realVal; cls='rp-real'; ttl=`REAL: ${realVal} cars dispatched`+(ex?` · planned ${committed}`:'')+(sg?` · suggested ${sg}`:''); }
+              else if(ex){ base=committed; cls='rp-committed'; ttl='Planned (confirmed) — edit & ✓ to update'+(isPast?'. Past switch: ✓ records the number as REAL':''); }
+              else { base=sg; cls='rp-proposed'; ttl='Proposed by the simulation — adjust, then ✓ under this switch to '+(isPast?'record as REAL':'confirm as the plan'); }
+              const draft=window._rpDrafts[`${dp.id}|${d}|${fid}|${pid}`];
+              const val=draft!==undefined?draft:base;
+              const shown=draft!==undefined&&draft!==base?'rp-dirty':cls;
+              const avail=availAtSwitch(pid,d);
+              return `<td class="tp-col-switch"${tSty?` style="${tSty}"`:''}><input type="number" min="0" step="1" value="${val}" data-dp="${dp.id}" data-sw="${d}" data-dest="${fid}" data-pid="${pid}" data-ds="${ds}" data-committed="${committed}" data-suggest="${sg}" data-real="${realVal!==null?realVal:''}" data-base="${base}" data-cls="${cls}" data-avail="${avail}" title="${ttl}" onchange="_rpPushEdit(this)" class="rp-push-inp ${shown}"></td>`; }).join('');
           }).join('');
           origRows.push(`<tr class="tp-row-push"><td style="color:#ff9433">    → push ${destFac?.name||fid}</td>${pushCells}</tr>`);
         });
@@ -10100,7 +10186,8 @@ function rpRender(){
         const mTd=`<td class="logi-mcol" style="${_mTdSty}"></td>`;
         return mTd+(isCol?[]:mon.days).map(d=>{ const tSty=_tpTdSty(d); const sw=rpIsSwitch(d,switchDays);
           if(!sw) return `<td${tSty?` style="${tSty}"`:''}></td>`;
-          return `<td class="tp-col-switch" style="text-align:center;${tSty||''}"><span class="rp-sw-icon" style="color:#00d9a3" title="Confirm all pushes for this switch" onclick="_rpConfirmSwitch('${dp.id}',${d})">✓</span><span class="rp-sw-icon" style="color:#8e9ab8" title="Reset this switch to suggested" onclick="_rpResetSwitch('${dp.id}',${d})">⟳</span></td>`; }).join('');
+          const _cPast=rpDayDate(d)<_rpToday;
+          return `<td class="tp-col-switch" style="text-align:center;${tSty||''}"><span class="rp-sw-icon" style="color:#00d9a3" title="${_cPast?'Record this switch\'s numbers as REAL dispatches':'Confirm all pushes for this switch as the plan'}" onclick="_rpConfirmSwitch('${dp.id}',${d})">✓</span><span class="rp-sw-icon" style="color:#8e9ab8" title="${_cPast?'Reset this switch to the planned values':'Reset this switch to the suggested distribution'}" onclick="_rpResetSwitch('${dp.id}',${d})">⟳</span></td>`; }).join('');
       }).join('');
       origRows.push(`<tr class="tp-row-confirm"><td style="color:#8e9ab8;font-size:8px;letter-spacing:.04em">    ✓ confirm · ⟳ reset</td>${confirmCells}</tr>`);
     });
@@ -10108,6 +10195,18 @@ function rpRender(){
   // Single merged table: ORIGIN (planning) first, a thick rule, then the DESTINATIONS — same dates.
   const _origDestSep=`<tr><td colspan="${_railColspan}" style="padding:0;height:0;border-top:4px solid var(--text-dim)"></td></tr>`;
   document.getElementById('rp-rail-tbody').innerHTML=origRows.join('')+_origDestSep+destRows.join('');
+  // Re-flag over-allocated switches for any surviving drafts (they persist across re-renders).
+  new Set(Object.keys(window._rpDrafts||{}).map(k=>k.split('|').slice(0,2).join('|'))).forEach(k=>{
+    const [dpId,sw]=k.split('|'); _rpValidateSwitch(dpId,sw);
+  });
+  // Push-cell colour legend above the table.
+  const legend=document.getElementById('rp-legend');
+  if(legend) legend.innerHTML=`<span style="opacity:.7">PUSH CELLS:</span>
+    <span><span class="rp-lg" style="background:rgba(179,136,255,.15);border:1px dashed rgba(179,136,255,.6)"></span> Proposed (simulation)</span>
+    <span><span class="rp-lg" style="background:rgba(255,184,48,.25);border:1px solid rgba(255,184,48,.7)"></span> Edited (unsaved — click ✓)</span>
+    <span><span class="rp-lg" style="background:rgba(56,189,248,.2);border:1px solid rgba(56,189,248,.7)"></span> Planned (confirmed)</span>
+    <span><span class="rp-lg" style="background:rgba(0,217,163,.22);border:1px solid rgba(0,217,163,.7)"></span> Real (actual dispatch)</span>
+    <span><span class="rp-lg" style="background:rgba(255,61,90,.25);border:1px solid #ff3d5a"></span> Exceeds available cars</span>`;
 }
 
 // ── Rail exception banner ──────────────────────────────────────────
@@ -12040,13 +12139,17 @@ function simulate(elements, connections, horizon, includeProposed=false){
     });
     railPushes[dp.id]={};
     const dpDestIds=new Set((dp.props.destinations||[]).map(x=>x.facility_id));
+    // Day index derived from the DATE (day numbers stored on old movements drift when the
+    // sim start date moves; departure_date is authoritative when present).
+    const _dayOfDate=ds=>Math.round((new Date(ds+'T00:00:00')-new Date(S.simCfg.start_date+'T00:00:00'))/864e5)+1;
     DB.rail_movements
       .filter(rm=>(rm.from_dispatch_id===dp.id||(rm.from_facility_id===S.facility_id&&dpDestIds.has(rm.to_facility_id)))
         &&rm.switch_day
         &&(rm.status||'Planned')!=='In Transit'
         &&(!rm.departure_date||rm.departure_date>=S.simCfg.start_date))
       .forEach(rm=>{
-        const sw=rm.switch_day;
+        const sw=rm.departure_date?_dayOfDate(rm.departure_date):rm.switch_day;
+        if(sw<1) return;
         const berthInfo=(railDestBerthMap[dp.id]||{})[rm.to_facility_id];
         if(!railPushes[dp.id][sw]) railPushes[dp.id][sw]=[];
         railPushes[dp.id][sw].push({
@@ -12058,6 +12161,20 @@ function simulate(elements, connections, horizon, includeProposed=false){
           status:rm.status||'Planned'
         });
       });
+    // REAL dispatches (real_rail_daily type 'dispatched') REPLACE the planned pushes on
+    // their day — reality trumps the plan, and plan vs real stays visible on the rail page.
+    const _realDisp={};
+    (DB.real_rail_daily||[]).filter(rr=>rr.type==='dispatched'&&rr.date
+        &&rr.facility_id===(dp.assigned_facility_id||dp.facility_id)&&rr.date>=S.simCfg.start_date)
+      .forEach(rr=>{ const sw=_dayOfDate(rr.date); if(sw<1) return; (_realDisp[sw]=_realDisp[sw]||[]).push(rr); });
+    Object.keys(_realDisp).forEach(sw=>{
+      railPushes[dp.id][sw]=_realDisp[sw].map(rr=>{
+        const berthInfo=(railDestBerthMap[dp.id]||{})[rr.dest_facility_id];
+        return {toFacId:rr.dest_facility_id, berthId:berthInfo?.berthId||null,
+          transitDays:parseInt((dp.props.destinations||[]).find(x=>x.facility_id===rr.dest_facility_id)?.transit_days)||berthInfo?.transitDays||1,
+          productId:rr.product_id||'', cars:parseInt(rr.cars)||0, status:'Real', _real:true};
+      });
+    });
   });
 
 
@@ -13307,8 +13424,11 @@ function simulate(elements, connections, horizon, includeProposed=false){
       // min(requested, cars accumulated in the yard for that product); the rest is a shortfall.
       // Unshipped yard cars carry forward to the next switch.
       const dispatchByDest={};
-      if(isSwitch){
-        const pushes=(railPushes[el.id]||{})[day]||[];
+      const _dayPushes=(railPushes[el.id]||{})[day]||[];
+      // Ship on switch days — and on any day with REAL dispatch records (reality wins,
+      // even if the calendar says it wasn't a switch day).
+      if(isSwitch||_dayPushes.some(p=>p._real)){
+        const pushes=_dayPushes;
         pushes.forEach(p=>{
           const dpProds=Object.keys(railProdSilo[el.id]||{});
           const pid=p.productId||(dpProds.length===1?dpProds[0]:null);
