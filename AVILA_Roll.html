@@ -9593,6 +9593,12 @@ function railDpProducts(dp, connections){
 // (<= carsPerDay) and overflow lists movements with unplaced cars.
 
 
+function _rpToggleMonth(ym){
+  if(!window._rpColapsed) window._rpColapsed=new Set();
+  window._rpColapsed.has(ym)?window._rpColapsed.delete(ym):window._rpColapsed.add(ym);
+  rpRender();
+}
+
 // ── Main render ───────────────────────────────────────────────────
 function rpRender(){
   _syncSimToggle();
@@ -9627,20 +9633,26 @@ function rpRender(){
 
   // ── Month grouping + summary-column styling (shared with vessel planner) ──
   const todayStr=new Date()._ymd();
+  if(!window._rpColapsed) window._rpColapsed=new Set(); // no months auto-collapsed; user expands/collapses manually
   const months=(()=>{const mons=[];days.forEach(d=>{const ds=rpDayDate(d);const ym=ds.slice(0,7);if(!mons.length||mons[mons.length-1].ym!==ym){const dt=new Date(ds+'T00:00:00');mons.push({ym,label:dt.toLocaleString('en-US',{month:'short',year:'2-digit'}),days:[]});}mons[mons.length-1].days.push(d);});return mons;})();
   const _mTdSty='background:var(--total-faint);border-left:2px solid var(--border2);font-weight:700;color:var(--total);text-align:right;padding:3px 8px;';
-  const _tpTdSty=d=>rpDayDate(d)===todayStr?'border-left:2px solid var(--green);border-right:2px solid var(--green);':'';
+  const _tpTdSty=d=>{
+    if(rpDayDate(d)===todayStr) return 'border-left:2px solid var(--green);border-right:2px solid var(--green);';
+    if(rpIsSat(d)) return 'border-left:2px solid rgba(255,61,90,.3);background:rgba(255,61,90,.04)';
+    if(rpIsSun(d)) return 'border-right:2px solid rgba(255,61,90,.3);background:rgba(255,61,90,.04)';
+    return '';
+  };
 
   // ── Build column headers (month summary col + day cols) ──
-  const thHtml=`<th>Element</th>`+months.map(mon=>{
-    const dayThs=mon.days.map(d=>{
+  const thHtml=`<th>Element</th>`+months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
+    const dayThs=(isCol?[]:mon.days).map(d=>{
       const ds=rpDayDate(d).slice(5);
       let cls='';
       if(rpIsSat(d)) cls=' class="tp-col-sat"';
       else if(rpIsSun(d)) cls=' class="tp-col-sun"';
       return `<th${cls} title="Day ${d}">${ds}</th>`;
     }).join('');
-    return `<th class="logi-mcol" style="border-left:2px solid var(--border2);color:var(--total);font-size:8px;font-weight:700;text-align:center;padding:4px 6px;position:sticky;top:0;background:var(--surface2)">${mon.label}</th>`+dayThs;
+    return `<th class="logi-mcol" onclick="_rpToggleMonth('${mon.ym}')" style="cursor:pointer;user-select:none;border-left:2px solid var(--border2);color:var(--total);font-size:8px;font-weight:700;text-align:center;padding:4px 6px;position:sticky;top:0;background:var(--surface2)"><span style="margin-right:3px">${isCol?'▶':'▼'}</span>${mon.label}</th>`+dayThs;
   }).join('');
   document.getElementById('rp-thead-row').innerHTML=thHtml;
   const _railColspan=days.length+months.length+1;
@@ -9669,10 +9681,10 @@ function rpRender(){
     // 1) INVENTORY — one row per product silo (top of each destination block)
     _activeProdIds.forEach(pid=>{
       destSilos.filter(s=>getSiloProducts(s).includes(pid)).forEach(silo=>{
-        const invCells=months.map(mon=>{
+        const invCells=months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
           const lastV=rpInv(silo.id,mon.days[mon.days.length-1]);
           const mTd=`<td class="logi-mcol" style="${_mTdSty}">${lastV!==null?Number(Math.round(lastV)).toLocaleString():'—'}</td>`;
-          return mTd+mon.days.map(d=>{
+          return mTd+(isCol?[]:mon.days).map(d=>{
             const v=rpInv(silo.id,d);
             const max=parseFloat(silo.props?.max_capacity)||0;
             const floor=(parseFloat(silo.props?.critical_floor_pct)||0)/100*max;
@@ -9688,10 +9700,10 @@ function rpRender(){
 
     // 2) TRANSF/ARRIVAL — clickable, color-coded by movement status
     const _statusPriority=['In Transit','Unloading','Confirmed','Planned','Proposed','Finished'];
-    const arrCells=months.map(mon=>{
+    const arrCells=months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
       const monT=mon.days.reduce((s,d)=>s+(arrivals[d]||[]).reduce((t,e)=>t+e.tonnes,0),0);
       const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString()+'t':'—'}</td>`;
-      return mTd+mon.days.map(d=>{
+      return mTd+(isCol?[]:mon.days).map(d=>{
         const entries=arrivals[d]||[];
         const ds=rpDayDate(d);
         let cls='tp-cell-clickable';
@@ -9712,10 +9724,10 @@ function rpRender(){
     // 3) UNLOADING — daily volume unloaded from the rail berth into the terminal silo
     if(berth&&S.simResults?.berthUnloadHistory?.[berth.id]){
       const unldHist=S.simResults.berthUnloadHistory[berth.id];
-      const unldCells=months.map(mon=>{
+      const unldCells=months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
         const monT=mon.days.reduce((s,d)=>s+(unldHist[d-1]||0),0);
         const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString()+'t':'—'}</td>`;
-        return mTd+mon.days.map(d=>{
+        return mTd+(isCol?[]:mon.days).map(d=>{
           const v=unldHist[d-1]||0;
           const tSty=_tpTdSty(d);
           return `<td style="color:var(--real);font-size:10px;${tSty}">${v>0?Number(v).toLocaleString()+'t':'—'}</td>`;
@@ -9729,10 +9741,10 @@ function rpRender(){
       const matchEls=demEls.filter(el=>_demElMatchesProd(el,pid));
       if(!matchEls.length) return;
       const prodName=DB.products.find(p=>p.id===pid)?.name||pid;
-      const demCells=months.map(mon=>{
+      const demCells=months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
         const monT=mon.days.reduce((s,d)=>s+matchEls.reduce((q,el)=>q+rpDemandEff(el.id,d),0),0);
         const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString():'—'}</td>`;
-        return mTd+mon.days.map(d=>{
+        return mTd+(isCol?[]:mon.days).map(d=>{
           const v=matchEls.reduce((q,el)=>q+rpDemandEff(el.id,d),0);
           const tSty=_tpTdSty(d);
           return `<td style="color:var(--simulated);${tSty}">${v>0?Number(v).toLocaleString():'—'}</td>`;
@@ -9768,10 +9780,10 @@ function rpRender(){
       const prodSilos=rpGetOriginProdSilos(dp)
         .filter(s=>!_rp.prodId||getSiloProducts(s).includes(_rp.prodId));
       prodSilos.forEach(silo=>{
-        const invCells=months.map(mon=>{
+        const invCells=months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
           const lastV=rpInv(silo.id,mon.days[mon.days.length-1]);
           const mTd=`<td class="logi-mcol" style="${_mTdSty}">${lastV!==null?Number(Math.round(lastV)).toLocaleString():'—'}</td>`;
-          return mTd+mon.days.map(d=>{
+          return mTd+(isCol?[]:mon.days).map(d=>{
             const v=rpInv(silo.id,d);
             const tSty=_tpTdSty(d);
             return `<td${tSty?` style="${tSty}"`:''}>${v!==null?Number(v).toLocaleString():'—'}</td>`;
@@ -9782,10 +9794,10 @@ function rpRender(){
 
       // RAIL transfer silo inventory — filtered by selected product
       if(railSilo&&(!_rp.prodId||getSiloProducts(railSilo).includes(_rp.prodId))){
-        const railCells=months.map(mon=>{
+        const railCells=months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
           const lastV=rpInv(railSilo.id,mon.days[mon.days.length-1]);
           const mTd=`<td class="logi-mcol" style="${_mTdSty}">${lastV!==null?Number(Math.round(lastV)).toLocaleString():'—'}</td>`;
-          return mTd+mon.days.map(d=>{
+          return mTd+(isCol?[]:mon.days).map(d=>{
             const v=rpInv(railSilo.id,d);
             const tSty=_tpTdSty(d);
             return `<td style="color:#38bdf8;${tSty}">${v!==null?Number(v).toLocaleString():'—'}</td>`;
@@ -9812,18 +9824,18 @@ function rpRender(){
         const pName=prod?.name||pid;
 
         // 1) Actual loading per day (from sim)
-        const loadCells=months.map(mon=>{
+        const loadCells=months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
           const mc=mon.days.reduce((s,d)=>s+loadedOn(pid,d),0);
           const mTd=`<td class="logi-mcol" style="${_mTdSty}">${mc>0?mc+' cars':'—'}</td>`;
-          return mTd+mon.days.map(d=>{ const c=loadedOn(pid,d); const tSty=_tpTdSty(d); const sw=rpIsSwitch(d,switchDays);
+          return mTd+(isCol?[]:mon.days).map(d=>{ const c=loadedOn(pid,d); const tSty=_tpTdSty(d); const sw=rpIsSwitch(d,switchDays);
             return `<td${sw?' class="tp-col-switch"':''}${tSty?` style="${tSty}"`:''}>${c>0?c:'—'}</td>`; }).join('');
         }).join('');
         origRows.push(`<tr class="tp-row-loading"><td style="color:#4da6ff">  ↑ Loaded ${pName} (cars/d)</td>${loadCells}</tr>`);
 
         // 2) Accumulated cars available at each switch
-        const availCells=months.map(mon=>{
+        const availCells=months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
           const mTd=`<td class="logi-mcol" style="${_mTdSty}">—</td>`;
-          return mTd+mon.days.map(d=>{ const tSty=_tpTdSty(d); const sw=rpIsSwitch(d,switchDays);
+          return mTd+(isCol?[]:mon.days).map(d=>{ const tSty=_tpTdSty(d); const sw=rpIsSwitch(d,switchDays);
             if(!sw) return `<td${tSty?` style="${tSty}"`:''}></td>`;
             const a=availAtSwitch(pid,d);
             return `<td class="tp-col-switch"${tSty?` style="${tSty}"`:''} title="cars accumulated in the yard, available to push">${a>0?a:'0'}</td>`; }).join('');
@@ -9849,10 +9861,10 @@ function rpRender(){
         // 3) Editable push row per terminal (only on switch-day columns)
         myDests.forEach(fid=>{
           const destFac=DB.facilities.find(f=>f.id===fid);
-          const pushCells=months.map(mon=>{
+          const pushCells=months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
             const mc=mon.days.reduce((s,d)=>{ if(!rpIsSwitch(d,switchDays))return s; const ex=existingPush(pid,fid,d); return s+(ex?(parseInt(ex.wagon_count)||0):(suggest[d]?.[fid]||0)); },0);
             const mTd=`<td class="logi-mcol" style="${_mTdSty}">${mc>0?mc+' cars':'—'}</td>`;
-            return mTd+mon.days.map(d=>{ const tSty=_tpTdSty(d); const sw=rpIsSwitch(d,switchDays);
+            return mTd+(isCol?[]:mon.days).map(d=>{ const tSty=_tpTdSty(d); const sw=rpIsSwitch(d,switchDays);
               if(!sw) return `<td${tSty?` style="${tSty}"`:''}></td>`;
               const ds=rpDayDate(d);
               const ex=existingPush(pid,fid,d);
@@ -9869,9 +9881,9 @@ function rpRender(){
       // Per-switch CONFIRM (✓) / RESET (⟳) controls — one row for this dispatch point.
       // The manager adjusts the push numbers above (cells turn amber), then clicks ✓ under a
       // switch to commit ALL that switch's pushes at once (they turn green); ⟳ restores suggestions.
-      const confirmCells=months.map(mon=>{
+      const confirmCells=months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
         const mTd=`<td class="logi-mcol" style="${_mTdSty}"></td>`;
-        return mTd+mon.days.map(d=>{ const tSty=_tpTdSty(d); const sw=rpIsSwitch(d,switchDays);
+        return mTd+(isCol?[]:mon.days).map(d=>{ const tSty=_tpTdSty(d); const sw=rpIsSwitch(d,switchDays);
           if(!sw) return `<td${tSty?` style="${tSty}"`:''}></td>`;
           return `<td class="tp-col-switch" style="text-align:center;${tSty||''}"><span class="rp-sw-icon" style="color:#00d9a3" title="Confirm all pushes for this switch" onclick="_rpConfirmSwitch('${dp.id}',${d})">✓</span><span class="rp-sw-icon" style="color:#8e9ab8" title="Reset this switch to suggested" onclick="_rpResetSwitch('${dp.id}',${d})">⟳</span></td>`; }).join('');
       }).join('');
@@ -10263,6 +10275,12 @@ function vpToggleProd(prodId){
   renderVesselTable();
 }
 
+function _vpToggleMonth(ym){
+  if(!window._vpColapsed) window._vpColapsed=new Set();
+  window._vpColapsed.has(ym)?window._vpColapsed.delete(ym):window._vpColapsed.add(ym);
+  vpRender();
+}
+
 function vpRender(){
   _syncSimToggle();
   if(!S.simCfg.start_date){
@@ -10291,18 +10309,24 @@ function vpRender(){
   vpRenderCharts();
 
   const todayStr=new Date()._ymd();
+  if(!window._vpColapsed) window._vpColapsed=new Set(); // no months auto-collapsed; user expands/collapses manually
   const months=(()=>{const mons=[];days.forEach(d=>{const ds=vpDayDate(d);const ym=ds.slice(0,7);if(!mons.length||mons[mons.length-1].ym!==ym){const dt=new Date(ds+'T00:00:00');mons.push({ym,label:dt.toLocaleString('en-US',{month:'short',year:'2-digit'}),days:[]});}mons[mons.length-1].days.push(d);});return mons;})();
   const _mTdSty='background:var(--total-faint);border-left:2px solid var(--border2);font-weight:700;color:var(--total);text-align:right;padding:3px 8px;';
-  const _tpTdSty=d=>vpDayDate(d)===todayStr?'border-left:2px solid var(--green);border-right:2px solid var(--green);':'';
-  const thHtml=`<th>Element</th>`+months.map(mon=>{
-    const dayThs=mon.days.map(d=>{
+  const _tpTdSty=d=>{
+    if(vpDayDate(d)===todayStr) return 'border-left:2px solid var(--green);border-right:2px solid var(--green);';
+    if(rpIsSat(d)) return 'border-left:2px solid rgba(255,61,90,.3);background:rgba(255,61,90,.04)';
+    if(rpIsSun(d)) return 'border-right:2px solid rgba(255,61,90,.3);background:rgba(255,61,90,.04)';
+    return '';
+  };
+  const thHtml=`<th>Element</th>`+months.map(mon=>{const isCol=window._vpColapsed.has(mon.ym);
+    const dayThs=(isCol?[]:mon.days).map(d=>{
       const ds=vpDayDate(d);const isToday=ds===todayStr;
       const cls=rpIsSat(d)?'tp-col-sat':rpIsSun(d)?'tp-col-sun':'';
       const clsA=cls?` class="${cls}"`:'';
       const styA=isToday?` style="border-left:2px solid var(--green);border-right:2px solid var(--green);color:var(--green)"`:' style=""';
       return `<th${clsA}${styA} title="Day ${d}">${ds.slice(5)}</th>`;
     }).join('');
-    return `<th class="logi-mcol" style="border-left:2px solid var(--border2);color:var(--total);font-size:8px;font-weight:700;text-align:center;padding:4px 6px;position:sticky;top:0;background:var(--surface2)">${mon.label}</th>${dayThs}`;
+    return `<th class="logi-mcol" onclick="_vpToggleMonth('${mon.ym}')" style="cursor:pointer;user-select:none;border-left:2px solid var(--border2);color:var(--total);font-size:8px;font-weight:700;text-align:center;padding:4px 6px;position:sticky;top:0;background:var(--surface2)"><span style="margin-right:3px">${isCol?'▶':'▼'}</span>${mon.label}</th>${dayThs}`;
   }).join('');
   document.getElementById('vp-dest-thead-row').innerHTML=thHtml;
   document.getElementById('vp-orig-thead-row').innerHTML=thHtml;
@@ -10338,10 +10362,10 @@ function vpRender(){
 
       // Renders the VESSEL ARRIVAL row (filtered) + its per-product VESSEL UNLOAD row
       const _pushArrUnload=(pid,label,filterFn)=>{
-        const arrCells=months.map(mon=>{
+        const arrCells=months.map(mon=>{const isCol=window._vpColapsed.has(mon.ym);
           const monT=mon.days.reduce((s,d)=>s+(arrivals[d]||[]).filter(filterFn).reduce((t,e)=>t+e.tonnes,0),0);
           const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString()+'t':'—'}</td>`;
-          return mTd+mon.days.map(d=>{
+          return mTd+(isCol?[]:mon.days).map(d=>{
             const entries=(arrivals[d]||[]).filter(filterFn);
             let cls='tp-cell-clickable',val='—';
             if(entries.length>0){
@@ -10361,10 +10385,10 @@ function vpRender(){
           const realDay=new Set((DB.real_unloading_daily||[]).filter(u=>u.berth_id===berth.id&&(!pid||u.product_id===pid)&&u.unit!=='cars'&&(parseFloat(u.value)||0)>0).map(u=>u.date));
           const ganttRow=(rowLbl, stateOf)=>{
             let _pk=null;
-            const cells=months.map(mon=>{
+            const cells=months.map(mon=>{const isCol=window._vpColapsed.has(mon.ym);
               const unl=mon.days.reduce((s,d)=>{ const c=stateOf(d); return s+(c&&c.state==='unloading'?1:0); },0);
               const mTd=`<td class="logi-mcol" style="${_mTdSty}">${unl>0?unl+'d':'—'}</td>`;
-              return mTd+mon.days.map(d=>{
+              return mTd+(isCol?[]:mon.days).map(d=>{
                 const c=stateOf(d); const st=c&&c.state; const vessel=(c&&c.vessel)||'';
                 const isReal=st==='unloading'&&realDay.has(vpDayDate(d));
                 const p=_vesselCellParts(st,isReal);
@@ -10388,10 +10412,10 @@ function vpRender(){
           _pushArrUnload(null,'VESSEL/ARRIVAL',()=>true);
           if(S.simResults?.berthUnloadHistory?.[berth.id]){
             const unldHist=S.simResults.berthUnloadHistory[berth.id];
-            const unldCells=months.map(mon=>{
+            const unldCells=months.map(mon=>{const isCol=window._vpColapsed.has(mon.ym);
               const monT=mon.days.reduce((s,d)=>s+(unldHist[d-1]||0),0);
               const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString()+'t':'—'}</td>`;
-              return mTd+mon.days.map(d=>{const v=unldHist[d-1]||0;const tSty=_tpTdSty(d);return `<td style="color:var(--real);font-size:10px;${tSty}">${v>0?Number(v).toLocaleString()+'t':'—'}</td>`;}).join('');
+              return mTd+(isCol?[]:mon.days).map(d=>{const v=unldHist[d-1]||0;const tSty=_tpTdSty(d);return `<td style="color:var(--real);font-size:10px;${tSty}">${v>0?Number(v).toLocaleString()+'t':'—'}</td>`;}).join('');
             }).join('');
             destRows.push(`<tr class="tp-row-unload"><td style="padding-left:14px;color:var(--real);font-size:10px">Vessel unload</td>${unldCells}</tr>`);
           }
@@ -10404,10 +10428,10 @@ function vpRender(){
         _pushArrUnload(pid,`▸ ${pName} — vessel arrival`,e=>e.product_id===pid);
         // Inventory row(s) for this product
         destSilos.filter(s=>getSiloProducts(s).includes(pid)).forEach(silo=>{
-          const invCells=months.map(mon=>{
+          const invCells=months.map(mon=>{const isCol=window._vpColapsed.has(mon.ym);
             const lastV=rpInv(silo.id,mon.days[mon.days.length-1]);
             const mTd=`<td class="logi-mcol" style="${_mTdSty}">${lastV!==null?Number(Math.round(lastV)).toLocaleString():'—'}</td>`;
-            return mTd+mon.days.map(d=>{
+            return mTd+(isCol?[]:mon.days).map(d=>{
               const v=rpInv(silo.id,d);
               const max=parseFloat(silo.props?.max_capacity)||0;
               const floor=(parseFloat(silo.props?.critical_floor_pct)||0)/100*max;
@@ -10424,10 +10448,10 @@ function vpRender(){
         const _pidDem=demEls.filter(el=>_demElMatchesProd(el,pid));
         _pidDem.forEach(el=>_vtShownDemIds.add(el.id));
         if(_pidDem.length){
-          const demCells=months.map(mon=>{
+          const demCells=months.map(mon=>{const isCol=window._vpColapsed.has(mon.ym);
             const monT=mon.days.reduce((s,d)=>s+_pidDem.reduce((q,el)=>q+rpDemandEff(el.id,d),0),0);
             const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString():'—'}</td>`;
-            return mTd+mon.days.map(d=>{ const v=_pidDem.reduce((q,el)=>q+rpDemandEff(el.id,d),0); return `<td style="color:var(--simulated);${_tpTdSty(d)}">${v>0?Number(Math.round(v)).toLocaleString():'—'}</td>`; }).join('');
+            return mTd+(isCol?[]:mon.days).map(d=>{ const v=_pidDem.reduce((q,el)=>q+rpDemandEff(el.id,d),0); return `<td style="color:var(--simulated);${_tpTdSty(d)}">${v>0?Number(Math.round(v)).toLocaleString():'—'}</td>`; }).join('');
           }).join('');
           destRows.push(`<tr class="tp-row-dem"><td style="padding-left:14px">Demand — ${pName}</td>${demCells}</tr>`);
         }
