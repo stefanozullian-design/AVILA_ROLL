@@ -1610,12 +1610,6 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
   <div class="stat-sep"></div>
   <div class="stat-item"><span id="stat-maint">0 maintenance events</span></div>
   <div class="stat-sep"></div>
-  <div class="stat-item" id="ui-zoom-ctrl" title="App zoom — independent of the browser's own zoom">
-    <span onclick="zoomOutUi()" style="cursor:pointer;padding:0 6px;font-family:var(--mono);color:var(--text-dim)">−</span>
-    <span id="ui-zoom-lbl" onclick="zoomResetUi()" style="cursor:pointer;font-family:var(--mono);font-size:9px;min-width:32px;display:inline-block;text-align:center" title="Click to reset to 100%">100%</span>
-    <span onclick="zoomInUi()" style="cursor:pointer;padding:0 6px;font-family:var(--mono);color:var(--text-dim)">+</span>
-  </div>
-  <div class="stat-sep"></div>
   <div class="stat-item" style="margin-left:auto">
     <span id="stat-save">Ready</span>
     <input type="file" id="import-json-input" accept=".json" style="display:none" onchange="importJSON(this)">
@@ -19461,31 +19455,37 @@ function setTool(tool){
 }
 
 // ═══════════════════════════════════════════════════════
-// APP-WIDE UI ZOOM — a device-level display preference (not organizational
-// data), applied via CSS zoom on <body>. Deliberately independent of the
-// browser's own Ctrl+/Ctrl-/Ctrl+scroll page zoom: those stay untouched, this
-// is a separate control the app owns, persisted per-browser in localStorage.
-// ═══════════════════════════════════════════════════════
-let _uiZoom=1;
-function _uiZoomSupported(){ return typeof document.body.style.zoom!=='undefined'; }
-function applyUiZoom(z){
-  _uiZoom=Math.min(2,Math.max(0.5,Math.round(z*20)/20)); // clamp 50-200%, snap to 5%
-  if(_uiZoomSupported()) document.body.style.zoom=_uiZoom;
-  const lbl=document.getElementById('ui-zoom-lbl');
-  if(lbl) lbl.textContent=Math.round(_uiZoom*100)+'%';
-  try{ localStorage.setItem('avila_ui_zoom',String(_uiZoom)); }catch(e){}
+// APP ZOOM HINT — a page cannot trigger the browser's own native zoom
+// (Ctrl+/Ctrl-/Ctrl+scroll) programmatically; that's a browser-chrome-level
+// feature, off-limits to page JS. An earlier version tried to approximate it
+// with CSS `zoom` on <body>, but that has real gaps versus native zoom (no
+// proper scroll/reflow of overflowing content) and could strand the reset
+// control itself off-screen at high zoom. Native zoom is safer — it can never
+// lock you out (Ctrl+0 always works) — so this just surfaces the shortcut
+// from inside the app instead of reimplementing it.
+function _buildUiZoomHint(){
+  if(document.getElementById('ui-zoom-hint')) return;
+  const w=document.createElement('div');
+  w.id='ui-zoom-hint';
+  w.style.cssText='position:fixed;left:8px;bottom:8px;z-index:99999;font-family:var(--mono,monospace)';
+  w.innerHTML=`
+    <span id="ui-zoom-hint-btn" onclick="_toggleUiZoomHintPopover()" title="How to zoom" style="cursor:pointer;display:flex;align-items:center;gap:4px;padding:4px 8px;background:var(--surface2,#12161f);border:1px solid var(--border2,#2a3550);border-radius:3px;color:var(--text-dim,#8b93a7);font-size:10px;box-shadow:0 2px 10px rgba(0,0,0,.4)">🔍 Zoom</span>
+    <div id="ui-zoom-hint-pop" style="display:none;position:absolute;left:0;bottom:32px;width:230px;padding:10px 12px;background:var(--surface,#0d1117);border:1px solid var(--border2,#2a3550);border-radius:4px;font-size:9px;line-height:1.7;color:var(--text,#dfe6f3);box-shadow:0 4px 20px rgba(0,0,0,.5)">
+      Use your browser's own zoom — it handles scrolling and layout properly, and can't get you stuck:<br>
+      <b>Zoom in/out:</b> Ctrl + Scroll, or Ctrl + Plus/Minus<br>
+      <b>Reset to 100%:</b> Ctrl + 0
+    </div>`;
+  document.body.appendChild(w);
 }
-function zoomInUi(){ applyUiZoom(_uiZoom+0.1); }
-function zoomOutUi(){ applyUiZoom(_uiZoom-0.1); }
-function zoomResetUi(){ applyUiZoom(1); }
+function _toggleUiZoomHintPopover(){
+  const p=document.getElementById('ui-zoom-hint-pop'); if(!p) return;
+  p.style.display=p.style.display==='none'?'block':'none';
+}
 function initUiZoom(){
-  if(!_uiZoomSupported()){
-    const w=document.getElementById('ui-zoom-ctrl'); if(w) w.style.display='none';
-    return; // e.g. Firefox — no supported app-level zoom mechanism; browser zoom still works
-  }
-  let saved=1;
-  try{ saved=parseFloat(localStorage.getItem('avila_ui_zoom'))||1; }catch(e){}
-  applyUiZoom(saved);
+  _buildUiZoomHint();
+  // One-time cleanup of the old approach's leftovers, if a returning user has them.
+  try{ localStorage.removeItem('avila_ui_zoom'); }catch(e){}
+  if(document.body.style.zoom) document.body.style.zoom='';
 }
 
 function toggleChat(){
