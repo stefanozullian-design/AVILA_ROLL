@@ -13110,15 +13110,20 @@ function simulate(elements, connections, horizon, includeProposed=false){
 
     // Step A: Promote yesterday's pending vessels to berthQueue (they arrived before today).
     // A vessel under an active 'anchorage' campaign stays in vesselPending — reported as
-    // anchorage — even if the berth is otherwise free.
+    // anchorage — even if the berth is otherwise free. Holistic across any number of vessels:
+    // an anchorage-held vessel only blocks ITSELF, not whoever is queued behind it — find the
+    // first vessel in the queue that ISN'T held and promote that one (normal FIFO is preserved
+    // whenever nothing ahead of it is under a campaign, since findIndex then just returns 0).
     elements.filter(e=>e.type==='berth'&&(e.props.berth_type||'Ship Berth')==='Ship Berth').forEach(berth=>{
       const bs=state[berth.id];
       const queued=Object.values(bs.berthQueue||{}).reduce((a,b)=>a+b,0);
       if(queued<=0&&(bs.vesselPending||[]).length>0){
-        const next=bs.vesselPending[0];
-        const act=next.vesselCallId?_vesselCampaignAction(next.vesselCallId,day):null;
-        if(act!=='anchorage'){
-          bs.vesselPending.shift();
+        const idx=bs.vesselPending.findIndex(p=>{
+          const act=p.vesselCallId?_vesselCampaignAction(p.vesselCallId,day):null;
+          return act!=='anchorage';
+        });
+        if(idx>=0){
+          const next=bs.vesselPending.splice(idx,1)[0];
           bs.currentVessel=next.name;
           bs.currentVesselRate=next.rateTPH;
           bs.currentVesselCallId=next.vesselCallId||null;
