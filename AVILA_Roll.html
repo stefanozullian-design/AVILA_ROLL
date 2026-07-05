@@ -4617,24 +4617,41 @@ function showVesselCampaignPopup(berthId, vesselCallId, dateStr){
   if(!vesselCallId){ statMsg('No vessel scheduled here to override'); return; }
   const v=DB.vessel_calls.find(x=>x.id===vesselCallId); if(!v) return;
   const berth=getEl(berthId);
+  const facId=berth?.assigned_facility_id||berth?.facility_id||S.facility_id;
+  const pid=v.product_id;
   const existing=(DB.vessel_campaigns||[]).find(c=>c.vessel_call_id===vesselCallId&&dateStr>=c.start_date&&dateStr<=c.end_date);
   const run=_vesselRunAt(berthId, vesselCallId, dateStr);
   const fromVal=existing?.start_date||run.start||dateStr;
   const toVal=existing?.end_date||run.end||dateStr;
   const action=existing?.action||run.state||'anchorage';
-  window._vCampCtx={berthId, vesselCallId, existingId:existing?.id||null};
+
+  // Existing REAL unloading already entered for the clicked day (mirrors showTermRealPopup).
+  const existingReal=(DB.real_unloading_daily||[]).filter(u=>u.date===dateStr&&u.berth_id===berthId&&u.product_id===pid);
+  const defaultMode=existingReal.length?'real':'forecast';
+  const realVal=Math.round(existingReal.length?realUnloadTonnesBerthProdDay(berthId,pid,dateStr):_termUnloadPlanAt(facId,pid,dateStr));
+
+  window._vCampCtx={berthId, vesselCallId, facId, pid, existingId:existing?.id||null};
 
   const html=`
   <div style="font-family:var(--mono);font-size:9px;min-width:320px">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
       <div>
-        <div style="font-size:11px;font-weight:700;color:${existing?'#4ade80':'var(--text)'}">${existing?'🔒 Edit Campaign':'+ New Campaign'}</div>
+        <div id="vcamp-title" style="font-size:11px;font-weight:700;color:${existing?'#4ade80':'var(--text)'}">${existing?'🔒 Edit Campaign':'+ New Campaign'}</div>
         <div style="color:var(--text-dim);margin-top:2px">${v.name} · ${berth?.name||''} · ${dateStr}</div>
       </div>
       <button onclick="closeVesselCampaignPopup()" style="background:transparent;border:none;color:var(--text-dim);cursor:pointer;font-size:16px">✕</button>
     </div>
+
+    <!-- Forecast vs Real toggle -->
+    <div style="display:flex;gap:0;margin-bottom:12px;border:1px solid var(--border2);border-radius:3px;overflow:hidden">
+      <button type="button" id="vcamp-mode-forecast" onclick="_vCampSetMode('forecast')"
+        style="flex:1;padding:6px 8px;font-family:var(--mono);font-size:9px;border:none;cursor:pointer">📈 Forecast Campaign</button>
+      <button type="button" id="vcamp-mode-real" onclick="_vCampSetMode('real')"
+        style="flex:1;padding:6px 8px;font-family:var(--mono);font-size:9px;border:none;cursor:pointer">✅ Real Data</button>
+    </div>
+
     <div style="display:flex;flex-direction:column;gap:8px">
-      <div class="fr s1">
+      <div class="fr s1" id="vcamp-action-field">
         <div class="ff">
           <div class="fl">Action</div>
           <select class="fi" id="vcamp-action" style="width:100%">
@@ -4643,17 +4660,26 @@ function showVesselCampaignPopup(berthId, vesselCallId, dateStr){
           </select>
         </div>
       </div>
+      <div class="fr s2" id="vcamp-value-field" style="display:none">
+        <div class="ff">
+          <div class="fl">Actual unloaded (t)</div>
+          <input class="fi" id="vcamp-value" type="number" value="${realVal}" min="0" step="10" style="width:100%">
+        </div>
+      </div>
       <div class="fr s2">
-        <div class="ff"><div class="fl">From</div><input class="fi" id="vcamp-from" type="date" value="${fromVal}" style="width:100%"></div>
-        <div class="ff"><div class="fl">To</div><input class="fi" id="vcamp-to" type="date" value="${toVal}" style="width:100%"></div>
+        <div class="ff"><div class="fl" id="vcamp-from-label">From</div><input class="fi" id="vcamp-from" type="date" value="${fromVal}" style="width:100%"></div>
+        <div class="ff" id="vcamp-to-field"><div class="fl">To</div><input class="fi" id="vcamp-to" type="date" value="${toVal}" style="width:100%"></div>
       </div>
     </div>
-    <div style="font-size:8px;color:var(--text-dim);line-height:1.5;margin-top:8px">Forces ${v.name}'s status at ${berth?.name||'this berth'} for the chosen dates, overriding the simulator's own logic. Unloading uses this vessel's own cargo/rate and gets priority over the normal berth queue (still capped by destination silo space). Real unloading entries (Daily Data) always win over this for the days they cover.</div>
+    <div id="vcamp-hint" style="font-size:8px;color:var(--text-dim);line-height:1.5;margin-top:8px"></div>
     <div style="margin-top:12px;display:flex;gap:8px;justify-content:space-between;align-items:center">
-      <div>${existing?`<button onclick="deleteVesselCampaign()" style="padding:5px 10px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid rgba(255,61,90,.5);color:var(--red);cursor:pointer;border-radius:2px">✕ Delete Campaign</button>`:''}</div>
+      <div style="display:flex;gap:6px">
+        <span id="vcamp-del-wrap">${existing?`<button onclick="deleteVesselCampaign()" style="padding:5px 10px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid rgba(255,61,90,.5);color:var(--red);cursor:pointer;border-radius:2px">✕ Delete Campaign</button>`:''}</span>
+        <span id="vcamp-clear-real-wrap" style="display:none">${existingReal.length?`<button onclick="clearVesselReal()" style="padding:5px 10px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid rgba(255,61,90,.5);color:var(--red);cursor:pointer;border-radius:2px">✕ Clear Real Value</button>`:''}</span>
+      </div>
       <div style="display:flex;gap:6px">
         <button onclick="closeVesselCampaignPopup()" style="padding:5px 12px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid var(--border2);color:var(--text-dim);cursor:pointer;border-radius:2px">Cancel</button>
-        <button onclick="applyVesselCampaign()" style="padding:5px 14px;font-family:var(--mono);font-size:9px;background:#4ade80;border:none;color:#000;cursor:pointer;font-weight:700;border-radius:2px">🔒 Apply Campaign</button>
+        <button id="vcamp-apply-btn" onclick="applyVesselCampaign()" style="padding:5px 14px;font-family:var(--mono);font-size:9px;background:#4ade80;border:none;color:#000;cursor:pointer;font-weight:700;border-radius:2px">🔒 Apply Campaign</button>
       </div>
     </div>
   </div>`;
@@ -4668,14 +4694,53 @@ function showVesselCampaignPopup(berthId, vesselCallId, dateStr){
   }
   ov.innerHTML=`<div style="background:var(--surface);border:1px solid #4ade80;padding:18px;border-radius:6px;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.6)">${html}</div>`;
   ov.style.display='flex';
+  _vCampSetMode(defaultMode);
 }
 function closeVesselCampaignPopup(){
   const ov=document.getElementById('vcamp-overlay');
   if(ov) ov.style.display='none';
 }
 
+// Switch the popup between Forecast (Anchorage/Unloading campaign) and Real (single-day
+// actual unloaded tonnage) input — mirrors _campSetMode for finish mills exactly.
+function _vCampSetMode(mode){
+  window._vCampMode=mode;
+  const real=mode==='real';
+  const fBtn=document.getElementById('vcamp-mode-forecast');
+  const rBtn=document.getElementById('vcamp-mode-real');
+  const onSty='background:#4ade80;color:#000;font-weight:700';
+  const offSty='background:transparent;color:var(--text-dim);font-weight:400';
+  if(fBtn) fBtn.style.cssText='flex:1;padding:6px 8px;font-family:var(--mono);font-size:9px;border:none;cursor:pointer;'+(real?offSty:onSty);
+  if(rBtn) rBtn.style.cssText='flex:1;padding:6px 8px;font-family:var(--mono);font-size:9px;border:none;cursor:pointer;'+(real?onSty:offSty);
+  const actionField=document.getElementById('vcamp-action-field'); if(actionField) actionField.style.display=real?'none':'';
+  const valueField=document.getElementById('vcamp-value-field'); if(valueField) valueField.style.display=real?'':'none';
+  const toField=document.getElementById('vcamp-to-field'); if(toField) toField.style.display=real?'none':'';
+  const fromLbl=document.getElementById('vcamp-from-label'); if(fromLbl) fromLbl.textContent=real?'Date':'From';
+  const title=document.getElementById('vcamp-title');
+  if(title) title.textContent=real?'✅ Real Unloading':(document.getElementById('vcamp-del-wrap')?.innerHTML?'🔒 Edit Campaign':'+ New Campaign');
+  const apply=document.getElementById('vcamp-apply-btn');
+  if(apply){ apply.textContent=real?'✅ Save Real Value':'🔒 Apply Campaign'; apply.style.background=real?'#3b82f6':'#4ade80'; apply.style.color=real?'#fff':'#000'; }
+  const delW=document.getElementById('vcamp-del-wrap'); if(delW) delW.style.display=real?'none':'';
+  const clrW=document.getElementById('vcamp-clear-real-wrap'); if(clrW) clrW.style.display=real?'':'none';
+  const hint=document.getElementById('vcamp-hint');
+  if(hint) hint.textContent=real
+    ?'Actual tonnage unloaded into this terminal\'s silos for this product on this day. Treated as real data, like the Daily Data form — always wins over any campaign below.'
+    :'Forces this vessel\'s status at this berth for the chosen dates, overriding the simulator\'s own logic. Unloading uses the vessel\'s own cargo/rate and gets priority over the normal berth queue (still capped by destination silo space). Real unloading entries always win over this for the days they cover.';
+}
+
 function applyVesselCampaign(){
   const ctx=window._vCampCtx; if(!ctx) return;
+  if(window._vCampMode==='real'){
+    const value=parseFloat(document.getElementById('vcamp-value')?.value);
+    const ds=document.getElementById('vcamp-from')?.value;
+    if(!ds||isNaN(value)||value<0){ statMsg('Enter a valid date and a non-negative tonnage'); return; }
+    const now=new Date().toISOString();
+    DB.real_unloading_daily=(DB.real_unloading_daily||[]).filter(u=>!(u.date===ds&&u.product_id===ctx.pid&&(u.facility_id===ctx.facId||u.berth_id===ctx.berthId)));
+    DB.real_unloading_daily.push({date:ds,facility_id:ctx.facId,berth_id:ctx.berthId,product_id:ctx.pid,mode:'ship',value,unit:'t',source:'actual',created_at:now,updated_at:now});
+    closeVesselCampaignPopup();
+    autoSave(); renderSupplyView(); statMsg('Real value saved — running simulation…'); scheduleSimulation();
+    return;
+  }
   const from=document.getElementById('vcamp-from')?.value;
   const to=document.getElementById('vcamp-to')?.value;
   const action=document.getElementById('vcamp-action')?.value;
@@ -4695,6 +4760,14 @@ function deleteVesselCampaign(){
   DB.vessel_campaigns=(DB.vessel_campaigns||[]).filter(c=>c.id!==ctx.existingId);
   closeVesselCampaignPopup();
   autoSave(); renderSupplyView(); statMsg('Campaign deleted — running simulation…'); scheduleSimulation();
+}
+function clearVesselReal(){
+  const ctx=window._vCampCtx; if(!ctx) return;
+  const ds=document.getElementById('vcamp-from')?.value;
+  if(!confirm('Clear this real value for '+ds+'?\nThe forecast will resume for this cell.')) return;
+  DB.real_unloading_daily=(DB.real_unloading_daily||[]).filter(u=>!(u.date===ds&&u.product_id===ctx.pid&&(u.facility_id===ctx.facId||u.berth_id===ctx.berthId)));
+  closeVesselCampaignPopup();
+  autoSave(); renderSupplyView(); statMsg('Real value cleared — running simulation…'); scheduleSimulation();
 }
 
 function applyCampaign(elId){
@@ -7941,7 +8014,7 @@ function _renderSupplyViewInner(wrap){
           if(pidSilos.length||_termArr[pid]){
             const rc='#b388ff', rcReal='#00d9a3';
             h+=`<tr class="sup-sec-hdr" data-seckey="termUnload" onclick="_supToggleSec('termUnload')" style="cursor:pointer;background:rgba(179,136,255,.06);border-top:1px solid rgba(179,136,255,.4)">
-              <td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${rc};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('termUnload')}</span> TRANSFERRED <span style="font-size:7px;opacity:.65;font-weight:400;margin-left:4px">(arrival + unloading · click a vessel cell to override Anchorage/Unloading · dbl-click to set actual · t)</span></td>${_blankCells()}</tr>`;
+              <td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${rc};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('termUnload')}</span> TRANSFERRED <span style="font-size:7px;opacity:.65;font-weight:400;margin-left:4px">(arrival + unloading · click a vessel cell for Forecast Campaign or Real value · t)</span></td>${_blankCells()}</tr>`;
             // Transfer / Arrival
             h+=`<tr class="supsec-termUnload"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${rc};font-size:9px;font-weight:700">Transfer / Arrival</td>`;
             months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
@@ -7974,8 +8047,8 @@ function _renderSupplyViewInner(wrap){
                     const key=(st||'__i')+'|'+vessel; const runStart=!!st&&key!==_pk; _pk=key;
                     const glyph=st==='anchorage'?' ⚓':'';
                     const label=runStart?`<span style="position:absolute;left:4px;top:0;line-height:12px;white-space:nowrap;font-size:8px;font-weight:700;color:${st==='unloading'?'#0a3a2c':'#fff'};pointer-events:none">${vessel}${glyph}</span>`:'';
-                    const ttl=(st?(vessel+' — '+p.lbl+' — '):'')+(vesselCallId?'click to override · ':'')+'dbl-click to set actual';
-                    h+=`<td class="sup-day-${mon.ym}" title="${ttl}" onclick="event.stopPropagation();showVesselCampaignPopup('${berth.id}','${vesselCallId}','${ds}')" ondblclick="event.stopPropagation();showTermRealPopup('unload','${fac.id}','${pid}','${ds}')" style="cursor:pointer;position:relative;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:12px;background:${p.bg}">${label}</div></td>`;
+                    const ttl=(st?(vessel+' — '+p.lbl+' — '):'')+(vesselCallId?'click to set Forecast Campaign or Real value':'no vessel scheduled');
+                    h+=`<td class="sup-day-${mon.ym}" title="${ttl}" onclick="event.stopPropagation();showVesselCampaignPopup('${berth.id}','${vesselCallId}','${ds}')" style="cursor:pointer;position:relative;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:12px;background:${p.bg}">${label}</div></td>`;
                   });
                 });
                 h+=`</tr>`;
