@@ -355,6 +355,13 @@ select.pi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
 .tblfs-btn{width:20px;height:20px;display:inline-flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:11px;color:var(--text-dim);background:var(--surface2);border:1px solid var(--border2);cursor:pointer;border-radius:2px;padding:0;}
 .tblfs-btn:hover{color:var(--text);border-color:var(--blue);}
 .tblfs-val{font-family:var(--mono);font-size:9px;color:var(--text-dim);min-width:30px;text-align:center;cursor:pointer;user-select:none;}
+/* Supply-table hierarchy refresh — applies to EVERY facility (plants + terminals,
+   current & future) via the shared row classes, not per-facility rules. Bigger
+   facility / section / chart titles and a deeper indent for the child data rows. */
+#supply-table-wrap tr.sup-grp-hdr>td:first-child{font-size:15px!important;}
+#supply-table-wrap tr.sup-sec-hdr>td:first-child{font-size:10px!important;}
+#supply-table-wrap tr.sup-chart-row>td:first-child>div:first-child{font-size:12px!important;}
+#supply-table-wrap tr[class*="supsec-"]:not(.sup-chart-row)>td:first-child{padding-left:80px!important;}
 .tp-table th{padding:5px 8px;border-bottom:1px solid var(--border2);color:var(--text-dim);font-weight:400;text-align:right;position:sticky;top:0;background:var(--surface);}
 .tp-table th:first-child{text-align:left;min-width:200px;position:sticky;left:0;z-index:2;background:var(--surface);}
 .tp-table td{padding:3px 8px;border-bottom:0.5px solid var(--border2);text-align:right;color:var(--text-dim);}
@@ -6797,7 +6804,9 @@ function _renderSupplyViewInner(wrap){
   };
   // extraFn(pid,ds) → extra tonnes stacked ON TOP of the available bar (lighter shade) —
   // used at rail terminals to show cement still on rail (in transit + local yard).
-  const _invChartRow=(label, cat, accent, scopeEls, depth, onlyPid, extraFn)=>{
+  // secKey → the inventory section this chart belongs to (e.g. 'clinkerInv'); when set the
+  // chart row also carries class supsec-<secKey> so collapsing that section title hides it too.
+  const _invChartRow=(label, cat, accent, scopeEls, depth, onlyPid, extraFn, secKey)=>{
     // 'packed' reads packed_silo elements (any product they hold); everything else reads bulk_silo.
     const _catOk=pr=>cat==='packed'?true:(pr&&(cat==='cement'?(pr.category==='cement_bulk'||pr.category==='cement_packed')
                         :cat==='scm'?(pr.category==='additive')
@@ -6855,7 +6864,7 @@ function _renderSupplyViewInner(wrap){
     const _fwdRate=(pid,di)=>{ const arr=_dailyUse[pid]||[]; let sum=0,n=0; for(let k=di;k<Math.min(arr.length,di+14);k++){ sum+=arr[k]; n++; } return n?sum/n:0; };
     const _coverDays=(pid,di,v)=>{ const rt=_fwdRate(pid,di); if(!rt||rt<=0||v<=0) return ''; const d=v/rt; return d>=10?Math.round(d):Math.round(d*10)/10; };
     const legend=prodIds.map(pid=>`<span style="display:inline-flex;align-items:center;gap:3px;margin:0 5px 1px 0;white-space:nowrap"><span style="width:7px;height:7px;background:${colorFor(pid)};border-radius:1px;flex-shrink:0"></span>${nameOf(pid)}</span>`).join('');
-    let row=`<tr class="sup-chart-row" data-chart="${cat}"><td style="${stickyLeft('var(--surface)',depth!=null?depth:1,'border-bottom:2px solid var(--border2),')}vertical-align:bottom;padding:5px 10px">
+    let row=`<tr class="sup-chart-row${secKey?' supsec-'+secKey:''}" data-chart="${cat}"><td style="${stickyLeft('var(--surface)',depth!=null?depth:1,'border-bottom:2px solid var(--border2),')}vertical-align:bottom;padding:5px 10px">
       <div style="color:${accent};font-size:8px;font-weight:700;letter-spacing:1px;text-transform:uppercase">${label}</div>
       <div style="display:flex;flex-wrap:wrap;font-size:7px;color:var(--text-dim);line-height:1.5;margin-top:3px;max-width:${leftW-24}px">${legend}</div>
       <div style="font-size:7px;color:var(--text-dim);margin-top:3px">scale max ${Math.round(gmax).toLocaleString()} t · # on bar = days of cover (next-14-day demand)${extraFn?' · lighter top = on rail (transit + rail yard + local yard)':''}</div>
@@ -6896,7 +6905,7 @@ function _renderSupplyViewInner(wrap){
 
     if(node.type==='fac'){
       const typeLabel=node.ftype==='plant'?'PLANT':'TERMINAL';
-      h+=`<tr onclick="_supToggleGrp('${node.id}')" style="cursor:pointer;background:${typeBg.fac};border-top:1px solid var(--border2)">
+      h+=`<tr class="sup-grp-hdr" onclick="_supToggleGrp('${node.id}')" style="cursor:pointer;background:${typeBg.fac};border-top:1px solid var(--border2)">
         <td style="${stickyLeft(typeBgSolid.fac,node.depth,'border-bottom:1px solid var(--border),')}color:var(--amber);font-weight:700;font-size:9px">
           ${isCollapsed?'▶':'▼'} ${node.name} <span style="font-size:7px;opacity:.5;margin-left:4px">${typeLabel}</span>
         </td>`;
@@ -7086,7 +7095,7 @@ function _renderSupplyViewInner(wrap){
         const _cemNeed1=h.length;
 
         // ── CEMENT inventory bar chart ──
-        h+=_invChartRow('Cement inventory','cement','#00d9a3',facEls,node.depth+1);
+        h+=_invChartRow('Cement inventory','cement','#00d9a3',facEls,node.depth+1,null,null,'cementInv');
 
         // ══════════════════════════════════════════════════════════════
         // SECTION 2: STARTING INVENTORY (cement silos, per silo)
@@ -7280,7 +7289,7 @@ function _renderSupplyViewInner(wrap){
           const pkColor='#4da6ff';
 
           // ── Packed inventory bar chart ──
-          h+=_invChartRow('Packed inventory','packed',pkColor,facEls,node.depth+1);
+          h+=_invChartRow('Packed inventory','packed',pkColor,facEls,node.depth+1,null,null,'packedInv');
 
           // ── STARTING INVENTORY (packed silos, per silo · tonnes) ──
           if(_packedSilos.length){
@@ -7640,7 +7649,7 @@ function _renderSupplyViewInner(wrap){
         const _clkReq1=h.length;
 
         // ── CLINKER inventory bar chart ──
-        h+=_invChartRow('Clinker inventory','clinker','#ff8c42',facEls,node.depth+1);
+        h+=_invChartRow('Clinker inventory','clinker','#ff8c42',facEls,node.depth+1,null,null,'clinkerInv');
 
         // ══════════════════════════════════════════════════════════════
         // SECTION 4: CLINKER INVENTORY (clinker silos, per silo)
@@ -7877,7 +7886,7 @@ function _renderSupplyViewInner(wrap){
         const _facCol=grpCol.has(fac.id);
 
         // ── Terminal header (amber) — total = throughput received ──
-        h+=`<tr onclick="_supToggleGrp('${fac.id}')" style="cursor:pointer;background:rgba(255,184,48,.04);border-top:1px solid var(--border2)">
+        h+=`<tr class="sup-grp-hdr" onclick="_supToggleGrp('${fac.id}')" style="cursor:pointer;background:rgba(255,184,48,.04);border-top:1px solid var(--border2)">
           <td style="${stickyLeft('var(--surface2)',depth,'border-bottom:1px solid var(--border),')}color:var(--amber);font-weight:700;font-size:9px">
             ${_facCol?'▶':'▼'} ${fac.name} <span style="font-size:7px;opacity:.5;margin-left:4px">TERMINAL</span>
           </td>`;
@@ -8047,7 +8056,7 @@ function _renderSupplyViewInner(wrap){
 
           // 1) Inventory bar chart (this product) — rail terminals stack the cement still
           // on rail (in transit + local yard) as a lighter segment on top of available.
-          h+=_invChartRow(pname+' inventory',chartCat,accent,facEls,depth+2,pid,_railBerths.length?_railPendT:null);
+          h+=_invChartRow(pname+' inventory',chartCat,accent,facEls,depth+2,pid,_railBerths.length?_railPendT:null,invSeckey);
 
           // 2) STARTING INVENTORY (this product's silos)
           if(pidSilos.length){
@@ -8134,7 +8143,8 @@ function _renderSupplyViewInner(wrap){
             // Click a cell to record how many cars were actually spotted to the local yard
             // that day (all or a portion — the rest stays at the rail yard).
             if(_railBerths.length){
-              const _rowRail=(lbl,fn,stColor,stDesc)=>{
+              const _countRec=(type,ds)=>(DB.real_rail_daily||[]).find(rr=>rr.type===type&&rr.date===ds&&rr.facility_id===fac.id&&(!rr.product_id||rr.product_id===pid));
+              const _rowRail=(lbl,fn,stColor,stDesc,recType)=>{
                 let rr2=`<tr class="supsec-termUnload"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${stColor};font-size:9px">${lbl} <span style="font-size:7px;opacity:.55">RAIL CARS</span></td>`;
                 months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
                   const lastDs=mon.dates[mon.dates.length-1];
@@ -8142,16 +8152,16 @@ function _renderSupplyViewInner(wrap){
                   rr2+=`<td title="end of month" style="border-left:2px solid rgba(179,136,255,.1);font-size:9px;color:${stColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mc>0?mc:''}</td>`;
                   if(!isCol) mon.dates.forEach(ds=>{
                     const t=fn(pid,ds); const cars=Math.round(t/_railCarCap);
-                    const rec=_placedRec(pid,ds); const isReal=!!rec;
+                    const rec=recType?_countRec(recType,ds):null; const isReal=!!rec;
                     const col=isReal?'#00d9a3':(cars>0?stColor:'rgba(179,136,255,.25)');
-                    const ttl=`${cars} cars (${Math.round(t).toLocaleString()} t) ${stDesc}${isReal?' · real spotting recorded ('+rec.cars+' cars)':''} — click to record cars spotted to the local yard`;
+                    const ttl=`${cars} cars (${Math.round(t).toLocaleString()} t) ${stDesc}${isReal?' · physical count set ('+rec.cars+' cars)':''} — click to reconcile the physical yard counts`;
                     rr2+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''}" title="${ttl}" onclick="event.stopPropagation();showRailPlacementPopup('${fac.id}','${pid}','${ds}')" style="cursor:pointer;font-size:9px;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${isReal?'700':'400'};${tdSty(ds)}">${cars>0?cars:0}</td>`; });
                 });
                 h+=rr2+`</tr>`;
               };
-              _rowRail('⇢ In Transit',_railTransT,rc,'in transit (on rail)');
-              _rowRail('▤ At Rail Yard',_railAtYardT,'#ff9433','at the rail yard, awaiting spotting');
-              _rowRail('▣ At Local Yard',_railYardT,'#38bdf8','at the local yard, unloading at the berth spec');
+              _rowRail('⇢ In Transit',_railTransT,rc,'in transit (on rail)',null);
+              _rowRail('▤ At Rail Yard',_railAtYardT,'#ff9433','at the rail yard, awaiting spotting','railyard_count');
+              _rowRail('▣ At Local Yard',_railYardT,'#38bdf8','at the local yard, unloading at the berth spec','localyard_count');
             }
             // Unloading — SHIP berths: one vessel-status Gantt line per berth (all vessels of
             // THIS product on the timeline: unloading / anchorage / waiting to dock). RAIL-fed
@@ -9865,10 +9875,12 @@ function _railCampClearReal(dpId, dateStr){
   statMsg('Real rail loading cleared — running simulation…');
   scheduleSimulation();
 }
-// ── Rail spotting popup (terminal side) ──────────────────────────────────────
-// Records how many rail cars were SPOTTED from the rail yard (arrived, waiting) into
-// the terminal's LOCAL YARD on a date — all of them or just a portion; the rest stays
-// at the rail yard. Stored in real_rail_daily as type 'placed'.
+// ── Rail yard reconciliation popup (terminal side) ───────────────────────────
+// Launch reconciliation: set the PHYSICAL car count at the rail yard and/or the local
+// yard on a date (absolute, per product). These override the simulation from that day —
+// reality wins — and are what lets you seed cars that predate the system (never dispatched
+// through the plan). Stored in real_rail_daily as 'railyard_count' / 'localyard_count'.
+// The optional "spotted" field still records a rail-yard→local-yard move ('placed').
 function showRailPlacementPopup(facId, pid, ds){
   const fac=DB.facilities.find(f=>f.id===facId);
   const prod=DB.products.find(p=>p.id===pid);
@@ -9882,31 +9894,47 @@ function showRailPlacementPopup(facId, pid, ds){
   const transCars=Math.round(sumAt('railTransitHistory')/carCap);
   const atYardCars=Math.round(sumAt('railAtRailyardHistory')/carCap);
   const yardCars=Math.round(sumAt('railYardHistory')/carCap);
-  const existing=(DB.real_rail_daily||[]).find(rr=>rr.type==='placed'&&rr.date===ds&&rr.facility_id===facId&&(rr.product_id||'')===pid);
+  const findRec=t=>(DB.real_rail_daily||[]).find(rr=>rr.type===t&&rr.date===ds&&rr.facility_id===facId&&(rr.product_id||'')===pid);
+  const ryRec=findRec('railyard_count'), lyRec=findRec('localyard_count'), spotRec=findRec('placed');
+  const anyReal=!!(ryRec||lyRec);
+  const _inp=(id,val)=>`<input class="fi" id="${id}" type="number" min="0" step="1" value="${val!=null?(parseInt(val.cars)||0):''}" placeholder="—" style="width:70px">`;
   const html=`
-  <div style="font-family:var(--mono);font-size:9px;min-width:300px">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+  <div style="font-family:var(--mono);font-size:9px;min-width:320px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
       <div>
-        <div style="font-size:11px;font-weight:700;color:${existing?'#00d9a3':'var(--text)'}">🛤 Spot Cars to Local Yard</div>
+        <div style="font-size:11px;font-weight:700;color:${anyReal?'#00d9a3':'var(--text)'}">🛤 Reconcile Rail Yard</div>
         <div style="color:var(--text-dim);margin-top:2px">${fac?.name||facId} · ${prod?.name||pid} · ${ds}</div>
       </div>
       <button onclick="closeCampaignPopup()" style="background:transparent;border:none;color:var(--text-dim);cursor:pointer;font-size:16px">✕</button>
     </div>
     <div style="display:flex;gap:12px;margin-bottom:10px;color:var(--text-dim);flex-wrap:wrap">
       <span>⇢ In transit: <b style="color:#b388ff">${transCars}</b></span>
-      <span>▤ At rail yard: <b style="color:#ff9433">${atYardCars}</b></span>
-      <span>▣ At local yard: <b style="color:#38bdf8">${yardCars}</b></span>
+      <span>▤ Rail yard: <b style="color:#ff9433">${atYardCars}</b></span>
+      <span>▣ Local yard: <b style="color:#38bdf8">${yardCars}</b></span>
+      <span style="opacity:.6">(cars now, simulated)</span>
     </div>
-    <div class="fr s2">
-      <div class="ff">
-        <div class="fl">Cars spotted to the local yard on this date</div>
-        <input class="fi" id="railpl-cars" type="number" min="0" step="1" value="${existing?(parseInt(existing.cars)||0):''}" placeholder="all or a portion" style="width:100%">
+    <div style="font-size:8px;color:var(--text-dim);margin-bottom:8px;line-height:1.5;border-left:2px solid #38bdf8;padding-left:8px">
+      Physical count = the cars actually sitting there at the <b>start of this day</b>. It overrides the
+      plan from here on (reality wins) and is how you seed cars that were never dispatched through the
+      system. Leave blank to keep the simulation.
+    </div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <div class="fr s2" style="align-items:center">
+        <div class="fl" style="flex:1">▤ Physical count — rail yard</div>
+        ${_inp('railpl-ryc',ryRec)}<span style="opacity:.5;margin-left:4px">cars</span>
       </div>
-      <div style="font-size:8px;color:var(--text-dim);align-self:flex-end;padding-bottom:6px">max = cars at the rail yard; the rest stays there</div>
+      <div class="fr s2" style="align-items:center">
+        <div class="fl" style="flex:1">▣ Physical count — local yard</div>
+        ${_inp('railpl-lyc',lyRec)}<span style="opacity:.5;margin-left:4px">cars</span>
+      </div>
+      <div class="fr s2" style="align-items:center;border-top:1px solid var(--border2);padding-top:8px">
+        <div class="fl" style="flex:1">↳ spotted rail→local today <span style="opacity:.5">(optional flow)</span></div>
+        ${_inp('railpl-spot',spotRec)}<span style="opacity:.5;margin-left:4px">cars</span>
+      </div>
     </div>
     <div style="margin-top:12px;display:flex;gap:8px;justify-content:space-between;align-items:center">
-      <span>${existing?`<button onclick="_railClearPlacement('${facId}','${pid}','${ds}')"
-        style="padding:5px 10px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid rgba(255,61,90,.5);color:var(--red);cursor:pointer;border-radius:2px">✕ Clear Record</button>`:''}</span>
+      <span>${(ryRec||lyRec||spotRec)?`<button onclick="_railClearPlacement('${facId}','${pid}','${ds}')"
+        style="padding:5px 10px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid rgba(255,61,90,.5);color:var(--red);cursor:pointer;border-radius:2px">✕ Clear All</button>`:''}</span>
       <div style="display:flex;gap:6px">
         <button onclick="closeCampaignPopup()" style="padding:5px 12px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid var(--border2);color:var(--text-dim);cursor:pointer;border-radius:2px">Cancel</button>
         <button onclick="_railSavePlacement('${facId}','${pid}','${ds}')" style="padding:5px 14px;font-family:var(--mono);font-size:9px;background:#00d9a3;border:none;color:#000;cursor:pointer;font-weight:700;border-radius:2px">✅ Save</button>
@@ -9921,30 +9949,32 @@ function showRailPlacementPopup(facId, pid, ds){
     ov.onclick=e=>{ if(e.target===ov) closeCampaignPopup(); };
     document.body.appendChild(ov);
   }
-  ov.innerHTML=`<div style="background:var(--surface);border:1px solid #38bdf8;padding:18px;border-radius:6px;max-width:400px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.6)">${html}</div>`;
+  ov.innerHTML=`<div style="background:var(--surface);border:1px solid #38bdf8;padding:18px;border-radius:6px;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.6)">${html}</div>`;
   ov.style.display='flex';
 }
-function _railSavePlacement(facId, pid, ds){
-  const v=document.getElementById('railpl-cars')?.value;
-  if(v===''||v==null){ statMsg('Enter the number of cars placed (0 = none moved)'); return; }
-  const cars=Math.max(0,parseInt(v)||0);
+// Upsert (non-blank) or remove (blank) a real_rail_daily row of the given type for this stage.
+function _railUpsertRec(type, facId, pid, ds, val){
   if(!DB.real_rail_daily) DB.real_rail_daily=[];
-  const now=new Date().toISOString();
-  let row=DB.real_rail_daily.find(rr=>rr.type==='placed'&&rr.date===ds&&rr.facility_id===facId&&(rr.product_id||'')===pid);
-  if(row){ row.cars=cars; row.updated_at=now; }
-  else DB.real_rail_daily.push({date:ds,facility_id:facId,product_id:pid,type:'placed',cars,source:'actual',created_at:now,updated_at:now});
+  DB.real_rail_daily=DB.real_rail_daily.filter(rr=>!(rr.type===type&&rr.date===ds&&rr.facility_id===facId&&(rr.product_id||'')===pid));
+  if(val!==''&&val!=null){ const now=new Date().toISOString();
+    DB.real_rail_daily.push({date:ds,facility_id:facId,product_id:pid,type,cars:Math.max(0,parseInt(val)||0),source:'actual',created_at:now,updated_at:now}); }
+}
+function _railSavePlacement(facId, pid, ds){
+  _railUpsertRec('railyard_count',facId,pid,ds,document.getElementById('railpl-ryc')?.value);
+  _railUpsertRec('localyard_count',facId,pid,ds,document.getElementById('railpl-lyc')?.value);
+  _railUpsertRec('placed',facId,pid,ds,document.getElementById('railpl-spot')?.value);
   closeCampaignPopup();
   autoSave();
   renderSupplyView();
-  statMsg('Local-yard placement saved — running simulation…');
+  statMsg('Rail yard reconciled — running simulation…');
   scheduleSimulation();
 }
 function _railClearPlacement(facId, pid, ds){
-  DB.real_rail_daily=(DB.real_rail_daily||[]).filter(rr=>!(rr.type==='placed'&&rr.date===ds&&rr.facility_id===facId&&(rr.product_id||'')===pid));
+  DB.real_rail_daily=(DB.real_rail_daily||[]).filter(rr=>!(['railyard_count','localyard_count','placed'].includes(rr.type)&&rr.date===ds&&rr.facility_id===facId&&(rr.product_id||'')===pid));
   closeCampaignPopup();
   autoSave();
   renderSupplyView();
-  statMsg('Placement record cleared — running simulation…');
+  statMsg('Rail yard records cleared — running simulation…');
   scheduleSimulation();
 }
 
@@ -13692,6 +13722,30 @@ function simulate(elements, connections, horizon, includeProposed=false){
     // 4. Unload from berthQueue at rate limit → downstream silo.
 
     const berthArrivedToday={};
+
+    // ── Step 0: PHYSICAL YARD COUNT (launch reconciliation) ────────────────────
+    // Cars physically at a terminal's rail yard / local yard that the plan never
+    // created (they predate the system). A real_rail_daily 'railyard_count' /
+    // 'localyard_count' row for today SETS that stage's opening balance (absolute,
+    // per product) — reality wins over the simulation from this day. Applied before
+    // arrivals/spotting/unloading, so it's the day's opening and the normal flow runs
+    // on top. Reruns are idempotent (SET, not add).
+    {
+      const _ycDate=new Date(simStartDate.getTime()+(day-1)*864e5)._ymd();
+      const _ycRows=(DB.real_rail_daily||[]).filter(rr=>(rr.type==='railyard_count'||rr.type==='localyard_count')&&rr.date===_ycDate);
+      if(_ycRows.length){
+        elements.filter(e=>e.type==='berth'&&(e.props?.berth_type||'')==='Rail Receiving').forEach(berth=>{
+          const bs=state[berth.id]; if(!bs||!bs.railArrived) return;
+          const facId=berth.assigned_facility_id||berth.facility_id;
+          const carCap=parseFloat(berth.props.car_capacity_t)||112;
+          _ycRows.filter(rr=>rr.facility_id===facId).forEach(rr=>{
+            const pid=rr.product_id||''; const t=Math.max(0,parseFloat(rr.cars)||0)*carCap;
+            if(rr.type==='railyard_count'){ if(pid) bs.railArrived[pid]=t; else bs.railArrived={['']:t}; }
+            else { if(pid) bs.berthQueue[pid]=t; else bs.berthQueue={['']:t}; }
+          });
+        });
+      }
+    }
 
     // Step A: Promote yesterday's pending vessels to berthQueue (they arrived before today).
     // A vessel under an active 'anchorage' campaign stays in vesselPending — reported as
