@@ -6844,7 +6844,7 @@ function _renderSupplyViewInner(wrap){
     let row=`<tr class="sup-chart-row" data-chart="${cat}"><td style="${stickyLeft('var(--surface)',depth!=null?depth:1,'border-bottom:2px solid var(--border2),')}vertical-align:bottom;padding:5px 10px">
       <div style="color:${accent};font-size:8px;font-weight:700;letter-spacing:1px;text-transform:uppercase">${label}</div>
       <div style="display:flex;flex-wrap:wrap;font-size:7px;color:var(--text-dim);line-height:1.5;margin-top:3px;max-width:${leftW-24}px">${legend}</div>
-      <div style="font-size:7px;color:var(--text-dim);margin-top:3px">scale max ${Math.round(gmax).toLocaleString()} t · # on bar = days of cover (next-14-day demand)${extraFn?' · lighter top = on rail (in transit + local yard)':''}</div>
+      <div style="font-size:7px;color:var(--text-dim);margin-top:3px">scale max ${Math.round(gmax).toLocaleString()} t · # on bar = days of cover (next-14-day demand)${extraFn?' · lighter top = on rail (transit + rail yard + local yard)':''}</div>
     </td>`;
     months.forEach(mon=>{
       const isCol=collapsed.has(mon.ym);
@@ -7938,17 +7938,18 @@ function _renderSupplyViewInner(wrap){
         // Gantt below (it replaces the flat "Unloading" tonnage row inside each product block).
         const _shipBerths=berths.filter(b=>(b.props?.berth_type||'Ship Berth')==='Ship Berth');
 
-        // Rail-receiving berths → In Transit / Local Yard tracking (sim histories, tonnes
-        // by product per day; cars = tonnes / berth car capacity). Generic: any facility
-        // with a Rail Receiving berth gets these rows, the Total-inventory line and the
-        // stacked chart segment.
+        // Rail-receiving berths → rail pipeline stages (sim histories, tonnes by product
+        // per day; cars = tonnes / berth car capacity): In Transit → At Rail Yard →
+        // At Local Yard → Unloading. Generic: any facility with a Rail Receiving berth
+        // gets these rows, the Total-inventory line and the stacked chart segment.
         const _railBerths=berths.filter(b=>(b.props?.berth_type||'')==='Rail Receiving');
         const _railCarCap=parseFloat(_railBerths[0]?.props?.car_capacity_t)||112;
-        const _railTransT=(pid,ds)=>{ const di=allDates.indexOf(ds); if(di<0) return 0;
-          return _railBerths.reduce((s,b)=>s+(((r?.railTransitHistory?.[b.id]||[])[di]||{})[pid]||0),0); };
-        const _railYardT=(pid,ds)=>{ const di=allDates.indexOf(ds); if(di<0) return 0;
-          return _railBerths.reduce((s,b)=>s+(((r?.railYardHistory?.[b.id]||[])[di]||{})[pid]||0),0); };
-        const _railPendT=(pid,ds)=>_railTransT(pid,ds)+_railYardT(pid,ds);
+        const _railHistT=hist=>(pid,ds)=>{ const di=allDates.indexOf(ds); if(di<0) return 0;
+          return _railBerths.reduce((s,b)=>s+(((r?.[hist]?.[b.id]||[])[di]||{})[pid]||0),0); };
+        const _railTransT=_railHistT('railTransitHistory');
+        const _railAtYardT=_railHistT('railAtRailyardHistory');
+        const _railYardT=_railHistT('railYardHistory');
+        const _railPendT=(pid,ds)=>_railTransT(pid,ds)+_railAtYardT(pid,ds)+_railYardT(pid,ds);
         const _placedRec=(pid,ds)=>(DB.real_rail_daily||[]).find(rr=>rr.type==='placed'&&rr.date===ds&&rr.facility_id===fac.id&&(!rr.product_id||rr.product_id===pid));
         const _vpSets=_vesselProductSets();
         const _carries=(name,pid)=>!!(_vpSets[name]&&_vpSets[name].has(pid));
@@ -8070,12 +8071,13 @@ function _renderSupplyViewInner(wrap){
               const _totDay=ds=>_invDay(ds)+_railPendT(pid,ds);
               h+=`<tr class="supsec-${invSeckey}">
                 <td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:var(--total,#e8e8e8);font-size:9px;font-weight:700">Total inventory
-                  <span style="color:var(--text-dim);font-size:8px;margin-left:4px;font-weight:400">available + rail in transit & local yard</span></td>`;
+                  <span style="color:var(--text-dim);font-size:8px;margin-left:4px;font-weight:400">available + in transit + rail yard + local yard</span></td>`;
               months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
                 const mt=mon.dates.reduce((s,ds)=>s+_totDay(ds),0)/(mon.dates.length||1);
                 h+=`<td style="border-left:2px solid rgba(${rgba},.1);font-size:9px;color:var(--total,#e8e8e8);font-weight:700;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
-                if(!isCol) mon.dates.forEach(ds=>{ const v=_totDay(ds); const pend=_railPendT(pid,ds);
-                  h+=`<td class="sup-day-${mon.ym}" title="${Math.round(_invDay(ds)).toLocaleString()} t available + ${Math.round(pend).toLocaleString()} t on rail" style="font-size:9px;color:${v>0?'var(--total,#e8e8e8)':dimCol};font-weight:700;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+                if(!isCol) mon.dates.forEach(ds=>{ const v=_totDay(ds);
+                  const ttl=`${Math.round(_invDay(ds)).toLocaleString()} t available + ${Math.round(_railTransT(pid,ds)).toLocaleString()} t in transit + ${Math.round(_railAtYardT(pid,ds)).toLocaleString()} t at rail yard + ${Math.round(_railYardT(pid,ds)).toLocaleString()} t at local yard`;
+                  h+=`<td class="sup-day-${mon.ym}" title="${ttl}" style="font-size:9px;color:${v>0?'var(--total,#e8e8e8)':dimCol};font-weight:700;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
               });
               h+=`</tr>`;
             }
@@ -8111,28 +8113,31 @@ function _renderSupplyViewInner(wrap){
                 h+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''}" ondblclick="event.stopPropagation();showTermRealPopup('transfer','${fac.id}','${pid}','${ds}')" title="${pname} arrival · ${Math.round(v).toLocaleString()} t${isReal?' · actual':' · planned'} — dbl-click to set actual" style="cursor:pointer;font-size:9px;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${isReal?'700':'400'};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
             });
             h+=`</tr>`;
-            // RAIL terminals: explicit split of the rail pipeline for this product —
-            //   ⇢ In Transit  = dispatched (planned or real) but not yet placed at the terminal
-            //   ▣ Local Yard  = placed at the terminal, available for unloading at the berth spec
-            // Click a cell to record how many cars were actually moved to the local yard that day.
+            // RAIL terminals: the rail pipeline for this product, one row per stage IN ORDER —
+            //   ⇢ In Transit    = dispatched (planned or real), scheduled arrival not reached
+            //   ▤ At Rail Yard  = arrived at the railroad's yard, awaiting spotting
+            //   ▣ At Local Yard = spotted at the terminal, unloading at the berth spec
+            // Click a cell to record how many cars were actually spotted to the local yard
+            // that day (all or a portion — the rest stays at the rail yard).
             if(_railBerths.length){
-              const _rowRail=(lbl,fn,isYard)=>{
-                let rr2=`<tr class="supsec-termUnload"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${isYard?'#38bdf8':rc};font-size:9px">${lbl} <span style="font-size:7px;opacity:.55">RAIL CARS</span></td>`;
+              const _rowRail=(lbl,fn,stColor,stDesc)=>{
+                let rr2=`<tr class="supsec-termUnload"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${stColor};font-size:9px">${lbl} <span style="font-size:7px;opacity:.55">RAIL CARS</span></td>`;
                 months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
                   const lastDs=mon.dates[mon.dates.length-1];
                   const mc=Math.round(fn(pid,lastDs)/_railCarCap);
-                  rr2+=`<td title="end of month" style="border-left:2px solid rgba(179,136,255,.1);font-size:9px;color:${isYard?'#38bdf8':rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mc>0?mc:''}</td>`;
+                  rr2+=`<td title="end of month" style="border-left:2px solid rgba(179,136,255,.1);font-size:9px;color:${stColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mc>0?mc:''}</td>`;
                   if(!isCol) mon.dates.forEach(ds=>{
                     const t=fn(pid,ds); const cars=Math.round(t/_railCarCap);
                     const rec=_placedRec(pid,ds); const isReal=!!rec;
-                    const col=isReal?'#00d9a3':(cars>0?(isYard?'#38bdf8':rc):'rgba(179,136,255,.25)');
-                    const ttl=`${cars} cars (${Math.round(t).toLocaleString()} t) ${isYard?'at the local yard':'in transit / awaiting placement'}${isReal?' · real placement recorded ('+rec.cars+' cars)':''} — click to record cars placed at the local yard`;
+                    const col=isReal?'#00d9a3':(cars>0?stColor:'rgba(179,136,255,.25)');
+                    const ttl=`${cars} cars (${Math.round(t).toLocaleString()} t) ${stDesc}${isReal?' · real spotting recorded ('+rec.cars+' cars)':''} — click to record cars spotted to the local yard`;
                     rr2+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''}" title="${ttl}" onclick="event.stopPropagation();showRailPlacementPopup('${fac.id}','${pid}','${ds}')" style="cursor:pointer;font-size:9px;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${isReal?'700':'400'};${tdSty(ds)}">${cars>0?cars:0}</td>`; });
                 });
                 h+=rr2+`</tr>`;
               };
-              _rowRail('⇢ In Transit',_railTransT,false);
-              _rowRail('▣ Local Yard',_railYardT,true);
+              _rowRail('⇢ In Transit',_railTransT,rc,'in transit (on rail)');
+              _rowRail('▤ At Rail Yard',_railAtYardT,'#ff9433','at the rail yard, awaiting spotting');
+              _rowRail('▣ At Local Yard',_railYardT,'#38bdf8','at the local yard, unloading at the berth spec');
             }
             // Unloading — SHIP berths: one vessel-status Gantt line per berth (all vessels of
             // THIS product on the timeline: unloading / anchorage / waiting to dock). RAIL-fed
@@ -9819,10 +9824,10 @@ function _railCampClearReal(dpId, dateStr){
   statMsg('Real rail loading cleared — running simulation…');
   scheduleSimulation();
 }
-// ── Rail placement popup (terminal side) ─────────────────────────────────────
-// Records how many rail cars were moved from "In Transit" (arrived at the railroad
-// yard) into the terminal's LOCAL YARD on a date — all of them or just a portion; the
-// rest stays quarantined in transit. Stored in real_rail_daily as type 'placed'.
+// ── Rail spotting popup (terminal side) ──────────────────────────────────────
+// Records how many rail cars were SPOTTED from the rail yard (arrived, waiting) into
+// the terminal's LOCAL YARD on a date — all of them or just a portion; the rest stays
+// at the rail yard. Stored in real_rail_daily as type 'placed'.
 function showRailPlacementPopup(facId, pid, ds){
   const fac=DB.facilities.find(f=>f.id===facId);
   const prod=DB.products.find(p=>p.id===pid);
@@ -9834,27 +9839,29 @@ function showRailPlacementPopup(facId, pid, ds){
   const di=Math.round((new Date(ds+'T00:00:00')-new Date(S.simCfg.start_date+'T00:00:00'))/864e5);
   const sumAt=hist=>railBerths.reduce((s,b)=>s+(((r?.[hist]?.[b.id]||[])[di]||{})[pid]||0),0);
   const transCars=Math.round(sumAt('railTransitHistory')/carCap);
+  const atYardCars=Math.round(sumAt('railAtRailyardHistory')/carCap);
   const yardCars=Math.round(sumAt('railYardHistory')/carCap);
   const existing=(DB.real_rail_daily||[]).find(rr=>rr.type==='placed'&&rr.date===ds&&rr.facility_id===facId&&(rr.product_id||'')===pid);
   const html=`
   <div style="font-family:var(--mono);font-size:9px;min-width:300px">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
       <div>
-        <div style="font-size:11px;font-weight:700;color:${existing?'#00d9a3':'var(--text)'}">🛤 Cars to Local Yard</div>
+        <div style="font-size:11px;font-weight:700;color:${existing?'#00d9a3':'var(--text)'}">🛤 Spot Cars to Local Yard</div>
         <div style="color:var(--text-dim);margin-top:2px">${fac?.name||facId} · ${prod?.name||pid} · ${ds}</div>
       </div>
       <button onclick="closeCampaignPopup()" style="background:transparent;border:none;color:var(--text-dim);cursor:pointer;font-size:16px">✕</button>
     </div>
-    <div style="display:flex;gap:14px;margin-bottom:10px;color:var(--text-dim)">
-      <span>⇢ In transit / awaiting: <b style="color:#b388ff">${transCars} cars</b></span>
-      <span>▣ Local yard: <b style="color:#38bdf8">${yardCars} cars</b></span>
+    <div style="display:flex;gap:12px;margin-bottom:10px;color:var(--text-dim);flex-wrap:wrap">
+      <span>⇢ In transit: <b style="color:#b388ff">${transCars}</b></span>
+      <span>▤ At rail yard: <b style="color:#ff9433">${atYardCars}</b></span>
+      <span>▣ At local yard: <b style="color:#38bdf8">${yardCars}</b></span>
     </div>
     <div class="fr s2">
       <div class="ff">
-        <div class="fl">Cars placed at the local yard on this date</div>
+        <div class="fl">Cars spotted to the local yard on this date</div>
         <input class="fi" id="railpl-cars" type="number" min="0" step="1" value="${existing?(parseInt(existing.cars)||0):''}" placeholder="all or a portion" style="width:100%">
       </div>
-      <div style="font-size:8px;color:var(--text-dim);align-self:flex-end;padding-bottom:6px">unplaced cars stay in transit</div>
+      <div style="font-size:8px;color:var(--text-dim);align-self:flex-end;padding-bottom:6px">max = cars at the rail yard; the rest stays there</div>
     </div>
     <div style="margin-top:12px;display:flex;gap:8px;justify-content:space-between;align-items:center">
       <span>${existing?`<button onclick="_railClearPlacement('${facId}','${pid}','${ds}')"
@@ -12015,8 +12022,9 @@ function simulate(elements, connections, horizon, includeProposed=false){
     railHistory:{},           // railHistory[dispElId][day-1]
     berthArrivalHistory:{},   // berthArrivalHistory[berthId][day-1] = total tonnes arrived at berth
     berthUnloadHistory:{},    // berthUnloadHistory[berthId][day-1] = total tonnes unloaded from berth
-    railTransitHistory:{},    // rail berths: railTransitHistory[berthId][day-1] = {pid:tonnes} dispatched but NOT yet placed at the local yard (in transit + arrived-awaiting-placement), end of day
-    railYardHistory:{},       // rail berths: railYardHistory[berthId][day-1] = {pid:tonnes} at the LOCAL YARD (placed, awaiting unloading = berthQueue), end of day
+    railTransitHistory:{},    // rail berths: railTransitHistory[berthId][day-1] = {pid:tonnes} IN TRANSIT (dispatched, scheduled arrival not reached), end of day
+    railAtRailyardHistory:{}, // rail berths: railAtRailyardHistory[berthId][day-1] = {pid:tonnes} AT RAIL YARD (arrived, awaiting spotting to the local yard), end of day
+    railYardHistory:{},       // rail berths: railYardHistory[berthId][day-1] = {pid:tonnes} at the LOCAL YARD (spotted, awaiting unloading = berthQueue), end of day
     berthVesselHistory:{},    // berthVesselHistory[berthId][day-1] = {docked, state:'unloading'|'anchorage'|'idle', waiting, waitingList:[{name,reason}]}
     vesselArrivalHistory:{},  // vesselArrivalHistory[siloId][day-1] = full vessel qty on arrival day, 0 otherwise
     siloUnloadHistory:{},     // siloUnloadHistory[siloId][day-1] = daily tonnes unloaded into that silo
@@ -12059,9 +12067,10 @@ function simulate(elements, connections, horizon, includeProposed=false){
       r.berthUnloadHistory[el.id]=[];
       r.berthVesselHistory[el.id]=[];
       if((el.props?.berth_type||'')==='Rail Receiving'){
-        state[el.id].railTransitT={}; // {pid:tonnes} dispatched, not yet at the terminal's railroad yard
-        state[el.id].railArrived={};  // {pid:tonnes} arrived (scheduled arrival reached), awaiting placement at the local yard
+        state[el.id].railTransitT={}; // {pid:tonnes} dispatched, not yet at the terminal's rail yard
+        state[el.id].railArrived={};  // {pid:tonnes} AT RAIL YARD — arrived, awaiting spotting to the local yard
         r.railTransitHistory[el.id]=[];
+        r.railAtRailyardHistory[el.id]=[];
         r.railYardHistory[el.id]=[];
       }
     }
@@ -12207,14 +12216,6 @@ function simulate(elements, connections, horizon, includeProposed=false){
       Object.entries(arr.byProduct||{}).forEach(([pid,t])=>{ bs.railTransitT[pid]=(bs.railTransitT[pid]||0)+t; });
     }
   }); });
-  // Rail placement tracking: today + the first date each terminal recorded a real
-  // placement (real_rail_daily type 'placed'). From that date on, past-day placements
-  // at that terminal are driven ONLY by real records (see PLACEMENT step in the day loop).
-  const _todayYmd=new Date()._ymd();
-  const _placedFirstDate={};
-  (DB.real_rail_daily||[]).filter(rr=>rr.type==='placed'&&rr.date&&rr.facility_id).forEach(rr=>{
-    if(!_placedFirstDate[rr.facility_id]||rr.date<_placedFirstDate[rr.facility_id]) _placedFirstDate[rr.facility_id]=rr.date;
-  });
 
   // ── VESSEL ARRIVALS PIPELINE ─────────────────────────
   // Pre-build vesselArrivalsByDay[day] = [{berthId, productId, quantity_t, rateTPH, name}]
@@ -13722,12 +13723,12 @@ function simulate(elements, connections, horizon, includeProposed=false){
       berthArrivedToday[arr.berthId]=(berthArrivedToday[arr.berthId]||0)+total;
     });
 
-    // ── PLACEMENT (rail berths): arrived cars → LOCAL YARD ─────────────────────
-    // Default: everything auto-places on its scheduled arrival day (forecast days, and
-    // terminals that never record placements — keeps legacy behaviour). Once a terminal
-    // records real placements (real_rail_daily type 'placed'), PAST days from its first
-    // record on are governed only by those records: recorded cars move (all or a
-    // portion), the rest waits — quarantined at the railroad yard, still "In Transit".
+    // ── SPOTTING (rail berths): RAIL YARD → LOCAL YARD ─────────────────────────
+    // Default: auto-spot only up to one day of unload capacity (tops the local yard up
+    // to the daily unload need — cars beyond that WAIT AT THE RAIL YARD, which is what
+    // physically happens). A real record for the day (real_rail_daily type 'placed')
+    // replaces the default exactly: the recorded cars move — all or a portion, capped
+    // by what the rail yard actually holds — and the rest stays there.
     {
       const _railDs=new Date(simStartDate.getTime()+(day-1)*864e5)._ymd();
       elements.filter(e=>e.type==='berth'&&(e.props?.berth_type||'')==='Rail Receiving').forEach(berth=>{
@@ -13746,9 +13747,17 @@ function simulate(elements, connections, horizon, includeProposed=false){
               if(take>0){ bs.railArrived[pid]-=take; bs.berthQueue[pid]=(bs.berthQueue[pid]||0)+take; want-=take; }
             });
           });
-        } else if(_railDs>=_todayYmd||!_placedFirstDate[facId]||_railDs<_placedFirstDate[facId]){
-          Object.keys(bs.railArrived).forEach(pid=>{ const t=bs.railArrived[pid];
-            if(t>0){ bs.berthQueue[pid]=(bs.berthQueue[pid]||0)+t; bs.railArrived[pid]=0; } });
+        } else {
+          const carsPerShift=parseFloat(berth.props.max_unload_cars_shift||berth.props.max_unload_cars_day)||99999;
+          const shifts=parseFloat(berth.props.shifts_per_day)||1;
+          const simPoints=parseFloat(berth.props.simultaneous_points)||1;
+          const dailyCapT=carsPerShift*shifts*simPoints*carCap;
+          const yardT=Object.values(bs.berthQueue||{}).reduce((a,b)=>a+b,0);
+          let spotT=Math.max(0,Math.min(arrTot,dailyCapT-yardT));
+          Object.keys(bs.railArrived).forEach(pid=>{ if(spotT<=0) return;
+            const take=Math.min(spotT,bs.railArrived[pid]||0);
+            if(take>0){ bs.railArrived[pid]-=take; bs.berthQueue[pid]=(bs.berthQueue[pid]||0)+take; spotT-=take; }
+          });
         }
       });
     }
@@ -14015,18 +14024,16 @@ function simulate(elements, connections, horizon, includeProposed=false){
       r.berthVesselHistory[berth.id].push({docked, dockedCallId:bs.currentVesselCallId||null, state:st, waiting:waitingList.length, waitingList});
     });
 
-    // ── Rail berth end-of-day snapshots: In Transit (dispatched + arrived-unplaced)
-    //    and Local Yard (placed, awaiting unloading) — feeds the Supply-page terminal rows.
+    // ── Rail berth end-of-day snapshots, one per pipeline stage: In Transit (moving),
+    //    At Rail Yard (arrived, awaiting spotting), Local Yard (spotted, awaiting
+    //    unloading) — feeds the Supply-page terminal rows.
     elements.filter(e=>e.type==='berth'&&(e.props?.berth_type||'')==='Rail Receiving').forEach(berth=>{
       const bs=state[berth.id];
       if(!bs||r.railTransitHistory[berth.id]===undefined) return;
-      const transitSnap={};
-      Object.entries(bs.railTransitT||{}).forEach(([pid,t])=>{ if(t>0.001) transitSnap[pid]=(transitSnap[pid]||0)+t; });
-      Object.entries(bs.railArrived||{}).forEach(([pid,t])=>{ if(t>0.001) transitSnap[pid]=(transitSnap[pid]||0)+t; });
-      const yardSnap={};
-      Object.entries(bs.berthQueue||{}).forEach(([pid,t])=>{ if(t>0.001) yardSnap[pid]=t; });
-      r.railTransitHistory[berth.id].push(transitSnap);
-      r.railYardHistory[berth.id].push(yardSnap);
+      const snap=src=>{ const o={}; Object.entries(src||{}).forEach(([pid,t])=>{ if(t>0.001) o[pid]=t; }); return o; };
+      r.railTransitHistory[berth.id].push(snap(bs.railTransitT));
+      r.railAtRailyardHistory[berth.id].push(snap(bs.railArrived));
+      r.railYardHistory[berth.id].push(snap(bs.berthQueue));
     });
   }
 
