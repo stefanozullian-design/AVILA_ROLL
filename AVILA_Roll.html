@@ -347,6 +347,14 @@ select.pi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
 .tp-section-hdr{font-family:var(--mono);font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim);padding:4px 0 6px;border-bottom:1px solid var(--border2);margin-bottom:0;}
 .tp-table-wrap{overflow-x:auto;max-width:100%;}
 .tp-table{border-collapse:collapse;font-family:var(--mono);font-size:10px;white-space:nowrap;}
+/* Table font-size control: one zoom factor scales every data grid proportionally
+   (preserves the row-header / column-header / data hierarchy). Applied to the table
+   root so the overflow wrapper still scrolls at its normal size. */
+#supply-table-wrap>table,#demand-table-wrap>table,.results-table,.dtree-table,.tp-table,.sp-tbl{zoom:var(--tbl-zoom,1);}
+.tblfs-ctl{display:inline-flex;align-items:center;gap:2px;margin-left:4px;}
+.tblfs-btn{width:20px;height:20px;display:inline-flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:11px;color:var(--text-dim);background:var(--surface2);border:1px solid var(--border2);cursor:pointer;border-radius:2px;padding:0;}
+.tblfs-btn:hover{color:var(--text);border-color:var(--blue);}
+.tblfs-val{font-family:var(--mono);font-size:9px;color:var(--text-dim);min-width:30px;text-align:center;cursor:pointer;user-select:none;}
 .tp-table th{padding:5px 8px;border-bottom:1px solid var(--border2);color:var(--text-dim);font-weight:400;text-align:right;position:sticky;top:0;background:var(--surface);}
 .tp-table th:first-child{text-align:left;min-width:200px;position:sticky;left:0;z-index:2;background:var(--surface);}
 .tp-table td{padding:3px 8px;border-bottom:0.5px solid var(--border2);text-align:right;color:var(--text-dim);}
@@ -815,6 +823,12 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
   <button class="top-sec-btn" data-section="results" onclick="switchTopSection('results')">Results</button>
   <button class="top-sec-btn" id="topo-nav-btn" onclick="switchView('topology')" title="Topology" style="margin-left:auto;display:inline-flex;align-items:center;justify-content:center;padding:5px 12px"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="5" r="2.4"/><circle cx="5" cy="19" r="2.4"/><circle cx="19" cy="19" r="2.4"/><line x1="11" y1="6.8" x2="6" y2="17"/><line x1="13" y1="6.8" x2="18" y2="17"/></svg></button>
   <button class="top-sec-btn" data-section="configuration" onclick="switchTopSection('configuration')">Configuration</button>
+  <div class="tb-div"></div>
+  <div class="tblfs-ctl" title="Table text size — scales row headers, column headers and data in every table">
+    <span class="tblfs-btn" onclick="_setTblZoom(-1)">A−</span>
+    <span class="tblfs-val" id="tblfs-val" onclick="_setTblZoom(0)" title="Click to reset to 100%">100%</span>
+    <span class="tblfs-btn" onclick="_setTblZoom(1)">A+</span>
+  </div>
   <div class="tb-div"></div>
   <button class="tb-btn sec" id="daily-data-btn" onclick="toggleRealDataPanel()">📋 Daily Data</button>
   <button class="tb-btn" onclick="runSimulation()">▶ Run Simulation</button>
@@ -9114,6 +9128,33 @@ function _toggleAutoPropose(){
   statMsg(S.simCfg.autoPropose
     ? 'Auto-Propose ON — Run Simulation will propose vessel calls to cover shortfalls.'
     : 'Forecast mode ON — Run Simulation will project inventory only, without adding vessels.');
+}
+
+// ── Table font-size (zoom) control ───────────────────────────
+// One factor scales every data grid (supply, demand, results, dashboard, logistics,
+// sales) proportionally, so the row-header / column-header / data hierarchy is kept.
+// dir: +1 bigger, -1 smaller, 0 reset. Persisted in localStorage.
+const TBL_ZOOM_MIN=0.7, TBL_ZOOM_MAX=1.8, TBL_ZOOM_STEP=0.1;
+function _getTblZoom(){ const v=parseFloat(localStorage.getItem('avila_tbl_zoom')); return (v&&v>0)?v:1; }
+function _applyTblZoom(z){
+  const zc=Math.round(Math.min(TBL_ZOOM_MAX,Math.max(TBL_ZOOM_MIN,z))*100)/100;
+  document.documentElement.style.setProperty('--tbl-zoom',zc);
+  const lbl=document.getElementById('tblfs-val'); if(lbl) lbl.textContent=Math.round(zc*100)+'%';
+  // Re-sync the mirrored top scrollbars: the zoomed table changed its scrollWidth.
+  requestAnimationFrame(()=>{
+    [['sup-top-inner','supply-table-wrap'],['dem-top-inner','demand-table-wrap'],
+     ['results-top-scroll-inner','results-table-wrap']].forEach(([innerId,wrapId])=>{
+      const inner=document.getElementById(innerId), wrap=document.getElementById(wrapId);
+      if(inner&&wrap) inner.style.width=wrap.scrollWidth+'px';
+    });
+  });
+  return zc;
+}
+function _setTblZoom(dir){
+  const z=dir===0?1:_getTblZoom()+dir*TBL_ZOOM_STEP;
+  const zc=_applyTblZoom(z);
+  localStorage.setItem('avila_tbl_zoom',zc);
+  statMsg(dir===0?'Table text size reset to 100%':'Table text size '+Math.round(zc*100)+'%');
 }
 
 // Reflect the current S.simCfg.autoPropose state on every toggle button. Treat an
@@ -21108,6 +21149,8 @@ function loadSaved(){
 // ═══════════════════════════════════════════════════════
 document.addEventListener('DOMContentLoaded',async()=>{
   const hasSavedState = loadSaved();
+
+  _applyTblZoom(_getTblZoom()); // restore saved table text size
 
   seedCatalogs();
 
