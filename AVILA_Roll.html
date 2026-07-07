@@ -13721,6 +13721,13 @@ function simulate(elements, connections, horizon, includeProposed=false){
     // 3. Rail transit arrivals go straight to berthQueue (same-day processing).
     // 4. Unload from berthQueue at rate limit → downstream silo.
 
+    // Pre-create TODAY's silo-unload slot before the berth unload below writes into it (it
+    // credits `length-1`). This slot used to be pushed at END of day in simDayApplyInventory —
+    // i.e. AFTER this function — so every unload landed on YESTERDAY's slot and the Unloading
+    // row showed a day early (even before the cars arrived). Physical inventory was always
+    // correct (siloInflow is applied same-day); only the display date was off by one.
+    elements.filter(e=>e.type==='bulk_silo').forEach(el=>{ if(r.siloUnloadHistory[el.id]!==undefined) r.siloUnloadHistory[el.id].push(0); });
+
     const berthArrivedToday={};
 
     // ── Step 0: PHYSICAL YARD COUNT (launch reconciliation) ────────────────────
@@ -13814,9 +13821,11 @@ function simulate(elements, connections, horizon, includeProposed=false){
     }); });
 
     // Step C: Rail transit arrivals. NON-rail berths keep the old same-day berthQueue
-    // injection. RAIL RECEIVING berths get a two-stage flow: scheduled arrival moves the
-    // cargo from In Transit → "arrived, awaiting placement"; a separate PLACEMENT step
-    // below moves it into the LOCAL YARD (berthQueue), where the daily unload spec applies.
+    // injection. RAIL RECEIVING berths get a staged flow: scheduled arrival moves the cargo
+    // from In Transit → the RAIL YARD ("arrived, awaiting spotting"). It is NOT unloaded
+    // today — the SPOTTING step runs AFTER unloading (below), staging cars into the local
+    // yard so they are available to unload the NEXT morning. This way the local-yard morning
+    // count always equals what will be unloaded that day (unloading = end-of-day flow).
     (transitQueue[day]||[]).forEach(arr=>{
       const bs=state[arr.berthId]; if(!bs) return;
       const isRailBerth=!!bs.railTransitT;
@@ -13833,44 +13842,8 @@ function simulate(elements, connections, horizon, includeProposed=false){
       berthArrivedToday[arr.berthId]=(berthArrivedToday[arr.berthId]||0)+total;
     });
 
-    // ── SPOTTING (rail berths): RAIL YARD → LOCAL YARD ─────────────────────────
-    // Default: auto-spot only up to one day of unload capacity (tops the local yard up
-    // to the daily unload need — cars beyond that WAIT AT THE RAIL YARD, which is what
-    // physically happens). A real record for the day (real_rail_daily type 'placed')
-    // replaces the default exactly: the recorded cars move — all or a portion, capped
-    // by what the rail yard actually holds — and the rest stays there.
-    {
-      const _railDs=new Date(simStartDate.getTime()+(day-1)*864e5)._ymd();
-      elements.filter(e=>e.type==='berth'&&(e.props?.berth_type||'')==='Rail Receiving').forEach(berth=>{
-        const bs=state[berth.id]; if(!bs||!bs.railArrived) return;
-        const arrTot=Object.values(bs.railArrived).reduce((a,b)=>a+b,0);
-        if(arrTot<=0) return;
-        const facId=berth.assigned_facility_id||berth.facility_id;
-        const carCap=parseFloat(berth.props.car_capacity_t)||112;
-        const rows=(DB.real_rail_daily||[]).filter(rr=>rr.type==='placed'&&rr.date===_railDs&&rr.facility_id===facId);
-        if(rows.length){
-          rows.forEach(rr=>{
-            let want=Math.max(0,parseFloat(rr.cars)||0)*carCap;
-            const pids=rr.product_id?[rr.product_id]:Object.keys(bs.railArrived);
-            pids.forEach(pid=>{ if(want<=0) return;
-              const take=Math.min(want,bs.railArrived[pid]||0);
-              if(take>0){ bs.railArrived[pid]-=take; bs.berthQueue[pid]=(bs.berthQueue[pid]||0)+take; want-=take; }
-            });
-          });
-        } else {
-          const carsPerShift=parseFloat(berth.props.max_unload_cars_shift||berth.props.max_unload_cars_day)||99999;
-          const shifts=parseFloat(berth.props.shifts_per_day)||1;
-          const simPoints=parseFloat(berth.props.simultaneous_points)||1;
-          const dailyCapT=carsPerShift*shifts*simPoints*carCap;
-          const yardT=Object.values(bs.berthQueue||{}).reduce((a,b)=>a+b,0);
-          let spotT=Math.max(0,Math.min(arrTot,dailyCapT-yardT));
-          Object.keys(bs.railArrived).forEach(pid=>{ if(spotT<=0) return;
-            const take=Math.min(spotT,bs.railArrived[pid]||0);
-            if(take>0){ bs.railArrived[pid]-=take; bs.berthQueue[pid]=(bs.berthQueue[pid]||0)+take; spotT-=take; }
-          });
-        }
-      });
-    }
+    // (Rail SPOTTING runs AFTER the unload loop — see below — so today's arrivals stage into
+    //  the local yard for TOMORROW, not for same-day unloading.)
 
     // Pre-compute today's expected demand pull per silo.
     // This credits same-day shipments so the berth sees real available space,
@@ -14120,6 +14093,46 @@ function simulate(elements, connections, horizon, includeProposed=false){
       }
     });
 
+    // ── SPOTTING (rail berths): RAIL YARD → LOCAL YARD — runs AFTER unloading ───
+    // Today's unloading has already drawn from the local yard as it stood this MORNING
+    // (yesterday's spotted cars). Now stage cars from the rail yard into the local yard so
+    // they're available to unload TOMORROW — i.e. a car that arrives today is unloaded from
+    // the next morning's count. Default: auto-spot up to one day of unload capacity; cars
+    // beyond that WAIT AT THE RAIL YARD (the buffer). A real 'placed' record for the day
+    // overrides the default exactly (all or a portion, capped by what the rail yard holds).
+    {
+      const _railDs=new Date(simStartDate.getTime()+(day-1)*864e5)._ymd();
+      elements.filter(e=>e.type==='berth'&&(e.props?.berth_type||'')==='Rail Receiving').forEach(berth=>{
+        const bs=state[berth.id]; if(!bs||!bs.railArrived) return;
+        const arrTot=Object.values(bs.railArrived).reduce((a,b)=>a+b,0);
+        if(arrTot<=0) return;
+        const facId=berth.assigned_facility_id||berth.facility_id;
+        const carCap=parseFloat(berth.props.car_capacity_t)||112;
+        const rows=(DB.real_rail_daily||[]).filter(rr=>rr.type==='placed'&&rr.date===_railDs&&rr.facility_id===facId);
+        if(rows.length){
+          rows.forEach(rr=>{
+            let want=Math.max(0,parseFloat(rr.cars)||0)*carCap;
+            const pids=rr.product_id?[rr.product_id]:Object.keys(bs.railArrived);
+            pids.forEach(pid=>{ if(want<=0) return;
+              const take=Math.min(want,bs.railArrived[pid]||0);
+              if(take>0){ bs.railArrived[pid]-=take; bs.berthQueue[pid]=(bs.berthQueue[pid]||0)+take; want-=take; }
+            });
+          });
+        } else {
+          const carsPerShift=parseFloat(berth.props.max_unload_cars_shift||berth.props.max_unload_cars_day)||99999;
+          const shifts=parseFloat(berth.props.shifts_per_day)||1;
+          const simPoints=parseFloat(berth.props.simultaneous_points)||1;
+          const dailyCapT=carsPerShift*shifts*simPoints*carCap;
+          const yardT=Object.values(bs.berthQueue||{}).reduce((a,b)=>a+b,0);
+          let spotT=Math.max(0,Math.min(arrTot,dailyCapT-yardT));
+          Object.keys(bs.railArrived).forEach(pid=>{ if(spotT<=0) return;
+            const take=Math.min(spotT,bs.railArrived[pid]||0);
+            if(take>0){ bs.railArrived[pid]-=take; bs.berthQueue[pid]=(bs.berthQueue[pid]||0)+take; spotT-=take; }
+          });
+        }
+      });
+    }
+
     // ── Record per-berth vessel state for the Gantt ──────────────────────
     // Only two vessel states: 'unloading' (docked, actively discharging) and 'anchorage'
     // (everything else — hasn't docked yet, berth occupied by another vessel, silo full,
@@ -14286,8 +14299,8 @@ function simulate(elements, connections, horizon, includeProposed=false){
         }
       });
       if(r.vesselArrivalHistory[el.id]!==undefined) r.vesselArrivalHistory[el.id].push(vesselQty);
-      // Silo unload: push 0 slot (retroactively updated by berth unload step above)
-      if(r.siloUnloadHistory[el.id]!==undefined) r.siloUnloadHistory[el.id].push(0);
+      // (siloUnloadHistory's daily slot is now created at the START of simDayBerths so the
+      //  berth unload credits TODAY, not yesterday — see the note there.)
     });
 
     // Apply flows, then record END-of-day inventory for display.
