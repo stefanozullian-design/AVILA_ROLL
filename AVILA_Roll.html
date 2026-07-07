@@ -12093,9 +12093,9 @@ function simulate(elements, connections, horizon, includeProposed=false){
     railHistory:{},           // railHistory[dispElId][day-1]
     berthArrivalHistory:{},   // berthArrivalHistory[berthId][day-1] = total tonnes arrived at berth
     berthUnloadHistory:{},    // berthUnloadHistory[berthId][day-1] = total tonnes unloaded from berth
-    railTransitHistory:{},    // rail berths: railTransitHistory[berthId][day-1] = {pid:tonnes} IN TRANSIT (dispatched, scheduled arrival not reached), end of day
-    railAtRailyardHistory:{}, // rail berths: railAtRailyardHistory[berthId][day-1] = {pid:tonnes} AT RAIL YARD (arrived, awaiting spotting to the local yard), end of day
-    railYardHistory:{},       // rail berths: railYardHistory[berthId][day-1] = {pid:tonnes} at the LOCAL YARD (spotted, awaiting unloading = berthQueue), end of day
+    railTransitHistory:{},    // rail berths: railTransitHistory[berthId][day-1] = {pid:tonnes} IN TRANSIT (dispatched, scheduled arrival not reached), BEGINNING of day (morning count)
+    railAtRailyardHistory:{}, // rail berths: railAtRailyardHistory[berthId][day-1] = {pid:tonnes} AT RAIL YARD (arrived, awaiting spotting to the local yard), BEGINNING of day
+    railYardHistory:{},       // rail berths: railYardHistory[berthId][day-1] = {pid:tonnes} at the LOCAL YARD (awaiting unloading = berthQueue), BEGINNING of day
     berthVesselHistory:{},    // berthVesselHistory[berthId][day-1] = {docked, state:'unloading'|'anchorage'|'idle', waiting, waitingList:[{name,reason}]}
     vesselArrivalHistory:{},  // vesselArrivalHistory[siloId][day-1] = full vessel qty on arrival day, 0 otherwise
     siloUnloadHistory:{},     // siloUnloadHistory[siloId][day-1] = daily tonnes unloaded into that silo
@@ -13747,6 +13747,21 @@ function simulate(elements, connections, horizon, includeProposed=false){
       }
     }
 
+    // ── Rail berth BEGINNING-OF-DAY snapshots, one per pipeline stage: In Transit
+    //    (moving), At Rail Yard (arrived, awaiting spotting), Local Yard (awaiting
+    //    unloading). Taken NOW — after the physical-count override but BEFORE this day's
+    //    arrivals / spotting / unloading — so the terminal rows read like a manager's
+    //    morning count ("what I have to start the day"), matching the silo Starting
+    //    Inventory convention. Today's arrivals & unloading show up in tomorrow's opening.
+    elements.filter(e=>e.type==='berth'&&(e.props?.berth_type||'')==='Rail Receiving').forEach(berth=>{
+      const bs=state[berth.id];
+      if(!bs||r.railTransitHistory[berth.id]===undefined) return;
+      const snap=src=>{ const o={}; Object.entries(src||{}).forEach(([pid,t])=>{ if(t>0.001) o[pid]=t; }); return o; };
+      r.railTransitHistory[berth.id].push(snap(bs.railTransitT));
+      r.railAtRailyardHistory[berth.id].push(snap(bs.railArrived));
+      r.railYardHistory[berth.id].push(snap(bs.berthQueue));
+    });
+
     // Step A: Promote yesterday's pending vessels to berthQueue (they arrived before today).
     // A vessel under an active 'anchorage' campaign stays in vesselPending — reported as
     // anchorage — even if the berth is otherwise free. Holistic across any number of vessels:
@@ -14119,17 +14134,6 @@ function simulate(elements, connections, horizon, includeProposed=false){
       r.berthVesselHistory[berth.id].push({docked, dockedCallId:bs.currentVesselCallId||null, state:st, waiting:waitingList.length, waitingList});
     });
 
-    // ── Rail berth end-of-day snapshots, one per pipeline stage: In Transit (moving),
-    //    At Rail Yard (arrived, awaiting spotting), Local Yard (spotted, awaiting
-    //    unloading) — feeds the Supply-page terminal rows.
-    elements.filter(e=>e.type==='berth'&&(e.props?.berth_type||'')==='Rail Receiving').forEach(berth=>{
-      const bs=state[berth.id];
-      if(!bs||r.railTransitHistory[berth.id]===undefined) return;
-      const snap=src=>{ const o={}; Object.entries(src||{}).forEach(([pid,t])=>{ if(t>0.001) o[pid]=t; }); return o; };
-      r.railTransitHistory[berth.id].push(snap(bs.railTransitT));
-      r.railAtRailyardHistory[berth.id].push(snap(bs.railArrived));
-      r.railYardHistory[berth.id].push(snap(bs.berthQueue));
-    });
   }
 
   function simDayDemand(day){
