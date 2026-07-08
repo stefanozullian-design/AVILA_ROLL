@@ -231,6 +231,13 @@ select.loc-field-input{appearance:none;cursor:pointer;background-image:url("data
 .cv-tool{padding:4px 10px;font-family:var(--mono);font-size:9px;letter-spacing:1px;color:var(--text-dim);background:transparent;border:1px solid transparent;cursor:pointer;text-transform:uppercase;transition:all .15s;}
 .cv-tool:hover{color:var(--text);border-color:var(--border2);}
 .cv-tool.active{color:var(--green);border-color:var(--green);background:var(--green-faint);}
+.cv-div{width:1px;align-self:stretch;background:var(--border2);margin:2px 3px;}
+#topo-fac-filter{position:absolute;top:46px;left:50%;transform:translateX(-50%);display:flex;flex-wrap:wrap;gap:3px;justify-content:center;max-width:90%;z-index:10;pointer-events:auto;}
+.tf-chip{font-family:var(--mono);font-size:8px;letter-spacing:.5px;text-transform:uppercase;color:var(--text-dim);background:var(--surface2);border:1px solid var(--border2);padding:2px 8px;cursor:pointer;border-radius:2px;white-space:nowrap;transition:all .12s;user-select:none;}
+.tf-chip:hover{color:var(--text);border-color:var(--green-dim);}
+.tf-chip.on{color:var(--green);border-color:var(--green);background:var(--green-faint);}
+.tf-chip.tf-all{color:var(--text);}
+.tf-chip.tf-all.on{color:var(--bg);background:var(--green);border-color:var(--green);}
 .empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:10px;color:var(--text-dim);font-family:var(--mono);font-size:11px;text-align:center;pointer-events:none;}
 .empty-diamond{font-size:26px;color:var(--border2);}
 .empty-hint{font-size:9px;opacity:.6;max-width:200px;line-height:1.8;}
@@ -967,18 +974,27 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
           <button class="cv-tool active" id="tool-select" onclick="setTool('select')">Select</button>
           <button class="cv-tool" id="tool-connect" onclick="setTool('connect')">Connect</button>
           <button class="cv-tool" id="tool-delete" onclick="setTool('delete')">Delete</button>
+          <span class="cv-div"></span>
+          <button class="cv-tool" id="tool-pan" onclick="setTool('pan')" title="Pan (hand) — or hold Space and drag, or middle-mouse drag">✋ Pan</button>
+          <button class="cv-tool" onclick="topoZoom(1.2)" title="Zoom in (or scroll wheel)">＋</button>
+          <button class="cv-tool" onclick="topoZoom(1/1.2)" title="Zoom out">－</button>
+          <button class="cv-tool" onclick="topoFitView()" title="Fit all visible elements in view">⤢ Fit</button>
+          <span class="cv-div"></span>
           <button class="cv-tool" onclick="autoLayout()">Auto Layout</button>
           <button class="cv-tool" onclick="clearCanvas()">Clear</button>
         </div>
+        <div id="topo-fac-filter"></div>
         <svg id="topo-svg" xmlns="http://www.w3.org/2000/svg">
           <defs>
             <marker id="arr" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0 0,7 2.5,0 5" fill="var(--green-dim)" opacity=".8"/></marker>
             <filter id="glow"><feGaussianBlur stdDeviation="2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
           </defs>
-          <g id="conn-layer"></g>
-          <g id="el-layer"></g>
-          <line id="temp-line" x1="0" y1="0" x2="0" y2="0" stroke="var(--green)" stroke-width="1.5" stroke-dasharray="4 3" opacity="0" pointer-events="none"/>
-          <rect id="marquee-rect" x="0" y="0" width="0" height="0" fill="rgba(0,255,157,.08)" stroke="var(--green)" stroke-width="1" stroke-dasharray="4 3" opacity="0" pointer-events="none"/>
+          <g id="topo-viewport">
+            <g id="conn-layer"></g>
+            <g id="el-layer"></g>
+            <line id="temp-line" x1="0" y1="0" x2="0" y2="0" stroke="var(--green)" stroke-width="1.5" stroke-dasharray="4 3" opacity="0" pointer-events="none"/>
+            <rect id="marquee-rect" x="0" y="0" width="0" height="0" fill="rgba(0,255,157,.08)" stroke="var(--green)" stroke-width="1" stroke-dasharray="4 3" opacity="0" pointer-events="none"/>
+          </g>
         </svg>
         <div id="canvas-empty" class="empty-state">
           <div class="empty-diamond">◇</div>
@@ -1910,6 +1926,7 @@ const S = {
   tool:'select', selectedEl:null, connectFrom:null,
   dragging:null, dragOff:{x:0,y:0},
   selectedEls:new Set(), marquee:null, groupDrag:null, _suppressNextClick:false,
+  topoView:{x:0,y:0,k:1}, topoFacFilter:null, _space:false, panning:null, // topology pan/zoom + facility filter
   elCounter:0,
   simCfg:{start_date:new Date()._ymd(), horizon:90, mode:'planning', conflict_resolution:'rolling_avg', autoPropose:true},
   simResults:null, chatCollapsed:true, realDataCollapsed:true,
@@ -2306,12 +2323,9 @@ function selectFacility(id){
   // Update nav
   document.querySelectorAll('.nav-item[data-fac]').forEach(n=>n.classList.remove('active'));
   document.querySelector(`.nav-item[data-fac="${id}"]`)?.classList.add('active');
-  // Reload canvas
-  document.getElementById('el-layer').innerHTML='';
-  document.getElementById('conn-layer').innerHTML='';
-  getFacElements().forEach(el=>renderEl(el));
-  redrawConns();
-  updateEmpty(); updateStatusBar();
+  // Reload canvas — unified plane, honouring the topology facility filter.
+  renderTopoCanvas();
+  updateStatusBar();
   // Initialize real data panel for this facility
   if(typeof renderRealDataSections==='function') renderRealDataSections();
 }
@@ -2344,8 +2358,8 @@ function onCanvasDrop(e){
   e.preventDefault();
   if(!S.facility_id){ alert('Select a facility first from the Organization view.'); return; }
   const type=e.dataTransfer.getData('elType'); if(!type) return;
-  const rect=document.getElementById('topo-canvas-wrap').getBoundingClientRect();
-  addElement(type, snap(e.clientX-rect.left), snap(e.clientY-rect.top));
+  const p=_topoPt(e.clientX,e.clientY); // canvas coords (honours pan/zoom)
+  addElement(type, snap(p.x), snap(p.y));
 }
 
 function addElement(type,x,y){
@@ -2357,12 +2371,15 @@ function addElement(type,x,y){
   renderEl(el); updateEmpty(); updateStatusBar(); selectEl(id); autoSave();
 }
 
-function renderEl(el){
+function renderEl(el, faded){
   const t=ET[el.type];
   if(!t) return; // unknown type — skip (handles legacy types gracefully)
   const layer=document.getElementById('el-layer');
   const g=document.createElementNS('http://www.w3.org/2000/svg','g');
   g.id=`eg-${el.id}`; g.setAttribute('transform',`translate(${el.x},${el.y})`); g.style.cursor='pointer';
+  // Faded = context element from a filtered-out facility that connects to a shown one.
+  // Dimmed and non-interactive (toggle its facility on to work with it).
+  if(faded){ g.setAttribute('opacity','0.26'); g.style.pointerEvents='none'; }
   // Dynamic color for bulk_silo based on product category
   const color=el.type==='bulk_silo'?getBulkSiloColor(el):t.color;
   g.appendChild(mkShape(t.shape,color,el.state));
@@ -2497,20 +2514,20 @@ function mkShape(shape,color,state){
 }
 
 function onElMD(e,id){
+  if(S.tool==='pan'||S._space||e.button===1) return; // let pan handler take it
   if(S.tool!=='select') return;
+  const p=_topoPt(e.clientX,e.clientY);
   // Mousedown on an element that's part of the current multi-selection moves
   // the WHOLE group together, preserving each element's offset from the others.
   if(S.selectedEls.size>1&&S.selectedEls.has(id)){
-    const sr=document.getElementById('topo-svg').getBoundingClientRect();
     const orig={};
     S.selectedEls.forEach(eid=>{ const el=getEl(eid); if(el) orig[eid]={x:el.x,y:el.y}; });
-    S.groupDrag={ids:[...S.selectedEls], startX:e.clientX-sr.left, startY:e.clientY-sr.top, orig};
+    S.groupDrag={ids:[...S.selectedEls], startX:p.x, startY:p.y, orig};
     return;
   }
   S.dragging=id;
   const el=getEl(id);
-  const sr=document.getElementById('topo-svg').getBoundingClientRect();
-  S.dragOff.x=e.clientX-sr.left-el.x; S.dragOff.y=e.clientY-sr.top-el.y;
+  S.dragOff.x=p.x-el.x; S.dragOff.y=p.y-el.y;
 }
 
 const GRID=32; // snap grid size in px — matches background grid
@@ -2519,16 +2536,27 @@ function snap(v){ return Math.round(v/GRID)*GRID; }
 // Mousedown on empty canvas (select tool only) starts a rubber-band selection
 // rectangle. Bails out over the floating canvas-toolbar so its buttons still work.
 function onCanvasMD(e){
+  if(e.target.closest&&(e.target.closest('#canvas-toolbar')||e.target.closest('#topo-fac-filter'))) return;
+  // Pan: hand tool, held Space, or middle mouse button.
+  if(S.tool==='pan'||S._space||e.button===1){
+    e.preventDefault();
+    S.panning={sx:e.clientX,sy:e.clientY,ox:S.topoView.x,oy:S.topoView.y,moved:false};
+    document.getElementById('topo-canvas-wrap').style.cursor='grabbing';
+    return;
+  }
   if(S.tool!=='select'||e.button!==0) return;
-  if(e.target.closest&&e.target.closest('#canvas-toolbar')) return;
-  const sr=document.getElementById('topo-svg').getBoundingClientRect();
-  const x=e.clientX-sr.left, y=e.clientY-sr.top;
-  S.marquee={x0:x,y0:y,x1:x,y1:y};
+  const p=_topoPt(e.clientX,e.clientY);
+  S.marquee={x0:p.x,y0:p.y,x1:p.x,y1:p.y};
 }
 
 function onCanvasMove(e){
-  const sr=document.getElementById('topo-svg').getBoundingClientRect();
-  const x=e.clientX-sr.left, y=e.clientY-sr.top;
+  if(S.panning){
+    const pn=S.panning; pn.moved=true;
+    S.topoView.x=pn.ox+(e.clientX-pn.sx); S.topoView.y=pn.oy+(e.clientY-pn.sy);
+    _applyTopoView();
+    return;
+  }
+  const p=_topoPt(e.clientX,e.clientY); const x=p.x, y=p.y;
   if(S.dragging&&S.tool==='select'){
     const el=getEl(S.dragging); el.x=snap(x-S.dragOff.x); el.y=snap(y-S.dragOff.y);
     const g=document.getElementById(`eg-${S.dragging}`);
@@ -2560,6 +2588,12 @@ function onCanvasMove(e){
 }
 
 function onCanvasUp(){
+  if(S.panning){
+    const moved=S.panning.moved; S.panning=null;
+    document.getElementById('topo-canvas-wrap').style.cursor=(S.tool==='pan'||S._space)?'grab':(S.tool==='delete'?'crosshair':S.tool==='connect'?'cell':'default');
+    if(moved) S._suppressNextClick=true; // don't deselect after a pan
+    return;
+  }
   // A drag that moved the mouse ends with a native click bubbling up to the
   // canvas wrap (mousedown/mouseup targets differ) — suppress that one click
   // so it doesn't immediately deselect what was just selected/moved.
@@ -2593,7 +2627,7 @@ function onCanvasClick(){
 // mode (group-highlight + a props-panel summary with a group delete action).
 function selectElsInRect(x0,y0,x1,y1){
   const pad=20; // matches the existing per-element hit-circle radius
-  const ids=getFacElements().filter(el=>
+  const ids=_topoShownEls().filter(el=>
     (el.x-pad)<x1&&(el.x+pad)>x0&&(el.y-pad)<y1&&(el.y+pad)>y0
   ).map(el=>el.id);
   if(ids.length<2){
@@ -2645,7 +2679,7 @@ function selectEl(id){
 function deselect(){
   S.selectedEl=null;
   S.selectedEls=new Set();
-  DB.elements.filter(e=>e.facility_id===S.facility_id).forEach(el=>{
+  DB.elements.forEach(el=>{
     const g=document.getElementById(`eg-${el.id}`);
     if(g){const sh=g.querySelector('.el-shape');if(sh){sh.removeAttribute('filter');sh.setAttribute('stroke-width','1.5');}}
   });
@@ -2668,7 +2702,7 @@ function addConn(from,to){
   DB.connections.push(c); drawConn(c); updateStatusBar(); autoSave();
 }
 
-function drawConn(c){
+function drawConn(c, faded){
   const fe=getEl(c.from_element_id), te=getEl(c.to_element_id); if(!fe||!te) return;
   const layer=document.getElementById('conn-layer');
   const line=document.createElementNS('http://www.w3.org/2000/svg','line');
@@ -2676,7 +2710,8 @@ function drawConn(c){
   line.setAttribute('x1',fe.x);line.setAttribute('y1',fe.y);
   line.setAttribute('x2',te.x);line.setAttribute('y2',te.y);
   line.setAttribute('stroke','var(--green-dim)');line.setAttribute('stroke-width','1.5');
-  line.setAttribute('marker-end','url(#arr)');line.setAttribute('opacity','0.55');
+  line.setAttribute('marker-end','url(#arr)');line.setAttribute('opacity',faded?'0.16':'0.55');
+  if(faded) line.style.pointerEvents='none';
   line.style.cursor='pointer';
   line.addEventListener('click',e=>{if(S.tool==='delete'){e.stopPropagation();delConn(c.id);}});
   layer.appendChild(line);
@@ -2690,7 +2725,12 @@ function delConn(id){
 
 function redrawConns(){
   document.getElementById('conn-layer').innerHTML='';
-  getFacConnections().forEach(c=>drawConn(c));
+  const vis=_topoVis();
+  DB.connections.forEach(c=>{
+    const fShown=vis.shown.has(c.from_element_id), tShown=vis.shown.has(c.to_element_id);
+    const fVis=fShown||vis.faded.has(c.from_element_id), tVis=tShown||vis.faded.has(c.to_element_id);
+    if(fVis&&tVis) drawConn(c, !(fShown&&tShown)); // faded when either end is a context (dimmed) element
+  });
 }
 
 function cancelConn(){
@@ -2709,7 +2749,7 @@ function clearCanvas(){
 }
 
 function autoLayout(){
-  const els=getFacElements(); if(!els.length) return;
+  const els=_topoShownEls(); if(!els.length) return;
   const cols=Math.ceil(Math.sqrt(els.length));
   els.forEach((el,i)=>{
     el.x=snap(160+(i%cols)*130); el.y=snap(100+Math.floor(i/cols)*130);
@@ -2718,8 +2758,110 @@ function autoLayout(){
   redrawConns(); autoSave();
 }
 
+// ═══════════════════════════════════════════════════════
+// TOPOLOGY — unified canvas: pan / zoom + multi-facility filter
+// ═══════════════════════════════════════════════════════
+// The canvas is one plane for the whole network (elements remember their facility
+// via assigned_facility_id||facility_id). It is NOT gated by S.facility_id, so the
+// other pages keep their own facility scoping untouched.
+function getCanvasEls(){ return DB.elements; }
+function getCanvasConns(){ return DB.connections; }
+function _elFac(el){ return el.assigned_facility_id||el.facility_id; }
+
+// Classify every element for the current facility filter:
+//   shown  = its facility is selected (or no filter → all shown)
+//   faded  = its facility is filtered OUT but it connects to a shown element (context)
+//   hidden = otherwise (not returned)
+function _topoVis(){
+  const sel=S.topoFacFilter; const filtering=!!(sel&&sel.size);
+  const shown=new Set(), faded=new Set();
+  DB.elements.forEach(el=>{ if(!filtering||sel.has(_elFac(el))) shown.add(el.id); });
+  if(filtering){
+    DB.connections.forEach(c=>{
+      if(shown.has(c.from_element_id)&&!shown.has(c.to_element_id)) faded.add(c.to_element_id);
+      if(shown.has(c.to_element_id)&&!shown.has(c.from_element_id)) faded.add(c.from_element_id);
+    });
+    faded.forEach(id=>{ if(shown.has(id)||!getEl(id)) faded.delete(id); }); // drop shown + orphaned refs
+  }
+  return {shown,faded};
+}
+// Elements the user can interact with (fully shown, not faded context).
+function _topoShownEls(){ const v=_topoVis(); return DB.elements.filter(e=>v.shown.has(e.id)); }
+
+// Full canvas redraw honoring the facility filter (elements + connections + fade).
+function renderTopoCanvas(){
+  const vis=_topoVis();
+  const elLayer=document.getElementById('el-layer'); if(!elLayer) return;
+  elLayer.innerHTML='';
+  DB.elements.forEach(el=>{ if(vis.shown.has(el.id)||vis.faded.has(el.id)) renderEl(el, vis.faded.has(el.id)); });
+  redrawConns();
+  _applyTopoView();
+  updateEmpty();
+  if(typeof renderTopoFacFilter==='function') renderTopoFacFilter();
+}
+
+// ── Facility filter chip bar ──────────────────────────────────────────────
+function renderTopoFacFilter(){
+  const bar=document.getElementById('topo-fac-filter'); if(!bar) return;
+  const facs=(DB.facilities||[]);
+  if(facs.length<2){ bar.innerHTML=''; return; } // nothing to filter with one facility
+  const sel=S.topoFacFilter; const allOn=!(sel&&sel.size);
+  bar.innerHTML=`<span class="tf-chip tf-all ${allOn?'on':''}" onclick="topoFilterAll()">All</span>`+
+    facs.map(f=>`<span class="tf-chip ${(!allOn&&sel.has(f.id))?'on':''}" onclick="topoToggleFac('${f.id}')">${f.name}</span>`).join('');
+}
+function topoFilterAll(){ S.topoFacFilter=null; renderTopoCanvas(); deselect(); }
+function topoToggleFac(fid){
+  if(!S.topoFacFilter||!S.topoFacFilter.size){ S.topoFacFilter=new Set([fid]); } // from "all" → focus this one
+  else if(S.topoFacFilter.has(fid)){ S.topoFacFilter.delete(fid); if(!S.topoFacFilter.size) S.topoFacFilter=null; }
+  else S.topoFacFilter.add(fid);
+  renderTopoCanvas(); deselect();
+}
+
+// ── Pan / zoom ────────────────────────────────────────────────────────────
+// Convert a screen (client) point to CANVAS coordinates (undo pan+zoom).
+function _topoPt(clientX,clientY){
+  const r=document.getElementById('topo-svg').getBoundingClientRect();
+  const v=S.topoView;
+  return { x:(clientX-r.left-v.x)/v.k, y:(clientY-r.top-v.y)/v.k };
+}
+function _applyTopoView(){
+  const g=document.getElementById('topo-viewport');
+  if(g) g.setAttribute('transform',`translate(${S.topoView.x},${S.topoView.y}) scale(${S.topoView.k})`);
+}
+// Zoom by a factor around the canvas centre (used by the +/- buttons).
+function topoZoom(factor){
+  const r=document.getElementById('topo-svg').getBoundingClientRect();
+  _topoZoomAt(factor, r.width/2, r.height/2);
+}
+// Zoom by factor keeping the point (sx,sy) [screen px, relative to svg] fixed.
+function _topoZoomAt(factor,sx,sy){
+  const v=S.topoView; const k2=Math.min(3.5,Math.max(0.15,v.k*factor));
+  const cx=(sx-v.x)/v.k, cy=(sy-v.y)/v.k;
+  v.x=sx-cx*k2; v.y=sy-cy*k2; v.k=k2;
+  _applyTopoView();
+}
+function onCanvasWheel(e){
+  if(S.view!=='topology') return;
+  e.preventDefault();
+  const r=document.getElementById('topo-svg').getBoundingClientRect();
+  _topoZoomAt(Math.exp(-e.deltaY*0.0015), e.clientX-r.left, e.clientY-r.top);
+}
+// Fit all currently-visible (shown) elements into view.
+function topoFitView(){
+  const els=_topoShownEls().filter(e=>ET[e.type]);
+  const r=document.getElementById('topo-svg').getBoundingClientRect();
+  if(!els.length){ S.topoView={x:0,y:0,k:1}; _applyTopoView(); return; }
+  let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+  els.forEach(el=>{ minX=Math.min(minX,el.x); minY=Math.min(minY,el.y); maxX=Math.max(maxX,el.x); maxY=Math.max(maxY,el.y); });
+  const pad=70; minX-=pad;minY-=pad;maxX+=pad;maxY+=pad;
+  const bw=Math.max(1,maxX-minX), bh=Math.max(1,maxY-minY);
+  const k=Math.min(2, Math.max(0.15, Math.min(r.width/bw, r.height/bh)));
+  S.topoView={ k, x:(r.width-bw*k)/2 - minX*k, y:(r.height-bh*k)/2 - minY*k };
+  _applyTopoView();
+}
+
 function updateEmpty(){
-  document.getElementById('canvas-empty').style.display=getFacElements().length?'none':'flex';
+  document.getElementById('canvas-empty').style.display=getCanvasEls().length?'none':'flex';
 }
 
 // ═══════════════════════════════════════════════════════
@@ -20221,6 +20363,7 @@ function switchView(view){
       const _row=document.getElementById('second-row'); if(_row) _row.innerHTML=''; // topology has its own toolbar; no section sub-nav
     } else _topoBtn.classList.remove('active');
   }
+  if(view==='topology'){ renderTopoFacFilter(); renderTopoCanvas(); }
   if(view==='location') renderLocationTree();
   if(view==='catalog') renderCatalogView();
   if(view==='elements') renderElementsView();
@@ -20245,7 +20388,7 @@ function setTool(tool){
   document.querySelectorAll('.cv-tool').forEach(t=>t.classList.remove('active'));
   document.getElementById(`tool-${tool}`)?.classList.add('active');
   if(tool!=='connect') cancelConn();
-  document.getElementById('topo-canvas-wrap').style.cursor=tool==='delete'?'crosshair':tool==='connect'?'cell':'default';
+  document.getElementById('topo-canvas-wrap').style.cursor=tool==='pan'?'grab':tool==='delete'?'crosshair':tool==='connect'?'cell':'default';
 }
 
 // ═══════════════════════════════════════════════════════
@@ -21365,7 +21508,19 @@ document.addEventListener('DOMContentLoaded',async()=>{
     canvas.addEventListener('click', (e) => onCanvasClick(e));
     canvas.addEventListener('mousemove', (e) => onCanvasMove(e));
     canvas.addEventListener('mouseup', (e) => onCanvasUp(e));
+    canvas.addEventListener('wheel', (e) => onCanvasWheel(e), {passive:false});
+    canvas.addEventListener('mouseleave', () => { if(S.panning){ S.panning=null; document.getElementById('topo-canvas-wrap').style.cursor=(S.tool==='pan'||S._space)?'grab':'default'; } });
   }
+  // Space-to-pan (SketchUp style): hold Space and drag. Ignore while typing.
+  document.addEventListener('keydown', (e) => {
+    if(e.code==='Space' && S.view==='topology' && !/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName||'') && !document.activeElement?.isContentEditable){
+      if(!S._space){ S._space=true; const w=document.getElementById('topo-canvas-wrap'); if(w&&!S.panning) w.style.cursor='grab'; }
+      e.preventDefault();
+    }
+  });
+  document.addEventListener('keyup', (e) => {
+    if(e.code==='Space'){ S._space=false; const w=document.getElementById('topo-canvas-wrap'); if(w&&!S.panning) w.style.cursor=(S.tool==='pan')?'grab':(S.tool==='delete'?'crosshair':S.tool==='connect'?'cell':'default'); }
+  });
 
   // Forecast on load: simResults are no longer persisted in localStorage
   // (too large). If the scenario file didn't restore them, regenerate.
