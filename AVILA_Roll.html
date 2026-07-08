@@ -13754,20 +13754,9 @@ function simulate(elements, connections, horizon, includeProposed=false){
       }
     }
 
-    // ── Rail berth BEGINNING-OF-DAY snapshots, one per pipeline stage: In Transit
-    //    (moving), At Rail Yard (arrived, awaiting spotting), Local Yard (awaiting
-    //    unloading). Taken NOW — after the physical-count override but BEFORE this day's
-    //    arrivals / spotting / unloading — so the terminal rows read like a manager's
-    //    morning count ("what I have to start the day"), matching the silo Starting
-    //    Inventory convention. Today's arrivals & unloading show up in tomorrow's opening.
-    elements.filter(e=>e.type==='berth'&&(e.props?.berth_type||'')==='Rail Receiving').forEach(berth=>{
-      const bs=state[berth.id];
-      if(!bs||r.railTransitHistory[berth.id]===undefined) return;
-      const snap=src=>{ const o={}; Object.entries(src||{}).forEach(([pid,t])=>{ if(t>0.001) o[pid]=t; }); return o; };
-      r.railTransitHistory[berth.id].push(snap(bs.railTransitT));
-      r.railAtRailyardHistory[berth.id].push(snap(bs.railArrived));
-      r.railYardHistory[berth.id].push(snap(bs.berthQueue));
-    });
+    // (Rail stage snapshots are taken AFTER Step C below, so a car that arrives today —
+    //  i.e. its transit ended today — shows AT THE RAIL YARD today, on the same day as the
+    //  Transfer/Arrival row. See the note by the snapshot.)
 
     // Step A: Promote yesterday's pending vessels to berthQueue (they arrived before today).
     // A vessel under an active 'anchorage' campaign stays in vesselPending — reported as
@@ -13840,6 +13829,20 @@ function simulate(elements, connections, horizon, includeProposed=false){
         total+=t;
       });
       berthArrivedToday[arr.berthId]=(berthArrivedToday[arr.berthId]||0)+total;
+    });
+
+    // ── Rail berth stage snapshots — taken AFTER arrivals (Step C) but BEFORE spotting &
+    //    unloading. So: a car whose transit ended today shows AT THE RAIL YARD today (same
+    //    day as the Transfer/Arrival row — "arriving" IS reaching the rail yard). In Transit
+    //    excludes it (it has arrived); the Local Yard still reads this morning's count
+    //    (spotting runs after unloading), which is exactly what gets unloaded today.
+    elements.filter(e=>e.type==='berth'&&(e.props?.berth_type||'')==='Rail Receiving').forEach(berth=>{
+      const bs=state[berth.id];
+      if(!bs||r.railTransitHistory[berth.id]===undefined) return;
+      const snap=src=>{ const o={}; Object.entries(src||{}).forEach(([pid,t])=>{ if(t>0.001) o[pid]=t; }); return o; };
+      r.railTransitHistory[berth.id].push(snap(bs.railTransitT));
+      r.railAtRailyardHistory[berth.id].push(snap(bs.railArrived));
+      r.railYardHistory[berth.id].push(snap(bs.berthQueue));
     });
 
     // (Rail SPOTTING runs AFTER the unload loop — see below — so today's arrivals stage into
