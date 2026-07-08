@@ -3013,6 +3013,33 @@ function renderProps(id){
     h+=`</div>`;
   }
 
+  // ── RAIL RECEIVING BERTH — terminal switch days ─────────
+  // Mirrors the Dispatch/Rail switch-day picker. On a switch day the terminal asks the
+  // railroad to pull the cars available at the RAIL YARD; they are placed at the LOCAL
+  // YARD the next day and unload from that morning's count.
+  if(el.type==='berth'&&(el.props.berth_type||'')==='Rail Receiving'){
+    const DAYS=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+    const swDays=el.props.switch_days||[];
+    h+=`<div class="pg"><div class="pg-title">Terminal Rail Switch</div>
+      <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-bottom:8px">
+        On a switch day the terminal pulls the railcars available at the rail yard; they are
+        placed at the local yard <b>the day after</b> and unload from that morning. With no
+        switch days selected, cars are spotted daily (no switch constraint).
+      </div>
+      <div class="pf"><div class="pl">Switch Days — when cars are pulled from the rail yard</div>
+        <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
+          ${DAYS.map((d,i)=>`
+            <label style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer">
+              <input type="checkbox" id="bu-sw-${i}" ${swDays.includes(i)?'checked':''}
+                style="width:14px;height:14px;accent-color:var(--green);cursor:pointer">
+              <span style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">${d}</span>
+            </label>`).join('')}
+        </div>
+        <div class="fhint">Days the switch locomotive serves this terminal</div>
+      </div>
+    </div>`;
+  }
+
   // ── DISPATCH POINT — truck/rail configuration ──────────
   if(el.type==='dispatch_point'){
     const dtype=el.props.dispatch_type||'Truck';
@@ -3395,6 +3422,14 @@ function saveProps(id){
       pc.capacity_tpd=pc.pallets_per_day*pc.tonnes_per_pallet; // output tonnes/day (kept in sync)
     }
   });
+  // Save Rail-Receiving berth terminal switch days (checkboxes only exist when the
+  // panel was rendered for that berth type — guard so a type change doesn't wipe them).
+  if(el.type==='berth'&&(el.props.berth_type||'')==='Rail Receiving'&&document.getElementById('bu-sw-0')!==null){
+    el.props.switch_days=[];
+    for(let i=0;i<7;i++){
+      if(document.getElementById(`bu-sw-${i}`)?.checked) el.props.switch_days.push(i);
+    }
+  }
   // Save dispatch_point configuration
   if(el.type==='dispatch_point'){
     if(el.props.dispatch_type==='Rail'){
@@ -12354,6 +12389,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
       if((el.props?.berth_type||'')==='Rail Receiving'){
         state[el.id].railTransitT={}; // {pid:tonnes} dispatched, not yet at the terminal's rail yard
         state[el.id].railArrived={};  // {pid:tonnes} AT RAIL YARD — arrived, awaiting spotting to the local yard
+        state[el.id].railPulled={};   // {pid:tonnes} pulled on the terminal's SWITCH day — placed at the local yard the NEXT morning
         r.railTransitHistory[el.id]=[];
         r.railAtRailyardHistory[el.id]=[];
         r.railYardHistory[el.id]=[];
@@ -13944,6 +13980,16 @@ function simulate(elements, connections, horizon, includeProposed=false){
 
     const berthArrivedToday={};
 
+    // ── Receive yesterday's terminal-switch pull ────────────────────────────────
+    // Cars pulled from the rail yard on the terminal's switch day (see SPOTTING below)
+    // are placed at the LOCAL YARD the next morning — i.e. now, before the physical
+    // counts (which stay authoritative) and before today's snapshot & unloading.
+    elements.filter(e=>e.type==='berth'&&(e.props?.berth_type||'')==='Rail Receiving').forEach(berth=>{
+      const bs=state[berth.id]; if(!bs||!bs.railPulled) return;
+      Object.entries(bs.railPulled).forEach(([pid,t])=>{ if(t>0) bs.berthQueue[pid]=(bs.berthQueue[pid]||0)+t; });
+      bs.railPulled={};
+    });
+
     // ── Step 0: PHYSICAL YARD COUNT (launch reconciliation) ────────────────────
     // Cars physically at a terminal's rail yard / local yard that the plan never
     // created (they predate the system). A real_rail_daily 'railyard_count' /
@@ -14311,14 +14357,17 @@ function simulate(elements, connections, horizon, includeProposed=false){
     });
 
     // ── SPOTTING (rail berths): RAIL YARD → LOCAL YARD — runs AFTER unloading ───
-    // Today's unloading has already drawn from the local yard as it stood this MORNING
-    // (yesterday's spotted cars). Now stage cars from the rail yard into the local yard so
-    // they're available to unload TOMORROW — i.e. a car that arrives today is unloaded from
-    // the next morning's count. Default: auto-spot up to one day of unload capacity; cars
-    // beyond that WAIT AT THE RAIL YARD (the buffer). A real 'placed' record for the day
-    // overrides the default exactly (all or a portion, capped by what the rail yard holds).
+    // Today's unloading has already drawn from the local yard as it stood this MORNING.
+    // WITH TERMINAL SWITCH DAYS configured (berth.props.switch_days, Mon=0..Sun=6): the
+    // terminal can only pull cars ON a switch day — everything available at the rail yard
+    // that day is pulled and RECEIVED AT THE LOCAL YARD THE NEXT MORNING (railPulled
+    // overnight buffer; see the receive step at the top of this function). Between
+    // switches, arrivals accumulate at the rail yard.
+    // WITHOUT switch days: legacy behavior — spot daily up to one day of unload capacity.
+    // A real 'placed' record for the day replaces the day's move exactly (immediate).
     {
       const _railDs=new Date(simStartDate.getTime()+(day-1)*864e5)._ymd();
+      const _dowMon=(new Date(simStartDate.getTime()+(day-1)*864e5).getDay()+6)%7; // Mon=0..Sun=6
       elements.filter(e=>e.type==='berth'&&(e.props?.berth_type||'')==='Rail Receiving').forEach(berth=>{
         const bs=state[berth.id]; if(!bs||!bs.railArrived) return;
         const arrTot=Object.values(bs.railArrived).reduce((a,b)=>a+b,0);
@@ -14326,6 +14375,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
         const facId=berth.assigned_facility_id||berth.facility_id;
         const carCap=parseFloat(berth.props.car_capacity_t)||112;
         const rows=(DB.real_rail_daily||[]).filter(rr=>rr.type==='placed'&&rr.date===_railDs&&rr.facility_id===facId);
+        const swDays=berth.props.switch_days||[];
         if(rows.length){
           rows.forEach(rr=>{
             let want=Math.max(0,parseFloat(rr.cars)||0)*carCap;
@@ -14335,6 +14385,11 @@ function simulate(elements, connections, horizon, includeProposed=false){
               if(take>0){ bs.railArrived[pid]-=take; bs.berthQueue[pid]=(bs.berthQueue[pid]||0)+take; want-=take; }
             });
           });
+        } else if(swDays.length){
+          if(swDays.includes(_dowMon)){
+            Object.keys(bs.railArrived).forEach(pid=>{ const t=bs.railArrived[pid];
+              if(t>0){ bs.railPulled[pid]=(bs.railPulled[pid]||0)+t; bs.railArrived[pid]=0; } });
+          }
         } else {
           const carsPerShift=parseFloat(berth.props.max_unload_cars_shift||berth.props.max_unload_cars_day)||99999;
           const shifts=parseFloat(berth.props.shifts_per_day)||1;
