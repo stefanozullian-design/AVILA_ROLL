@@ -1771,7 +1771,7 @@ const DB = {
   real_transfers_daily:  [], // { date:'YYYY-MM-DD', origin_facility_id, dest_facility_id, mode:'rail'|'truck', product_id, volume_t, created_at, updated_at }
   real_rail_daily:       [], // { date:'YYYY-MM-DD', facility_id, product_id, type:'loading'|'delivered', cars:N, source:'actual', created_at, updated_at }
   real_shipping_daily:   [], // { date:'YYYY-MM-DD', facility_id, product_id, volume_t, source:'actual', created_at, updated_at }
-  real_unloading_daily:  []  // { date:'YYYY-MM-DD', facility_id, berth_id, product_id, mode:'ship'|'rail'|'truck', value, unit:'t'|'cars', source:'actual', created_at, updated_at }
+  real_unloading_daily:  []  // { date:'YYYY-MM-DD', facility_id, berth_id, product_id, mode:'ship'|'rail'|'truck', value, unit:'t'|'cars', cars?:N (rail: entered car count for display; value stays tonnes for the sim), source:'actual', created_at, updated_at }
 };
 
 // Seed catalog data
@@ -4499,7 +4499,14 @@ function showTermRealPopup(kind,facId,pid,ds){
   const realSum=isTr?existing.reduce((s,x)=>s+(parseFloat(x.volume_t)||0),0):realUnloadTonnesFacProdDay(facId,pid,ds);
   const planVal=isTr?_termArrPlanAt(facId,pid,ds):_termUnloadPlanAt(facId,pid,ds);
   const initVal=Math.round(hasReal?realSum:planVal);
-  window._termRealCtx={kind,facId,pid,ds};
+  // Rail terminals enter unloading as CARS (for the table) + TONNES (for the calc).
+  const railBerth=kind==='unload'?(DB.elements||[]).find(e=>e.type==='berth'&&(e.props?.berth_type||'')==='Rail Receiving'&&(e.assigned_facility_id||e.facility_id)===facId):null;
+  const isRail=!!railBerth;
+  const carCap=parseFloat(railBerth?.props?.car_capacity_t)||112;
+  const _realCarsSum=(DB.real_unloading_daily||[]).filter(u=>u.date===ds&&u.product_id===pid&&u.facility_id===facId)
+    .reduce((s,u)=>s+(u.cars!=null?(parseFloat(u.cars)||0):u.unit==='cars'?(parseFloat(u.value)||0):((parseFloat(u.value)||0)/carCap)),0);
+  const initCars=Math.round(hasReal?_realCarsSum:(planVal/carCap));
+  window._termRealCtx={kind,facId,pid,ds,isRail,carCap};
 
   const html=`
   <div style="font-family:var(--mono);font-size:9px;min-width:320px">
@@ -4511,6 +4518,22 @@ function showTermRealPopup(kind,facId,pid,ds){
       <button onclick="closeTermRealPopup()" style="background:transparent;border:none;color:var(--text-dim);cursor:pointer;font-size:16px">✕</button>
     </div>
     <div style="display:flex;flex-direction:column;gap:8px">
+      ${isRail?`
+      <div class="fr s2">
+        <div class="ff">
+          <div class="fl">Railcars unloaded</div>
+          <input class="fi" id="term-real-cars" type="number" value="${initCars}" min="0" step="1" oninput="_termUnlCarsChanged()" style="width:100%">
+        </div>
+        <div style="font-size:8px;color:var(--text-dim);align-self:flex-end;padding-bottom:6px">for the table</div>
+      </div>
+      <div class="fr s2">
+        <div class="ff">
+          <div class="fl">Total unloaded (t)</div>
+          <input class="fi" id="term-real-value" type="number" value="${initVal}" min="0" step="10" style="width:100%">
+        </div>
+        <div style="font-size:8px;color:var(--text-dim);align-self:flex-end;padding-bottom:6px">for the calc</div>
+      </div>
+      `:`
       <div class="fr s2">
         <div class="ff">
           <div class="fl">${label} (t)</div>
@@ -4518,13 +4541,14 @@ function showTermRealPopup(kind,facId,pid,ds){
         </div>
         <div style="font-size:8px;color:var(--text-dim);align-self:flex-end;padding-bottom:6px">${hasReal?'actual':'override forecast'}</div>
       </div>
+      `}
       <div class="fr s1">
         <div class="ff">
           <div class="fl">Date</div>
           <input class="fi" id="term-real-date" type="date" value="${ds}" onchange="_termRealPrefill()" style="width:100%">
         </div>
       </div>
-      <div style="font-size:8px;color:var(--text-dim);line-height:1.4">${isTr?'Actual tonnage transferred/arrived at this terminal for this product.':'Actual tonnage unloaded into this terminal\'s silos for this product.'} Treated as real data, like the Daily Data form.</div>
+      <div style="font-size:8px;color:var(--text-dim);line-height:1.4">${isTr?'Actual tonnage transferred/arrived at this terminal for this product.':isRail?'Enter the cars unloaded (shown in the table) and the actual tonnes (used for inventory). Editing cars suggests tonnes at '+carCap+' t/car; adjust tonnes to the scale ticket.':'Actual tonnage unloaded into this terminal\'s silos for this product.'} Treated as real data, like the Daily Data form.</div>
     </div>
     <div style="margin-top:12px;display:flex;gap:8px;justify-content:space-between;align-items:center">
       <div style="display:flex;gap:6px">
@@ -4560,6 +4584,20 @@ function _termRealPrefill(){
     ?(isTr?existing.reduce((s,x)=>s+(parseFloat(x.volume_t)||0),0):realUnloadTonnesFacProdDay(ctx.facId,ctx.pid,ds))
     :(isTr?_termArrPlanAt(ctx.facId,ctx.pid,ds):_termUnloadPlanAt(ctx.facId,ctx.pid,ds));
   const inp=document.getElementById('term-real-value'); if(inp) inp.value=Math.round(val);
+  const cInp=document.getElementById('term-real-cars');
+  if(cInp&&ctx.isRail){ const cc=ctx.carCap||112;
+    const rows=(DB.real_unloading_daily||[]).filter(u=>u.date===ds&&u.product_id===ctx.pid&&u.facility_id===ctx.facId);
+    const realCars=rows.length?rows.reduce((s,u)=>s+(u.cars!=null?(parseFloat(u.cars)||0):u.unit==='cars'?(parseFloat(u.value)||0):((parseFloat(u.value)||0)/cc)),0):null;
+    cInp.value=Math.round(realCars!=null?realCars:(val/cc));
+  }
+}
+// Rail unload dialog: typing a car count suggests the tonnage (cars × car capacity); the user
+// can then edit tonnes to the exact scale-ticket figure. Tonnes is what the simulation uses.
+function _termUnlCarsChanged(){
+  const ctx=window._termRealCtx; if(!ctx||!ctx.isRail) return;
+  const cars=parseFloat(document.getElementById('term-real-cars')?.value);
+  const tIn=document.getElementById('term-real-value');
+  if(tIn&&!isNaN(cars)&&cars>=0) tIn.value=Math.round(cars*(ctx.carCap||112));
 }
 
 function applyTermReal(){
@@ -4576,7 +4614,11 @@ function applyTermReal(){
     // Data form) so the two input paths don't leave duplicates that double-count.
     const berthId=_termBerthForProduct(ctx.facId,ctx.pid);
     DB.real_unloading_daily=(DB.real_unloading_daily||[]).filter(u=>!(u.date===ds&&u.product_id===ctx.pid&&(u.facility_id===ctx.facId||u.berth_id===berthId)));
-    DB.real_unloading_daily.push({date:ds,facility_id:ctx.facId,berth_id:berthId,product_id:ctx.pid,mode:'ship',value,unit:'t',source:'actual',created_at:now,updated_at:now});
+    // value = tonnes (used by the sim for inventory). For rail, also store the entered CAR
+    // count for the table display (cars ≠ tonnes/carCap exactly, so keep both).
+    const row={date:ds,facility_id:ctx.facId,berth_id:berthId,product_id:ctx.pid,mode:ctx.isRail?'rail':'ship',value,unit:'t',source:'actual',created_at:now,updated_at:now};
+    if(ctx.isRail){ const carsV=parseFloat(document.getElementById('term-real-cars')?.value); if(!isNaN(carsV)&&carsV>=0) row.cars=Math.round(carsV); }
+    DB.real_unloading_daily.push(row);
   }
   closeTermRealPopup();
   autoSave();
@@ -8020,6 +8062,15 @@ function _renderSupplyViewInner(wrap){
         const _prodSilos=pid=>allSilos.filter(s=>getSiloProducts(s).includes(pid));
         const _unlPlan=(pid,ds)=>{ const di=allDates.indexOf(ds); if(di<0)return 0; return _prodSilos(pid).reduce((s,si)=>s+((r&&r.siloUnloadHistory&&r.siloUnloadHistory[si.id]||[])[di]||0),0); };
         const _unlReal=(pid,ds)=>realUnloadTonnesFacProdDay(fac.id,pid,ds);
+        // Real cars unloaded (rail display): the entered car count if present, else derive
+        // from the tonnes ÷ car capacity. Returns null when there's no real entry.
+        const _unlRealCars=(pid,ds)=>{
+          const rows=(DB.real_unloading_daily||[]).filter(u=>u.date===ds&&u.product_id===pid
+            &&(u.facility_id===fac.id||(_railBerths||[]).some(b=>b.id===u.berth_id)));
+          if(!rows.length) return null;
+          return rows.reduce((s,u)=>s+(u.cars!=null?(parseFloat(u.cars)||0)
+            :u.unit==='cars'?(parseFloat(u.value)||0):((parseFloat(u.value)||0)/_railCarCap)),0);
+        };
         const totalNeed=(pid,ds)=>demandPoints.filter(dp=>dp.products?.some(p=>p.product_id===pid))
           .reduce((s,dp)=>s+(_demandRate(dp.element_id,ds)||0),0);
 
@@ -8191,14 +8242,23 @@ function _renderSupplyViewInner(wrap){
                 h+=`</tr>`;
               });
             } else {
-              h+=`<tr class="supsec-termUnload"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${rc};font-size:9px">Unloading</td>`;
+              // Rail terminals show unloading in RAIL CARS (like the pipeline rows); tonnage is
+              // in the tooltip. Truck/other terminals keep tonnes. The simulation always uses
+              // tonnes for inventory — cars are display only.
+              const _railU=_railBerths.length>0;
+              const _uCars=(ds)=>{ const rv=_unlReal(pid,ds); if(rv>0){ const rc2=_unlRealCars(pid,ds); return rc2!=null?rc2:rv/_railCarCap; } return _unlPlan(pid,ds)/_railCarCap; };
+              h+=`<tr class="supsec-termUnload"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${rc};font-size:9px">Unloading${_railU?' <span style="font-size:7px;opacity:.55">RAIL CARS</span>':''}</td>`;
               months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-                const mt=mon.dates.reduce((s,ds)=>{ const rv=_unlReal(pid,ds); return s+(rv>0?rv:_unlPlan(pid,ds)); },0);
-                h+=`<td style="border-left:2px solid rgba(179,136,255,.1);font-size:9px;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                const mtT=mon.dates.reduce((s,ds)=>{ const rv=_unlReal(pid,ds); return s+(rv>0?rv:_unlPlan(pid,ds)); },0);
+                const mDisp=_railU?Math.round(mon.dates.reduce((s,ds)=>s+_uCars(ds),0)):Math.round(mtT);
+                h+=`<td title="${_railU?Math.round(mtT).toLocaleString()+' t':''}" style="border-left:2px solid rgba(179,136,255,.1);font-size:9px;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mtT>0?mDisp.toLocaleString():''}</td>`;
                 if(!isCol) mon.dates.forEach(ds=>{
-                  const rv=_unlReal(pid,ds); const isReal=rv>0; const v=isReal?rv:_unlPlan(pid,ds);
-                  const col=isReal?rcReal:(v>0?rc:'rgba(179,136,255,.25)');
-                  h+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''}" ondblclick="event.stopPropagation();showTermRealPopup('unload','${fac.id}','${pid}','${ds}')" title="${pname} unloading · ${Math.round(v).toLocaleString()} t${isReal?' · actual':' · planned'} — dbl-click to set actual" style="cursor:pointer;font-size:9px;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${isReal?'700':'400'};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+                  const rv=_unlReal(pid,ds); const isReal=rv>0; const vT=isReal?rv:_unlPlan(pid,ds);
+                  const col=isReal?rcReal:(vT>0?rc:'rgba(179,136,255,.25)');
+                  const disp=_railU?(vT>0?Math.round(_uCars(ds)):0):(vT>0?Math.round(vT):0);
+                  const ttl=_railU?`${pname} unloading · ${vT>0?Math.round(_uCars(ds)):0} cars (${Math.round(vT).toLocaleString()} t)${isReal?' · actual':' · planned'} — dbl-click to set actual`
+                    :`${pname} unloading · ${Math.round(vT).toLocaleString()} t${isReal?' · actual':' · planned'} — dbl-click to set actual`;
+                  h+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''}" ondblclick="event.stopPropagation();showTermRealPopup('unload','${fac.id}','${pid}','${ds}')" title="${ttl}" style="cursor:pointer;font-size:9px;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${isReal?'700':'400'};${tdSty(ds)}">${disp.toLocaleString?disp.toLocaleString():disp}</td>`; });
               });
               h+=`</tr>`;
             }
