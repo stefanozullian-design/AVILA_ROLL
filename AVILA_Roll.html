@@ -6672,7 +6672,7 @@ function _renderSupplyViewInner(wrap){
   // opens as a compact overview (headers + inventory charts) instead of a wall of rows.
   if(!window._supSecDefaultApplied){
     window._supSecDefaultApplied=true;
-    ['clinkerInv','clinkerReq','clinkerProd','cementInv','cementNeed','cementProd','railLoad','termUnload','scmInv'].forEach(k=>window._supSecCol.add(k));
+    ['clinkerInv','clinkerReq','clinkerProd','cementInv','cementNeed','cementProd','railLoad','termUnload','scmInv','termVessel','termRail','truckIn'].forEach(k=>window._supSecCol.add(k));
   }
   if(!S.simCfg.start_date){
     wrap.innerHTML=`<div style="font-family:var(--mono);font-size:10px;color:var(--text-dim);padding:30px;text-align:center">Configure simulation dates in Configure first.</div>`;
@@ -6879,9 +6879,9 @@ function _renderSupplyViewInner(wrap){
   if(_supProdFilter) _termFacs=_termFacs.filter(f=>{
     const fe=allEls.filter(e=>(e.assigned_facility_id||e.facility_id)===f.id);
     return fe.some(e=>{
-      if(e.type==='bulk_silo') return getSiloProducts(e).includes(_supProdFilter);
+      if(e.type==='bulk_silo'||e.type==='packed_silo') return getSiloProducts(e).includes(_supProdFilter);
       if(e.type==='demand_point') return (DB.demand_points.find(dp=>dp.element_id===e.id)?.products||[]).some(p=>p.product_id===_supProdFilter);
-      return e.type==='berth';
+      return false; // a berth alone doesn't mean the terminal handles this product
     });
   });
 
@@ -7031,8 +7031,10 @@ function _renderSupplyViewInner(wrap){
   // secKey → the inventory section this chart belongs to (e.g. 'clinkerInv'); when set the
   // chart row also carries class supsec-<secKey> so collapsing that section title hides it too.
   const _invChartRow=(label, cat, accent, scopeEls, depth, onlyPid, extraFn, secKey)=>{
-    // 'packed' reads packed_silo elements (any product they hold); everything else reads bulk_silo.
-    const _catOk=pr=>cat==='packed'?true:(pr&&(cat==='cement'?(pr.category==='cement_bulk'||pr.category==='cement_packed')
+    // 'packed' reads packed_silo elements (any product they hold); 'bulk' reads bulk_silo
+    // elements accepting ANY category (terminal blocks mix cement + SCM side-by-side);
+    // everything else reads bulk_silo filtered to one category.
+    const _catOk=pr=>(cat==='packed'||cat==='bulk')?true:(pr&&(cat==='cement'?(pr.category==='cement_bulk'||pr.category==='cement_packed')
                         :cat==='scm'?(pr.category==='additive')
                         :(pr.category==='clinker')));
     const _siloType=cat==='packed'?'packed_silo':'bulk_silo';
@@ -7043,10 +7045,15 @@ function _renderSupplyViewInner(wrap){
     const prodMap={};
     silos.forEach(s=>{ const pid=getSiloProducts(s)[0]; if(!pid) return; (prodMap[pid]=prodMap[pid]||[]).push(s); });
     let prodIds=Object.keys(prodMap); if(!prodIds.length) return '';
-    // onlyPid → chart a single product (per-product terminal blocks). Otherwise respect the
-    // page product filter — narrow to the selected product when it belongs to this chart's
+    // onlyPid → chart a single product, or an ARRAY of products (terminal category
+    // blocks chart all their products side-by-side). Otherwise respect the page
+    // product filter — narrow to the selected product when it belongs to this chart's
     // category (so a cement-product filter doesn't blank the clinker chart, and vice-versa).
-    if(onlyPid) prodIds=prodIds.filter(p=>p===onlyPid);
+    if(Array.isArray(onlyPid)){
+      prodIds=prodIds.filter(p=>onlyPid.includes(p));
+      if(_supProdFilter && prodIds.includes(_supProdFilter)) prodIds=[_supProdFilter];
+    }
+    else if(onlyPid) prodIds=prodIds.filter(p=>p===onlyPid);
     else if(_supProdFilter && prodIds.includes(_supProdFilter)) prodIds=[_supProdFilter];
     if(!prodIds.length) return '';
     const colorFor=pid=>{ const nm=DB.products.find(p=>p.id===pid)?.name||pid; return (typeof spProdColor==='function')?spProdColor(nm,false):accent; };
@@ -8256,46 +8263,84 @@ function _renderSupplyViewInner(wrap){
         const totalNeed=(pid,ds)=>demandPoints.filter(dp=>dp.products?.some(p=>p.product_id===pid))
           .reduce((s,dp)=>s+(_demandRate(dp.element_id,ds)||0),0);
 
-        // Products handled here = silo products ∪ demand products ∪ arrivals; ordered cement→SCM→other.
+        // ── CATEGORY-FIRST LAYOUT ──────────────────────────────────────────
+        // Products are grouped by how they are STORED, not one block each:
+        // one BULK block (bulk silos — cement, SCM, clinker alike), then one
+        // PACKED block (packed silos). Inside each block the sections appear
+        // ONCE with the products as rows: side-by-side inventory chart →
+        // STARTING INVENTORY → PRODUCT REQUIREMENT → transfers split by mode
+        // (⚓ VESSEL ARRIVALS · 🚂 RAIL ARRIVALS · 🚚 TRUCK ARRIVALS) →
+        // TRUCK TRANSFERS (origin). Holistic: driven purely by topology, so
+        // any current or future terminal picks this up automatically.
+        const packedSilos=facEls.filter(e=>e.type==='packed_silo');
         const _demProdIds=new Set(); demandPoints.forEach(dp=>(dp.products||[]).forEach(p=>_demProdIds.add(p.product_id)));
         const _catRank=pid=>{ const c=DB.products.find(p=>p.id===pid)?.category; return (c==='cement_bulk'||c==='cement_packed')?0:c==='additive'?1:c==='clinker'?2:3; };
         const _pNameOf=pid=>DB.products.find(p=>p.id===pid)?.name||pid;
-        const _prods=[...new Set([...allSilos.flatMap(getSiloProducts),..._demProdIds,...Object.keys(_termArr),..._truckNodeProds])].filter(Boolean)
-          .sort((a,b)=>_catRank(a)-_catRank(b)||_pNameOf(a).localeCompare(_pNameOf(b)));
+        const _packedPids=new Set(packedSilos.flatMap(getSiloProducts).filter(Boolean));
+        // A product is PACKED when it is held in packed silos here, or — if not stored
+        // here at all — when its catalog category is cement_packed. Everything else
+        // (incl. SCM/additives) is BULK. Silo type wins over the product name.
+        const _isPackedHere=pid=>{ if(_packedPids.has(pid)) return true;
+          if(allSilos.some(s=>getSiloProducts(s).includes(pid))) return false;
+          return DB.products.find(p=>p.id===pid)?.category==='cement_packed'; };
+        let _prodsAll=[...new Set([...allSilos.flatMap(getSiloProducts),..._packedPids,..._demProdIds,...Object.keys(_termArr),..._truckNodeProds])]
+          .filter(Boolean).sort((a,b)=>_catRank(a)-_catRank(b)||_pNameOf(a).localeCompare(_pNameOf(b)));
+        if(_supProdFilter) _prodsAll=_prodsAll.filter(p=>p===_supProdFilter);
 
-        if(!_prods.length){
+        // Mode classification (topology-driven): which berth type feeds each product.
+        const _railFedPids=new Set();
+        _railBerths.forEach(b=>_downSilosOf(b).forEach(s=>getSiloProducts(s).forEach(p=>_railFedPids.add(p))));
+        (DB.rail_movements||[]).filter(rm=>rm.to_facility_id===fac.id&&rm.product_id).forEach(rm=>_railFedPids.add(rm.product_id));
+        const _shipFedPids=new Set();
+        _shipBerths.forEach(b=>_downSilosOf(b).forEach(s=>getSiloProducts(s).forEach(p=>_shipFedPids.add(p))));
+        (DB.vessel_calls||[]).forEach(vc=>{
+          const legs=vc.legs&&vc.legs.length?vc.legs:[vc];
+          legs.forEach(l=>{ if(_berthIds.has(l.berth_element_id)&&(l.product_id||vc.product_id)) _shipFedPids.add(l.product_id||vc.product_id); });
+        });
+
+        const _pkSilosOf=pid=>packedSilos.filter(s=>getSiloProducts(s).includes(pid));
+        const _pkStartT=s=>(typeof _siloStartT==='function')?_siloStartT(s):(parseFloat(s.props?.start_inventory)||0);
+
+        const _groupsDef=[
+          {key:'bulk',  label:'BULK PRODUCTS',   accent:'#00d9a3', rgba:'0,217,163',  chartCat:'bulk',   pids:_prodsAll.filter(p=>!_isPackedHere(p))},
+          {key:'packed',label:'PACKED PRODUCTS', accent:'#4da6ff', rgba:'77,166,255', chartCat:'packed', pids:_prodsAll.filter(p=>_isPackedHere(p))},
+        ].filter(gr=>gr.pids.length);
+
+        if(!_groupsDef.length){
           h+=`<tr><td style="${stickyLeft('var(--surface)',depth+1)}color:var(--text-dim);font-size:8px;font-style:italic">no products configured for this terminal</td>${_blankCells()}</tr>`;
         }
 
-        _prods.forEach(pid=>{
-          const pname=_pNameOf(pid); const cat=DB.products.find(p=>p.id===pid)?.category;
-          const isCem=(cat==='cement_bulk'||cat==='cement_packed'); const isScm=cat==='additive';
-          const chartCat=isCem?'cement':isScm?'scm':'clinker';
-          const catLabel=isCem?'CEMENT':isScm?'SCM':(cat||'PRODUCT').toUpperCase();
-          const isClk=cat==='clinker';
-          const accent=isCem?'#00d9a3':(isScm||isClk)?'#ff8c42':'#4da6ff';
-          const rgba=isCem?'0,217,163':(isScm||isClk)?'255,140,66':'77,166,255';
-          const invSeckey=isScm?'scmInv':'cementInv';
+        _groupsDef.forEach(gr=>{
+          const accent=gr.accent, rgba=gr.rgba;
           const dimCol='rgba('+rgba+',.3)';
-          const pKey=fac.id+'__'+pid; const pCol=grpCol.has(pKey);
-          const pidSilos=_prodSilos(pid);
+          const gKey=fac.id+'__'+gr.key; const gColl=grpCol.has(gKey);
+          const suffix=gr.key==='bulk'?'(BULK)':'(PACKED)';
+          const invSeckey=gr.key==='bulk'?'cementInv':'packedInv';
+          const reqSeckey=gr.key==='bulk'?'cementNeed':'packedNeed';
+          const _grSilosOf=pid=>gr.key==='packed'?_pkSilosOf(pid):_prodSilos(pid);
+          const _grStartOf=s=>gr.key==='packed'?_pkStartT(s):(parseFloat(s.props?.start_inventory)||0);
+          const _pColor=pid=>{ const nm=_pNameOf(pid); return (typeof spProdColor==='function')?spProdColor(nm,false):accent; };
+          const _pChip=pid=>`<span style="display:inline-block;width:7px;height:7px;background:${_pColor(pid)};border-radius:1px;margin-right:4px;vertical-align:-1px"></span>`;
 
-          // Product divider (collapsible: hides this product's whole block)
-          h+=`<tr onclick="_supToggleGrp('${pKey}')" style="cursor:pointer;background:rgba(${rgba},.1);border-top:2px solid rgba(${rgba},.55)">
+          // Category divider (collapsible: hides this whole block)
+          h+=`<tr onclick="_supToggleGrp('${gKey}')" style="cursor:pointer;background:rgba(${rgba},.1);border-top:2px solid rgba(${rgba},.55)">
             <td style="${stickyLeft('var(--surface2)',depth+1,'border-bottom:1px solid var(--border),')}color:${accent};font-weight:700;font-size:9px">
-              ${pCol?'▶':'▼'} <span style="display:inline-block;width:8px;height:8px;background:${accent};border-radius:1px;margin-right:3px;vertical-align:-1px"></span>${pname} <span style="font-size:7px;opacity:.6;margin-left:4px">${catLabel}</span>
+              ${gColl?'▶':'▼'} ${gr.label} <span style="font-size:7px;opacity:.6;margin-left:4px">${gr.pids.length} PRODUCT${gr.pids.length>1?'S':''}</span>
             </td>${_blankCells()}</tr>`;
-          if(pCol) return;
+          if(gColl) return;
 
-          // 1) Inventory bar chart (this product) — rail terminals stack the cement still
-          // on rail (in transit + local yard) as a lighter segment on top of available.
-          h+=_invChartRow(pname+' inventory',chartCat,accent,facEls,depth+2,pid,_railBerths.length?_railPendT:null,invSeckey);
+          // 1) ONE inventory chart — every product of the block side-by-side (same
+          // component the plants use). Rail-fed products additionally stack the
+          // tonnage still on rail (transit + rail yard + local yard) as the
+          // lighter dashed top segment, per product.
+          h+=_invChartRow(gr.label.replace(' PRODUCTS','')+' inventory',gr.chartCat,accent,facEls,depth+2,gr.pids,(_railBerths.length&&gr.key==='bulk')?_railPendT:null,invSeckey);
 
-          // 2) STARTING INVENTORY (this product's silos)
-          if(pidSilos.length){
-            const _invDay=ds=>pidSilos.reduce((s,si)=>s+getInv(si.id,ds,parseFloat(si.props?.start_inventory)||0).value,0);
+          // 2) STARTING INVENTORY (BULK|PACKED) — one row per product-silo.
+          const _invPids=gr.pids.filter(pid=>_grSilosOf(pid).length);
+          if(_invPids.length){
+            const _invDay=ds=>_invPids.reduce((t,pid)=>t+_grSilosOf(pid).reduce((s,si)=>s+getInv(si.id,ds,_grStartOf(si)).value,0),0);
             h+=`<tr class="sup-sec-hdr" data-seckey="${invSeckey}" onclick="_supToggleSec('${invSeckey}')" style="cursor:pointer;background:rgba(${rgba},.05);border-top:1px solid rgba(${rgba},.3)">
-              <td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${accent};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow(invSeckey)}</span> STARTING INVENTORY</td>`;
+              <td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${accent};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow(invSeckey)}</span> STARTING INVENTORY ${suffix}</td>`;
             months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
               const mt=mon.dates.reduce((a,ds)=>a+_invDay(ds),0)/(mon.dates.length||1);
               h+=`<td style="border-left:2px solid rgba(${rgba},.2);font-size:9px;font-weight:700;color:${accent};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
@@ -8303,82 +8348,135 @@ function _renderSupplyViewInner(wrap){
                 h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${accent};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
             });
             h+=`</tr>`;
-            pidSilos.forEach(silo=>{
-              const siloMax=parseFloat(silo.props?.max_capacity)||0;
-              const siloStart=parseFloat(silo.props?.start_inventory)||0;
-              h+=`<tr class="supsec-${invSeckey}">
-                <td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${accent};font-size:9px">${silo.name}
-                  <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${siloMax>0?'cap: '+siloMax.toLocaleString()+'t':''}</span></td>`;
-              months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-                const mt=mon.dates.reduce((s,ds)=>s+getInv(silo.id,ds,siloStart).value,0)/(mon.dates.length||1);
-                h+=`<td style="border-left:2px solid rgba(${rgba},.1);font-size:9px;color:${accent};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
-                if(!isCol) mon.dates.forEach(ds=>{
-                  const inv=getInv(silo.id,ds,siloStart); const v=inv.value;
-                  const lvlColor=invLevelColor(v,siloMax);
-                  const cls=inv.isActual?'cell-real':''; const wt=inv.isActual?'700':'400';
-                  const ttl=(siloMax>0?`${Math.round(v/siloMax*100)}% of ${siloMax.toLocaleString()}t${inv.isActual?' · actual':''}`:'')+' · click to set real inventory';
-                  h+=`<td class="sup-day-${mon.ym} ${cls}" title="${ttl}" onclick="showInventoryPopup('${silo.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?lvlColor:dimCol};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${wt};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+            _invPids.forEach(pid=>{
+              const pc=_pColor(pid);
+              _grSilosOf(pid).forEach(silo=>{
+                const siloMax=parseFloat(silo.props?.max_capacity)||0;
+                const siloStart=_grStartOf(silo);
+                h+=`<tr class="supsec-${invSeckey}">
+                  <td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${pc};font-size:9px">${_pChip(pid)}${_pNameOf(pid)}
+                    <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${silo.name}${siloMax>0?' · cap '+Math.round(siloMax).toLocaleString()+'t':''}</span></td>`;
+                months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+                  const mt=mon.dates.reduce((s,ds)=>s+getInv(silo.id,ds,siloStart).value,0)/(mon.dates.length||1);
+                  h+=`<td style="border-left:2px solid rgba(${rgba},.1);font-size:9px;color:${pc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                  if(!isCol) mon.dates.forEach(ds=>{
+                    const inv=getInv(silo.id,ds,siloStart); const v=inv.value;
+                    const lvlColor=invLevelColor(v,siloMax);
+                    const cls=inv.isActual?'cell-real':''; const wt=inv.isActual?'700':'400';
+                    const ttl=(siloMax>0?`${Math.round(v/siloMax*100)}% of ${Math.round(siloMax).toLocaleString()}t${inv.isActual?' · actual':''}`:'')+' · click to set real inventory';
+                    h+=`<td class="sup-day-${mon.ym} ${cls}" title="${ttl}" onclick="showInventoryPopup('${silo.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?lvlColor:dimCol};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${wt};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+                });
+                h+=`</tr>`;
               });
-              h+=`</tr>`;
             });
-            // TOTAL INVENTORY (rail terminals): available + cement still on rail (in
-            // transit + local yard) — the "potential" stock. White = summary row.
-            if(_railBerths.length){
-              const _totDay=ds=>_invDay(ds)+_railPendT(pid,ds);
-              h+=`<tr class="supsec-${invSeckey}">
-                <td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:var(--total,#e8e8e8);font-size:9px;font-weight:700">Total inventory
-                  <span style="color:var(--text-dim);font-size:8px;margin-left:4px;font-weight:400">available + in transit + rail yard + local yard</span></td>`;
-              months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-                const mt=mon.dates.reduce((s,ds)=>s+_totDay(ds),0)/(mon.dates.length||1);
-                h+=`<td style="border-left:2px solid rgba(${rgba},.1);font-size:9px;color:var(--total,#e8e8e8);font-weight:700;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
-                if(!isCol) mon.dates.forEach(ds=>{ const v=_totDay(ds);
-                  const ttl=`${Math.round(_invDay(ds)).toLocaleString()} t available + ${Math.round(_railTransT(pid,ds)).toLocaleString()} t in transit + ${Math.round(_railAtYardT(pid,ds)).toLocaleString()} t at rail yard + ${Math.round(_railYardT(pid,ds)).toLocaleString()} t at local yard`;
-                  h+=`<td class="sup-day-${mon.ym}" title="${ttl}" style="font-size:9px;color:${v>0?'var(--total,#e8e8e8)':dimCol};font-weight:700;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
-              });
-              h+=`</tr>`;
-            }
           }
 
-          // 3) REQUIREMENTS (this product's local demand)
-          if(_demProdIds.has(pid)){
+          // 3) PRODUCT REQUIREMENT (BULK|PACKED) — one row per product with local demand.
+          const _reqPids=gr.pids.filter(pid=>_demProdIds.has(pid));
+          if(_reqPids.length){
             const reqColor='#4da6ff';
-            h+=`<tr class="sup-sec-hdr" data-seckey="cementNeed" onclick="_supToggleSec('cementNeed')" style="cursor:pointer;background:rgba(77,166,255,.05);border-top:1px solid rgba(77,166,255,.3)">
-              <td title="Local demand" style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${reqColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('cementNeed')}</span> REQUIREMENTS <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>`;
+            const _reqDay=ds=>_reqPids.reduce((s,pid)=>s+totalNeed(pid,ds),0);
+            h+=`<tr class="sup-sec-hdr" data-seckey="${reqSeckey}" onclick="_supToggleSec('${reqSeckey}')" style="cursor:pointer;background:rgba(77,166,255,.05);border-top:1px solid rgba(77,166,255,.3)">
+              <td title="Local demand per product" style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${reqColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow(reqSeckey)}</span> PRODUCT REQUIREMENT ${suffix} <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>`;
             months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-              const mt=mon.dates.reduce((a,ds)=>a+totalNeed(pid,ds),0);
+              const mt=mon.dates.reduce((a,ds)=>a+_reqDay(ds),0);
               h+=`<td style="border-left:2px solid rgba(77,166,255,.2);font-size:9px;font-weight:700;color:${reqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
-              if(!isCol) mon.dates.forEach(ds=>{ const v=totalNeed(pid,ds);
-                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${v>0?reqColor:'rgba(77,166,255,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+              if(!isCol) mon.dates.forEach(ds=>{ const v=_reqDay(ds);
+                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${v>0?reqColor:'rgba(77,166,255,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
             });
             h+=`</tr>`;
+            _reqPids.forEach(pid=>{
+              h+=`<tr class="supsec-${reqSeckey}"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${reqColor};font-size:9px">${_pChip(pid)}${_pNameOf(pid)}</td>`;
+              months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+                const mt=mon.dates.reduce((a,ds)=>a+totalNeed(pid,ds),0);
+                h+=`<td style="border-left:2px solid rgba(77,166,255,.1);font-size:9px;color:${reqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                if(!isCol) mon.dates.forEach(ds=>{ const v=totalNeed(pid,ds);
+                  h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${v>0?reqColor:'rgba(77,166,255,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+              });
+              h+=`</tr>`;
+            });
           }
 
-          // 4) TRANSFERRED (this product): Transfer/Arrival + Unloading (dbl-click to set actual)
-          if(pidSilos.length||_termArr[pid]){
-            const rc='#b388ff', rcReal='#00d9a3';
-            h+=`<tr class="sup-sec-hdr" data-seckey="termUnload" onclick="_supToggleSec('termUnload')" style="cursor:pointer;background:rgba(179,136,255,.06);border-top:1px solid rgba(179,136,255,.4)">
-              <td title="Arrival + unloading · click a vessel cell for Forecast Campaign or Real value · t" style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${rc};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('termUnload')}</span> TRANSFERRED <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>${_blankCells()}</tr>`;
-            // Transfer / Arrival
-            h+=`<tr class="supsec-termUnload"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${rc};font-size:9px;font-weight:700">Transfer / Arrival</td>`;
-            months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-              const mt=mon.dates.reduce((s,ds)=>s+_arrDay(pid,ds),0);
-              h+=`<td style="border-left:2px solid rgba(179,136,255,.12);font-size:9px;font-weight:700;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
-              if(!isCol) mon.dates.forEach(ds=>{
-                const rv=_arrReal(pid,ds); const isReal=rv>0; const v=isReal?rv:_arrPlan(pid,ds);
-                const col=isReal?rcReal:(v>0?rc:'rgba(179,136,255,.25)');
-                h+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''}" ondblclick="event.stopPropagation();showTermRealPopup('transfer','${fac.id}','${pid}','${ds}')" title="${pname} arrival · ${Math.round(v).toLocaleString()} t${isReal?' · actual':' · planned'} — dbl-click to set actual" style="cursor:pointer;font-size:9px;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${isReal?'700':'400'};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+          // 4) TRANSFERS — split by arrival mode.
+          const rc='#b388ff', rcReal='#00d9a3';
+
+          // ⚓ VESSEL ARRIVALS — ONE line per product: the gantt bar / real-values row.
+          // (The old separate "Transfer / Arrival" tonnage line is gone; its content
+          // lives in the bar + tooltips + green actual numbers on the same row.)
+          const _vesPids=gr.pids.filter(pid=>{
+            if(!_shipBerths.length) return false;
+            if(_shipFedPids.has(pid)) return true;
+            return _shipBerths.some(b=>{ const hh=(r&&r.berthVesselHistory&&r.berthVesselHistory[b.id])||[]; return _berthProductTimeline(hh,_carries,pid).some(x=>x); });
+          });
+          if(_vesPids.length){
+            h+=`<tr class="sup-sec-hdr" data-seckey="termVessel" onclick="_supToggleSec('termVessel')" style="cursor:pointer;background:rgba(179,136,255,.06);border-top:1px solid rgba(179,136,255,.4)">
+              <td title="One row per product — hatched green = forecast unloading (vessel name on the bar), bold green number = actual tonnes, red hatch = at anchorage · click a cell for Forecast Campaign / Real value" style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${rc};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('termVessel')}</span> ⚓ VESSEL ARRIVALS ${suffix} <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>${_blankCells()}</tr>`;
+            _vesPids.forEach(pid=>{
+              const pname=_pNameOf(pid);
+              const _pidShipBerths=_shipBerths.filter(b=>{ const hh=(r&&r.berthVesselHistory&&r.berthVesselHistory[b.id])||[]; return _berthProductTimeline(hh,_carries,pid).some(x=>x); });
+              if(_pidShipBerths.length){
+                _pidShipBerths.forEach(berth=>{
+                  const hist=(r.berthVesselHistory[berth.id])||[];
+                  const tl=_berthProductTimeline(hist,_carries,pid);
+                  const realDaySet=new Set((DB.real_unloading_daily||[]).filter(u=>u.berth_id===berth.id&&u.product_id===pid&&u.unit!=='cars'&&(parseFloat(u.value)||0)>0).map(u=>u.date));
+                  h+=`<tr class="supsec-termVessel"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${_pColor(pid)};font-size:9px">${_pChip(pid)}${pname}<span style="font-size:7px;opacity:.55;margin-left:4px">${_shipBerths.length>1?berth.name:'UNLOADING'}</span></td>`;
+                  let _pk=null;
+                  months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+                    const unl=mon.dates.reduce((s,ds)=>{ const c=tl[allDates.indexOf(ds)]; return s+(c&&c.state==='unloading'?1:0); },0);
+                    h+=`<td style="border-left:2px solid rgba(179,136,255,.1);font-size:8px;color:${rc};text-align:center;padding:4px 6px;border-bottom:1px solid var(--border)">${unl>0?unl+'d':''}</td>`;
+                    if(!isCol) mon.dates.forEach(ds=>{
+                      const c=tl[allDates.indexOf(ds)]; const st=c&&c.state; const vessel=(c&&c.vessel)||''; const vesselCallId=(c&&c.vesselCallId)||'';
+                      // REAL unloading (any source — vessel popup, Daily Data form, or imported file)
+                      // shows the ACTUAL tonnage as a bold GREEN NUMBER on the same line.
+                      if(realDaySet.has(ds)){
+                        _pk='__real'; // break the run so the next forecast bar re-labels its vessel
+                        const rt=realUnloadTonnesBerthProdDay(berth.id,pid,ds);
+                        h+=`<td class="sup-day-${mon.ym} cell-real" title="${vessel?vessel+' — ':''}actual unloading · ${Math.round(rt).toLocaleString()} t — click to edit" onclick="event.stopPropagation();showVesselCampaignPopup('${berth.id}','${vesselCallId}','${ds}')" style="cursor:pointer;font-size:9px;font-weight:700;color:#00d9a3;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${Math.round(rt).toLocaleString()}</td>`;
+                        return;
+                      }
+                      const p=_vesselCellParts(st,false);
+                      const key=(st||'__i')+'|'+vessel; const runStart=!!st&&key!==_pk; _pk=key;
+                      const glyph=st==='anchorage'?' ⚓':'';
+                      const label=runStart?`<span style="position:absolute;left:4px;top:0;line-height:12px;white-space:nowrap;font-size:8px;font-weight:700;color:${st==='unloading'?'#0a3a2c':'#fff'};pointer-events:none">${vessel}${glyph}</span>`:'';
+                      const ttl=(st?(vessel+' — '+p.lbl+' — '):'')+(vesselCallId?'click to set Forecast Campaign or Real value':'no vessel scheduled');
+                      h+=`<td class="sup-day-${mon.ym}" title="${ttl}" onclick="event.stopPropagation();showVesselCampaignPopup('${berth.id}','${vesselCallId}','${ds}')" style="cursor:pointer;position:relative;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:12px;background:${p.bg}">${label}</div></td>`;
+                    });
+                  });
+                  h+=`</tr>`;
+                });
+              } else {
+                // No vessel timeline yet (e.g. simulation not run) — flat tonnage row so
+                // planned arrivals/unloading still show; dbl-click sets the actual.
+                const _fDay=ds=>{ const rv=_unlReal(pid,ds); if(rv>0) return rv; const up=_unlPlan(pid,ds); return up>0?up:_arrDay(pid,ds); };
+                h+=`<tr class="supsec-termVessel"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${_pColor(pid)};font-size:9px">${_pChip(pid)}${pname}<span style="font-size:7px;opacity:.55;margin-left:4px">ARRIVAL / UNLOADING</span></td>`;
+                months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+                  const mt=mon.dates.reduce((s,ds)=>s+_fDay(ds),0);
+                  h+=`<td style="border-left:2px solid rgba(179,136,255,.12);font-size:9px;font-weight:700;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                  if(!isCol) mon.dates.forEach(ds=>{
+                    const rv=_unlReal(pid,ds); const isReal=rv>0; const v=_fDay(ds);
+                    const col=isReal?rcReal:(v>0?rc:'rgba(179,136,255,.25)');
+                    h+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''}" ondblclick="event.stopPropagation();showTermRealPopup('unload','${fac.id}','${pid}','${ds}')" title="${pname} arrival/unloading · ${Math.round(v).toLocaleString()} t${isReal?' · actual':' · planned'} — dbl-click to set actual" style="cursor:pointer;font-size:9px;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${isReal?'700':'400'};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+                });
+                h+=`</tr>`;
+              }
             });
-            h+=`</tr>`;
-            // RAIL terminals: the rail pipeline for this product, one row per stage IN ORDER —
-            //   ⇢ In Transit    = dispatched (planned or real), scheduled arrival not reached
-            //   ▤ At Rail Yard  = arrived at the railroad's yard, awaiting spotting
-            //   ▣ At Local Yard = spotted at the terminal, unloading at the berth spec
-            // Click a cell to record how many cars were actually spotted to the local yard
-            // that day (all or a portion — the rest stays at the rail yard).
-            if(_railBerths.length){
+          }
+
+          // 🚂 RAIL ARRIVALS — per rail-fed product, the full pipeline IN ORDER:
+          //   ⇢ In Transit → ▤ At Rail Yard → ▣ At Local Yard → Unloading (cars).
+          // Click a pipeline cell to reconcile physical yard counts; dbl-click
+          // Unloading to set the actual.
+          const _railPids=gr.pids.filter(pid=>_railBerths.length&&_railFedPids.has(pid));
+          if(_railPids.length){
+            h+=`<tr class="sup-sec-hdr" data-seckey="termRail" onclick="_supToggleSec('termRail')" style="cursor:pointer;background:rgba(179,136,255,.06);border-top:1px solid rgba(179,136,255,.4)">
+              <td title="Rail pipeline per product — In Transit → At Rail Yard → At Local Yard → Unloading · cells are RAIL CARS · click to reconcile physical counts" style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${rc};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('termRail')}</span> 🚂 RAIL ARRIVALS ${suffix} <span style="opacity:.55;font-weight:400;font-size:7px;margin-left:3px;text-transform:none">cars @ ${Math.round(_railCarCap)}t</span> <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>${_blankCells()}</tr>`;
+            _railPids.forEach(pid=>{
+              const pname=_pNameOf(pid);
+              // Product sub-header inside the rail section
+              h+=`<tr class="supsec-termRail"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${_pColor(pid)};font-size:9px;font-weight:700">${_pChip(pid)}${pname}</td>${_blankCells()}</tr>`;
               const _countRec=(type,ds)=>(DB.real_rail_daily||[]).find(rr=>rr.type===type&&rr.date===ds&&rr.facility_id===fac.id&&(!rr.product_id||rr.product_id===pid));
               const _rowRail=(lbl,fn,stColor,stDesc,recType)=>{
-                let rr2=`<tr class="supsec-termUnload"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${stColor};font-size:9px">${lbl} <span style="font-size:7px;opacity:.55">RAIL CARS</span></td>`;
+                let rr2=`<tr class="supsec-termRail"><td style="${stickyLeft('var(--surface)',depth+4,'border-bottom:1px solid var(--border),')}color:${stColor};font-size:9px">${lbl} <span style="font-size:7px;opacity:.55">RAIL CARS</span></td>`;
                 months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
                   const lastDs=mon.dates[mon.dates.length-1];
                   const mc=Math.round(fn(pid,lastDs)/_railCarCap);
@@ -8395,74 +8493,71 @@ function _renderSupplyViewInner(wrap){
               _rowRail('⇢ In Transit',_railTransT,rc,'in transit (on rail)',null);
               _rowRail('▤ At Rail Yard',_railAtYardT,'#ff9433','at the rail yard, awaiting spotting','railyard_count');
               _rowRail('▣ At Local Yard',_railYardT,'#38bdf8','at the local yard, unloading at the berth spec','localyard_count');
-            }
-            // Unloading — SHIP berths: one vessel-status Gantt line per berth (all vessels of
-            // THIS product on the timeline: unloading / anchorage / waiting to dock). RAIL-fed
-            // products keep the flat tonnage row. dbl-click a cell still sets actual unloading.
-            const _pidShipBerths=_shipBerths.filter(b=>{ const hh=(r&&r.berthVesselHistory&&r.berthVesselHistory[b.id])||[]; return _berthProductTimeline(hh,_carries,pid).some(x=>x); });
-            if(_pidShipBerths.length){
-              _pidShipBerths.forEach(berth=>{
-                const hist=(r.berthVesselHistory[berth.id])||[];
-                const tl=_berthProductTimeline(hist,_carries,pid);
-                const realDaySet=new Set((DB.real_unloading_daily||[]).filter(u=>u.berth_id===berth.id&&u.product_id===pid&&u.unit!=='cars'&&(parseFloat(u.value)||0)>0).map(u=>u.date));
-                h+=`<tr class="supsec-termUnload"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${rc};font-size:9px">${berth.name} <span style="font-size:7px;opacity:.55">UNLOADING</span></td>`;
-                let _pk=null;
-                months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-                  const unl=mon.dates.reduce((s,ds)=>{ const c=tl[allDates.indexOf(ds)]; return s+(c&&c.state==='unloading'?1:0); },0);
-                  h+=`<td style="border-left:2px solid rgba(179,136,255,.1);font-size:8px;color:${rc};text-align:center;padding:4px 6px;border-bottom:1px solid var(--border)">${unl>0?unl+'d':''}</td>`;
-                  if(!isCol) mon.dates.forEach(ds=>{
-                    const c=tl[allDates.indexOf(ds)]; const st=c&&c.state; const vessel=(c&&c.vessel)||''; const vesselCallId=(c&&c.vesselCallId)||'';
-                    // REAL unloading (any source — vessel popup, Daily Data form, or imported file)
-                    // shows the ACTUAL tonnage as a bold GREEN NUMBER, not a bar (mirrors finish mills).
-                    if(realDaySet.has(ds)){
-                      _pk='__real'; // break the run so the next forecast bar re-labels its vessel
-                      const rt=realUnloadTonnesBerthProdDay(berth.id,pid,ds);
-                      h+=`<td class="sup-day-${mon.ym} cell-real" title="${vessel?vessel+' — ':''}actual unloading · ${Math.round(rt).toLocaleString()} t — click to edit" onclick="event.stopPropagation();showVesselCampaignPopup('${berth.id}','${vesselCallId}','${ds}')" style="cursor:pointer;font-size:9px;font-weight:700;color:#00d9a3;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${Math.round(rt).toLocaleString()}</td>`;
-                      return;
-                    }
-                    const p=_vesselCellParts(st,false);
-                    const key=(st||'__i')+'|'+vessel; const runStart=!!st&&key!==_pk; _pk=key;
-                    const glyph=st==='anchorage'?' ⚓':'';
-                    const label=runStart?`<span style="position:absolute;left:4px;top:0;line-height:12px;white-space:nowrap;font-size:8px;font-weight:700;color:${st==='unloading'?'#0a3a2c':'#fff'};pointer-events:none">${vessel}${glyph}</span>`:'';
-                    const ttl=(st?(vessel+' — '+p.lbl+' — '):'')+(vesselCallId?'click to set Forecast Campaign or Real value':'no vessel scheduled');
-                    h+=`<td class="sup-day-${mon.ym}" title="${ttl}" onclick="event.stopPropagation();showVesselCampaignPopup('${berth.id}','${vesselCallId}','${ds}')" style="cursor:pointer;position:relative;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:12px;background:${p.bg}">${label}</div></td>`;
-                  });
-                });
-                h+=`</tr>`;
-              });
-            } else {
-              // Rail terminals show unloading in RAIL CARS (like the pipeline rows); tonnage is
-              // in the tooltip. Truck/other terminals keep tonnes. The simulation always uses
-              // tonnes for inventory — cars are display only.
-              const _railU=_railBerths.length>0;
+              // Unloading (cars; tonnes in the tooltip) — dbl-click to set actual.
               const _uCars=(ds)=>{ const rv=_unlReal(pid,ds); if(rv>0){ const rc2=_unlRealCars(pid,ds); return rc2!=null?rc2:rv/_railCarCap; } return _unlPlan(pid,ds)/_railCarCap; };
-              h+=`<tr class="supsec-termUnload"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${rc};font-size:9px">Unloading${_railU?' <span style="font-size:7px;opacity:.55">RAIL CARS</span>':''}</td>`;
+              h+=`<tr class="supsec-termRail"><td style="${stickyLeft('var(--surface)',depth+4,'border-bottom:1px solid var(--border),')}color:${rc};font-size:9px">Unloading <span style="font-size:7px;opacity:.55">RAIL CARS</span></td>`;
               months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
                 const mtT=mon.dates.reduce((s,ds)=>{ const rv=_unlReal(pid,ds); return s+(rv>0?rv:_unlPlan(pid,ds)); },0);
-                const mDisp=_railU?Math.round(mon.dates.reduce((s,ds)=>s+_uCars(ds),0)):Math.round(mtT);
-                h+=`<td title="${_railU?Math.round(mtT).toLocaleString()+' t':''}" style="border-left:2px solid rgba(179,136,255,.1);font-size:9px;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mtT>0?mDisp.toLocaleString():''}</td>`;
+                const mDisp=Math.round(mon.dates.reduce((s,ds)=>s+_uCars(ds),0));
+                h+=`<td title="${Math.round(mtT).toLocaleString()+' t'}" style="border-left:2px solid rgba(179,136,255,.1);font-size:9px;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mtT>0?mDisp.toLocaleString():''}</td>`;
                 if(!isCol) mon.dates.forEach(ds=>{
                   const rv=_unlReal(pid,ds); const isReal=rv>0; const vT=isReal?rv:_unlPlan(pid,ds);
                   const col=isReal?rcReal:(vT>0?rc:'rgba(179,136,255,.25)');
-                  const disp=_railU?(vT>0?Math.round(_uCars(ds)):0):(vT>0?Math.round(vT):0);
-                  const ttl=_railU?`${pname} unloading · ${vT>0?Math.round(_uCars(ds)):0} cars (${Math.round(vT).toLocaleString()} t)${isReal?' · actual':' · planned'} — dbl-click to set actual`
-                    :`${pname} unloading · ${Math.round(vT).toLocaleString()} t${isReal?' · actual':' · planned'} — dbl-click to set actual`;
-                  h+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''}" ondblclick="event.stopPropagation();showTermRealPopup('unload','${fac.id}','${pid}','${ds}')" title="${ttl}" style="cursor:pointer;font-size:9px;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${isReal?'700':'400'};${tdSty(ds)}">${disp.toLocaleString?disp.toLocaleString():disp}</td>`; });
+                  const disp=vT>0?Math.round(_uCars(ds)):0;
+                  const ttl=`${pname} unloading · ${disp} cars (${Math.round(vT).toLocaleString()} t)${isReal?' · actual':' · planned'} — dbl-click to set actual`;
+                  h+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''}" ondblclick="event.stopPropagation();showTermRealPopup('unload','${fac.id}','${pid}','${ds}')" title="${ttl}" style="cursor:pointer;font-size:9px;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${isReal?'700':'400'};${tdSty(ds)}">${disp}</td>`; });
               });
               h+=`</tr>`;
-            }
-            // Destination truck receiving (UNLOAD) nodes for this product — beside ship unloading.
-            _facUnloadNodes.filter(n=>(_unloadNodeProds[n.id]||new Set()).has(pid))
-              .forEach(n=>{ h+=_renderTruckNode(n,'in',pid,'termUnload'); });
+            });
           }
 
-          // 5) TRUCK TRANSFERS (origin) — LOAD nodes dispatching this product from here.
-          const _pidLoadNodes=_facLoadNodes.filter(n=>(_loadNodeProds[n.id]||new Set()).has(pid));
-          if(_pidLoadNodes.length){
+          // OTHER ARRIVALS — safety net for products with scheduled arrivals
+          // (rail_movements / vessel_calls / real transfers) that no berth here
+          // classifies as vessel- or rail-fed: keep the flat arrival row so the
+          // tonnage never silently disappears. dbl-click sets the actual.
+          const _otherPids=gr.pids.filter(pid=>!_vesPids.includes(pid)&&!_railPids.includes(pid)
+            &&(_termArr[pid]||months.some(mon=>mon.dates.some(ds=>_arrReal(pid,ds)>0))));
+          if(_otherPids.length){
+            h+=`<tr class="sup-sec-hdr" data-seckey="termVessel" onclick="_supToggleSec('termVessel')" style="cursor:pointer;background:rgba(179,136,255,.06);border-top:1px solid rgba(179,136,255,.4)">
+              <td title="Scheduled arrivals with no ship/rail berth at this terminal — dbl-click a cell to set the actual" style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${rc};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('termVessel')}</span> OTHER ARRIVALS ${suffix}</td>${_blankCells()}</tr>`;
+            _otherPids.forEach(pid=>{
+              const pname=_pNameOf(pid);
+              h+=`<tr class="supsec-termVessel"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${_pColor(pid)};font-size:9px">${_pChip(pid)}${pname}<span style="font-size:7px;opacity:.55;margin-left:4px">TRANSFER / ARRIVAL</span></td>`;
+              months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+                const mt=mon.dates.reduce((s,ds)=>s+_arrDay(pid,ds),0);
+                h+=`<td style="border-left:2px solid rgba(179,136,255,.12);font-size:9px;font-weight:700;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                if(!isCol) mon.dates.forEach(ds=>{
+                  const rv=_arrReal(pid,ds); const isReal=rv>0; const v=isReal?rv:_arrPlan(pid,ds);
+                  const col=isReal?rcReal:(v>0?rc:'rgba(179,136,255,.25)');
+                  h+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''}" ondblclick="event.stopPropagation();showTermRealPopup('transfer','${fac.id}','${pid}','${ds}')" title="${pname} arrival · ${Math.round(v).toLocaleString()} t${isReal?' · actual':' · planned'} — dbl-click to set actual" style="cursor:pointer;font-size:9px;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${isReal?'700':'400'};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+              });
+              h+=`</tr>`;
+            });
+          }
+
+          // 🚚 TRUCK ARRIVALS — destination UNLOAD nodes, per product.
+          const _truckInPids=gr.pids.filter(pid=>_facUnloadNodes.some(n=>(_unloadNodeProds[n.id]||new Set()).has(pid)));
+          if(_truckInPids.length){
+            h+=`<tr class="sup-sec-hdr" data-seckey="truckIn" onclick="_supToggleSec('truckIn')" style="cursor:pointer;background:rgba(179,136,255,.06);border-top:1px solid rgba(179,136,255,.4)">
+              <td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${rc};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('truckIn')}</span> 🚚 TRUCK ARRIVALS ${suffix}</td>${_blankCells()}</tr>`;
+            _truckInPids.forEach(pid=>{
+              h+=`<tr class="supsec-truckIn"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${_pColor(pid)};font-size:9px;font-weight:700">${_pChip(pid)}${_pNameOf(pid)}</td>${_blankCells()}</tr>`;
+              _facUnloadNodes.filter(n=>(_unloadNodeProds[n.id]||new Set()).has(pid))
+                .forEach(n=>{ h+=_renderTruckNode(n,'in',pid,'truckIn'); });
+            });
+          }
+
+          // 5) TRUCK TRANSFERS (origin) — LOAD nodes dispatching from here, per product.
+          const _loadPids=gr.pids.filter(pid=>_facLoadNodes.some(n=>(_loadNodeProds[n.id]||new Set()).has(pid)));
+          if(_loadPids.length){
             const _tlKey='truckLoad';
             h+=`<tr class="sup-sec-hdr" data-seckey="${_tlKey}" onclick="_supToggleSec('${_tlKey}')" style="cursor:pointer;background:rgba(255,255,255,.03);border-top:1px solid var(--border2)">
-              <td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:var(--text);font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow(_tlKey)}</span> TRUCK TRANSFERS</td>${_blankCells()}</tr>`;
-            _pidLoadNodes.forEach(n=>{ h+=_renderTruckNode(n,'out',pid,_tlKey); });
+              <td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:var(--text);font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow(_tlKey)}</span> TRUCK TRANSFERS ${suffix}</td>${_blankCells()}</tr>`;
+            _loadPids.forEach(pid=>{
+              h+=`<tr class="supsec-${_tlKey}"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${_pColor(pid)};font-size:9px;font-weight:700">${_pChip(pid)}${_pNameOf(pid)}</td>${_blankCells()}</tr>`;
+              _facLoadNodes.filter(n=>(_loadNodeProds[n.id]||new Set()).has(pid))
+                .forEach(n=>{ h+=_renderTruckNode(n,'out',pid,_tlKey); });
+            });
           }
         });
 
