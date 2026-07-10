@@ -15768,6 +15768,7 @@ function importJSON(input){
       if(saved.simCfg) Object.assign(S.simCfg,saved.simCfg);
       if(saved.counter) S.elCounter=saved.counter;
       syncElCounter();
+      _healStaleProductRefs('import');
       autoSave();
       // Reset canvas and re-render everything
       S.simResults=null;
@@ -20140,6 +20141,7 @@ async function dsIngestTopology(buf, name){
     if(saved.simCfg) Object.assign(S.simCfg,saved.simCfg);
     if(saved.counter) S.elCounter=saved.counter;
     syncElCounter();
+    _healStaleProductRefs('topology');
 
     // Re-render all views
     if(S.view==='demand') renderDemandView();
@@ -21579,6 +21581,72 @@ function autoSaveNow(){
   if(typeof scScheduleWrite === 'function') scScheduleWrite();
 }
 
+// ── Stale product-reference healing ─────────────────────────────────────
+// Renaming/recreating a product leaves its OLD id behind in demand points,
+// vessel calls, movements and actuals (e.g. 'riz_slg' after the product
+// became 'riz_slg_blk'). On every load/import this pass:
+//   • REMAPS references whose old id unambiguously prefixes a current
+//     product's id/name (riz_slg → riz_slg_blk), deduping remapped
+//     demand-point entries;
+//   • REMOVES demand-point / vessel-call references that match no current
+//     product at all (true leftovers of a rename).
+// Deterministic, so every browser that loads the same file converges on the
+// same healed state (plays nicely with the shared-file merge layer).
+function _healStaleProductRefs(source){
+  try{
+    const ids=new Set((DB.products||[]).map(p=>p.id));
+    if(!ids.size) return;
+    const norm=s=>String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+    const cache={};
+    const canon=pid=>{
+      if(!pid||ids.has(pid)) return pid;
+      if(Object.prototype.hasOwnProperty.call(cache,pid)) return cache[pid];
+      const n=norm(pid);
+      const hit=n&&(DB.products||[]).find(p=>norm(p.id).startsWith(n)||norm(p.name).startsWith(n));
+      return (cache[pid]=hit?hit.id:null); // null → unresolvable leftover
+    };
+    let remapped=0, removed=0; const removedRefs=[];
+    (DB.demand_points||[]).forEach(dp=>{
+      if(!Array.isArray(dp.products)||!dp.products.length) return;
+      const seen=new Set(); const out=[];
+      dp.products.forEach(p=>{
+        const c=canon(p.product_id);
+        if(c===null){ removed++; removedRefs.push((dp.element_name||dp.id)+': '+p.product_id); return; }
+        if(c!==p.product_id){ p.product_id=c; remapped++; }
+        if(seen.has(c)){ removed++; return; } // duplicate after remap
+        seen.add(c); out.push(p);
+      });
+      if(out.length!==dp.products.length) dp.products=out;
+    });
+    (DB.vessel_calls||[]).forEach(vc=>{
+      const fix=o=>{ if(!o||!o.product_id) return; const c=canon(o.product_id);
+        if(c===null){ removedRefs.push((vc.name||vc.id)+': '+o.product_id); o.product_id=null; removed++; }
+        else if(c!==o.product_id){ o.product_id=c; remapped++; } };
+      fix(vc); (vc.legs||[]).forEach(fix);
+    });
+    // Remap-only (never remove) across the remaining product-bearing tables.
+    ['rail_movements','truck_movements','rail_loading_plan','production_schedule','production_campaigns',
+     'demand_substitutions','mill_policies','element_product_capacities','in_transit_inventory','recipes',
+     'real_transfers_daily','real_production_daily','real_inventory_daily','real_rail_daily',
+     'real_shipping_daily','real_unloading_daily'].forEach(t=>{
+      (DB[t]||[]).forEach(rw=>{
+        ['product_id','to_product_id','material_id'].forEach(k=>{
+          if(!rw[k]) return; const c=canon(rw[k]);
+          if(c&&c!==rw[k]){ rw[k]=c; remapped++; }
+        });
+      });
+    });
+    (DB.mill_product_focus||[]).forEach(rw=>{
+      if(!Array.isArray(rw.products)) return;
+      rw.products=rw.products.map(p=>{ const c=canon(p); if(c&&c!==p){ remapped++; return c; } return p; }).filter(Boolean);
+    });
+    if(remapped||removed){
+      console.warn(`_healStaleProductRefs${source?' ['+source+']':''}: remapped ${remapped} stale product reference(s), removed ${removed} leftover(s)`+(removedRefs.length?' — removed: '+removedRefs.join(' · '):''));
+      if(typeof statMsg==='function') statMsg(`Cleaned ${remapped+removed} stale reference(s) left over from renamed products`);
+    }
+  }catch(e){ console.warn('heal refs:', e); }
+}
+
 function loadSaved(){
   // ── Clear only truly-oversized legacy entries ───────────────────────────
   // Real data (shipments, production, actual demand_values) now belongs to the
@@ -21606,6 +21674,7 @@ function loadSaved(){
       syncElCounter();
       if(saved.simCfg) Object.assign(S.simCfg,saved.simCfg);
       if(saved.simResults) S.simResults = saved.simResults;  // Restore forecast results so all data visible on load
+      _healStaleProductRefs('localStorage');
 
       // Remember when this localStorage copy was saved, so the topology data
       // source can refuse to overwrite it with an OLDER file (stale-file guard).
@@ -21999,6 +22068,7 @@ function _mgApplyPayloadToApp(payload){
   if(payload.simCfg) Object.assign(S.simCfg, payload.simCfg);
   if(payload.counter) S.elCounter=payload.counter;
   if(typeof syncElCounter==='function') syncElCounter();
+  if(typeof _healStaleProductRefs==='function') _healStaleProductRefs('merge');
   if(payload.simResults) S.simResults=payload.simResults;
   try{
     if(S.view==='demand' && typeof renderDemandView==='function') renderDemandView();
@@ -22226,6 +22296,7 @@ async function scLoadScenario(id, opts){
   if(saved.simCfg) Object.assign(S.simCfg,saved.simCfg);
   if(saved.counter) S.elCounter=saved.counter;
   syncElCounter();
+  _healStaleProductRefs('scenario');
   if(saved.simResults) S.simResults=saved.simResults;  // Restore forecast results
   SC.activeId=id; m.lastOpened=new Date().toISOString();
   window._lsSavedAt=saved.savedAt||null;
