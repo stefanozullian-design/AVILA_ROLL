@@ -6858,7 +6858,13 @@ function _renderSupplyViewInner(wrap){
   const _supFacFilter=window._supView?.facId||document.getElementById('sup-fac-filter')?.value||'';
   const _supProdFilter=window._supView?.prodId||document.getElementById('sup-prod-filter')?.value||'';
   const allEls=getFacElements();
-  let prodEls=allEls.filter(e=>e.type==='kiln'||e.type==='finish_mill'||e.type==='packing_plant');
+  // Terminal-type facilities ALWAYS render via the terminal (category-first) path,
+  // even when they own production elements (e.g. a packing plant at PEV). Without
+  // this exclusion a terminal packer routes the whole facility into the plant tree,
+  // which has no vessel/rail arrival sections and filters inventory to cement only.
+  const _facTypeOf=id=>DB.facilities.find(f=>f.id===id)?.type;
+  let prodEls=allEls.filter(e=>(e.type==='kiln'||e.type==='finish_mill'||e.type==='packing_plant')
+    &&_facTypeOf(e.assigned_facility_id||e.facility_id||S.facility_id)!=='terminal');
   // Filter by selected facility (assigned_facility_id first)
   if(_supFacFilter){
     prodEls=prodEls.filter(e=>(e.assigned_facility_id||e.facility_id)===_supFacFilter);
@@ -6873,7 +6879,7 @@ function _renderSupplyViewInner(wrap){
   // ── Terminal facilities (receiving-only: silos + berths + demand, no mills) ──
   // Collected here so the empty-topology guard below also allows terminal-only
   // scenarios. Rendered as their own group AFTER the plant tree (see below).
-  const _termHasEls=f=>allEls.some(e=>(e.assigned_facility_id||e.facility_id)===f.id&&(e.type==='bulk_silo'||e.type==='demand_point'||e.type==='berth'));
+  const _termHasEls=f=>allEls.some(e=>(e.assigned_facility_id||e.facility_id)===f.id&&(e.type==='bulk_silo'||e.type==='packed_silo'||e.type==='demand_point'||e.type==='berth'||e.type==='packing_plant'));
   let _termFacs=DB.facilities.filter(f=>f.type==='terminal').filter(_termHasEls);
   if(_supFacFilter) _termFacs=_termFacs.filter(f=>f.id===_supFacFilter);
   if(_supProdFilter) _termFacs=_termFacs.filter(f=>{
@@ -6881,6 +6887,7 @@ function _renderSupplyViewInner(wrap){
     return fe.some(e=>{
       if(e.type==='bulk_silo'||e.type==='packed_silo') return getSiloProducts(e).includes(_supProdFilter);
       if(e.type==='demand_point') return (DB.demand_points.find(dp=>dp.element_id===e.id)?.products||[]).some(p=>p.product_id===_supProdFilter);
+      if(e.type==='packing_plant') return DB.element_product_capacities.some(c=>c.element_id===e.id&&c.product_id===_supProdFilter);
       return false; // a berth alone doesn't mean the terminal handles this product
     });
   });
@@ -8056,6 +8063,20 @@ function _renderSupplyViewInner(wrap){
       const _allFE=getFacElements();
       const _isCementPid=pid=>{ const pr=DB.products.find(x=>x.id===pid); return pr&&(pr.category==='cement_bulk'||pr.category==='cement_packed'); };
       const _isScmPid=pid=>{ const pr=DB.products.find(x=>x.id===pid); return pr&&pr.category==='additive'; };
+      // Data-resilience: vessel_calls / demand_points / transfers can carry product
+      // ids from an OLDER catalog (e.g. 'riz_slg' after the product became
+      // 'riz_slg_blk'). Resolve stale ids to the current catalog by normalized
+      // id/name prefix so no phantom product rows appear and their tonnage lands
+      // on the right row. Unresolvable ids pass through unchanged.
+      const _pnorm=s=>String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+      const _canonCache={};
+      const _canon=pid=>{
+        if(!pid||DB.products.some(p=>p.id===pid)) return pid;
+        if(Object.prototype.hasOwnProperty.call(_canonCache,pid)) return _canonCache[pid];
+        const n=_pnorm(pid);
+        const hit=n&&DB.products.find(p=>_pnorm(p.id).startsWith(n)||_pnorm(p.name).startsWith(n));
+        return (_canonCache[pid]=hit?hit.id:pid);
+      };
       // Unloading helpers — plan = simulated unload into silos; real = entered actuals.
       const _downSilosOf=berth=>_allFE.filter(e=>e.type==='bulk_silo'&&
         DB.connections.some(c=>c.from_element_id===berth.id&&c.to_element_id===e.id));
@@ -8206,7 +8227,7 @@ function _renderSupplyViewInner(wrap){
         const _railPendT=(pid,ds)=>_railTransT(pid,ds)+_railAtYardT(pid,ds)+_railYardT(pid,ds);
         const _placedRec=(pid,ds)=>(DB.real_rail_daily||[]).find(rr=>rr.type==='placed'&&rr.date===ds&&rr.facility_id===fac.id&&(!rr.product_id||rr.product_id===pid));
         const _vpSets=_vesselProductSets();
-        const _carries=(name,pid)=>!!(_vpSets[name]&&_vpSets[name].has(pid));
+        const _carries=(name,pid)=>!!(_vpSets[name]&&[..._vpSets[name]].some(x=>_canon(x)===pid));
 
         // ── PER-PRODUCT BLOCKS ─────────────────────────────────────────────
         // Each product handled at this terminal (CEMENT first, then SCM, then others)
@@ -8225,7 +8246,7 @@ function _renderSupplyViewInner(wrap){
 
         // Per-product arrival map (rail movements + vessel calls → tonnes/day).
         const _termArr={};
-        const _addArr=(pid,ds,t)=>{ if(!pid||!ds||!(t>0))return; (_termArr[pid]=_termArr[pid]||{}); _termArr[pid][ds]=(_termArr[pid][ds]||0)+t; };
+        const _addArr=(pid,ds,t)=>{ pid=_canon(pid); if(!pid||!ds||!(t>0))return; (_termArr[pid]=_termArr[pid]||{}); _termArr[pid][ds]=(_termArr[pid][ds]||0)+t; };
         const _dayToDs=day=>new Date(simStart.getTime()+(day-1)*864e5)._ymd();
         (DB.rail_movements||[]).filter(rm=>rm.to_facility_id===fac.id).forEach(rm=>{
           let depDay=null;
@@ -8246,7 +8267,7 @@ function _renderSupplyViewInner(wrap){
           }
         });
         const _arrPlan=(pid,ds)=>(_termArr[pid]&&_termArr[pid][ds])||0;
-        const _arrReal=(pid,ds)=>(DB.real_transfers_daily||[]).filter(t=>t.date===ds&&t.dest_facility_id===fac.id&&t.product_id===pid).reduce((s,t)=>s+(parseFloat(t.volume_t)||0),0);
+        const _arrReal=(pid,ds)=>(DB.real_transfers_daily||[]).filter(t=>t.date===ds&&t.dest_facility_id===fac.id&&_canon(t.product_id)===pid).reduce((s,t)=>s+(parseFloat(t.volume_t)||0),0);
         const _arrDay=(pid,ds)=>{ const rv=_arrReal(pid,ds); return rv>0?rv:_arrPlan(pid,ds); };
         const _prodSilos=pid=>allSilos.filter(s=>getSiloProducts(s).includes(pid));
         const _unlPlan=(pid,ds)=>{ const di=allDates.indexOf(ds); if(di<0)return 0; return _prodSilos(pid).reduce((s,si)=>s+((r&&r.siloUnloadHistory&&r.siloUnloadHistory[si.id]||[])[di]||0),0); };
@@ -8260,7 +8281,7 @@ function _renderSupplyViewInner(wrap){
           return rows.reduce((s,u)=>s+(u.cars!=null?(parseFloat(u.cars)||0)
             :u.unit==='cars'?(parseFloat(u.value)||0):((parseFloat(u.value)||0)/_railCarCap)),0);
         };
-        const totalNeed=(pid,ds)=>demandPoints.filter(dp=>dp.products?.some(p=>p.product_id===pid))
+        const totalNeed=(pid,ds)=>demandPoints.filter(dp=>dp.products?.some(p=>_canon(p.product_id)===pid))
           .reduce((s,dp)=>s+(_demandRate(dp.element_id,ds)||0),0);
 
         // ── CATEGORY-FIRST LAYOUT ──────────────────────────────────────────
@@ -8273,10 +8294,15 @@ function _renderSupplyViewInner(wrap){
         // TRUCK TRANSFERS (origin). Holistic: driven purely by topology, so
         // any current or future terminal picks this up automatically.
         const packedSilos=facEls.filter(e=>e.type==='packed_silo');
-        const _demProdIds=new Set(); demandPoints.forEach(dp=>(dp.products||[]).forEach(p=>_demProdIds.add(p.product_id)));
+        const _facPackers=facEls.filter(e=>e.type==='packing_plant');
+        const _demProdIds=new Set(); demandPoints.forEach(dp=>(dp.products||[]).forEach(p=>_demProdIds.add(_canon(p.product_id))));
         const _catRank=pid=>{ const c=DB.products.find(p=>p.id===pid)?.category; return (c==='cement_bulk'||c==='cement_packed')?0:c==='additive'?1:c==='clinker'?2:3; };
         const _pNameOf=pid=>DB.products.find(p=>p.id===pid)?.name||pid;
         const _packedPids=new Set(packedSilos.flatMap(getSiloProducts).filter(Boolean));
+        // Packer OUTPUT products belong to the PACKED block too, even before a
+        // packed silo is wired up, so the block (and its production gantt) shows.
+        _facPackers.forEach(pk=>DB.element_product_capacities.filter(c=>c.element_id===pk.id&&_isPackingRow(c))
+          .forEach(c=>{ if(c.product_id) _packedPids.add(c.product_id); }));
         // A product is PACKED when it is held in packed silos here, or — if not stored
         // here at all — when its catalog category is cement_packed. Everything else
         // (incl. SCM/additives) is BULK. Silo type wins over the product name.
@@ -8290,12 +8316,12 @@ function _renderSupplyViewInner(wrap){
         // Mode classification (topology-driven): which berth type feeds each product.
         const _railFedPids=new Set();
         _railBerths.forEach(b=>_downSilosOf(b).forEach(s=>getSiloProducts(s).forEach(p=>_railFedPids.add(p))));
-        (DB.rail_movements||[]).filter(rm=>rm.to_facility_id===fac.id&&rm.product_id).forEach(rm=>_railFedPids.add(rm.product_id));
+        (DB.rail_movements||[]).filter(rm=>rm.to_facility_id===fac.id&&rm.product_id).forEach(rm=>_railFedPids.add(_canon(rm.product_id)));
         const _shipFedPids=new Set();
         _shipBerths.forEach(b=>_downSilosOf(b).forEach(s=>getSiloProducts(s).forEach(p=>_shipFedPids.add(p))));
         (DB.vessel_calls||[]).forEach(vc=>{
           const legs=vc.legs&&vc.legs.length?vc.legs:[vc];
-          legs.forEach(l=>{ if(_berthIds.has(l.berth_element_id)&&(l.product_id||vc.product_id)) _shipFedPids.add(l.product_id||vc.product_id); });
+          legs.forEach(l=>{ if(_berthIds.has(l.berth_element_id)&&(l.product_id||vc.product_id)) _shipFedPids.add(_canon(l.product_id||vc.product_id)); });
         });
 
         const _pkSilosOf=pid=>packedSilos.filter(s=>getSiloProducts(s).includes(pid));
@@ -8392,6 +8418,95 @@ function _renderSupplyViewInner(wrap){
                 h+=`<td style="border-left:2px solid rgba(77,166,255,.1);font-size:9px;color:${reqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
                 if(!isCol) mon.dates.forEach(ds=>{ const v=totalNeed(pid,ds);
                   h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${v>0?reqColor:'rgba(77,166,255,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+              });
+              h+=`</tr>`;
+            });
+          }
+
+          // 3b) PACKING PLANT PRODUCTION — terminals can pack too (e.g. PEVPACK01).
+          // Same gantt component the plants use: real days show actual tonnage,
+          // forecast days a product-coloured bar; click opens the Campaign popup.
+          if(gr.key==='packed'&&_facPackers.length){
+            const packColor='#4da6ff';
+            const _packRated=el=>{ const ls=DB.element_product_capacities.filter(c=>c.element_id===el.id&&_isPackingRow(c));
+              return ls.length?Math.max(...ls.map(_packLineCapT)):0; };
+            h+=`<tr class="sup-sec-hdr" data-seckey="packProd" onclick="_supToggleSec('packProd')" style="cursor:pointer;background:rgba(77,166,255,.05);border-top:1px solid rgba(77,166,255,.3)">
+              <td title="Packed · t" style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${packColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('packProd')}</span> PACKING PLANT PRODUCTION <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>`;
+            months.forEach(mon=>{
+              const isCol=collapsed.has(mon.ym);
+              const mt=grpMonTotal(_facPackers,mon);
+              h+=`<td style="border-left:2px solid rgba(77,166,255,.2);font-size:9px;color:${packColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+              if(!isCol) mon.dates.forEach(ds=>{
+                const dayIdx=allDates.indexOf(ds);
+                const v=grpDailyTotal(_facPackers,ds,dayIdx);
+                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${packColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
+              });
+            });
+            h+=`</tr>`;
+            _facPackers.forEach(el=>{
+              const maintDays=maintSetFor(el.id);
+              const starvedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='starved').map(e=>allDates[e.day-1]).filter(Boolean));
+              const maxSingleCap=_packRated(el);
+              h+=`<tr class="supsec-packProd">
+                <td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${packColor};font-size:9px">${el.name}
+                  <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${maxSingleCap>0?maxSingleCap.toLocaleString()+' t/d rated':''}</span>
+                </td>`;
+              let _gPrev=null;
+              // Precompute contiguous production runs (same product) so a click pre-fills the campaign dialog.
+              const _runByDate={};
+              { let cs=null,cp=null,pd=null;
+                const _fin=(endDs)=>{ if(cs==null)return; let on=false; for(const d of allDates){ if(d===cs)on=true; if(on)_runByDate[d]={start:cs,end:endDs,product:cp}; if(d===endDs)break; } };
+                allDates.forEach(ds=>{
+                  const rr=maintDays.has(ds)?{capacity_tpd:0,product_id:null}:resolveProduction(el,ds,allDates.indexOf(ds),maintDays);
+                  const pid=(rr.capacity_tpd>0)?rr.product_id:null;
+                  if(pid&&pid===cp){ pd=ds; }
+                  else { if(cs!=null)_fin(pd); if(pid){cs=ds;cp=pid;pd=ds;}else{cs=null;cp=null;pd=null;} }
+                });
+                if(cs!=null)_fin(pd);
+              }
+              months.forEach(mon=>{
+                const isCol=collapsed.has(mon.ym);
+                const mt=mon.dates.reduce((s,ds)=>{
+                  const dayIdx=allDates.indexOf(ds);
+                  return s+resolveProduction(el,ds,dayIdx,maintDays).capacity_tpd;
+                },0);
+                h+=`<td style="border-left:2px solid rgba(77,166,255,.15);font-size:9px;color:${packColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                if(!isCol) mon.dates.forEach(ds=>{
+                  const dayIdx=allDates.indexOf(ds);
+                  const res=resolveProduction(el,ds,dayIdx,maintDays);
+                  const v=res.capacity_tpd;
+                  const prod=DB.products.find(p=>p.id===res.product_id);
+                  const isMaint=maintDays.has(ds);
+                  const isCamp=res.isCampaign;
+                  const isReal=!!res.isActual && v>0;
+                  const barColor=prod?((typeof spProdColor==='function')?spProdColor(prod.name||prod.id,false):(PRODUCT_CAT_COLORS[prod.category||'']||packColor)):packColor;
+                  const run=_runByDate[ds];
+                  const campArgs=run?`'${el.id}','${ds}','${run.start}','${run.end}','${run.product}'`:`'${el.id}','${ds}'`;
+                  const clickFn=isMaint?`openMaintenanceEventById('${maintDays.get(ds)}')`:`showCampaignPopup(${campArgs})`;
+                  if(isReal){
+                    _gPrev='__real';
+                    const _allP=resolveProductionAll(el,ds,dayIdx,maintDays);
+                    const _multi=_allP.length>1;
+                    const _tip=(_allP.length?_allP.map(p=>(DB.products.find(x=>x.id===p.product_id)?.name||p.product_id)+' '+Math.round(p.capacity_tpd).toLocaleString()+'t').join(' + '):(prod?.name||''))+' · actual';
+                    const _mk=_multi?`<span style="font-size:7px;color:var(--amber);vertical-align:super;margin-left:1px">▾${_allP.length}</span>`:'';
+                    h+=`<td class="sup-day-${mon.ym}" title="${_tip}" onclick="event.stopPropagation();${clickFn}" style="cursor:pointer;font-size:9px;color:${barColor};font-weight:700;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${Math.round(v).toLocaleString()}${_mk}</td>`;
+                    return;
+                  }
+                  // FORECAST / maintenance: Gantt bar — colour = product, label once per run.
+                  const runKey=isMaint?'__m':(v>0?(res.product_id||'__p'):'__idle');
+                  const isRunStart=(!isMaint&&v>0&&runKey!==_gPrev);
+                  _gPrev=runKey;
+                  const maintBg='repeating-linear-gradient(45deg,#5f5e5a,#5f5e5a 3px,#383836 3px,#383836 6px)';
+                  const starvedBg='repeating-linear-gradient(45deg,#5f5e5a,#5f5e5a 3px,#a32d2d 3px,#a32d2d 6px)';
+                  const isStarved=(!isMaint&&v<=0&&starvedDays.has(ds));
+                  const barBg=isMaint?maintBg:isStarved?starvedBg:(v>0?barColor:'transparent');
+                  const campMark=(isCamp&&!isMaint)?'border-top:2px solid #4ade80;':'';
+                  const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(isStarved?'⚠ Unplanned shortfall — packer could not run (no bulk cement)':(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name?`${prod.name} · ${Math.round(v)} t/d`:'Idle')));
+                  const lblName=(typeof spShortProd==='function')?spShortProd(prod?.name||''):(prod?.name||'');
+                  const label=isRunStart?`<span style="position:absolute;left:5px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:9px;font-weight:700;color:${_barTextColor(barColor)};pointer-events:none">${lblName} · ${Math.round(v).toLocaleString()}${isCamp?' 🔒':''}</span>`:'';
+                  const zpos=isRunStart?'position:relative;z-index:2;':'';
+                  h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="${zpos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barBg};${campMark}">${label}</div></td>`;
+                });
               });
               h+=`</tr>`;
             });
