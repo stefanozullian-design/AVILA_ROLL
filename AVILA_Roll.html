@@ -19555,6 +19555,7 @@ async function dsRefreshSlot(id, showErrors=true){
 
     // Dispatch to the right ingestion handler
     if(!window[slot.handler]) throw new Error(`Handler function ${slot.handler} not found`);
+    window._dsCurrentFileMod = fileModTime; // so dsIngestTopology can record the merge baseline
     const result = await window[slot.handler](buf, file.name);
     if(!result) throw new Error('Handler returned no result');
     DS.meta[id] = {
@@ -19653,7 +19654,7 @@ const _dsWritableSlots = {
     // Mirror localStorage's stamp so a successful write keeps file and localStorage
     // in lockstep; if a write fails, the file's stamp stays behind localStorage's.
     const payload = { DB: dbOut, counter: S.elCounter, simCfg: S.simCfg, savedAt: (window._lastSaveStamp || new Date().toISOString()) };
-    return { blob: new Blob([JSON.stringify(payload, null, 2)], {type:'application/json'}), mime:'application/json' };
+    return { payload, mime:'application/json' };
   },
 };
 
@@ -19672,6 +19673,10 @@ async function _dsEnsureWritePermission(handle){
 }
 
 // Actually perform the write — atomic via createWritable's temp-file swap.
+// Merge-aware for the topology slot: if the file changed on disk since we
+// last synced (a teammate saved via a shared drive), three-way-merge their
+// rows with ours instead of overwriting them. See the SHARED-FILE MERGE
+// ENGINE section for the algorithm.
 async function dsWriteSlot(id){
   const factory = _dsWritableSlots[id];
   const handle  = DS.handles[id];
@@ -19686,10 +19691,30 @@ async function dsWriteSlot(id){
       _dsWriteBlockedBanner(id, handle.name, 'file-edit permission was declined');
       return;
     }
-    const { blob } = factory();
+    const { payload } = factory();
+    const prep = await _mgPrepareWrite(handle, payload, id==='topology' ? _dsTopoBaseline : null);
+    if(prep.mode==='pull'){
+      // Teammate updated the file, we have nothing new — adopt theirs, skip the write.
+      _mgApplyPayloadToApp(prep.theirs);
+      _dsTopoBaseline = { text: prep.diskText, savedAt: prep.theirs.savedAt||null, fileMod: prep.fileMod };
+      DS.meta[id] = { ...(DS.meta[id]||{}), lastFileModified: prep.fileMod, _writeDenied: false, writeError: null };
+      dsSaveMeta();
+      dsRefreshConfigUI();
+      _dsHideWriteBlockedBanner();
+      if(prep.mergeInfo.remoteApplied) _mgShowMergeBanner(handle.name, prep.mergeInfo);
+      return;
+    }
+    let out = payload;
+    if(prep.mode==='merge'){ out = prep.mergeInfo.payload; _mgApplyPayloadToApp(out); }
+    const outText = JSON.stringify(out, null, 2);
     const writable = await handle.createWritable();
-    await writable.write(blob);
+    await writable.write(new Blob([outText], {type:'application/json'}));
     await writable.close();
+    if(id==='topology'){
+      let mod = null; try{ mod = (await handle.getFile()).lastModified; }catch(e){}
+      _dsTopoBaseline = { text: outText, savedAt: out.savedAt||null, fileMod: mod };
+      if(mod!=null) DS.meta[id] = { ...(DS.meta[id]||{}), lastFileModified: mod };
+    }
     DS.meta[id] = {
       ...(DS.meta[id]||{}),
       lastWritten: new Date().toISOString().slice(0,16).replace('T',' '),
@@ -19699,6 +19724,7 @@ async function dsWriteSlot(id){
     dsSaveMeta();
     dsRefreshConfigUI();
     _dsHideWriteBlockedBanner(); // write succeeded — clear any warning
+    if(prep.mode==='merge') _mgShowMergeBanner(handle.name, prep.mergeInfo);
   }catch(err){
     DS.meta[id] = { ...(DS.meta[id]||{}), writeError: err.message };
     dsSaveMeta();
@@ -19916,6 +19942,9 @@ async function dsIngestTopology(buf, name){
     if(typeof initRealDataFacilitySelector === 'function'){
       initRealDataFacilitySelector();
     }
+
+    // Record the just-loaded file as the merge baseline for future write-backs.
+    _dsTopoBaseline = { text, savedAt: saved.savedAt||null, fileMod: window._dsCurrentFileMod||null };
 
     const elCount = DB.elements?.length||0;
     return {rowCount:elCount, info:`Loaded ${elCount} elements`};
@@ -21565,6 +21594,7 @@ document.addEventListener('DOMContentLoaded',async()=>{
 
   initUiZoom();
   dsStartAutoCheck();
+  scStartRemoteWatch();
 
   // Attach canvas event listeners
   const canvas = document.getElementById('topo-canvas-wrap');
@@ -21597,12 +21627,203 @@ document.addEventListener('DOMContentLoaded',async()=>{
 });
 
 // ═══════════════════════════════════════════════════════════════════════
+// SHARED-FILE MERGE ENGINE — three-way merge for scenario / topology JSON
+// files that several people edit through a shared drive (SharePoint /
+// OneDrive / network folder). Instead of blindly overwriting the file with
+// this browser's copy (last-writer-wins, silently destroying everyone
+// else's edits), every write first re-reads the file: if someone else
+// wrote since we last synced, their changes are merged in row-by-row.
+//   base   = the file as this browser last read/wrote it (the baseline)
+//   ours   = this browser's current in-memory state
+//   theirs = the file as it is on disk right now
+// Per row (keyed by id / composite key): only-one-side-changed → that side
+// wins; both changed → OURS wins and the row is reported as a conflict.
+// ═══════════════════════════════════════════════════════════════════════
+
+// Baseline for the legacy Data-Source "topology" slot (the scenario system
+// keeps per-scenario baselines in SC.baselines / IndexedDB instead).
+let _dsTopoBaseline = null; // { text, savedAt, fileMod }
+
+// Composite row keys for tables whose rows have no single `id`. Everything
+// else falls back to `id`, then to the full row JSON (identity keying —
+// such rows merge as pure add/remove sets and can never conflict).
+const _MG_KEYS = {
+  demand_values:         r=>['dv', r.element_id, r.date, r.source, r.ship_to??''].join('|'),
+  real_shipments_daily:  r=>['rs', r.date, r.origin, r.product, r.customer_type, r.ship_to??''].join('|'),
+  real_production_daily: r=>['rp', r.date, r.facility_id, r.element_id, r.product_id].join('|'),
+  real_inventory_daily:  r=>['ri', r.date, r.facility_id, r.silo_id, r.product_id].join('|'),
+  real_transfers_daily:  r=>['rt', r.date, r.origin_facility_id, r.dest_facility_id, r.mode, r.product_id].join('|'),
+  real_rail_daily:       r=>['rr', r.date, r.facility_id, r.product_id, r.type].join('|'),
+  real_shipping_daily:   r=>['rsh', r.date, r.facility_id, r.product_id].join('|'),
+  real_unloading_daily:  r=>['ru', r.date, r.facility_id, r.berth_id, r.product_id, r.mode].join('|'),
+};
+function _mgStr(x){ return JSON.stringify(x===undefined?null:x); }
+function _mgRowKey(table, row){
+  const fn=_MG_KEYS[table];
+  if(fn){ try{ return fn(row); }catch(e){} }
+  return (row && row.id!=null) ? ('id|'+row.id) : ('row|'+_mgStr(row));
+}
+function _mgRowLabel(table, row, key){
+  const n = row && (row.name || row.element_name || row.reference || row.date);
+  return table.replace(/_/g,' ') + (n ? ': '+n : ': '+String(key).slice(0,40));
+}
+
+// Pick one of three versions of a value. side: same | ours | theirs | ours-conflict.
+function _mgPick3(b, o, t){
+  const so=_mgStr(o), st=_mgStr(t);
+  if(so===st) return {value:o, side:'same'};
+  const sb=_mgStr(b);
+  if(so===sb) return {value:t, side:'theirs'};   // only they changed it
+  if(st===sb) return {value:o, side:'ours'};     // only we changed it
+  return {value:o, side:'ours-conflict'};        // both changed — ours wins
+}
+
+// Three-way merge of one table (array of rows).
+function _mgMergeTable(table, baseArr, oursArr, theirsArr){
+  const bm=new Map(), om=new Map(), tm=new Map();
+  for(const r of baseArr)   bm.set(_mgRowKey(table,r), r);
+  for(const r of oursArr)   om.set(_mgRowKey(table,r), r);
+  for(const r of theirsArr) tm.set(_mgRowKey(table,r), r);
+  const rows=[], conflicts=[]; let remoteApplied=0, localApplied=0;
+  for(const [k,orow] of om){
+    if(tm.has(k)){
+      const trow=tm.get(k), so=_mgStr(orow), st=_mgStr(trow);
+      if(so===st){ rows.push(orow); continue; }
+      const sb=bm.has(k)?_mgStr(bm.get(k)):null;
+      if(sb!==null && so===sb){ rows.push(trow); remoteApplied++; continue; }  // they edited it
+      if(sb!==null && st===sb){ rows.push(orow); localApplied++;  continue; }  // we edited it
+      rows.push(orow); localApplied++;                                          // both edited — ours wins
+      conflicts.push({table, key:k, label:_mgRowLabel(table,orow,k)});
+    }else if(!bm.has(k)){
+      rows.push(orow); localApplied++;                                          // we added it
+    }else if(_mgStr(orow)===_mgStr(bm.get(k))){
+      remoteApplied++;                                                          // they deleted an untouched row
+    }else{
+      rows.push(orow); localApplied++;                                          // they deleted, we edited — keep ours
+      conflicts.push({table, key:k, label:_mgRowLabel(table,orow,k), kind:'remote-deleted'});
+    }
+  }
+  for(const [k,trow] of tm){
+    if(om.has(k)) continue;
+    if(!bm.has(k)){ rows.push(trow); remoteApplied++; continue; }               // they added it
+    if(_mgStr(trow)===_mgStr(bm.get(k))){ localApplied++; continue; }           // we deleted an untouched row
+    rows.push(trow); remoteApplied++;                                           // we deleted, they edited — restore theirs
+    conflicts.push({table, key:k, label:_mgRowLabel(table,trow,k), kind:'local-deleted'});
+  }
+  return {rows, conflicts, remoteApplied, localApplied};
+}
+
+// Field-level three-way merge for small flat objects (simCfg).
+function _mgMergeFlat(b, o, t){
+  const out={}; let localApplied=0, remoteApplied=0;
+  for(const k of new Set([...Object.keys(o), ...Object.keys(t)])){
+    const p=_mgPick3(b?b[k]:undefined, o[k], t[k]);
+    if(p.value!==undefined) out[k]=p.value;
+    if(p.side==='ours'||p.side==='ours-conflict') localApplied++;
+    else if(p.side==='theirs') remoteApplied++;
+  }
+  return {value:out, localApplied, remoteApplied};
+}
+
+// Merge whole payloads ({DB, counter, simCfg, simResults?, savedAt}).
+function _mgMergePayload(base, ours, theirs){
+  const conflicts=[]; let remoteApplied=0, localApplied=0;
+  const mergedDB={};
+  const tables=new Set([...Object.keys(ours.DB||{}), ...Object.keys(theirs.DB||{})]);
+  for(const t of tables){
+    const o=ours.DB?ours.DB[t]:undefined, th=theirs.DB?theirs.DB[t]:undefined, b=base.DB?base.DB[t]:undefined;
+    if(Array.isArray(o)||Array.isArray(th)){
+      const r=_mgMergeTable(t, Array.isArray(b)?b:[], Array.isArray(o)?o:[], Array.isArray(th)?th:[]);
+      mergedDB[t]=r.rows; remoteApplied+=r.remoteApplied; localApplied+=r.localApplied;
+      for(const c of r.conflicts) conflicts.push(c);
+    }else{
+      const p=_mgPick3(b, o, th);
+      if(p.value!==undefined) mergedDB[t]=p.value;
+      if(p.side==='ours'||p.side==='ours-conflict') localApplied++;
+      else if(p.side==='theirs') remoteApplied++;
+    }
+  }
+  const cfg=_mgMergeFlat(base.simCfg||{}, ours.simCfg||{}, theirs.simCfg||{});
+  localApplied+=cfg.localApplied; remoteApplied+=cfg.remoteApplied;
+  const payload={
+    DB: mergedDB,
+    counter: Math.max(Number(ours.counter)||0, Number(theirs.counter)||0) || ours.counter || theirs.counter || 0,
+    simCfg: cfg.value,
+    savedAt: new Date().toISOString(),
+  };
+  // simResults are regenerated on every simulation run — carry one copy along
+  // (prefer whichever side changed) but never let them force a write by themselves.
+  const sr=_mgPick3(base.simResults??null, ours.simResults??null, theirs.simResults??null);
+  if(sr.value!=null) payload.simResults=sr.value;
+  return {payload, conflicts, remoteApplied, localApplied};
+}
+
+// Decide how a pending write should hit the disk.
+//   plain — file untouched since baseline (or no baseline / unreadable / not a
+//           valid payload): write ours as-is, exactly as before this engine.
+//   pull  — file changed but we have nothing new: adopt the disk copy, skip the
+//           write entirely (prevents two idle browsers ping-ponging rewrites).
+//   merge — both sides moved: write the three-way merge.
+async function _mgPrepareWrite(handle, ours, baseline){
+  if(!baseline || !baseline.text) return {mode:'plain'};
+  let f=null;
+  try{ f=await handle.getFile(); }catch(e){ return {mode:'plain'}; }
+  if(baseline.fileMod!=null && f.lastModified===baseline.fileMod) return {mode:'plain'};
+  let diskText=null;
+  try{ diskText=new TextDecoder().decode(await f.arrayBuffer()); }catch(e){ return {mode:'plain'}; }
+  if(diskText===baseline.text) return {mode:'plain'};
+  let theirs=null; try{ theirs=JSON.parse(diskText); }catch(e){}
+  if(!theirs || !theirs.DB) return {mode:'plain'};
+  let base=null; try{ base=JSON.parse(baseline.text); }catch(e){}
+  if(!base || !base.DB) return {mode:'plain'};
+  const mergeInfo=_mgMergePayload(base, ours, theirs);
+  if(mergeInfo.localApplied===0 && mergeInfo.conflicts.length===0)
+    return {mode:'pull', theirs, diskText, fileMod:f.lastModified, mergeInfo};
+  return {mode:'merge', mergeInfo};
+}
+
+// Push a (merged / pulled) payload into the live app + light re-render — the
+// same set dsIngestTopology refreshes, safe to run mid-session.
+function _mgApplyPayloadToApp(payload){
+  Object.keys(DB).forEach(t=>{ if(payload.DB[t]!==undefined) DB[t]=payload.DB[t]; });
+  if(payload.simCfg) Object.assign(S.simCfg, payload.simCfg);
+  if(payload.counter) S.elCounter=payload.counter;
+  if(typeof syncElCounter==='function') syncElCounter();
+  if(payload.simResults) S.simResults=payload.simResults;
+  try{
+    if(S.view==='demand' && typeof renderDemandView==='function') renderDemandView();
+    if(typeof renderDtree==='function') renderDtree(S.simResults);
+    if(typeof updateStatusBar==='function') updateStatusBar();
+    if(typeof renderLocationTree==='function') renderLocationTree();
+    if(typeof updateNavFacilities==='function') updateNavFacilities();
+    if(typeof initRealDataFacilitySelector==='function') initRealDataFacilitySelector();
+  }catch(e){ console.warn('merge re-render:', e); }
+}
+
+// Green banner = clean sync (auto-dismisses); amber = conflicts (stays up).
+function _mgShowMergeBanner(fileName, info){
+  const conflicts=info.conflicts||[];
+  const isConflict=conflicts.length>0;
+  let b=document.getElementById('mg-merge-banner');
+  if(!b){ b=document.createElement('div'); b.id='mg-merge-banner'; document.body.appendChild(b); }
+  b.style.cssText='position:fixed;top:0;left:0;right:0;z-index:99999;font-family:var(--mono),monospace;font-size:11px;padding:8px 14px;display:flex;align-items:center;gap:12px;box-shadow:0 2px 14px rgba(0,0,0,.55);'+
+    (isConflict?'background:#3a2a0d;border-bottom:2px solid #ffb830;color:#ffe8bd':'background:#0d3a2a;border-bottom:2px solid #00ff9d;color:#c8ffe8');
+  const names=conflicts.slice(0,4).map(c=>c.label).join(' · ')+(conflicts.length>4?` · +${conflicts.length-4} more`:'');
+  b.innerHTML=`<span style="font-size:15px;line-height:1">${isConflict?'⚠':'⇄'}</span>
+    <span style="flex:1;line-height:1.35">${isConflict
+      ? `Merged changes from <b>${fileName||'the shared file'}</b> — <b>${conflicts.length} conflict${conflicts.length>1?'s':''}</b> where both you and a teammate edited the same item: ${names}. <b>Your version was kept</b> — please double-check ${conflicts.length>1?'these items':'this item'}.`
+      : `Synced with <b>${fileName||'the shared file'}</b>: pulled ${info.remoteApplied} change${info.remoteApplied!==1?'s':''} made by a teammate${info.localApplied?` and saved ${info.localApplied} of yours`:''}.`}</span>
+    <button onclick="document.getElementById('mg-merge-banner')?.remove()" style="background:transparent;color:inherit;border:1px solid currentColor;padding:6px 11px;font-family:inherit;font-size:10px;cursor:pointer;border-radius:3px">Dismiss</button>`;
+  if(!isConflict){ clearTimeout(window._mgBannerT); window._mgBannerT=setTimeout(()=>{document.getElementById('mg-merge-banner')?.remove();}, 15000); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // SCENARIOS — each scenario is its own JSON file on disk (File System Access
 // API). Handles persist in IndexedDB; metadata (name, colour) in localStorage.
 // Replaces the old single "Topology JSON" Data Source: the active scenario IS
 // the topology source of truth, and autoSave mirrors edits into its file.
 // ═══════════════════════════════════════════════════════════════════════
-const SC = { meta:{}, handles:{}, activeId:null, _writeTimer:null };
+const SC = { meta:{}, handles:{}, baselines:{}, activeId:null, _writeTimer:null, _writeBusy:false, _writeQueued:false };
 const SC_COLORS = ['#4da6ff','#ff3d5a','#ffb830','#00ff9d','#a78bfa','#f472b6','#2dd4bf','#fb923c'];
 // Only truly regenerated-on-run tables are transient. Real data (production,
 // shipments, etc.) BELONGS to the app once imported/entered — it is saved with
@@ -21617,8 +21838,12 @@ let _scDB=null;
 function scOpenIDB(){
   return new Promise((res,rej)=>{
     if(_scDB){res(_scDB);return;}
-    const req=indexedDB.open('avila_scenarios',1);
-    req.onupgradeneeded=e=>e.target.result.createObjectStore('handles');
+    const req=indexedDB.open('avila_scenarios',2);
+    req.onupgradeneeded=e=>{
+      const d=e.target.result;
+      if(!d.objectStoreNames.contains('handles'))   d.createObjectStore('handles');
+      if(!d.objectStoreNames.contains('baselines')) d.createObjectStore('baselines');
+    };
     req.onsuccess=e=>{_scDB=e.target.result;res(_scDB);};
     req.onerror=()=>rej(req.error);
   });
@@ -21626,6 +21851,22 @@ function scOpenIDB(){
 async function scSaveHandle(id,h){ try{const db=await scOpenIDB();await new Promise((r,j)=>{const tx=db.transaction('handles','readwrite');tx.objectStore('handles').put(h,id);tx.oncomplete=r;tx.onerror=j;});}catch(e){console.warn('SC handle save',e);} }
 async function scLoadHandle(id){ try{const db=await scOpenIDB();return await new Promise(r=>{const tx=db.transaction('handles','readonly');const q=tx.objectStore('handles').get(id);q.onsuccess=()=>r(q.result||null);q.onerror=()=>r(null);});}catch(e){return null;} }
 async function scDeleteHandleIDB(id){ try{const db=await scOpenIDB();await new Promise(r=>{const tx=db.transaction('handles','readwrite');tx.objectStore('handles').delete(id);tx.oncomplete=r;tx.onerror=r;});}catch(e){} }
+
+// ── Merge baselines — the file state this browser last synced with ──
+// Persisted in IndexedDB so the three-way merge survives a reload; without a
+// baseline the app falls back to the old timestamp guard (binary keep/replace).
+async function scSaveBaseline(id, text, savedAt, fileMod){
+  SC.baselines[id]={text, savedAt:savedAt||null, fileMod:fileMod??null};
+  try{ const db=await scOpenIDB(); await new Promise((r,j)=>{const tx=db.transaction('baselines','readwrite');tx.objectStore('baselines').put(SC.baselines[id],id);tx.oncomplete=r;tx.onerror=j;}); }catch(e){ console.warn('SC baseline save',e); }
+}
+async function scLoadBaseline(id){
+  if(SC.baselines[id]) return SC.baselines[id];
+  try{ const db=await scOpenIDB(); const v=await new Promise(r=>{const tx=db.transaction('baselines','readonly');const q=tx.objectStore('baselines').get(id);q.onsuccess=()=>r(q.result||null);q.onerror=()=>r(null);}); if(v) SC.baselines[id]=v; return v; }catch(e){ return null; }
+}
+async function scDeleteBaseline(id){
+  delete SC.baselines[id];
+  try{ const db=await scOpenIDB(); await new Promise(r=>{const tx=db.transaction('baselines','readwrite');tx.objectStore('baselines').delete(id);tx.oncomplete=r;tx.onerror=r;}); }catch(e){}
+}
 
 // ── Metadata ──
 function scSaveMeta(){ try{ localStorage.setItem('avila_scenarios', JSON.stringify({meta:SC.meta, activeId:SC.activeId})); }catch(e){console.warn('SC meta save',e);} }
@@ -21645,17 +21886,38 @@ function scBuildPayload(){
 function scSetSaveStatus(state){ const d=document.getElementById('sc-dot'); if(!d) return; d.className='sc-dot'+(state==='saving'?' saving':state==='error'?' error':state==='none'?' none':''); }
 
 // ── Write active scenario to disk ──
+// Merge-aware: before writing, re-reads the file — if a teammate saved a
+// different version since our last sync (shared SharePoint/OneDrive folder),
+// their rows are three-way-merged with ours instead of being overwritten.
 async function scWriteActive(id){
   id=id||SC.activeId; const m=SC.meta[id]; const handle=SC.handles[id];
   if(!m||!handle){ scSetSaveStatus('none'); return; }
+  if(SC._writeBusy){ SC._writeQueued=true; return; }  // a sync is already running — coalesce
+  SC._writeBusy=true;
   try{
     const granted=await _dsEnsureWritePermission(handle);
     if(!granted){ scSetSaveStatus('error'); _dsWriteBlockedBanner('scenario:'+id, m.fileName, 'file-edit permission was declined'); return; }
-    const blob=new Blob([JSON.stringify(scBuildPayload(),null,2)],{type:'application/json'});
-    const w=await handle.createWritable(); await w.write(blob); await w.close();
+    const ours=scBuildPayload();
+    const prep=await _mgPrepareWrite(handle, ours, await scLoadBaseline(id));
+    if(prep.mode==='pull'){
+      // Teammate updated the file and we have nothing new — adopt their copy, skip the write.
+      _mgApplyPayloadToApp(prep.theirs);
+      scSaveBaseline(id, prep.diskText, prep.theirs.savedAt||null, prep.fileMod);
+      scSetSaveStatus('saved'); _dsHideWriteBlockedBanner(); scRenderDropdown();
+      if(prep.mergeInfo.remoteApplied) _mgShowMergeBanner(m.fileName, prep.mergeInfo);
+      return;
+    }
+    let out=ours;
+    if(prep.mode==='merge'){ out=prep.mergeInfo.payload; _mgApplyPayloadToApp(out); }
+    const outText=JSON.stringify(out,null,2);
+    const w=await handle.createWritable(); await w.write(new Blob([outText],{type:'application/json'})); await w.close();
+    let mod=null; try{ mod=(await handle.getFile()).lastModified; }catch(e){}
+    scSaveBaseline(id, outText, out.savedAt||null, mod);
     m.lastSaved=new Date().toISOString(); scSaveMeta();
     scSetSaveStatus('saved'); _dsHideWriteBlockedBanner(); scRenderDropdown();
+    if(prep.mode==='merge') _mgShowMergeBanner(m.fileName, prep.mergeInfo);
   }catch(err){ scSetSaveStatus('error'); _dsWriteBlockedBanner('scenario:'+id, m.fileName, 'write failed — '+err.message); console.warn('SC write',err); }
+  finally{ SC._writeBusy=false; if(SC._writeQueued){ SC._writeQueued=false; scScheduleWrite(); } }
 }
 function scScheduleWrite(){
   if(!scActive()||!SC.handles[SC.activeId]) return; // no active scenario → localStorage only
@@ -21701,21 +21963,54 @@ async function scLoadScenario(id, opts){
   let perm=await handle.queryPermission({mode:'read'});
   if(perm!=='granted') perm=await handle.requestPermission({mode:'read'});
   if(perm!=='granted'){ statMsg('Cannot read "'+m.name+'" — file access denied'); return false; }
-  let saved;
-  try{ const f=await handle.getFile(); saved=JSON.parse(new TextDecoder().decode(await f.arrayBuffer())); }
+  let saved, text, fileMod=null;
+  try{ const f=await handle.getFile(); fileMod=f.lastModified; text=new TextDecoder().decode(await f.arrayBuffer()); saved=JSON.parse(text); }
   catch(e){ statMsg('Could not read "'+m.name+'": '+e.message); return false; }
   if(!saved.DB){ statMsg('"'+m.name+'" is not a valid scenario file'); return false; }
 
   // Startup safety net: when auto-opening the SAME scenario that's cached in
-  // localStorage, refuse to let an OLDER file overwrite newer local edits.
+  // localStorage, don't let one copy silently erase the other. With a merge
+  // baseline available we can tell WHO moved since the last sync:
+  //   only this browser → keep local (file is behind);
+  //   only the file     → adopt the file (a teammate saved);
+  //   both              → three-way merge, then write the result back.
   if(opts.guard && SC.activeId===id){
     const fileStamp=saved.savedAt||null, lsStamp=window._lsSavedAt||null;
-    if(lsStamp && (!fileStamp || lsStamp>fileStamp)){
-      console.warn('scLoadScenario: local cache ('+lsStamp+') newer than file ('+(fileStamp||'none')+') — keeping local');
+    const baseline=await scLoadBaseline(id);
+    const localChanged = baseline
+      ? !!(lsStamp && baseline.savedAt && lsStamp>baseline.savedAt)
+      : !!(lsStamp && (!fileStamp || lsStamp>fileStamp)); // no baseline → old stamp heuristic
+    const remoteChanged = baseline ? (text!==baseline.text) : false;
+    if(baseline && localChanged && remoteChanged){
+      let base=null; try{ base=JSON.parse(baseline.text); }catch(e){}
+      if(base && base.DB){
+        const res=_mgMergePayload(base, scBuildPayload(), saved);
+        _mgApplyPayloadToApp(res.payload);
+        m.lastOpened=new Date().toISOString(); scSaveMeta();
+        const outText=JSON.stringify(res.payload,null,2);
+        let wrote=false;
+        try{
+          if(await _dsEnsureWritePermission(handle)){
+            const w=await handle.createWritable(); await w.write(new Blob([outText],{type:'application/json'})); await w.close();
+            wrote=true;
+          }
+        }catch(e){ console.warn('SC merge write',e); }
+        let mod=fileMod; try{ mod=(await handle.getFile()).lastModified; }catch(e){}
+        if(wrote) scSaveBaseline(id, outText, res.payload.savedAt, mod);
+        window._lsSavedAt=res.payload.savedAt;
+        scSetSaveStatus(wrote?'saved':'error');
+        _mgShowMergeBanner(m.fileName, res);
+        scAfterLoad();
+        return true;
+      }
+    }
+    if(localChanged && !remoteChanged){
+      console.warn('scLoadScenario: local cache ('+lsStamp+') newer than file — keeping local');
       _dsWriteBlockedBanner('scenario:'+id, m.fileName, 'the file is OLDER than your local edits — the last save didn\'t reach it');
       m.lastOpened=new Date().toISOString(); scSaveMeta(); scScheduleWrite(); scAfterLoad();
       return true;
     }
+    // !localChanged → fall through: the file is the freshest copy, adopt it.
   }
   Object.keys(DB).forEach(t=>{ if(saved.DB[t]!==undefined) DB[t]=saved.DB[t]; });
   if(saved.simCfg) Object.assign(S.simCfg,saved.simCfg);
@@ -21724,8 +22019,37 @@ async function scLoadScenario(id, opts){
   if(saved.simResults) S.simResults=saved.simResults;  // Restore forecast results
   SC.activeId=id; m.lastOpened=new Date().toISOString();
   window._lsSavedAt=saved.savedAt||null;
+  scSaveBaseline(id, text, saved.savedAt||null, fileMod);
   scSaveMeta(); scSetSaveStatus('saved'); scAfterLoad();
   return true;
+}
+
+// ── Background watch for teammate edits to the ACTIVE scenario file ──
+// Every few minutes (and whenever the tab regains focus), stat the file; if a
+// teammate wrote a different version, run the merge-aware save — with no local
+// edits it simply pulls their changes into the app (no write), with local
+// edits it writes the three-way merge.
+let _scWatchTimer=null;
+const SC_WATCH_INTERVAL_MS=3*60*1000;
+function scStartRemoteWatch(){
+  if(_scWatchTimer) return; // idempotent
+  _scWatchTimer=setInterval(scCheckRemoteChange, SC_WATCH_INTERVAL_MS);
+  document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) scCheckRemoteChange(); });
+  window._scWatchArmed=true; // observable from console for debugging
+}
+async function scCheckRemoteChange(){
+  const id=SC.activeId; if(!id || SC._writeBusy) return;
+  const handle=SC.handles[id]; if(!handle) return;
+  const baseline=await scLoadBaseline(id); if(!baseline) return;
+  try{
+    // Silent poll — never surface a permission prompt out of nowhere.
+    const perm=await handle.queryPermission({mode:'read'}); if(perm!=='granted') return;
+    const f=await handle.getFile();
+    if(baseline.fileMod!=null && f.lastModified===baseline.fileMod) return;
+    const text=new TextDecoder().decode(await f.arrayBuffer());
+    if(text===baseline.text){ scSaveBaseline(id, baseline.text, baseline.savedAt, f.lastModified); return; }
+    await scWriteActive(id); // merge-aware: pulls their changes; writes only if we also have some
+  }catch(e){ /* transient (file syncing, locked) — next tick retries */ }
 }
 
 // ── Create / duplicate / open / switch / rename / delete ──
@@ -21762,7 +22086,7 @@ function scRename(id){ const m=SC.meta[id]; if(!m) return; const nn=prompt('Rena
 async function scDelete(id){
   const m=SC.meta[id]; if(!m) return;
   if(!confirm('Remove scenario "'+m.name+'" from the list?\n\nThe .json file on disk is NOT deleted — you can re-open it later.')) return;
-  delete SC.meta[id]; delete SC.handles[id]; await scDeleteHandleIDB(id);
+  delete SC.meta[id]; delete SC.handles[id]; await scDeleteHandleIDB(id); await scDeleteBaseline(id);
   if(localStorage.getItem('avila_sc_autoopen')===id) localStorage.removeItem('avila_sc_autoopen');
   const wasActive=(SC.activeId===id); if(wasActive) SC.activeId=null;
   scSaveMeta(); scUpdatePill(); scRenderDropdown();
