@@ -6022,13 +6022,19 @@ function saveProduct(){
   const material_code=document.getElementById('pm-code')?.value?.trim()||'';
   const desc=document.getElementById('pm-desc')?.value||'';
   const category=document.getElementById('pm-cat')?.value||'cement_bulk';
-  // Generate stable id from name
+  // Generate stable id from name (new products only)
   const pid=name.toLowerCase().replace(/[\s\/\(\)\-]+/g,'_').replace(/__+/g,'_').replace(/^_|_$/g,'');
   const prod={id:pid, name, description:desc, material_code, category};
 
   if(S._editProductIdx!=null){
+    // EDIT: the id NEVER changes on rename. Regenerating it from the new name
+    // (old behavior) orphaned every reference to the old id — demand points,
+    // vessel calls, silos, movements — which is how 'riz_slg' leftovers were
+    // born when the product became 'RIZ_SLG/BLK'. Ids are internal; only the
+    // display name changes.
+    prod.id=DB.products[S._editProductIdx]?.id||pid;
     DB.products[S._editProductIdx]=prod;
-    DB.recipes=DB.recipes.filter(r=>r.product_id!==pid);
+    DB.recipes=DB.recipes.filter(r=>r.product_id!==prod.id);
     S._editProductIdx=null;
   } else {
     if(DB.products.find(p=>p.id===pid)){
@@ -6041,7 +6047,7 @@ function saveProduct(){
   let ri=0;
   document.querySelectorAll('[id^="ing-mat-"]').forEach((sel,i)=>{
     const pct=parseFloat(document.getElementById(`ing-pct-${i}`)?.value)||0;
-    if(sel.value&&pct>0) DB.recipes.push({id:`r_${Date.now()}_${ri++}`,product_id:pid,material_id:sel.value,pct});
+    if(sel.value&&pct>0) DB.recipes.push({id:`r_${Date.now()}_${ri++}`,product_id:prod.id,material_id:sel.value,pct});
   });
   autoSave(); closeModal(); renderCatalogView(); statMsg('Product saved');
 }
@@ -12726,9 +12732,10 @@ function simulate(elements, connections, horizon, includeProposed=false){
       if(!berthId) return;
       if(!transitQueue[arrivalDay]) transitQueue[arrivalDay]=[];
       const byProduct={};
-      if(rm.product_id) byProduct[rm.product_id]=(rm.total_capacity_t||0);
+      const rmPid=_canonPid(rm.product_id); // stale pre-rename id → current catalog id
+      if(rmPid) byProduct[rmPid]=(rm.total_capacity_t||0);
       else if(rm.wagon_count&&rm.wagon_capacity_t)
-        byProduct[rm.product_id||'']=(parseInt(rm.wagon_count)*parseFloat(rm.wagon_capacity_t));
+        byProduct[rmPid||'']=(parseInt(rm.wagon_count)*parseFloat(rm.wagon_capacity_t));
       transitQueue[arrivalDay].push({
         berthId,
         byProduct,
@@ -12793,7 +12800,10 @@ function simulate(elements, connections, horizon, includeProposed=false){
         if(!vesselArrivalsByDay[day]) vesselArrivalsByDay[day]=[];
         vesselArrivalsByDay[day].push({
           berthId:entry.berth_element_id,
-          productId:entry.product_id,
+          // Canonicalize: a vessel call may still carry a pre-rename product id
+          // ('tam_wht'); routing must use the current catalog id ('tam_wht_blk')
+          // or the cargo lands in the wrong silo (Grit XXX → MED_I-II bug).
+          productId:_canonPid(entry.product_id),
           quantity_t:parseFloat(entry.quantity_t)||0,
           rateTPH:parseFloat(entry.unload_rate_tph)||0,
           name:entry.name,
@@ -14289,7 +14299,8 @@ function simulate(elements, connections, horizon, includeProposed=false){
       const bs=state[arr.berthId]; if(!bs) return;
       const isRailBerth=!!bs.railTransitT;
       let total=0;
-      Object.entries(arr.byProduct||{}).forEach(([pid,t])=>{
+      Object.entries(arr.byProduct||{}).forEach(([rawPid,t])=>{
+        const pid=_canonPid(rawPid); // stale pre-rename ids must not fork a parallel bucket
         if(isRailBerth){
           bs.railTransitT[pid]=Math.max(0,(bs.railTransitT[pid]||0)-t);
           bs.railArrived[pid]=(bs.railArrived[pid]||0)+t;
@@ -14485,25 +14496,36 @@ function simulate(elements, connections, horizon, includeProposed=false){
         dailyCap=effectiveTPH*24*simPoints;
       }
 
-      // Find the downstream bulk_silo that accepts the vessel's product.
-      // For ship berths with a specific vessel product, prefer the product-matched silo.
-      // Fall back to first available silo with space if no exact match found.
+      // Find the downstream bulk_silo that accepts the cargo's product.
+      // 1. Exact product match (both sides canonicalized against the catalog, so a
+      //    pre-rename id on either side still pairs up correctly).
+      // 2. TYPED cargo may only fall back to UNTYPED silos — never into a silo
+      //    dedicated to a DIFFERENT product (that was the PEV bug: a TAM_WHT
+      //    vessel whose stale id matched nothing got dumped into the MED_OPC
+      //    silo by the old "any silo with space" fallback).
+      // 3. UNTYPED cargo keeps the old fallbacks (any silo with space, then first).
       const downSilos=(dn[berth.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='bulk_silo');
-      // Determine the vessel's product (single product in berthQueue)
-      const vesselProdId=Object.keys(bs.berthQueue).find(pid=>(bs.berthQueue[pid]||0)>0);
+      // Determine the cargo's product (single product in berthQueue)
+      const vesselProdId=_canonPid(Object.keys(bs.berthQueue).find(pid=>(bs.berthQueue[pid]||0)>0));
       let downSilo=null;
       if(vesselProdId){
-        // First try: silo explicitly configured for this product
         downSilo=downSilos.find(s=>{
           const prods=getSiloProducts(s);
-          return prods.length>0&&prods.includes(vesselProdId);
+          return prods.length>0&&prods.some(p=>_canonPid(p)===vesselProdId);
         });
       }
-      // Second try: any silo with space (handles untyped silos)
-      if(!downSilo) downSilo=downSilos.find(s=>(state[s.id]?.inventory||0)<(state[s.id]?.maxCap||Infinity)*0.99);
-      // Last resort: first downstream silo
-      if(!downSilo) downSilo=downSilos[0];
-      if(!downSilo){ bs.status='blocked'; r.berthUnloadHistory[berth.id].push(0); return; }
+      if(!downSilo){
+        const eligible=vesselProdId?downSilos.filter(s=>getSiloProducts(s).length===0):downSilos;
+        downSilo=eligible.find(s=>(state[s.id]?.inventory||0)<(state[s.id]?.maxCap||Infinity)*0.99)||eligible[0]||null;
+      }
+      if(!downSilo){
+        bs.status='blocked';
+        if(vesselProdId&&downSilos.length){
+          const pn=DB.products.find(p=>p.id===vesselProdId)?.name||vesselProdId;
+          logStop(berth.id,berth.name,day,'no_silo_for_product',`No downstream silo accepts ${pn} — ${bs.currentVessel||'cargo'} cannot unload at ${berth.name}`);
+        }
+        r.berthUnloadHistory[berth.id].push(0); return;
+      }
 
       const siloInv=state[downSilo.id]?.inventory||0;
       const siloMax=state[downSilo.id]?.maxCap||Infinity;
@@ -14545,7 +14567,8 @@ function simulate(elements, connections, horizon, includeProposed=false){
         if(deduct<0.001) return;
         bs.berthQueue[pid]=Math.max(0,(bs.berthQueue[pid]||0)-deduct);
         siloInflow[downSilo.id]=(siloInflow[downSilo.id]||0)+deduct;
-        state[downSilo.id].composition[pid]=(state[downSilo.id].composition[pid]||0)+deduct;
+        const compPid=_canonPid(pid); // composition tracked under the current catalog id
+        state[downSilo.id].composition[compPid]=(state[downSilo.id].composition[compPid]||0)+deduct;
       });
       r.berthUnloadHistory[berth.id].push(Math.round(canUnload));
       bs.status='running';
@@ -21579,6 +21602,19 @@ function autoSaveNow(){
   if(typeof dsScheduleAllWrites === 'function') dsScheduleAllWrites();
   // Mirror the in-memory state into the ACTIVE scenario's file (debounced).
   if(typeof scScheduleWrite === 'function') scScheduleWrite();
+}
+
+// Resolve a possibly-stale product id to the current catalog: returns the
+// input unchanged when it is already valid (or blank) or when no unambiguous
+// match exists; returns the matched current id when the stale id prefixes a
+// current product's id/name ('riz_slg' → 'riz_slg_blk'). Used by the healer,
+// the simulation's cargo routing, and the terminal Supply view.
+function _canonPid(pid){
+  if(!pid||(DB.products||[]).some(p=>p.id===pid)) return pid;
+  const norm=s=>String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+  const n=norm(pid);
+  const hit=n&&(DB.products||[]).find(p=>norm(p.id).startsWith(n)||norm(p.name).startsWith(n));
+  return hit?hit.id:pid;
 }
 
 // ── Stale product-reference healing ─────────────────────────────────────
