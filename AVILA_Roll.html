@@ -14238,22 +14238,51 @@ function simulate(elements, connections, horizon, includeProposed=false){
     //  i.e. its transit ended today — shows AT THE RAIL YARD today, on the same day as the
     //  Transfer/Arrival row. See the note by the snapshot.)
 
+    // ── Ship-berth DOCK GATE — the default unloading strategy ─────────────────
+    // A NEW arrival may dock as soon as its silo can take a full day's discharge
+    // (start unloading ASAP). A vessel that was sent to ANCHORAGE because its
+    // silo filled up (p._waitSpace) only returns once the silo can take its whole
+    // REMAINDER — capped at 90% of silo capacity for cargoes larger than the
+    // silo — so it unloads in one continuous run instead of cycling
+    // 1-day-unload / N-days-anchorage. The cap guarantees progress (it re-docks
+    // when the silo is ~empty) so demand can never starve with cargo at anchor.
+    const _shipDockOK=(berth,p)=>{
+      const qty=p.quantity_t||0; if(qty<=0) return false;
+      const ds=(dn[berth.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='bulk_silo');
+      const pid=_canonPid(p.productId);
+      let sil=pid?ds.find(x=>{const pr=getSiloProducts(x);return pr.length>0&&pr.some(q=>_canonPid(q)===pid);}):null;
+      if(!sil) sil=ds.find(x=>getSiloProducts(x).length===0)||(!pid?ds[0]:null);
+      if(!sil) return false;
+      const max=state[sil.id]?.maxCap||Infinity;
+      if(!isFinite(max)) return true;
+      const space=Math.max(0,max-(state[sil.id]?.inventory||0));
+      if(p._waitSpace) return space>=Math.min(qty,max*0.9);
+      const berthTPH=parseFloat(berth.props.max_unload_rate_tph)||99999;
+      const vTPH=p.rateTPH>0?parseFloat(p.rateTPH):Infinity;
+      const cap=Math.min(berthTPH,vTPH)*24*(parseFloat(berth.props.simultaneous_points)||1);
+      const fullDaily=Math.min(cap,qty);
+      return space>=fullDaily||fullDaily>max;
+    };
+
     // Step A: Promote yesterday's pending vessels to berthQueue (they arrived before today).
-    // A vessel under an active 'anchorage' campaign stays in vesselPending — reported as
-    // anchorage — even if the berth is otherwise free. Holistic across any number of vessels:
-    // an anchorage-held vessel only blocks ITSELF, not whoever is queued behind it — find the
-    // first vessel in the queue that ISN'T held and promote that one (normal FIFO is preserved
-    // whenever nothing ahead of it is under a campaign, since findIndex then just returns 0).
+    // FIFO with two gates: a vessel under an active 'anchorage' campaign stays waiting, and
+    // every vessel must pass _shipDockOK (full-day space for new arrivals; space for the
+    // whole remainder for vessels that were sent to anchorage by a full silo). A vessel
+    // vacating for anchorage rejoins at the FRONT of the queue, so it keeps seniority and
+    // returns as soon as the berth is free AND its space rule is met — i.e. it waits while
+    // another vessel is unloading, until that one finishes or anchors too.
     elements.filter(e=>e.type==='berth'&&(e.props.berth_type||'Ship Berth')==='Ship Berth').forEach(berth=>{
       const bs=state[berth.id];
       const queued=Object.values(bs.berthQueue||{}).reduce((a,b)=>a+b,0);
       if(queued<=0&&(bs.vesselPending||[]).length>0){
         const idx=bs.vesselPending.findIndex(p=>{
           const act=p.vesselCallId?_vesselCampaignAction(p.vesselCallId,day):null;
-          return act!=='anchorage';
+          if(act==='anchorage') return false;
+          return _shipDockOK(berth,p);
         });
         if(idx>=0){
           const next=bs.vesselPending.splice(idx,1)[0];
+          delete next._waitSpace; // docked — a future silo-full anchorage re-flags it
           bs.currentVessel=next.name;
           bs.currentVesselRate=next.rateTPH;
           bs.currentVesselCallId=next.vesselCallId||null;
@@ -14424,51 +14453,46 @@ function simulate(elements, connections, horizon, includeProposed=false){
         if(_act==='unloading') _forcedUnload=true;
       }
 
-      // ── Ship-berth YIELD: if the berthed vessel is blocked (its silo can't take a full
-      //    day's discharge) but a pending vessel's silo CAN, the blocked vessel steps back
-      //    to anchorage and yields the berth so a full silo doesn't starve later vessels
-      //    whose silos have space (and may be heading to stockout). A vessel under a forced
-      //    'unloading' campaign is exempt — it keeps the berth regardless.
+      // ── Ship-berth ANCHORAGE / YIELD — default unloading strategy ─────────────
+      // The moment the berthed vessel can no longer discharge a full day (its silo
+      // is full), it VACATES the berth for anchorage, rejoining the queue at the
+      // FRONT (seniority kept). It only re-docks via the Step-A gate once the silo
+      // can take its whole remainder (_waitSpace rule in _shipDockOK) — one long
+      // anchorage instead of 1-day-unload/N-day-anchorage cycles. If another
+      // waiting vessel CAN unload right now, it takes the berth the same day; the
+      // anchored vessel then waits until that one finishes or anchors too. A
+      // vessel under a forced 'unloading' campaign keeps the berth regardless.
       if(!_forcedUnload&&(berth.props.berth_type||'Ship Berth')==='Ship Berth'){
-        const _pickSilo=(productId)=>{
-          const ds=(dn[berth.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='bulk_silo');
-          let s=productId?ds.find(x=>{const p=getSiloProducts(x);return p.length>0&&p.includes(productId);}):null;
-          if(!s) s=ds.find(x=>(state[x.id]?.inventory||0)<(state[x.id]?.maxCap||Infinity)*0.99);
-          if(!s) s=ds[0];
-          return s||null;
-        };
-        const _canFullDay=(productId,qty,rateTPH)=>{
-          const sil=_pickSilo(productId); if(!sil) return false;
-          const berthTPH=parseFloat(berth.props.max_unload_rate_tph)||99999;
-          const vTPH=rateTPH>0?parseFloat(rateTPH):Infinity;
-          const cap=Math.min(berthTPH,vTPH)*24*(parseFloat(berth.props.simultaneous_points)||1);
-          const fullDaily=Math.min(cap,qty);
-          const inv=state[sil.id]?.inventory||0, max=state[sil.id]?.maxCap||Infinity;
-          const space=Math.max(0,max-inv-(siloInflow[sil.id]||0)+(todayDemandPull[sil.id]||0));
-          return space>=fullDaily || fullDaily>max;
-        };
         const curProd=Object.keys(bs.berthQueue||{}).find(pid=>(bs.berthQueue[pid]||0)>0);
-        if(curProd && !_canFullDay(curProd,bs.berthQueue[curProd],bs.currentVesselRate) && (bs.vesselPending||[]).length){
-          // A vessel held under an active 'anchorage' campaign is not an eligible swap-in —
-          // forcing it out defeats the whole point of the override.
+        if(curProd && !_shipDockOK(berth,{productId:curProd, quantity_t:bs.berthQueue[curProd], rateTPH:bs.currentVesselRate})){
+          const demoted={productId:curProd, quantity_t:bs.berthQueue[curProd], rateTPH:bs.currentVesselRate, name:bs.currentVessel, vesselCallId:bs.currentVesselCallId, _waitSpace:true};
+          bs.vesselPending.unshift(demoted);
+          bs.berthQueue={}; bs.currentVessel=null; bs.currentVesselRate=0; bs.currentVesselCallId=null;
+          // Same-day berth reuse: dock the first waiting vessel that can unload now
+          // (skipping the vessel just demoted and campaign-held ones).
           const idx=bs.vesselPending.findIndex(p=>
-            (p.quantity_t||0)>0 && _canFullDay(p.productId,p.quantity_t,p.rateTPH) &&
+            p!==demoted && (p.quantity_t||0)>0 && _shipDockOK(berth,p) &&
             !(p.vesselCallId&&_vesselCampaignAction(p.vesselCallId,day)==='anchorage'));
           if(idx>=0){
-            const demoted={productId:curProd, quantity_t:bs.berthQueue[curProd], rateTPH:bs.currentVesselRate, name:bs.currentVessel, vesselCallId:bs.currentVesselCallId, _bumped:true};
             const incoming=bs.vesselPending.splice(idx,1)[0];
-            if(incoming) incoming._bumped=false; // it's docking now, no longer waiting
-            bs.vesselPending.unshift(demoted);
-            bs.berthQueue={}; bs.berthQueue[incoming.productId]=(incoming.quantity_t||0);
+            delete incoming._waitSpace;
+            bs.berthQueue[incoming.productId]=(incoming.quantity_t||0);
             bs.currentVessel=incoming.name; bs.currentVesselRate=incoming.rateTPH; bs.currentVesselCallId=incoming.vesselCallId||null;
             logStop(berth.id,berth.name,day,'berth_yield',`${demoted.name||'vessel'} yielded berth (silo full) → ${incoming.name||'vessel'} berthed to unload`);
+          } else {
+            bs.status='anchorage';
+            logStop(berth.id,berth.name,day,'anchorage',`Silo full — ${demoted.name||'vessel'} at anchorage, ${Math.round(demoted.quantity_t).toLocaleString()}t remaining (returns when the whole remainder fits)`);
+            r.berthUnloadHistory[berth.id].push(0);
+            return;
           }
         }
       }
 
       const queued=Object.values(bs.berthQueue||{}).reduce((a,b)=>a+b,0);
       if(queued<=0){
-        if(bs.status!=='maintenance') bs.status='idle';
+        // Ship berth with vessels waiting for space/berth → report anchorage, not idle.
+        if(bs.status!=='maintenance')
+          bs.status=((berth.props.berth_type||'Ship Berth')==='Ship Berth'&&(bs.vesselPending||[]).length)?'anchorage':'idle';
         r.berthUnloadHistory[berth.id].push(0);
         return;
       }
@@ -14533,12 +14557,12 @@ function simulate(elements, connections, horizon, includeProposed=false){
       const expectedDrainToday=todayDemandPull[downSilo.id]||0;
       const siloSpace=Math.max(0,siloMax-siloInv-alreadyInflowing+expectedDrainToday);
 
-      // Ship berths: ALL-OR-NOTHING daily discharge — unload a full day at the defined rate,
-      // or nothing. If a full day's discharge would push the silo over max, the vessel waits
-      // at anchorage (0 unloaded) until demand frees enough space, then returns and resumes
-      // at the rate (the remainder unloads once it fits). Rail/Truck keep partial top-off.
-      // A forced-unloading campaign also gets partial top-off instead of all-or-nothing — it
-      // gets priority (see the yield-exemption above) but never overflows the silo either.
+      // Ship berths: ALL-OR-NOTHING daily discharge — unload a full day at the defined
+      // rate, or nothing. When a full day no longer fits, the vessel vacates for
+      // anchorage (see the ANCHORAGE/YIELD block above) and re-docks only when the
+      // silo can take its whole remainder — minimizing unload/anchorage cycles.
+      // Rail/Truck keep partial top-off. A forced-unloading campaign also gets partial
+      // top-off instead of all-or-nothing — it keeps the berth but never overflows.
       const isShipBerth=berthType==='Ship Berth';
       let canUnload;
       if(isShipBerth&&!_forcedUnload){
@@ -14550,9 +14574,19 @@ function simulate(elements, connections, horizon, includeProposed=false){
         canUnload=Math.min(dailyCap,queued,siloSpace);
       }
       if(canUnload<=0){
-        if(isShipBerth&&queued>0){
+        if(isShipBerth&&queued>0&&!_forcedUnload){
+          // Defensive vacate — e.g. another berth filled this silo after the
+          // ANCHORAGE/YIELD check ran. Same rule: out to anchorage with seniority,
+          // back when the whole remainder fits.
+          const curProd=Object.keys(bs.berthQueue).find(pid=>(bs.berthQueue[pid]||0)>0);
+          if(curProd){
+            bs.vesselPending.unshift({productId:curProd, quantity_t:bs.berthQueue[curProd], rateTPH:bs.currentVesselRate, name:bs.currentVessel, vesselCallId:bs.currentVesselCallId, _waitSpace:true});
+            logStop(berth.id,berth.name,day,'anchorage',`Silo ${downSilo.name} full — ${bs.currentVessel||'vessel'} at anchorage, ${Math.round(queued).toLocaleString()}t remaining (returns when the whole remainder fits)`);
+          }
+          bs.berthQueue={}; bs.currentVessel=null; bs.currentVesselRate=0; bs.currentVesselCallId=null;
           bs.status='anchorage';
-          logStop(berth.id,berth.name,day,'anchorage',`Silo ${downSilo.name} full — vessel ${bs.currentVessel||''} at anchorage, ${Math.round(queued).toLocaleString()}t remaining`);
+        } else if(isShipBerth&&queued>0){
+          bs.status='anchorage'; // forced-unloading campaign holds the berth while blocked
         } else {
           bs.status=siloSpace<=0?'blocked':'idle';
         }
