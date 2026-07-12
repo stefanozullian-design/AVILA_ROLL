@@ -6878,7 +6878,14 @@ function _renderSupplyViewInner(wrap){
   const _supFacFilter=window._supView?.facId||document.getElementById('sup-fac-filter')?.value||'';
   const _supProdFilter=window._supView?.prodId||document.getElementById('sup-prod-filter')?.value||'';
   const allEls=getFacElements();
-  let prodEls=allEls.filter(e=>e.type==='kiln'||e.type==='finish_mill'||e.type==='packing_plant');
+  // Exclude production elements that live at a terminal-type facility (e.g. an on-site
+  // bagging line) from the PLANT tree — a facility's node type follows facility.type, not
+  // "does it happen to contain a kiln/mill/packer." Otherwise a terminal with any production
+  // element gets reclassified as a plant, nesting it under the wrong tree branch and losing
+  // its terminal-only sections (per-product starting inventory, etc.).
+  const _facTypeOf=fid=>DB.facilities.find(f=>f.id===fid)?.type;
+  let prodEls=allEls.filter(e=>(e.type==='kiln'||e.type==='finish_mill'||e.type==='packing_plant')
+    &&_facTypeOf(e.assigned_facility_id||e.facility_id)!=='terminal');
   // Filter by selected facility (assigned_facility_id first)
   if(_supFacFilter){
     prodEls=prodEls.filter(e=>(e.assigned_facility_id||e.facility_id)===_supFacFilter);
