@@ -6476,6 +6476,7 @@ function renderDemandView(){
 
   h+=`</tbody></table>`;
   wrap.innerHTML=h;
+  _monthTotalsToEnd(wrap,'dem-day-',false); // month total at END of each month
 
   // Sync top scrollbar + fix Total ALL sticky top
   const topScroll=document.getElementById('dem-top-scroll');
@@ -6577,6 +6578,40 @@ function saveDemandValues(){
   _demandCacheInvalidate();
   statMsg('Demand forecast saved');
   renderDemandView();
+}
+
+// ── Month-total column → END-of-month position (post-render DOM pass) ──
+// The month/day grids all EMIT each month as [total][day…] because that's the
+// simplest build order (compute the total, then walk the days). This pass flips
+// the rendered DOM to [day…][total] so the total column reads as a month-END
+// summary, WITHOUT touching the ~60 places that build these grids. It keys off
+// the class markers those grids already carry:
+//   • Supply/Demand — DAY cells carry sup-day-<ym> / dem-day-<ym>; the total is
+//     the unclassed cell that precedes each day run (markedIsTotal=false).
+//   • Logistics — the TOTAL cells carry logi-mcol; days are unclassed
+//     (markedIsTotal=true).
+// Collapsed months (total cell with no following day cells) are left in place.
+// `root` may be a table wrapper (its <tr>s are processed) or a single <tr>.
+function _monthTotalsToEnd(root, cls, markedIsTotal){
+  if(!root) return;
+  const rows = root.matches&&root.matches('tr') ? [root] : [...root.querySelectorAll('tr')];
+  rows.forEach(tr=>{
+    const cells=[...tr.children];
+    if(cells.length<3) return; // skip label-only / full-width colspan (divider) rows
+    for(let i=1;i<cells.length;i++){
+      const c=cells[i];
+      const marked=(c.className||'').includes(cls);
+      if((markedIsTotal?marked:!marked)!==true) continue; // not a total cell
+      let last=null,j=i+1;
+      for(;j<cells.length;j++){
+        const m=(cells[j].className||'').includes(cls);
+        if((markedIsTotal?m:!m)===true) break; // reached the next month's total
+        last=cells[j];
+      }
+      if(last) tr.insertBefore(c,last.nextSibling);
+      i=j-1;
+    }
+  });
 }
 
 // ═══════════════════════════════════════════════════════
@@ -8728,6 +8763,7 @@ function _renderSupplyViewInner(wrap){
 
   h+=`</tbody></table>`;
   wrap.innerHTML=h;
+  _monthTotalsToEnd(wrap,'sup-day-',false); // month total at END of each month
   _supApplySecStyle();
 
   const topScroll=document.getElementById('sup-top-scroll');
@@ -10667,6 +10703,7 @@ function rpRender(){
     return `<th class="logi-mcol" onclick="_rpToggleMonth('${mon.ym}')" style="cursor:pointer;user-select:none;border-left:2px solid var(--border2);color:var(--total);font-size:8px;font-weight:700;text-align:center;padding:4px 6px;position:sticky;top:0;background:var(--surface2)"><span style="margin-right:3px">${isCol?'▶':'▼'}</span>${mon.label}</th>`+dayThs;
   }).join('');
   document.getElementById('rp-thead-row').innerHTML=thHtml;
+  _monthTotalsToEnd(document.getElementById('rp-thead-row'),'logi-mcol',true); // month total at END
   const _railColspan=days.length+months.length+1;
 
   // ── DESTINATION TABLE ─────────────────────────────────────────
@@ -10928,6 +10965,7 @@ function rpRender(){
   // Single merged table: ORIGIN (planning) first, a thick rule, then the DESTINATIONS — same dates.
   const _origDestSep=`<tr><td colspan="${_railColspan}" style="padding:0;height:0;border-top:4px solid var(--text-dim)"></td></tr>`;
   document.getElementById('rp-rail-tbody').innerHTML=origRows.join('')+_origDestSep+destRows.join('');
+  _monthTotalsToEnd(document.getElementById('rp-rail-tbody'),'logi-mcol',true); // month total at END
   // Re-flag over-allocated switches for any surviving drafts (they persist across re-renders).
   new Set(Object.keys(window._rpDrafts||{}).map(k=>k.split('|').slice(0,2).join('|'))).forEach(k=>{
     const [dpId,sw]=k.split('|'); _rpValidateSwitch(dpId,sw);
@@ -11384,6 +11422,8 @@ function vpRender(){
   }).join('');
   document.getElementById('vp-dest-thead-row').innerHTML=thHtml;
   document.getElementById('vp-orig-thead-row').innerHTML=thHtml;
+  _monthTotalsToEnd(document.getElementById('vp-dest-thead-row'),'logi-mcol',true); // month total at END
+  _monthTotalsToEnd(document.getElementById('vp-orig-thead-row'),'logi-mcol',true);
 
   const _statusPriority=['In Transit','Unloading','Confirmed','Planned','Proposed','Finished'];
   const destRows=[];
@@ -11513,6 +11553,7 @@ function vpRender(){
     });
   });
   document.getElementById('vp-dest-tbody').innerHTML=destRows.join('');
+  _monthTotalsToEnd(document.getElementById('vp-dest-tbody'),'logi-mcol',true); // month total at END
   document.getElementById('vp-orig-tbody').innerHTML=
     `<tr><td colspan="999" style="color:var(--text-dim);font-size:9px;padding:10px">Vessels are external supply — no origin inventory deducted</td></tr>`;
 }
@@ -16365,7 +16406,7 @@ function renderDtree(r){
   const isLevelId=id=>/_inv\b|_inv_|inventor/i.test(id||''); // inventory rows summarize as end-of-month, others as monthly total
   const visCols=monthsD.reduce((s,mon)=>s+1+(monCol.has(mon.ym)?0:mon.dayNums.length),0);
   const _msumSty='background:var(--total-faint);border-left:2px solid var(--border2);font-weight:700;text-align:right;padding:4px 8px;';
-  // Build a row's cells: one summary cell per month, then (unless collapsed) that month's day cells.
+  // Build a row's cells: that month's day cells (unless collapsed), then the summary cell at the END of the month.
   const monCells=(valArr,agg,dayCellFn,sumColor)=>monthsD.map(mon=>{
     const isCol=monCol.has(mon.ym);
     const vals=mon.idxs.map(i=>valArr?valArr[i]:null).filter(v=>v!==null&&v!==undefined&&!isNaN(v));
@@ -16373,13 +16414,13 @@ function renderDtree(r){
     if(vals.length) sv=agg==='last'?vals[vals.length-1]:vals.reduce((a,b)=>a+b,0);
     const sumTd=`<td class="dtree-mcol" style="${_msumSty}color:${sumColor||'var(--total)'}">${sv!==null?Number(Math.round(sv)).toLocaleString():'—'}</td>`;
     const dayTds=isCol?'':mon.dayNums.map(dayCellFn).join('');
-    return sumTd+dayTds;
+    return dayTds+sumTd;
   }).join('');
   const monHeaderCells=monthsD.map(mon=>{
     const isCol=monCol.has(mon.ym);
     const sumTh=`<th class="dtree-mcol" onclick="_dtreeToggleMonth('${mon.ym}')" title="Click to ${isCol?'expand':'collapse'} ${mon.label}" style="cursor:pointer;user-select:none;background:var(--surface2);border-left:2px solid var(--border2);font-weight:700;color:var(--total);text-align:center;padding:6px 6px;position:sticky;top:0;z-index:3"><span style="margin-right:3px">${isCol?'▶':'▼'}</span>${mon.label}</th>`;
     const dayThs=isCol?'':mon.dayNums.map(d=>`<th title="Day ${d}" style="${wkendThStyle(d)}">${dayToDate(d).slice(5)}</th>`).join('');
-    return sumTh+dayThs;
+    return dayThs+sumTh;
   }).join('');
 
   let h=`<table class="dtree-table"><thead><tr>
