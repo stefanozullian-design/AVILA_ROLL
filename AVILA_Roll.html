@@ -572,6 +572,7 @@ select.pi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
 .typing-dots span:nth-child(2){animation-delay:.2s;}
 .typing-dots span:nth-child(3){animation-delay:.4s;}
 @keyframes tp{0%,60%,100%{opacity:.2;transform:scale(.8);}30%{opacity:1;transform:scale(1);}}
+.chat-typing-label{font-size:9px;color:var(--text-dim);font-style:italic;}
 
 /* REAL DATA INPUT PANEL */
 #real-data-panel{position:fixed;right:0;top:48px;bottom:0;width:340px;background:var(--surface);border-left:1px solid var(--border);display:none;flex-direction:column;z-index:301;box-shadow:-6px 0 32px rgba(0,0,0,.45);}
@@ -847,7 +848,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
   <button class="tb-btn sec" id="daily-data-btn" onclick="toggleRealDataPanel()">📋 Daily Data</button>
   <button class="tb-btn" onclick="runSimulation()">▶ Run Simulation</button>
   <button class="tb-btn sec" onclick="stOpen()" title="Golden-scenario self-test — compare simulation output against a saved known-good baseline">🧪</button>
-  <button id="ai-fab" onclick="toggleChat()" title="AI Agent">✦</button>
+  <button id="ai-fab" onclick="toggleChat()" title="AI Agent"><svg viewBox="0 0 9 9" width="16" height="16" shape-rendering="crispEdges" style="pointer-events:none"><g fill="currentColor"><rect x="4" y="0" width="1" height="1"/><rect x="4" y="1" width="1" height="1"/><rect x="2" y="2" width="1" height="1"/><rect x="3" y="2" width="1" height="1"/><rect x="4" y="2" width="1" height="1"/><rect x="5" y="2" width="1" height="1"/><rect x="6" y="2" width="1" height="1"/><rect x="2" y="3" width="1" height="1"/><rect x="6" y="3" width="1" height="1"/><rect x="2" y="4" width="1" height="1"/><rect x="3" y="4" width="1" height="1"/><rect x="5" y="4" width="1" height="1"/><rect x="6" y="4" width="1" height="1"/><rect x="2" y="5" width="1" height="1"/><rect x="6" y="5" width="1" height="1"/><rect x="2" y="6" width="1" height="1"/><rect x="3" y="6" width="1" height="1"/><rect x="4" y="6" width="1" height="1"/><rect x="5" y="6" width="1" height="1"/><rect x="6" y="6" width="1" height="1"/><rect x="2" y="7" width="1" height="1"/><rect x="3" y="7" width="1" height="1"/><rect x="4" y="7" width="1" height="1"/><rect x="5" y="7" width="1" height="1"/><rect x="6" y="7" width="1" height="1"/></g></svg></button>
   <div class="mode-wrap">
     <span class="mode-lbl" id="mode-lbl" style="display:none"></span>
     <button class="tb-btn sec" id="sc-save-btn" onclick="scManualSave()" title="Save the current scenario to its file now">💾 Save</button>
@@ -4344,7 +4345,10 @@ function showCampaignPopup(elId, dateStr, runStart, runEnd, runProduct){
 
   const selCap=caps.find(c=>c.product_id===selProd);
   const currentRate=existing?.rate_tpd||(selCap?_rowRate(selCap):_rowRate(caps[0]))||0;
-  const fromVal=existing?.start_date||runStart||dateStr;
+  // Always prefill "From" with the clicked day, not the campaign/run's original start —
+  // otherwise clicking mid-campaign silently jumps the dialog back to day 1 of the run,
+  // which reads as if the click landed on the wrong cell.
+  const fromVal=dateStr;
   const toVal=existing?.end_date||runEnd||dateStr;
   // In Real mode the rate field holds the actual produced tonnage for the clicked day.
   const realVal=existingReal.find(r=>r.product_id===selProd)?.volume_t ?? existingReal[0]?.volume_t ?? '';
@@ -4869,7 +4873,9 @@ function showVesselCampaignPopup(berthId, vesselCallId, dateStr){
   const pid=v.product_id;
   const existing=(DB.vessel_campaigns||[]).find(c=>c.vessel_call_id===vesselCallId&&dateStr>=c.start_date&&dateStr<=c.end_date);
   const run=_vesselRunAt(berthId, vesselCallId, dateStr);
-  const fromVal=existing?.start_date||run.start||dateStr;
+  // Always prefill "From" with the clicked day, not the run's original start — see
+  // showCampaignPopup for why (same fix, same reasoning).
+  const fromVal=dateStr;
   const toVal=existing?.end_date||run.end||dateStr;
   const action=existing?.action||run.state||'anchorage';
 
@@ -6098,10 +6104,15 @@ function renderDemandView(){
     mon.dates.push(ds);
   });
 
-  // Collapsed state — months keyed by ym, org groups keyed by id
-  if(!window._demColapsed) window._demColapsed=new Set(
-    months.filter(m=>m.ym<todayStr.slice(0,7)).map(m=>m.ym)
-  );
+  // Collapsed state — months keyed by ym, org groups keyed by id.
+  // Every month except the current one starts collapsed so the page opens compact.
+  // Gated on months.length so an early render (before the date range is synced) can't
+  // permanently lock in an empty collapsed set.
+  if(!window._demColapsed) window._demColapsed=new Set();
+  if(!window._demColDefaultApplied&&months.length){
+    window._demColDefaultApplied=true;
+    months.filter(m=>m.ym!==todayStr.slice(0,7)).forEach(m=>window._demColapsed.add(m.ym));
+  }
   if(!window._demGrpCol) window._demGrpCol=new Set(); // org group ids that are collapsed
   const collapsed=window._demColapsed;
   const grpCol=window._demGrpCol;
@@ -6701,8 +6712,15 @@ function _renderSupplyViewInner(wrap){
     mon.dates.push(ds);
   });
 
-  // Collapsed state — shared with demand view pattern but separate keys
-  if(!window._supColapsed) window._supColapsed=new Set(); // no months auto-collapsed; user expands/collapses manually
+  // Collapsed state — shared with demand view pattern but separate keys.
+  // Every month except the current one starts collapsed so the page opens compact.
+  // Gated on months.length so an early render (before the date range is synced) can't
+  // permanently lock in an empty collapsed set.
+  if(!window._supColapsed) window._supColapsed=new Set();
+  if(!window._supColDefaultApplied&&months.length){
+    window._supColDefaultApplied=true;
+    months.filter(m=>m.ym!==todayStr.slice(0,7)).forEach(m=>window._supColapsed.add(m.ym));
+  }
   if(!window._supGrpCol) window._supGrpCol=new Set();
   const collapsed=window._supColapsed;
   const grpCol=window._supGrpCol;
@@ -7518,6 +7536,10 @@ function _renderSupplyViewInner(wrap){
           });
         }
 
+        // Marks where the PACKING block's HTML begins within `h`, so it can be split
+        // off from the CEMENT BULK block below and given its own divider.
+        const _packStart=h.length;
+
         // ╔══════════════════════════════════════════════════════════════╗
         // ║ PACKED block — its own inventory chart + starting inventory +  ║
         // ║ requirements, mirroring the CEMENT / CLINKER blocks. Order:    ║
@@ -7809,8 +7831,10 @@ function _renderSupplyViewInner(wrap){
           }
         }
 
-        // ── End of CEMENT block: stash its HTML, then start capturing CLINKER ──
-        const cementHTML=h.slice(_cemStart); h=h.slice(0,_cemStart);
+        // ── End of CEMENT block: split into CEMENT BULK + PACKING, then start capturing CLINKER ──
+        const cementBulkHTML=h.slice(_cemStart,_packStart);
+        const packHTML=h.slice(_packStart);
+        h=h.slice(0,_cemStart);
         const _clkStart=h.length;
 
         // ══════════════════════════════════════════════════════════════
@@ -8018,12 +8042,15 @@ function _renderSupplyViewInner(wrap){
           });
         }
 
-        // ── Emit in display order: CLINKER, thick line, CEMENT, thick line, RAIL LOADING ──
+        // ── Emit in display order: CLINKER → CEMENT BULK → PACKING → RAIL LOADING,
+        // each separated by a thin 1px divider (product-family boundaries within a plant).
         const clinkerHTML=h.slice(_clkStart); h=h.slice(0,_clkStart);
+        const _sepRow=grad=>`<tr class="sup-sep-row" aria-hidden="true"><td colspan="999" style="padding:0;border:0"><div style="height:1px;background:linear-gradient(90deg,${grad});opacity:.85"></div></td></tr>`;
         h += clinkerHTML
-           + `<tr class="sup-sep-row" aria-hidden="true"><td colspan="999" style="padding:0;border:0"><div style="height:5px;background:linear-gradient(90deg,#ff8c42,#00d9a3);opacity:.85"></div></td></tr>`
-           + cementHTML
-           + (_railHTML?`<tr class="sup-sep-row" aria-hidden="true"><td colspan="999" style="padding:0;border:0"><div style="height:5px;background:linear-gradient(90deg,#00d9a3,#b388ff);opacity:.85"></div></td></tr>`+_railHTML:'');
+           + _sepRow('#ff8c42,#00d9a3')
+           + cementBulkHTML
+           + (packHTML?_sepRow('#00d9a3,#4da6ff')+packHTML:'')
+           + (_railHTML?_sepRow('#4da6ff,#b388ff')+_railHTML:'');
 
       }
     } else {
@@ -8525,7 +8552,7 @@ function _renderSupplyViewInner(wrap){
           });
           if(_vesPids.length){
             h+=`<tr class="sup-sec-hdr" data-seckey="termVessel" onclick="_supToggleSec('termVessel')" style="cursor:pointer;background:rgba(179,136,255,.06);border-top:1px solid rgba(179,136,255,.4)">
-              <td title="One row per product — hatched green = forecast unloading (vessel name on the bar), bold green number = actual tonnes, red hatch = at anchorage · click a cell for Forecast Campaign / Real value" style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${rc};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('termVessel')}</span> ⚓ VESSEL ARRIVALS ${suffix} <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>${_blankCells()}</tr>`;
+              <td title="One row per product — hatched green = forecast unloading (vessel name on the bar), bold green number = actual tonnes, red hatch = at anchorage · click a cell for Forecast Campaign / Real value" style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${rc};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('termVessel')}</span> VESSEL ARRIVALS ${suffix} <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>${_blankCells()}</tr>`;
             _vesPids.forEach(pid=>{
               const pname=_pNameOf(pid);
               const _pidShipBerths=_shipBerths.filter(b=>{ const hh=(r&&r.berthVesselHistory&&r.berthVesselHistory[b.id])||[]; return _berthProductTimeline(hh,_carries,pid).some(x=>x); });
@@ -8584,7 +8611,7 @@ function _renderSupplyViewInner(wrap){
           const _railPids=gr.pids.filter(pid=>_railBerths.length&&_railFedPids.has(pid));
           if(_railPids.length){
             h+=`<tr class="sup-sec-hdr" data-seckey="termRail" onclick="_supToggleSec('termRail')" style="cursor:pointer;background:rgba(179,136,255,.06);border-top:1px solid rgba(179,136,255,.4)">
-              <td title="Rail pipeline per product — In Transit → At Rail Yard → At Local Yard → Unloading · cells are RAIL CARS · click to reconcile physical counts" style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${rc};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('termRail')}</span> 🚂 RAIL ARRIVALS ${suffix} <span style="opacity:.55;font-weight:400;font-size:7px;margin-left:3px;text-transform:none">cars @ ${Math.round(_railCarCap)}t</span> <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>${_blankCells()}</tr>`;
+              <td title="Rail pipeline per product — In Transit → At Rail Yard → At Local Yard → Unloading · cells are RAIL CARS · click to reconcile physical counts" style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${rc};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('termRail')}</span> RAIL ARRIVALS ${suffix} <span style="opacity:.55;font-weight:400;font-size:7px;margin-left:3px;text-transform:none">cars @ ${Math.round(_railCarCap)}t</span> <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>${_blankCells()}</tr>`;
             _railPids.forEach(pid=>{
               const pname=_pNameOf(pid);
               // Product sub-header inside the rail section
@@ -10168,7 +10195,9 @@ function showRailCampaignPopup(dpId, dateStr, runStart, runEnd, runProduct){
     const base=railPlanRate(dpId,pid,null)||stdRate;
     return `<option value="${pid}" data-rate="${base}" ${selProd===pid?'selected':''}>${p?.name||pid}</option>`; }).join('');
   const currentRate=existing?(parseFloat(existing.cars_per_day)||0):(railPlanRate(dpId,selProd,dateStr)||railPlanRate(dpId,selProd,null)||stdRate);
-  const fromVal=existing?.date_from||runStart||dateStr;
+  // Always prefill "From" with the clicked day, not the campaign/run's original start —
+  // see showCampaignPopup for why (same fix, same reasoning).
+  const fromVal=dateStr;
   const toVal=existing?.date_to||runEnd||dateStr;
   const realVal=existingReal.find(rr=>rr.product_id===selProd)?.cars ?? existingReal[0]?.cars ?? '';
   const initVal=defaultMode==='real'?realVal:currentRate;
@@ -10590,8 +10619,15 @@ function rpRender(){
 
   // ── Month grouping + summary-column styling (shared with vessel planner) ──
   const todayStr=new Date()._ymd();
-  if(!window._rpColapsed) window._rpColapsed=new Set(); // no months auto-collapsed; user expands/collapses manually
   const months=(()=>{const mons=[];days.forEach(d=>{const ds=rpDayDate(d);const ym=ds.slice(0,7);if(!mons.length||mons[mons.length-1].ym!==ym){const dt=new Date(ds+'T00:00:00');mons.push({ym,label:dt.toLocaleString('en-US',{month:'short',year:'2-digit'}),days:[]});}mons[mons.length-1].days.push(d);});return mons;})();
+  // Every month except the current one starts collapsed so the page opens compact.
+  // Gated on months.length so an early render (before the date range is synced) can't
+  // permanently lock in an empty collapsed set.
+  if(!window._rpColapsed) window._rpColapsed=new Set();
+  if(!window._rpColDefaultApplied&&months.length){
+    window._rpColDefaultApplied=true;
+    months.filter(m=>m.ym!==todayStr.slice(0,7)).forEach(m=>window._rpColapsed.add(m.ym));
+  }
   const _mTdSty='background:var(--total-faint);border-left:2px solid var(--border2);font-weight:700;color:var(--total);text-align:right;padding:3px 8px;';
   const _tpTdSty=d=>{
     if(rpDayDate(d)===todayStr) return 'border-left:2px solid var(--green);border-right:2px solid var(--green);';
@@ -11301,8 +11337,15 @@ function vpRender(){
   vpRenderCharts();
 
   const todayStr=new Date()._ymd();
-  if(!window._vpColapsed) window._vpColapsed=new Set(); // no months auto-collapsed; user expands/collapses manually
   const months=(()=>{const mons=[];days.forEach(d=>{const ds=vpDayDate(d);const ym=ds.slice(0,7);if(!mons.length||mons[mons.length-1].ym!==ym){const dt=new Date(ds+'T00:00:00');mons.push({ym,label:dt.toLocaleString('en-US',{month:'short',year:'2-digit'}),days:[]});}mons[mons.length-1].days.push(d);});return mons;})();
+  // Every month except the current one starts collapsed so the page opens compact.
+  // Gated on months.length so an early render (before the date range is synced) can't
+  // permanently lock in an empty collapsed set.
+  if(!window._vpColapsed) window._vpColapsed=new Set();
+  if(!window._vpColDefaultApplied&&months.length){
+    window._vpColDefaultApplied=true;
+    months.filter(m=>m.ym!==todayStr.slice(0,7)).forEach(m=>window._vpColapsed.add(m.ym));
+  }
   const _mTdSty='background:var(--total-faint);border-left:2px solid var(--border2);font-weight:700;color:var(--total);text-align:right;padding:3px 8px;';
   const _tpTdSty=d=>{
     if(vpDayDate(d)===todayStr) return 'border-left:2px solid var(--green);border-right:2px solid var(--green);';
@@ -16292,6 +16335,14 @@ function renderDtree(r){
     mon.idxs.push(i); mon.dayNums.push(d);
   });
   const monCol=(window._dtreeMonCol=window._dtreeMonCol||new Set());
+  // Every month except the current one starts collapsed so the page opens compact.
+  // Gated on monthsD.length so an early render (before the date range is synced) can't
+  // permanently lock in an empty collapsed set.
+  if(!window._dtreeMonColDefaultApplied&&monthsD.length){
+    window._dtreeMonColDefaultApplied=true;
+    const curYm=new Date()._ymd().slice(0,7);
+    monthsD.filter(m=>m.ym!==curYm).forEach(m=>monCol.add(m.ym));
+  }
   const isLevelId=id=>/_inv\b|_inv_|inventor/i.test(id||''); // inventory rows summarize as end-of-month, others as monthly total
   const visCols=monthsD.reduce((s,mon)=>s+1+(monCol.has(mon.ym)?0:mon.dayNums.length),0);
   const _msumSty='background:var(--total-faint);border-left:2px solid var(--border2);font-weight:700;text-align:right;padding:4px 8px;';
@@ -21387,18 +21438,28 @@ function hideTip(){document.getElementById('tooltip').style.display='none';docum
 // ═══════════════════════════════════════════════════════
 function chatKey(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChat();}}
 
+// Running conversation, so follow-up questions ("why is that happening?") have
+// something to refer back to. chatTurnStarts marks where each user-initiated
+// turn begins in chatHistory (a turn can span several messages once tool use
+// is involved); trimming only ever cuts at a turn boundary so an assistant
+// tool_use block is never separated from its tool_result reply.
+let chatHistory=[];
+let chatTurnStarts=[];
+const CHAT_MAX_TURNS=8;
+
 function getApiKey(){return localStorage.getItem('avila_api_key')||'';}
 
 // Single entry point for every Anthropic API call (rule interpreter, settings
 // connection test, agent chat). Returns the parsed response body — callers
 // keep their own data.error handling; network failures throw.
-async function callClaude({model, maxTokens=300, system, messages}){
+async function callClaude({model, maxTokens=300, system, messages, tools}){
   const body={
     model: model||localStorage.getItem('avila_ai_model')||'claude-haiku-4-5-20251001',
     max_tokens: maxTokens,
     messages
   };
   if(system) body.system=system;
+  if(tools&&tools.length) body.tools=tools;
   const res=await fetch('https://api.anthropic.com/v1/messages',{
     method:'POST',
     headers:{
@@ -21424,24 +21485,187 @@ function jumpToAiConfig(){
   renderCfgPanel('ai');
 }
 
+// ── AGENT TOOLS ──────────────────────────────────────────
+// Real read access to the last simulation result, plus a sandboxed "what if"
+// runner. Sandboxed runs call simulate() directly (never runSimulation()), so
+// they never touch DB.vessel_calls, never autoSave(), and never write the
+// scenario file to disk — config/maintenance overrides are snapshotted and
+// restored in a finally block regardless of outcome.
+function agentFindElement(name){
+  if(!name) return null;
+  const els=getFacElements();
+  const q=String(name).toLowerCase();
+  return els.find(e=>e.name.toLowerCase()===q) || els.find(e=>e.name.toLowerCase().includes(q)) || null;
+}
+
+function agentToolGetStopEvents({element_name, type, limit}={}){
+  const r=S.simResults;
+  if(!r) return {error:'No simulation has been run yet for the active facility.'};
+  let events=r.stopEvents||[];
+  if(element_name){
+    const el=agentFindElement(element_name);
+    if(!el) return {error:`No element found matching "${element_name}".`};
+    events=events.filter(e=>e.element_id===el.id);
+  }
+  if(type) events=events.filter(e=>e.type===type);
+  events=events.slice().sort((a,b)=>b.day-a.day).slice(0, limit||20);
+  return {
+    count:events.length,
+    events: events.map(e=>({element:e.element_name, type:e.type, cause:e.cause, date:dayToDate(e.day)}))
+  };
+}
+
+function agentToolGetInventoryOnDate({element_name, date}={}){
+  const r=S.simResults;
+  if(!r) return {error:'No simulation has been run yet for the active facility.'};
+  const el=agentFindElement(element_name);
+  if(!el) return {error:`No element found matching "${element_name}".`};
+  const series=r.inventoryHistory?.[el.id];
+  if(!series) return {error:`"${el.name}" has no inventory series (it may not be a storage element).`};
+  const idx=dateToDayOffset(date, S.simCfg.start_date);
+  if(idx<0||idx>=series.length) return {error:`${date} is outside the simulated horizon (${S.simCfg.start_date} + ${series.length}d).`};
+  return {element:el.name, date, inventory_tonnes:series[idx]};
+}
+
+async function agentToolRunWhatif({horizon_days, maintenance_overrides}={}){
+  if(!S.facility_id) return {error:'No active facility selected.'};
+  if(_simQ.running) return {error:'A real simulation is running right now — try again in a moment.'};
+  const origHorizon=S.simCfg.horizon;
+  const maintSnapshot=JSON.stringify(DB.element_maintenance_events);
+  const skipped=[];
+  try{
+    if(horizon_days) S.simCfg.horizon=parseInt(horizon_days)||origHorizon;
+    for(const mo of (maintenance_overrides||[])){
+      const el=agentFindElement(mo.element_name);
+      if(!el){skipped.push(mo.element_name);continue;}
+      DB.element_maintenance_events.push({
+        id:`whatif_${Date.now()}_${Math.random().toString(36).slice(2,7)}`,
+        element_id:el.id, facility_id:S.facility_id, element_name:el.name, element_type:el.type,
+        name:'What-if outage', type:'fixed', start_date:mo.start_date,
+        duration_days:parseInt(mo.duration_days)||1, end_date:null,
+        frequency_days:null, recurrence_end_date:null, rampup_days:0, rampup_profile:[],
+        notes:'Sandboxed AI what-if — not saved'
+      });
+    }
+    const horizon=_simEffectiveHorizon();
+    const r=simulate(getFacElements(), getFacConnections(), horizon, true);
+    const baseline=S.simResults;
+    return {
+      horizon_days:horizon,
+      fulfillment_pct:r.fulfillmentPct,
+      stop_event_count:(r.stopEvents||[]).length,
+      baseline_fulfillment_pct: baseline?baseline.fulfillmentPct:null,
+      baseline_stop_event_count: baseline?(baseline.stopEvents||[]).length:null,
+      new_stop_events:(r.stopEvents||[]).slice(0,15).map(e=>({element:e.element_name,type:e.type,cause:e.cause,date:dayToDate(e.day)})),
+      skipped_elements: skipped.length?skipped:undefined,
+      note:'This was a sandboxed trial only — nothing was saved, the real plan is unchanged. fulfillment_pct is a stop-event penalty score (100 minus a penalty per non-maintenance stop day), not literally the percent of demand tonnage delivered — describe it that way to the user, not as "% fulfilled".'
+    };
+  } finally {
+    S.simCfg.horizon=origHorizon;
+    DB.element_maintenance_events=JSON.parse(maintSnapshot);
+  }
+}
+
+const AGENT_TOOL_FNS={
+  get_stop_events: agentToolGetStopEvents,
+  get_inventory_on_date: agentToolGetInventoryOnDate,
+  run_whatif_simulation: agentToolRunWhatif
+};
+
+const AGENT_TOOLS=[
+  {
+    name:'get_stop_events',
+    description:'List stop/blocked/idle/starved events for the active facility from the most recent real simulation run. Use for "why did X stop" or "what caused the fulfillment miss" questions.',
+    input_schema:{type:'object',properties:{
+      element_name:{type:'string',description:'Optional. Case-insensitive (partial match ok) element name to filter to.'},
+      type:{type:'string',enum:['blocked','maintenance','idle','starved','berth_yield','anchorage'],description:'Optional. Filter to one stop-event type.'},
+      limit:{type:'integer',description:'Max events to return, most recent first. Default 20.'}
+    }}
+  },
+  {
+    name:'get_inventory_on_date',
+    description:'Get simulated inventory (tonnes) of a storage element on a specific date, from the most recent real simulation run for the active facility.',
+    input_schema:{type:'object',properties:{
+      element_name:{type:'string',description:'Name (or partial, case-insensitive) of the storage element.'},
+      date:{type:'string',description:'YYYY-MM-DD, must fall within the simulated horizon.'}
+    },required:['element_name','date']}
+  },
+  {
+    name:'run_whatif_simulation',
+    description:'Run a hypothetical simulation for the active facility in a sandbox — nothing is saved or written to disk. Use when the user asks a "what if" question, e.g. adding a hypothetical maintenance outage or changing the horizon. Reports what changed vs. the current baseline result.',
+    input_schema:{type:'object',properties:{
+      horizon_days:{type:'integer',description:'Optional. Override the simulation horizon in days for this trial only.'},
+      maintenance_overrides:{type:'array',description:'Optional. Hypothetical downtime events to add for this trial only.',items:{type:'object',properties:{
+        element_name:{type:'string',description:'Name (or partial match) of the element to take down.'},
+        start_date:{type:'string',description:'YYYY-MM-DD'},
+        duration_days:{type:'integer'}
+      },required:['element_name','start_date','duration_days']}}
+    }}
+  }
+];
+
 async function sendChat(){
   const inp=document.getElementById('chat-in');
   const msg=inp.value.trim(); if(!msg) return;
   const apiKey=getApiKey();
   if(!apiKey){addMsg('agent','No API key set — click "Configure in Settings" below.');return;}
-  inp.value=''; addMsg('user',msg); showTyping();
+  inp.value=''; addMsg('user',msg);
+  const historySnapshot=JSON.stringify(chatHistory);
+  const turnsSnapshot=JSON.stringify(chatTurnStarts);
+  chatTurnStarts.push(chatHistory.length);
+  chatHistory.push({role:'user',content:msg});
+  showTyping();
   try{
     const ctx=buildCtx();
     const model=localStorage.getItem('avila_ai_model')||'claude-haiku-4-5-20251001';
-    const data=await callClaude({model,maxTokens:1000,
-        system:`You are AVILA Roll, an AI simulation agent for cement production planning.
+    const system=`You are the AI agent embedded in AVILA Roll, a cement production planning tool. You're talking directly to the planner running the simulation — think of yourself as the colleague at the next desk who happens to have the whole database memorized, not a database interface. Answer in plain, conversational language: lead with the takeaway, then the supporting numbers, and only mention table/field names if the person actually asks about the data model. Offer a natural next step when it's useful ("want me to check X?") instead of just stopping. Keep it tight — a few sentences, not a report — unless the question calls for a real breakdown.
+
+You have tools to look up real simulation results and to try sandboxed "what if" runs. Use get_stop_events / get_inventory_on_date to ground answers in the actual last run instead of guessing at numbers. Use run_whatif_simulation when the user proposes a hypothetical change — it's a throwaway trial against a sandbox copy, so always tell the user plainly that nothing was saved and the real plan is unchanged. If there's no simulation result yet, say so and suggest running one rather than inventing numbers.
+
+What you're working with:
 Database tables: macro_regions, countries, regions, sub_regions, facilities, elements, connections, products, recipes, raw_materials, fuels, element_maintenance_events, element_product_capacities, vessel_calls, rail_movements, truck_movements, transport_links, in_transit_inventory, demand_points, simulation_runs, simulation_stop_events. Element types: raw_material_storage, fuel_storage, bulk_silo (replaces clinker_silo/cement_silo/homo_silo — color by product category), packed_silo, raw_meal_mill, kiln, finish_mill, packing_plant, berth, dispatch_point (truck=no constraint same-day; rail=car accumulation with switch days and transit lag), demand_point, supply_source. Products have category: clinker, raw_meal, cement_bulk, cement_packed, additive. Kiln product capacities include capacity_tpd, specific_heat_kcal_kg, raw_meal_ratio per clinker product. Rail dispatch points have: car_capacity_t, std_loading_cars_day, max_loading_cars_day, working_days, switch_days (array of 0-6 Mon-Sun), transit_days.
-Be concise, specific, reference table names and element names precisely. ${ctx}`,
-        messages:[{role:'user',content:msg}]});
+
+Current state: ${ctx}
+
+You're mid-conversation with this person — earlier turns are included below, so use them; don't ask them to repeat context they already gave you.`;
+
+    let rounds=0, finalText=null;
+    while(rounds<6){
+      rounds++;
+      const data=await callClaude({model,maxTokens:1200,system,messages:chatHistory,tools:AGENT_TOOLS});
+      if(data.error) throw new Error(data.error.message);
+      const content=data.content||[];
+      chatHistory.push({role:'assistant',content});
+      const toolUses=content.filter(c=>c.type==='tool_use');
+      const text=content.filter(c=>c.type==='text').map(c=>c.text).join('');
+      if(!toolUses.length){ finalText=text||'Unable to process.'; break; }
+      if(text.trim()){ hideTyping(); addMsg('agent',text); showTyping(); }
+      showTyping(toolUses.length===1?`${toolUses[0].name.replace(/_/g,' ')}…`:'running tools…');
+      const results=[];
+      for(const tu of toolUses){
+        let out;
+        try{
+          const fn=AGENT_TOOL_FNS[tu.name];
+          out = fn ? await fn(tu.input||{}) : {error:`Unknown tool: ${tu.name}`};
+        }catch(e){ out={error:e.message}; }
+        results.push({type:'tool_result', tool_use_id:tu.id, content:JSON.stringify(out)});
+      }
+      chatHistory.push({role:'user', content:results});
+    }
     hideTyping();
-    if(data.error){addMsg('agent',`Error: ${data.error.message}`);return;}
-    addMsg('agent',data.content?.map(c=>c.text||'').join('')||'Unable to process.');
-  }catch(e){hideTyping();addMsg('agent',`Connection error: ${e.message}`);}
+    addMsg('agent', finalText || 'Ran out of steps on that one — try breaking it into a smaller question.');
+    if(chatTurnStarts.length>CHAT_MAX_TURNS){
+      const keepFrom=chatTurnStarts.length-CHAT_MAX_TURNS;
+      const cut=chatTurnStarts[keepFrom];
+      chatHistory=chatHistory.slice(cut);
+      chatTurnStarts=chatTurnStarts.slice(keepFrom).map(i=>i-cut);
+    }
+  }catch(e){
+    hideTyping();
+    addMsg('agent',`Error: ${e.message}`);
+    chatHistory=JSON.parse(historySnapshot);
+    chatTurnStarts=JSON.parse(turnsSnapshot);
+  }
 }
 
 function buildCtx(){
@@ -21463,7 +21687,14 @@ function addMsg(role,text){
 }
 
 let typingEl=null;
-function showTyping(){const msgs=document.getElementById('chat-msgs');typingEl=document.createElement('div');typingEl.className='chat-msg agent';typingEl.innerHTML='<div class="chat-msg-lbl">Agent</div><div class="typing-dots"><span></span><span></span><span></span></div>';msgs.appendChild(typingEl);msgs.scrollTop=msgs.scrollHeight;}
+function showTyping(label){
+  const msgs=document.getElementById('chat-msgs');
+  typingEl=document.createElement('div');
+  typingEl.className='chat-msg agent';
+  const body=label?`<div class="chat-typing-label">${label}</div>`:'<div class="typing-dots"><span></span><span></span><span></span></div>';
+  typingEl.innerHTML=`<div class="chat-msg-lbl">Agent</div>${body}`;
+  msgs.appendChild(typingEl); msgs.scrollTop=msgs.scrollHeight;
+}
 function hideTyping(){if(typingEl){typingEl.remove();typingEl=null;}}
 
 // ═══════════════════════════════════════════════════════
