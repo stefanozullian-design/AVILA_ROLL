@@ -4345,10 +4345,7 @@ function showCampaignPopup(elId, dateStr, runStart, runEnd, runProduct){
 
   const selCap=caps.find(c=>c.product_id===selProd);
   const currentRate=existing?.rate_tpd||(selCap?_rowRate(selCap):_rowRate(caps[0]))||0;
-  // Always prefill "From" with the clicked day, not the campaign/run's original start —
-  // otherwise clicking mid-campaign silently jumps the dialog back to day 1 of the run,
-  // which reads as if the click landed on the wrong cell.
-  const fromVal=dateStr;
+  const fromVal=existing?.start_date||runStart||dateStr;
   const toVal=existing?.end_date||runEnd||dateStr;
   // In Real mode the rate field holds the actual produced tonnage for the clicked day.
   const realVal=existingReal.find(r=>r.product_id===selProd)?.volume_t ?? existingReal[0]?.volume_t ?? '';
@@ -5656,10 +5653,6 @@ function supInitFilters(){
     `<button class="vw-btn ${cur===''?'active':''}" onclick="supSelectFac('')">All Facilities</button>`+
     DB.facilities
       .filter(f=>qualFacIds.has(f.id))
-      // Plants first, then terminals — matches the table's display grouping below instead
-      // of DB.facilities' raw (region-interleaved) order, which put terminals like PEV
-      // next to whichever plant shares its region.
-      .sort((a,b)=>(a.type==='terminal')-(b.type==='terminal'))
       .map(f=>`<button class="vw-btn ${f.id===cur?'active':''}" onclick="supSelectFac('${f.id}')">${f.name}</button>`)
       .join('');
   supPopulateProductFilter(cur);
@@ -6106,15 +6099,10 @@ function renderDemandView(){
     mon.dates.push(ds);
   });
 
-  // Collapsed state — months keyed by ym, org groups keyed by id.
-  // Every month except the current one starts collapsed so the page opens compact.
-  // Gated on months.length so an early render (before the date range is synced) can't
-  // permanently lock in an empty collapsed set.
-  if(!window._demColapsed) window._demColapsed=new Set();
-  if(!window._demColDefaultApplied&&months.length){
-    window._demColDefaultApplied=true;
-    months.filter(m=>m.ym!==todayStr.slice(0,7)).forEach(m=>window._demColapsed.add(m.ym));
-  }
+  // Collapsed state — months keyed by ym, org groups keyed by id
+  if(!window._demColapsed) window._demColapsed=new Set(
+    months.filter(m=>m.ym<todayStr.slice(0,7)).map(m=>m.ym)
+  );
   if(!window._demGrpCol) window._demGrpCol=new Set(); // org group ids that are collapsed
   const collapsed=window._demColapsed;
   const grpCol=window._demGrpCol;
@@ -6714,15 +6702,8 @@ function _renderSupplyViewInner(wrap){
     mon.dates.push(ds);
   });
 
-  // Collapsed state — shared with demand view pattern but separate keys.
-  // Every month except the current one starts collapsed so the page opens compact.
-  // Gated on months.length so an early render (before the date range is synced) can't
-  // permanently lock in an empty collapsed set.
-  if(!window._supColapsed) window._supColapsed=new Set();
-  if(!window._supColDefaultApplied&&months.length){
-    window._supColDefaultApplied=true;
-    months.filter(m=>m.ym!==todayStr.slice(0,7)).forEach(m=>window._supColapsed.add(m.ym));
-  }
+  // Collapsed state — shared with demand view pattern but separate keys
+  if(!window._supColapsed) window._supColapsed=new Set(); // no months auto-collapsed; user expands/collapses manually
   if(!window._supGrpCol) window._supGrpCol=new Set();
   const collapsed=window._supColapsed;
   const grpCol=window._supGrpCol;
@@ -6878,14 +6859,7 @@ function _renderSupplyViewInner(wrap){
   const _supFacFilter=window._supView?.facId||document.getElementById('sup-fac-filter')?.value||'';
   const _supProdFilter=window._supView?.prodId||document.getElementById('sup-prod-filter')?.value||'';
   const allEls=getFacElements();
-  // Exclude production elements that live at a terminal-type facility (e.g. an on-site
-  // bagging line) from the PLANT tree — a facility's node type follows facility.type, not
-  // "does it happen to contain a kiln/mill/packer." Otherwise a terminal with any production
-  // element gets reclassified as a plant, nesting it under the wrong tree branch and losing
-  // its terminal-only sections (per-product starting inventory, etc.).
-  const _facTypeOf=fid=>DB.facilities.find(f=>f.id===fid)?.type;
-  let prodEls=allEls.filter(e=>(e.type==='kiln'||e.type==='finish_mill'||e.type==='packing_plant')
-    &&_facTypeOf(e.assigned_facility_id||e.facility_id)!=='terminal');
+  let prodEls=allEls.filter(e=>e.type==='kiln'||e.type==='finish_mill'||e.type==='packing_plant');
   // Filter by selected facility (assigned_facility_id first)
   if(_supFacFilter){
     prodEls=prodEls.filter(e=>(e.assigned_facility_id||e.facility_id)===_supFacFilter);
@@ -7531,10 +7505,6 @@ function _renderSupplyViewInner(wrap){
           });
         }
 
-        // Marks where the PACKING block's HTML begins within `h`, so it can be split
-        // off from the CEMENT BULK block below and given its own divider.
-        const _packStart=h.length;
-
         // ╔══════════════════════════════════════════════════════════════╗
         // ║ PACKED block — its own inventory chart + starting inventory +  ║
         // ║ requirements, mirroring the CEMENT / CLINKER blocks. Order:    ║
@@ -7826,10 +7796,8 @@ function _renderSupplyViewInner(wrap){
           }
         }
 
-        // ── End of CEMENT block: split into CEMENT BULK + PACKING, then start capturing CLINKER ──
-        const cementBulkHTML=h.slice(_cemStart,_packStart);
-        const packHTML=h.slice(_packStart);
-        h=h.slice(0,_cemStart);
+        // ── End of CEMENT block: stash its HTML, then start capturing CLINKER ──
+        const cementHTML=h.slice(_cemStart); h=h.slice(0,_cemStart);
         const _clkStart=h.length;
 
         // ══════════════════════════════════════════════════════════════
@@ -8037,15 +8005,12 @@ function _renderSupplyViewInner(wrap){
           });
         }
 
-        // ── Emit in display order: CLINKER → CEMENT BULK → PACKING → RAIL LOADING,
-        // each separated by a thin 1px divider (product-family boundaries within a plant).
+        // ── Emit in display order: CLINKER, thick line, CEMENT, thick line, RAIL LOADING ──
         const clinkerHTML=h.slice(_clkStart); h=h.slice(0,_clkStart);
-        const _sepRow=grad=>`<tr class="sup-sep-row" aria-hidden="true"><td colspan="999" style="padding:0;border:0"><div style="height:1px;background:linear-gradient(90deg,${grad});opacity:.85"></div></td></tr>`;
         h += clinkerHTML
-           + _sepRow('#ff8c42,#00d9a3')
-           + cementBulkHTML
-           + (packHTML?_sepRow('#00d9a3,#4da6ff')+packHTML:'')
-           + (_railHTML?_sepRow('#4da6ff,#b388ff')+_railHTML:'');
+           + `<tr class="sup-sep-row" aria-hidden="true"><td colspan="999" style="padding:0;border:0"><div style="height:5px;background:linear-gradient(90deg,#ff8c42,#00d9a3);opacity:.85"></div></td></tr>`
+           + cementHTML
+           + (_railHTML?`<tr class="sup-sep-row" aria-hidden="true"><td colspan="999" style="padding:0;border:0"><div style="height:5px;background:linear-gradient(90deg,#00d9a3,#b388ff);opacity:.85"></div></td></tr>`+_railHTML:'');
 
       }
     } else {
@@ -8137,17 +8102,13 @@ function _renderSupplyViewInner(wrap){
       });
       h+=`</tr>`;
 
-      if(!_tCol) _termRender.forEach((fac,facIdx)=>{
+      if(!_tCol) _termRender.forEach(fac=>{
         const depth=1;
         const facEls=_allFE.filter(e=>(e.assigned_facility_id||e.facility_id)===fac.id);
         const berths=_facBerths(fac);
         const demandEls=facEls.filter(e=>e.type==='demand_point');
         const demandPoints=DB.demand_points.filter(dp=>demandEls.some(el=>el.id===dp.element_id));
         const _facCol=grpCol.has(fac.id);
-
-        // Divider BETWEEN terminals only (not per product-family within one) —
-        // mirrors the plant-side family dividers but marks a facility boundary instead.
-        if(facIdx>0) h+=`<tr class="sup-sep-row" aria-hidden="true"><td colspan="999" style="padding:0;border:0"><div style="height:1px;background:rgba(255,184,48,.5)"></div></td></tr>`;
 
         // ── Terminal header (amber) — total = throughput received ──
         h+=`<tr class="sup-grp-hdr" onclick="_supToggleGrp('${fac.id}')" style="cursor:pointer;background:rgba(255,184,48,.04);border-top:1px solid var(--border2)">
@@ -10420,15 +10381,8 @@ function rpRender(){
 
   // ── Month grouping + summary-column styling (shared with vessel planner) ──
   const todayStr=new Date()._ymd();
+  if(!window._rpColapsed) window._rpColapsed=new Set(); // no months auto-collapsed; user expands/collapses manually
   const months=(()=>{const mons=[];days.forEach(d=>{const ds=rpDayDate(d);const ym=ds.slice(0,7);if(!mons.length||mons[mons.length-1].ym!==ym){const dt=new Date(ds+'T00:00:00');mons.push({ym,label:dt.toLocaleString('en-US',{month:'short',year:'2-digit'}),days:[]});}mons[mons.length-1].days.push(d);});return mons;})();
-  // Every month except the current one starts collapsed so the page opens compact.
-  // Gated on months.length so an early render (before the date range is synced) can't
-  // permanently lock in an empty collapsed set.
-  if(!window._rpColapsed) window._rpColapsed=new Set();
-  if(!window._rpColDefaultApplied&&months.length){
-    window._rpColDefaultApplied=true;
-    months.filter(m=>m.ym!==todayStr.slice(0,7)).forEach(m=>window._rpColapsed.add(m.ym));
-  }
   const _mTdSty='background:var(--total-faint);border-left:2px solid var(--border2);font-weight:700;color:var(--total);text-align:right;padding:3px 8px;';
   const _tpTdSty=d=>{
     if(rpDayDate(d)===todayStr) return 'border-left:2px solid var(--green);border-right:2px solid var(--green);';
@@ -11138,15 +11092,8 @@ function vpRender(){
   vpRenderCharts();
 
   const todayStr=new Date()._ymd();
+  if(!window._vpColapsed) window._vpColapsed=new Set(); // no months auto-collapsed; user expands/collapses manually
   const months=(()=>{const mons=[];days.forEach(d=>{const ds=vpDayDate(d);const ym=ds.slice(0,7);if(!mons.length||mons[mons.length-1].ym!==ym){const dt=new Date(ds+'T00:00:00');mons.push({ym,label:dt.toLocaleString('en-US',{month:'short',year:'2-digit'}),days:[]});}mons[mons.length-1].days.push(d);});return mons;})();
-  // Every month except the current one starts collapsed so the page opens compact.
-  // Gated on months.length so an early render (before the date range is synced) can't
-  // permanently lock in an empty collapsed set.
-  if(!window._vpColapsed) window._vpColapsed=new Set();
-  if(!window._vpColDefaultApplied&&months.length){
-    window._vpColDefaultApplied=true;
-    months.filter(m=>m.ym!==todayStr.slice(0,7)).forEach(m=>window._vpColapsed.add(m.ym));
-  }
   const _mTdSty='background:var(--total-faint);border-left:2px solid var(--border2);font-weight:700;color:var(--total);text-align:right;padding:3px 8px;';
   const _tpTdSty=d=>{
     if(vpDayDate(d)===todayStr) return 'border-left:2px solid var(--green);border-right:2px solid var(--green);';
@@ -16136,14 +16083,6 @@ function renderDtree(r){
     mon.idxs.push(i); mon.dayNums.push(d);
   });
   const monCol=(window._dtreeMonCol=window._dtreeMonCol||new Set());
-  // Every month except the current one starts collapsed so the page opens compact.
-  // Gated on monthsD.length so an early render (before the date range is synced) can't
-  // permanently lock in an empty collapsed set.
-  if(!window._dtreeMonColDefaultApplied&&monthsD.length){
-    window._dtreeMonColDefaultApplied=true;
-    const curYm=new Date()._ymd().slice(0,7);
-    monthsD.filter(m=>m.ym!==curYm).forEach(m=>monCol.add(m.ym));
-  }
   const isLevelId=id=>/_inv\b|_inv_|inventor/i.test(id||''); // inventory rows summarize as end-of-month, others as monthly total
   const visCols=monthsD.reduce((s,mon)=>s+1+(monCol.has(mon.ym)?0:mon.dayNums.length),0);
   const _msumSty='background:var(--total-faint);border-left:2px solid var(--border2);font-weight:700;text-align:right;padding:4px 8px;';
@@ -18779,7 +18718,7 @@ function spBuildDateSpine(){
   const to  =SP.f.dateTo  ||`${today.slice(0,4)}-12-31`;
   // Return cached spine if date range hasn't changed
   if(SP._spine&&SP._spine.from===from&&SP._spine.to===to){
-    if(!SP.collapsedMonths) SP.collapsedMonths=new Set(SP._spine.months.filter(m=>!m.isCurrent).map(m=>m.ym));
+    if(!SP.collapsedMonths) SP.collapsedMonths=new Set(SP._spine.months.filter(m=>m.isPast).map(m=>m.ym));
     return {months:SP._spine.months,today};
   }
   const months=[];
@@ -18790,7 +18729,7 @@ function spBuildDateSpine(){
     mo.dates.push(ds);
   }
   if(!SP.collapsedMonths){
-    SP.collapsedMonths=new Set(months.filter(m=>!m.isCurrent).map(m=>m.ym));
+    SP.collapsedMonths=new Set(months.filter(m=>m.isPast).map(m=>m.ym));
   }
   SP._spine={from,to,months};
   return {months,today};
