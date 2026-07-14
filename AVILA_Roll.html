@@ -4355,12 +4355,16 @@ function showCampaignPopup(elId, dateStr, runStart, runEnd, runProduct){
   // Rated output for an element_product_capacities row — packing lines are pallets/day × t/pallet,
   // everything else uses the capacity_tpd field directly.
   const _rowRate=c=>_isPackingRow(c)?_packLineCapT(c):(parseFloat(c.capacity_tpd)||0);
-  // Product options
+  // Product options + two DOWNTIME choices (0 production, tagged reason). Picking a
+  // downtime option forces the rate to 0 (handled by the select's onchange via data-rate)
+  // and applyCampaign stores the sentinel product_id so the Gantt shows a distinct bar.
   const prodOpts=caps.map(c=>{
     const p=DB.products.find(pr=>pr.id===c.product_id);
     const rr=_rowRate(c);
     return `<option value="${c.product_id}" data-rate="${rr}" ${selProd===c.product_id?'selected':''}>${p?.name||c.product_id} (${rr} t/d rated)</option>`;
-  }).join('');
+  }).join('')
+  + `<option value="__down_repair__" data-rate="0" data-down="1" ${selProd==='__down_repair__'?'selected':''}>🔧 Down For Repairs (0 t/d)</option>`
+  + `<option value="__down_pm__" data-rate="0" data-down="1" ${selProd==='__down_pm__'?'selected':''}>🗓 Down PM Day (0 t/d)</option>`;
 
   const selCap=caps.find(c=>c.product_id===selProd);
   const currentRate=existing?.rate_tpd||(selCap?_rowRate(selCap):_rowRate(caps[0]))||0;
@@ -4397,7 +4401,7 @@ function showCampaignPopup(elId, dateStr, runStart, runEnd, runProduct){
       <div class="fr s1">
         <div class="ff">
           <div class="fl">Product</div>
-          <select class="fi" id="camp-product" onchange="if(window._campMode!=='real')document.getElementById('camp-rate').value=this.options[this.selectedIndex].dataset.rate" style="width:100%">${prodOpts}</select>
+          <select class="fi" id="camp-product" onchange="_campProductChanged(this)" style="width:100%">${prodOpts}</select>
         </div>
       </div>
       <div class="fr s2">
@@ -4449,6 +4453,30 @@ function showCampaignPopup(elId, dateStr, runStart, runEnd, runProduct){
   ov.innerHTML=`<div style="background:var(--surface);border:1px solid #4ade80;padding:18px;border-radius:6px;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.6)">${html}</div>`;
   ov.style.display='flex';
   _campSetMode(defaultMode);
+  _campProductChanged(document.getElementById('camp-product')); // reflect a pre-selected downtime option
+}
+
+// Product-dropdown change in the Campaign popup. Keeps the original behaviour (sync the
+// rate field to the picked product's rated output in Forecast mode) and adds downtime
+// handling: a "Down For Repairs" / "Down PM Day" option forces the rate to 0, disables the
+// rate field, and relabels it so it's clear no production happens. No-op for popups (rail)
+// that have no downtime options.
+function _campProductChanged(sel){
+  if(!sel) return;
+  const opt=sel.options[sel.selectedIndex];
+  const isDown=opt&&opt.dataset&&opt.dataset.down==='1';
+  const rate=document.getElementById('camp-rate');
+  const rateLbl=document.getElementById('camp-rate-label');
+  const rateHint=document.getElementById('camp-rate-hint');
+  if(window._campMode!=='real'&&rate) rate.value=opt?opt.dataset.rate:rate.value;
+  if(rate){ rate.disabled=!!isDown; rate.style.opacity=isDown?'.5':'1'; }
+  if(isDown){
+    if(rate) rate.value='0';
+    if(rateLbl) rateLbl.textContent='Rate (t/d)';
+    if(rateHint){ rateHint.textContent='no production'; rateHint.style.display=''; }
+  } else if(rateHint&&rateHint.textContent==='no production'){
+    rateHint.textContent='override topology';
+  }
 }
 
 // Switch the Campaign popup between Forecast (date-range campaign) and Real (single-day actual) input.
@@ -5051,6 +5079,7 @@ function applyCampaign(elId){
 
   // REAL mode: write a single-day actual to real_production_daily (Tier 0 — same as Daily Data / Excel).
   if(window._campMode==='real'){
+    if(DOWNTIME_PRODUCTS[productId]){ statMsg('“Down For Repairs / PM Day” is a forecast plan — switch to Forecast Campaign to schedule downtime'); return; }
     if(!productId||!fromDate){ statMsg('Please choose a product and date'); return; }
     const facId=getEl(elId)?.facility_id||S.facility_id;
     const now=new Date().toISOString();
@@ -6614,6 +6643,25 @@ function _monthTotalsToEnd(root, cls, markedIsTotal){
   });
 }
 
+// Production-Gantt downtime fills — one distinct diagonal hatch per reason, so a
+// zero-output day shows WHY the kiln/mill/packer is down instead of a blank cell.
+// Shared by the clinker, finish-mill and packing rows.
+const _DOWN_HATCH = {
+  maint:   'repeating-linear-gradient(45deg,#5f5e5a,#5f5e5a 3px,#383836 3px,#383836 6px)', // scheduled maintenance event
+  starved: 'repeating-linear-gradient(45deg,#5f5e5a,#5f5e5a 3px,#a32d2d 3px,#a32d2d 6px)', // no feed (e.g. no clinker)
+  blocked: 'repeating-linear-gradient(45deg,#4a4526,#4a4526 3px,#e8c020 3px,#e8c020 6px)', // receiving silo full (sim "blocked")
+  repair:  'repeating-linear-gradient(45deg,#5a2a15,#5a2a15 3px,#ff6a1a 3px,#ff6a1a 6px)', // manual "Down For Repairs"
+  pm:      'repeating-linear-gradient(45deg,#2f3a52,#2f3a52 3px,#5b6b8a 3px,#5b6b8a 6px)', // manual "Down PM Day"
+};
+const _DOWN_LABEL = {blocked:'FULL', repair:'REPAIRS', pm:'PM DAY'};
+const _DOWN_TIP = {
+  blocked:'⛔ Blocked — receiving silo full, so the element had to stop',
+  repair:'🔧 Down For Repairs (manual) — no production',
+  pm:'🗓 Down PM Day (manual) — no production',
+};
+// Sentinel product_ids used by downtime campaigns (0 production, tagged reason).
+const DOWNTIME_PRODUCTS = {'__down_repair__':'repair','__down_pm__':'pm'};
+
 // ═══════════════════════════════════════════════════════
 // SUPPLY / PRODUCTION VIEW
 // ═══════════════════════════════════════════════════════
@@ -6846,6 +6894,11 @@ function _renderSupplyViewInner(wrap){
       c.element_id===el.id && ds>=c.start_date && ds<=c.end_date
     );
     if(managerCampaign){
+      // Downtime campaign ("Down For Repairs" / "Down PM Day"): 0 production, tagged
+      // reason. Must return BEFORE the rate fallback below (else a 0 rate would fall
+      // back to rated capacity and the element would wrongly "produce" while down).
+      const dt=DOWNTIME_PRODUCTS[managerCampaign.product_id];
+      if(dt) return {product_id:null, capacity_tpd:0, isCampaign:true, downtime:dt};
       const campRate=parseFloat(managerCampaign.rate_tpd)||0;
       const fallbackCap=DB.element_product_capacities.find(c=>c.element_id===el.id&&c.product_id===managerCampaign.product_id);
       const fbRate=_isPackingRow(fallbackCap)?_packLineCapT(fallbackCap):(parseFloat(fallbackCap?.capacity_tpd)||0);
@@ -7057,6 +7110,9 @@ function _renderSupplyViewInner(wrap){
     ${_legProdHTML||'<span style="opacity:.6">none</span>'}
     <span style="display:inline-flex;align-items:center;gap:3px"><span style="width:12px;height:9px;border-radius:1px;background:repeating-linear-gradient(45deg,#5f5e5a,#5f5e5a 3px,#383836 3px,#383836 6px);display:inline-block"></span>Maintenance</span>
     <span style="display:inline-flex;align-items:center;gap:3px"><span style="width:12px;height:9px;border-radius:1px;background:repeating-linear-gradient(45deg,#5f5e5a,#5f5e5a 3px,#a32d2d 3px,#a32d2d 6px);display:inline-block"></span>Unplanned shortfall</span>
+    <span style="display:inline-flex;align-items:center;gap:3px"><span style="width:12px;height:9px;border-radius:1px;background:${_DOWN_HATCH.blocked};display:inline-block"></span>Blocked (silo full)</span>
+    <span style="display:inline-flex;align-items:center;gap:3px"><span style="width:12px;height:9px;border-radius:1px;background:${_DOWN_HATCH.repair};display:inline-block"></span>Down for repairs</span>
+    <span style="display:inline-flex;align-items:center;gap:3px"><span style="width:12px;height:9px;border-radius:1px;background:${_DOWN_HATCH.pm};display:inline-block"></span>Down PM day</span>
     <span style="width:1px;height:11px;background:var(--border2);margin:0 2px"></span>
     <span style="color:var(--text);letter-spacing:.5px">INVENTORY:</span>
     ${_legSw('#ff3d5a','Critical / overflow')}${_legSw('#ffb830','Low (&lt;25%)')}${_legSw('#ff8c42','Near full (&gt;85%)')}${_legSw('#00d9a3','Healthy')}
@@ -7519,6 +7575,7 @@ function _renderSupplyViewInner(wrap){
             // Days the mill couldn't produce despite needing to (no clinker) — an
             // UNPLANNED cement shortfall, flagged with a gray/red hatch below.
             const starvedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='starved').map(e=>allDates[e.day-1]).filter(Boolean));
+            const blockedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='blocked').map(e=>allDates[e.day-1]).filter(Boolean)); // down: receiving silo full
             const caps=DB.element_product_capacities.filter(c=>c.element_id===el.id);
             const maxSingleCap=caps.length?Math.max(...caps.map(c=>parseFloat(c.capacity_tpd)||0)):0;
             h+=`<tr class="supsec-cementProd">
@@ -7570,18 +7627,22 @@ function _renderSupplyViewInner(wrap){
                   h+=`<td class="sup-day-${mon.ym}" title="${_tip}" onclick="event.stopPropagation();${clickFn}" style="cursor:pointer;font-size:9px;color:${barColor};font-weight:700;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${Math.round(v).toLocaleString()}${_mk}</td>`;
                   return;
                 }
-                // FORECAST / maintenance: Gantt bar — colour = product, label once per run.
-                const runKey=isMaint?'__m':(v>0?(res.product_id||'__p'):'__idle');
-                const isRunStart=(!isMaint&&v>0&&runKey!==_gPrev);
+                // FORECAST / maintenance / downtime: Gantt bar — colour = product, or a
+                // distinct hatch when the mill is DOWN (maintenance · blocked=silo full ·
+                // manual Down-For-Repairs / Down-PM-Day). A short label marks the reason.
+                const dt=res.downtime; // 'repair' | 'pm' from a downtime campaign
+                const isStarved=(!isMaint&&!dt&&v<=0&&starvedDays.has(ds));
+                const isBlocked=(!isMaint&&!dt&&v<=0&&!isStarved&&blockedDays.has(ds));
+                const downKind=isMaint?'maint':dt?dt:isStarved?'starved':isBlocked?'blocked':null;
+                const runKey=downKind?('__'+downKind):(v>0?(res.product_id||'__p'):'__idle');
+                const isRunStart=(runKey!=='__idle'&&runKey!==_gPrev);
                 _gPrev=runKey;
-                const maintBg='repeating-linear-gradient(45deg,#5f5e5a,#5f5e5a 3px,#383836 3px,#383836 6px)';
-                const starvedBg='repeating-linear-gradient(45deg,#5f5e5a,#5f5e5a 3px,#a32d2d 3px,#a32d2d 6px)';
-                const isStarved=(!isMaint&&v<=0&&starvedDays.has(ds));
-                const barBg=isMaint?maintBg:isStarved?starvedBg:(v>0?barColor:'transparent');
+                const barBg=downKind?(_DOWN_HATCH[downKind]||'transparent'):(v>0?barColor:'transparent');
                 const campMark=(isCamp&&!isMaint)?'border-top:2px solid #4ade80;':'';
-                const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(isStarved?'⚠ Unplanned shortfall — mill could not produce (no clinker)':(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name?`${prod.name} · ${Math.round(v)} t/d`:'Idle')));
+                const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?_DOWN_TIP[dt]:isBlocked?_DOWN_TIP.blocked:isStarved?'⚠ Unplanned shortfall — mill could not produce (no clinker)':(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name?`${prod.name} · ${Math.round(v)} t/d`:'Idle')));
                 const lblName=(typeof spShortProd==='function')?spShortProd(prod?.name||''):(prod?.name||'');
-                const label=isRunStart?`<span style="position:absolute;left:5px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:9px;font-weight:700;color:${_barTextColor(barColor)};pointer-events:none">${lblName} · ${Math.round(v).toLocaleString()}${isCamp?' 🔒':''}</span>`:'';
+                const barTxt=(downKind==='maint'||downKind==='starved')?'':(downKind?(_DOWN_LABEL[downKind]||''):(v>0?`${lblName} · ${Math.round(v).toLocaleString()}${isCamp?' 🔒':''}`:''));
+                const label=(isRunStart&&barTxt)?`<span style="position:absolute;left:5px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:9px;font-weight:700;color:${downKind?'#fff':_barTextColor(barColor)};pointer-events:none">${barTxt}</span>`:'';
                 const zpos=isRunStart?'position:relative;z-index:2;':'';
                 h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="${zpos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barBg};${campMark}">${label}</div></td>`;
               });
@@ -7711,6 +7772,7 @@ function _renderSupplyViewInner(wrap){
           node.packers.forEach(el=>{
             const maintDays=maintSetFor(el.id);
             const starvedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='starved').map(e=>allDates[e.day-1]).filter(Boolean));
+            const blockedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='blocked').map(e=>allDates[e.day-1]).filter(Boolean)); // down: receiving silo full
             const maxSingleCap=_packRated(el);
             h+=`<tr class="supsec-packProd">
               <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${packColor};font-size:9px">${el.name}
@@ -7757,18 +7819,22 @@ function _renderSupplyViewInner(wrap){
                   h+=`<td class="sup-day-${mon.ym}" title="${_tip}" onclick="event.stopPropagation();${clickFn}" style="cursor:pointer;font-size:9px;color:${barColor};font-weight:700;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${Math.round(v).toLocaleString()}${_mk}</td>`;
                   return;
                 }
-                // FORECAST / maintenance: Gantt bar — colour = product, label once per run.
-                const runKey=isMaint?'__m':(v>0?(res.product_id||'__p'):'__idle');
-                const isRunStart=(!isMaint&&v>0&&runKey!==_gPrev);
+                // FORECAST / maintenance / downtime: Gantt bar — colour = product, or a
+                // distinct hatch when the packer is DOWN (maintenance · blocked=packed silo
+                // full · manual Down-For-Repairs / Down-PM-Day). Short label marks the reason.
+                const dt=res.downtime;
+                const isStarved=(!isMaint&&!dt&&v<=0&&starvedDays.has(ds));
+                const isBlocked=(!isMaint&&!dt&&v<=0&&!isStarved&&blockedDays.has(ds));
+                const downKind=isMaint?'maint':dt?dt:isStarved?'starved':isBlocked?'blocked':null;
+                const runKey=downKind?('__'+downKind):(v>0?(res.product_id||'__p'):'__idle');
+                const isRunStart=(runKey!=='__idle'&&runKey!==_gPrev);
                 _gPrev=runKey;
-                const maintBg='repeating-linear-gradient(45deg,#5f5e5a,#5f5e5a 3px,#383836 3px,#383836 6px)';
-                const starvedBg='repeating-linear-gradient(45deg,#5f5e5a,#5f5e5a 3px,#a32d2d 3px,#a32d2d 6px)';
-                const isStarved=(!isMaint&&v<=0&&starvedDays.has(ds));
-                const barBg=isMaint?maintBg:isStarved?starvedBg:(v>0?barColor:'transparent');
+                const barBg=downKind?(_DOWN_HATCH[downKind]||'transparent'):(v>0?barColor:'transparent');
                 const campMark=(isCamp&&!isMaint)?'border-top:2px solid #4ade80;':'';
-                const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(isStarved?'⚠ Unplanned shortfall — packer could not run (no bulk cement)':(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name?`${prod.name} · ${Math.round(v)} t/d`:'Idle')));
+                const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?_DOWN_TIP[dt]:isBlocked?_DOWN_TIP.blocked:isStarved?'⚠ Unplanned shortfall — packer could not run (no bulk cement)':(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name?`${prod.name} · ${Math.round(v)} t/d`:'Idle')));
                 const lblName=(typeof spShortProd==='function')?spShortProd(prod?.name||''):(prod?.name||'');
-                const label=isRunStart?`<span style="position:absolute;left:5px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:9px;font-weight:700;color:${_barTextColor(barColor)};pointer-events:none">${lblName} · ${Math.round(v).toLocaleString()}${isCamp?' 🔒':''}</span>`:'';
+                const barTxt=(downKind==='maint'||downKind==='starved')?'':(downKind?(_DOWN_LABEL[downKind]||''):(v>0?`${lblName} · ${Math.round(v).toLocaleString()}${isCamp?' 🔒':''}`:''));
+                const label=(isRunStart&&barTxt)?`<span style="position:absolute;left:5px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:9px;font-weight:700;color:${downKind?'#fff':_barTextColor(barColor)};pointer-events:none">${barTxt}</span>`:'';
                 const zpos=isRunStart?'position:relative;z-index:2;':'';
                 h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="${zpos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barBg};${campMark}">${label}</div></td>`;
               });
@@ -8067,6 +8133,7 @@ function _renderSupplyViewInner(wrap){
 
           node.kilns.forEach(el=>{
             const maintDays=maintSetFor(el.id);
+            const blockedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='blocked').map(e=>allDates[e.day-1]).filter(Boolean)); // down: clinker silo full
             const defaultCap=DB.element_product_capacities.filter(c=>c.element_id===el.id)
               .reduce((s,c)=>s+(parseFloat(c.capacity_tpd)||0),0);
             h+=`<tr class="supsec-clinkerProd">
@@ -8088,8 +8155,20 @@ function _renderSupplyViewInner(wrap){
                 const isCamp=res.isCampaign;
                 const campBorder=isCamp?'border-left:2px solid #4ade80;border-right:2px solid #4ade80;':'';
                 const lockBadge=isCamp?'<span style="font-size:7px;color:#4ade80;margin-left:2px" title="Manager campaign">🔒</span>':'';
-                const cellTitle=isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name||'');
-                h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();showCampaignPopup('${el.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?clkColor:'rgba(255,61,90,.4)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${campBorder}${tdSty(ds)}">${maintDays.has(ds)?`<span style="font-size:7px;font-family:var(--mono);color:var(--amber);letter-spacing:.5px;cursor:pointer;font-weight:700;opacity:.9" onclick="event.stopPropagation();openMaintenanceEventById('${maintDays.get(ds)}')">MAINT</span>`:(v>0?prodIcon(prod)+Math.round(v).toLocaleString()+lockBadge:'0')}</td>`;
+                const isMaint=maintDays.has(ds);
+                // Kilns render as numbers, but a DOWN day (blocked=clinker silo full, or a
+                // manual Down-For-Repairs / Down-PM-Day campaign) shows a mini hatch bar
+                // instead of a bare "0" so the reason is evident. Maintenance keeps its badge.
+                const dt=res.downtime;
+                const isBlocked=(!isMaint&&!dt&&v<=0&&blockedDays.has(ds));
+                const downKind=dt?dt:isBlocked?'blocked':null;
+                const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?_DOWN_TIP[dt]:isBlocked?_DOWN_TIP.blocked:isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name||''));
+                let inner, cAlign='text-align:right;', cPad='padding:4px 6px;';
+                if(isMaint){ inner=`<span style="font-size:7px;font-family:var(--mono);color:var(--amber);letter-spacing:.5px;cursor:pointer;font-weight:700;opacity:.9" onclick="event.stopPropagation();openMaintenanceEventById('${maintDays.get(ds)}')">MAINT</span>`; }
+                else if(downKind){ cAlign=''; cPad='padding:3px 0;';
+                  inner=`<div style="position:relative;height:10px;background:${_DOWN_HATCH[downKind]}"><span style="position:absolute;left:4px;top:0;line-height:10px;font-size:8px;font-weight:700;color:#fff;font-family:var(--mono);pointer-events:none">${_DOWN_LABEL[downKind]}</span></div>`; }
+                else { inner = v>0?prodIcon(prod)+Math.round(v).toLocaleString()+lockBadge:'0'; }
+                h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();showCampaignPopup('${el.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?clkColor:'rgba(255,61,90,.4)'};${cAlign}${cPad}border-bottom:1px solid var(--border);overflow:visible;${campBorder}${tdSty(ds)}">${inner}</td>`;
               });
             });
             h+=`</tr>`;
@@ -8527,6 +8606,7 @@ function _renderSupplyViewInner(wrap){
             _facPackers.forEach(el=>{
               const maintDays=maintSetFor(el.id);
               const starvedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='starved').map(e=>allDates[e.day-1]).filter(Boolean));
+              const blockedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='blocked').map(e=>allDates[e.day-1]).filter(Boolean)); // down: receiving silo full
               const maxSingleCap=_packRated(el);
               h+=`<tr class="supsec-packProd">
                 <td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${packColor};font-size:9px">${el.name}
@@ -8573,18 +8653,22 @@ function _renderSupplyViewInner(wrap){
                     h+=`<td class="sup-day-${mon.ym}" title="${_tip}" onclick="event.stopPropagation();${clickFn}" style="cursor:pointer;font-size:9px;color:${barColor};font-weight:700;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${Math.round(v).toLocaleString()}${_mk}</td>`;
                     return;
                   }
-                  // FORECAST / maintenance: Gantt bar — colour = product, label once per run.
-                  const runKey=isMaint?'__m':(v>0?(res.product_id||'__p'):'__idle');
-                  const isRunStart=(!isMaint&&v>0&&runKey!==_gPrev);
+                  // FORECAST / maintenance / downtime: Gantt bar — colour = product, or a
+                  // distinct hatch when the packer is DOWN (maintenance · blocked · manual
+                  // Down-For-Repairs / Down-PM-Day). Short label marks the reason.
+                  const dt=res.downtime;
+                  const isStarved=(!isMaint&&!dt&&v<=0&&starvedDays.has(ds));
+                  const isBlocked=(!isMaint&&!dt&&v<=0&&!isStarved&&blockedDays.has(ds));
+                  const downKind=isMaint?'maint':dt?dt:isStarved?'starved':isBlocked?'blocked':null;
+                  const runKey=downKind?('__'+downKind):(v>0?(res.product_id||'__p'):'__idle');
+                  const isRunStart=(runKey!=='__idle'&&runKey!==_gPrev);
                   _gPrev=runKey;
-                  const maintBg='repeating-linear-gradient(45deg,#5f5e5a,#5f5e5a 3px,#383836 3px,#383836 6px)';
-                  const starvedBg='repeating-linear-gradient(45deg,#5f5e5a,#5f5e5a 3px,#a32d2d 3px,#a32d2d 6px)';
-                  const isStarved=(!isMaint&&v<=0&&starvedDays.has(ds));
-                  const barBg=isMaint?maintBg:isStarved?starvedBg:(v>0?barColor:'transparent');
+                  const barBg=downKind?(_DOWN_HATCH[downKind]||'transparent'):(v>0?barColor:'transparent');
                   const campMark=(isCamp&&!isMaint)?'border-top:2px solid #4ade80;':'';
-                  const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(isStarved?'⚠ Unplanned shortfall — packer could not run (no bulk cement)':(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name?`${prod.name} · ${Math.round(v)} t/d`:'Idle')));
+                  const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?_DOWN_TIP[dt]:isBlocked?_DOWN_TIP.blocked:isStarved?'⚠ Unplanned shortfall — packer could not run (no bulk cement)':(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name?`${prod.name} · ${Math.round(v)} t/d`:'Idle')));
                   const lblName=(typeof spShortProd==='function')?spShortProd(prod?.name||''):(prod?.name||'');
-                  const label=isRunStart?`<span style="position:absolute;left:5px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:9px;font-weight:700;color:${_barTextColor(barColor)};pointer-events:none">${lblName} · ${Math.round(v).toLocaleString()}${isCamp?' 🔒':''}</span>`:'';
+                  const barTxt=(downKind==='maint'||downKind==='starved')?'':(downKind?(_DOWN_LABEL[downKind]||''):(v>0?`${lblName} · ${Math.round(v).toLocaleString()}${isCamp?' 🔒':''}`:''));
+                  const label=(isRunStart&&barTxt)?`<span style="position:absolute;left:5px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:9px;font-weight:700;color:${downKind?'#fff':_barTextColor(barColor)};pointer-events:none">${barTxt}</span>`:'';
                   const zpos=isRunStart?'position:relative;z-index:2;':'';
                   h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="${zpos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barBg};${campMark}">${label}</div></td>`;
                 });
@@ -10281,7 +10365,7 @@ function showRailCampaignPopup(dpId, dateStr, runStart, runEnd, runProduct){
       <div class="fr s1">
         <div class="ff">
           <div class="fl">Product</div>
-          <select class="fi" id="camp-product" onchange="if(window._campMode!=='real')document.getElementById('camp-rate').value=this.options[this.selectedIndex].dataset.rate" style="width:100%">${prodOpts}</select>
+          <select class="fi" id="camp-product" onchange="_campProductChanged(this)" style="width:100%">${prodOpts}</select>
         </div>
       </div>
       <div class="fr s2">
@@ -13489,6 +13573,16 @@ function simulate(elements, connections, horizon, includeProposed=false){
         recK(_kProd); return;
       }
 
+      // ── DOWNTIME CAMPAIGN (kilns) ─────────────────────
+      // "Down For Repairs" / "Down PM Day" — force the kiln down (0 clinker). Checked
+      // AFTER the real-production anchor so actual recorded output still wins.
+      const _kCamp=(DB.production_campaigns||[]).find(c=>c.element_id===el.id&&_kilnDate>=c.start_date&&_kilnDate<=c.end_date);
+      if(_kCamp&&DOWNTIME_PRODUCTS[_kCamp.product_id]){
+        s.status='idle';
+        logStop(el.id,el.name,day,'idle',_kCamp.product_id==='__down_repair__'?'Down for repairs (manual)':'Down PM day (manual)');
+        recK(0); return;
+      }
+
       const caps=capMap[el.id]||[];
       if(!caps.length){ s.status='idle'; recK(0); return; }
 
@@ -13769,6 +13863,13 @@ function simulate(elements, connections, horizon, includeProposed=false){
         );
         if(camp){
           const campProdId=camp.product_id;
+          // Downtime campaign ("Down For Repairs" / "Down PM Day") — force the mill down
+          // for the day: produce nothing, exactly like a maintenance/idle day.
+          if(DOWNTIME_PRODUCTS[campProdId]){
+            s.status='idle'; r.millProductHistory[mill.id].push(null);
+            logStop(mill.id,mill.name,day,'idle',campProdId==='__down_repair__'?'Down for repairs (manual)':'Down PM day (manual)');
+            return;
+          }
           const campRate=parseFloat(camp.rate_tpd)||0;
           const campCap=caps.find(c=>c.product_id===campProdId);
           const ratedTPD=campRate||(parseFloat(campCap?.capacity_tpd)||0);
@@ -14080,6 +14181,13 @@ function simulate(elements, connections, horizon, includeProposed=false){
       const camp=(DB.production_campaigns||[]).find(c=>
         c.element_id===el.id && packDate>=c.start_date && packDate<=c.end_date);
       if(camp){
+        // Downtime campaign — force the packer down for the day (no production).
+        if(DOWNTIME_PRODUCTS[camp.product_id]){
+          s.status='idle'; s.currentProduct=null;
+          logStop(el.id,el.name,day,'idle',camp.product_id==='__down_repair__'?'Down for repairs (manual)':'Down PM day (manual)');
+          r.packProductHistory[el.id].push(null);
+          return;
+        }
         const line=lines.find(l=>l.product_id===camp.product_id);
         if(line){
           const outPid=line.product_id, inPid=line.packing_input_id;
