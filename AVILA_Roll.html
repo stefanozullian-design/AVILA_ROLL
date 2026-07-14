@@ -20464,13 +20464,44 @@ async function dsIngestProduction(buf, name){
     matched++;
   });
 
-  DB.real_production_daily = Object.values(aggMap).map(r=>({...r,volume_t:Math.round(r.volume_t*10)/10}));
+  // ── ZERO-FILL absent days (in-app rule) ───────────────────────────────
+  // The Excel pivot omits a row when equipment didn't run that day, so those days
+  // would silently fall through to the FORECAST (the sim would "keep" the plan).
+  // Treat the file as authoritative for the window it covers: for every equipment
+  // that reports AT LEAST ONCE, any day in [dateMin … min(dateMax, today)] with no
+  // row becomes an actual 0 (a real_production_daily row with volume 0), which the
+  // sim reads as "produced nothing" — reconciling the display and inventory with
+  // reality. Equipment never present in the file is left untouched (can't tell
+  // "not in the report" from "down all period"); days after today are never zeroed.
+  const zeroRows=[]; let zeroFilled=0;
+  if(matched>0){
+    const today=new Date()._ymd();
+    const winMax = dateMax < today ? dateMax : today; // never zero future forecast days
+    if(winMax>=dateMin){
+      const elName={}; const presentElDay=new Set(); const matchedEls=new Set();
+      Object.values(aggMap).forEach(r=>{ elName[r.element_id]=r.element_name; presentElDay.add(r.element_id+'|'+r.date); matchedEls.add(r.element_id); });
+      const days=[];
+      for(let d=new Date(dateMin+'T00:00:00'); d._ymd()<=winMax; d.setDate(d.getDate()+1)) days.push(d._ymd());
+      matchedEls.forEach(elId=>{
+        days.forEach(ds=>{
+          if(!presentElDay.has(elId+'|'+ds)){
+            zeroRows.push({date:ds, element_id:elId, element_name:elName[elId], product_id:null, volume_t:0, source:'file-zero'});
+            zeroFilled++;
+          }
+        });
+      });
+    }
+  }
+
+  DB.real_production_daily = Object.values(aggMap).map(r=>({...r,volume_t:Math.round(r.volume_t*10)/10})).concat(zeroRows);
 
   const result = {
-    rowCount: raw.length, matched, skipped,
+    rowCount: raw.length, matched, skipped, zeroFilled,
     dateMin, dateMax,
     warnings: []
   };
+  if(zeroFilled)
+    result.warnings.push(`Zero-filled ${zeroFilled} non-producing equipment-day${zeroFilled>1?'s':''} within ${dateMin} … ${dateMax<new Date()._ymd()?dateMax:new Date()._ymd()} (days absent from the file counted as 0 production, not forecast).`);
   if(unmatchedEquip.size)
     result.warnings.push(`Equipment not matched to elements: ${[...unmatchedEquip].join(', ')}`);
   if(unmatchedMat.size)
