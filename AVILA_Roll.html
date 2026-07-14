@@ -6653,7 +6653,7 @@ const _DOWN_HATCH = {
   repair:  'repeating-linear-gradient(45deg,#5a2a15,#5a2a15 3px,#ff6a1a 3px,#ff6a1a 6px)', // manual "Down For Repairs"
   pm:      'repeating-linear-gradient(45deg,#2f3a52,#2f3a52 3px,#5b6b8a 3px,#5b6b8a 6px)', // manual "Down PM Day"
 };
-const _DOWN_LABEL = {blocked:'FULL', repair:'REPAIRS', pm:'PM DAY'};
+const _DOWN_LABEL = {maint:'MAINT', blocked:'FULL', repair:'REPAIRS', pm:'PM DAY'};
 const _DOWN_TIP = {
   blocked:'⛔ Blocked — receiving silo full, so the element had to stop',
   repair:'🔧 Down For Repairs (manual) — no production',
@@ -7641,7 +7641,7 @@ function _renderSupplyViewInner(wrap){
                 const campMark=(isCamp&&!isMaint)?'border-top:2px solid #4ade80;':'';
                 const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?_DOWN_TIP[dt]:isBlocked?_DOWN_TIP.blocked:isStarved?'⚠ Unplanned shortfall — mill could not produce (no clinker)':(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name?`${prod.name} · ${Math.round(v)} t/d`:'Idle')));
                 const lblName=(typeof spShortProd==='function')?spShortProd(prod?.name||''):(prod?.name||'');
-                const barTxt=(downKind==='maint'||downKind==='starved')?'':(downKind?(_DOWN_LABEL[downKind]||''):(v>0?`${lblName} · ${Math.round(v).toLocaleString()}${isCamp?' 🔒':''}`:''));
+                const barTxt=(downKind==='starved')?'':(downKind?(_DOWN_LABEL[downKind]||''):(v>0?`${lblName} · ${Math.round(v).toLocaleString()}${isCamp?' 🔒':''}`:''));
                 const label=(isRunStart&&barTxt)?`<span style="position:absolute;left:5px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:9px;font-weight:700;color:${downKind?'#fff':_barTextColor(barColor)};pointer-events:none">${barTxt}</span>`:'';
                 const zpos=isRunStart?'position:relative;z-index:2;':'';
                 h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="${zpos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barBg};${campMark}">${label}</div></td>`;
@@ -7833,7 +7833,7 @@ function _renderSupplyViewInner(wrap){
                 const campMark=(isCamp&&!isMaint)?'border-top:2px solid #4ade80;':'';
                 const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?_DOWN_TIP[dt]:isBlocked?_DOWN_TIP.blocked:isStarved?'⚠ Unplanned shortfall — packer could not run (no bulk cement)':(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name?`${prod.name} · ${Math.round(v)} t/d`:'Idle')));
                 const lblName=(typeof spShortProd==='function')?spShortProd(prod?.name||''):(prod?.name||'');
-                const barTxt=(downKind==='maint'||downKind==='starved')?'':(downKind?(_DOWN_LABEL[downKind]||''):(v>0?`${lblName} · ${Math.round(v).toLocaleString()}${isCamp?' 🔒':''}`:''));
+                const barTxt=(downKind==='starved')?'':(downKind?(_DOWN_LABEL[downKind]||''):(v>0?`${lblName} · ${Math.round(v).toLocaleString()}${isCamp?' 🔒':''}`:''));
                 const label=(isRunStart&&barTxt)?`<span style="position:absolute;left:5px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:9px;font-weight:700;color:${downKind?'#fff':_barTextColor(barColor)};pointer-events:none">${barTxt}</span>`:'';
                 const zpos=isRunStart?'position:relative;z-index:2;':'';
                 h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="${zpos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barBg};${campMark}">${label}</div></td>`;
@@ -8156,19 +8156,20 @@ function _renderSupplyViewInner(wrap){
                 const campBorder=isCamp?'border-left:2px solid #4ade80;border-right:2px solid #4ade80;':'';
                 const lockBadge=isCamp?'<span style="font-size:7px;color:#4ade80;margin-left:2px" title="Manager campaign">🔒</span>':'';
                 const isMaint=maintDays.has(ds);
-                // Kilns render as numbers, but a DOWN day (blocked=clinker silo full, or a
-                // manual Down-For-Repairs / Down-PM-Day campaign) shows a mini hatch bar
-                // instead of a bare "0" so the reason is evident. Maintenance keeps its badge.
+                // Kilns render as numbers, but a DOWN day shows a mini hatch bar instead of a
+                // bare "0"/"MAINT" so the reason is evident at a glance — maintenance (grey),
+                // blocked=clinker silo full (amber), or a manual Down-For-Repairs / Down-PM-Day
+                // campaign (orange / blue-grey). Clicking a maintenance bar opens its event.
                 const dt=res.downtime;
                 const isBlocked=(!isMaint&&!dt&&v<=0&&blockedDays.has(ds));
-                const downKind=dt?dt:isBlocked?'blocked':null;
+                const downKind=isMaint?'maint':dt?dt:isBlocked?'blocked':null;
                 const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?_DOWN_TIP[dt]:isBlocked?_DOWN_TIP.blocked:isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name||''));
+                const clickFn=isMaint?`openMaintenanceEventById('${maintDays.get(ds)}')`:`showCampaignPopup('${el.id}','${ds}')`;
                 let inner, cAlign='text-align:right;', cPad='padding:4px 6px;';
-                if(isMaint){ inner=`<span style="font-size:7px;font-family:var(--mono);color:var(--amber);letter-spacing:.5px;cursor:pointer;font-weight:700;opacity:.9" onclick="event.stopPropagation();openMaintenanceEventById('${maintDays.get(ds)}')">MAINT</span>`; }
-                else if(downKind){ cAlign=''; cPad='padding:3px 0;';
+                if(downKind){ cAlign=''; cPad='padding:3px 0;';
                   inner=`<div style="position:relative;height:10px;background:${_DOWN_HATCH[downKind]}"><span style="position:absolute;left:4px;top:0;line-height:10px;font-size:8px;font-weight:700;color:#fff;font-family:var(--mono);pointer-events:none">${_DOWN_LABEL[downKind]}</span></div>`; }
                 else { inner = v>0?prodIcon(prod)+Math.round(v).toLocaleString()+lockBadge:'0'; }
-                h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();showCampaignPopup('${el.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?clkColor:'rgba(255,61,90,.4)'};${cAlign}${cPad}border-bottom:1px solid var(--border);overflow:visible;${campBorder}${tdSty(ds)}">${inner}</td>`;
+                h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="cursor:pointer;font-size:9px;color:${v>0?clkColor:'rgba(255,61,90,.4)'};${cAlign}${cPad}border-bottom:1px solid var(--border);overflow:visible;${campBorder}${tdSty(ds)}">${inner}</td>`;
               });
             });
             h+=`</tr>`;
@@ -8667,7 +8668,7 @@ function _renderSupplyViewInner(wrap){
                   const campMark=(isCamp&&!isMaint)?'border-top:2px solid #4ade80;':'';
                   const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?_DOWN_TIP[dt]:isBlocked?_DOWN_TIP.blocked:isStarved?'⚠ Unplanned shortfall — packer could not run (no bulk cement)':(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name?`${prod.name} · ${Math.round(v)} t/d`:'Idle')));
                   const lblName=(typeof spShortProd==='function')?spShortProd(prod?.name||''):(prod?.name||'');
-                  const barTxt=(downKind==='maint'||downKind==='starved')?'':(downKind?(_DOWN_LABEL[downKind]||''):(v>0?`${lblName} · ${Math.round(v).toLocaleString()}${isCamp?' 🔒':''}`:''));
+                  const barTxt=(downKind==='starved')?'':(downKind?(_DOWN_LABEL[downKind]||''):(v>0?`${lblName} · ${Math.round(v).toLocaleString()}${isCamp?' 🔒':''}`:''));
                   const label=(isRunStart&&barTxt)?`<span style="position:absolute;left:5px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:9px;font-weight:700;color:${downKind?'#fff':_barTextColor(barColor)};pointer-events:none">${barTxt}</span>`:'';
                   const zpos=isRunStart?'position:relative;z-index:2;':'';
                   h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="${zpos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barBg};${campMark}">${label}</div></td>`;
