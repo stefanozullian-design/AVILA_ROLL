@@ -9245,6 +9245,42 @@ function _fbGetShipToSplit(soldTo, elId){
   return Object.entries(volBySt).map(([st,vol])=>({ship_to:st,proportion:vol/total}));
 }
 
+// ── Truck-load rounding ───────────────────────────────────
+// Forecast values are planned in whole truck loads. Rounding is to the NEAREST
+// step, not up: at demand-point grain rounding up costs +1.65%, and at
+// ship-to grain +22.6%, which would flow into vessel auto-propose as demand
+// that does not exist.
+const FB_STEP=25;
+
+// Nearest step. A positive rate never rounds away to nothing — the smallest
+// demand points (e.g. 11 t/day) would otherwise forecast zero forever.
+function _fbQ25(v){
+  if(!(v>0)) return 0;
+  return Math.max(FB_STEP, Math.round(v/FB_STEP)*FB_STEP);
+}
+
+// Same, but no floor — for derived values where zero is a legitimate answer
+// (a Saturday at 25% of a small weekday rate really is no truck).
+function _fbQ25z(v){ return v>0?Math.round(v/FB_STEP)*FB_STEP : 0; }
+
+// Split `total` across weighted slots in whole steps, largest-remainder style,
+// so the slots still sum to `total` (quantised to the step) instead of each
+// slot rounding independently and the total drifting.
+function _fbAlloc25(weights, total){
+  const n=weights.length;
+  if(!n) return [];
+  if(!(total>0)) return new Array(n).fill(0);
+  const chunks=Math.max(1, Math.round(total/FB_STEP));
+  const wSum=weights.reduce((s,w)=>s+w,0)||1;
+  const ideal=weights.map(w=>chunks*w/wSum);
+  const out=ideal.map(Math.floor);
+  let short=chunks-out.reduce((s,v)=>s+v,0);
+  ideal.map((v,i)=>({i,frac:v-Math.floor(v)}))
+       .sort((a,b)=>b.frac-a.frac)
+       .forEach(({i})=>{ if(short>0){ out[i]++; short--; } });
+  return out.map(c=>c*FB_STEP);
+}
+
 function _fbBuildRows(elIdOverride){
   const elId=elIdOverride||document.getElementById('fb-el-id')?.value||null;
   const start=document.getElementById('fb-start')?.value; if(!start) return null;
@@ -9316,27 +9352,25 @@ function _fbBuildRows(elIdOverride){
       }
     }
     const avgW=samples.length?samples.reduce((a,b)=>a+b,0)/samples.length:0;
+    const rateW=_fbQ25(avgW), rateS=shipsSat?_fbQ25z(avgW*satCoef):0;
     const scope=shipTo?` · ${shipTo}`:'';
-    msgs.push(`Weekday avg: ${avgW.toFixed(1)} t (${samples.length}/${n} pts)${scope}`);
-    rows=spine.map(ds=>({date:ds,value:isSun(ds)||nwdSet.has(ds)?0:isSat(ds)?(shipsSat?avgW*satCoef:0):avgW}));
+    msgs.push(`Weekday avg: ${avgW.toFixed(1)} t → ${rateW.toLocaleString()} t/day (${samples.length}/${n} pts)${scope}`);
+    rows=spine.map(ds=>({date:ds,value:isSun(ds)||nwdSet.has(ds)?0:isSat(ds)?rateS:rateW}));
   } else if(method==='fixed'){
     const v=parseFloat(document.getElementById('fb-fixed-val')?.value)||0;
-    rows=spine.map(ds=>({date:ds,value:isSun(ds)||nwdSet.has(ds)?0:isSat(ds)?(shipsSat?v*satCoef:0):isWkday(ds)?v:0}));
-    msgs.push(`Fixed ${v} t/day · Sat ${shipsSat?satPct+'%':'off'} · ${start} → ${endDate}`);
+    const rateW=_fbQ25(v), rateS=shipsSat?_fbQ25z(v*satCoef):0;
+    rows=spine.map(ds=>({date:ds,value:isSun(ds)||nwdSet.has(ds)?0:isSat(ds)?rateS:isWkday(ds)?rateW:0}));
+    msgs.push(`Fixed ${v} t/day${rateW!==v?` → ${rateW.toLocaleString()} t/day`:''} · Sat ${shipsSat?satPct+'%':'off'} · ${start} → ${endDate}`);
   } else {
+    // Allocate the month total in whole truck loads so the days still sum to
+    // the number the user typed, rather than each day rounding on its own.
     const total=parseFloat(document.getElementById('fb-month-total')?.value)||0;
     const eligible=spine.filter(ds=>isEligible(ds));
-    const totalWeight=eligible.reduce((s,ds)=>s+(isSat(ds)?satCoef:1),0)||1;
-    const perUnit=total/totalWeight;
-    let rem=total;
-    rows=spine.map((ds,i)=>{
-      if(!isEligible(ds)) return {date:ds,value:0};
-      const w=isSat(ds)?satCoef:1;
-      const v=i===spine.length-1?Math.max(0,Math.round(rem)):Math.round(perUnit*w);
-      rem-=v;
-      return {date:ds,value:v};
-    });
-    msgs.push(`Distributed ${total} t over ${eligible.length} eligible days`);
+    const alloc=_fbAlloc25(eligible.map(ds=>isSat(ds)?satCoef:1), total);
+    const byDate={}; eligible.forEach((ds,i)=>{ byDate[ds]=alloc[i]; });
+    rows=spine.map(ds=>({date:ds,value:byDate[ds]||0}));
+    const placed=alloc.reduce((s,v)=>s+v,0);
+    msgs.push(`Distributed ${placed.toLocaleString()} t over ${alloc.filter(v=>v>0).length} of ${eligible.length} eligible days${placed!==total?` (${total.toLocaleString()} t → nearest ${FB_STEP} t)`:''}`);
   }
 
   return {rows,msgs,elId,shipTo,soldTo};
@@ -9362,12 +9396,14 @@ function _fbApply(){
     const result=_fbBuildRows(); if(!result) return;
     const {rows,msgs}=result;
     let totalDays=0,totalT=0;
-    split.forEach(({ship_to:st,proportion})=>{
-      rows.forEach(r=>{
-        const v=Math.round(r.value*proportion*10)/10;
+    // Allocate each day across ship-tos in whole truck loads, so the parts still
+    // sum to the day's value instead of each one rounding independently.
+    rows.forEach(r=>{
+      const parts=_fbAlloc25(split.map(s=>s.proportion), r.value);
+      split.forEach(({ship_to:st},k)=>{
         DB.demand_values=DB.demand_values.filter(x=>!(x.element_id===elId&&x.date===r.date&&x.ship_to===st));
         DB.demand_values=DB.demand_values.filter(x=>!(x.element_id===elId&&x.date===r.date&&!x.ship_to));
-        if(v>0){ DB.demand_values.push({element_id:elId,date:r.date,value_t:v,ship_to:st}); totalDays++; totalT+=v; }
+        if(parts[k]>0){ DB.demand_values.push({element_id:elId,date:r.date,value_t:parts[k],ship_to:st}); totalDays++; totalT+=parts[k]; }
       });
     });
     autoSave(); _demandCacheInvalidate();
@@ -9389,12 +9425,13 @@ function _fbApply(){
     if(!probeResult) return;
     const {rows,msgs}=probeResult;
     let totalDays=0,totalT=0;
-    split.forEach(({elId:eid,name,proportion})=>{
-      rows.forEach(r=>{
-        const v=Math.round(r.value*proportion*10)/10;
+    // Allocate each day across demand points in whole truck loads (see above).
+    rows.forEach(r=>{
+      const parts=_fbAlloc25(split.map(s=>s.proportion), r.value);
+      split.forEach(({elId:eid},k)=>{
         DB.demand_values=DB.demand_values.filter(x=>!(x.element_id===eid&&x.date===r.date&&x.ship_to===shipTo));
         DB.demand_values=DB.demand_values.filter(x=>!(x.element_id===eid&&x.date===r.date&&!x.ship_to));
-        if(v>0){ DB.demand_values.push({element_id:eid,date:r.date,value_t:v,ship_to:shipTo}); totalDays++; totalT+=v; }
+        if(parts[k]>0){ DB.demand_values.push({element_id:eid,date:r.date,value_t:parts[k],ship_to:shipTo}); totalDays++; totalT+=parts[k]; }
       });
     });
     autoSave(); _demandCacheInvalidate();
@@ -9511,16 +9548,9 @@ function _fbDistributeMonthRows(y, m, total, opts){
   const spine=[];
   for(let d=1; d<=last; d++) spine.push(`${y}-${pad(m)}-${pad(d)}`);
   const eligible=spine.filter(ds=>!nwdSet.has(ds)&&!isSun(ds)&&(shipsSat?true:!isSat(ds)));
-  const totalWeight=eligible.reduce((s,ds)=>s+(isSat(ds)?satCoef:1),0)||1;
-  const perUnit=total/totalWeight;
-  let rem=total;
+  const alloc=_fbAlloc25(eligible.map(ds=>isSat(ds)?satCoef:1), total);
   const rows=[];
-  eligible.forEach((ds,i)=>{
-    const w=isSat(ds)?satCoef:1;
-    const v=i===eligible.length-1?Math.max(0,Math.round(rem*10)/10):Math.round(perUnit*w*10)/10;
-    rem=Math.round((rem-v)*10)/10;
-    if(v>0) rows.push({date:ds, value:v});
-  });
+  eligible.forEach((ds,i)=>{ if(alloc[i]>0) rows.push({date:ds, value:alloc[i]}); });
   return rows;
 }
 
