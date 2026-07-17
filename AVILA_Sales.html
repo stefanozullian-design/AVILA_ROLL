@@ -968,15 +968,18 @@ function spDow(ds){ let v=_dowCache[ds]; if(v===undefined){ v=new Date(ds+'T00:0
 function spEsc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>c==='&'?'&amp;':c==='<'?'&lt;':c==='>'?'&gt;':'&quot;'); }
 
 // ── Forecast periods: ROM · next 3 months · rest-of-year ──
+// Anchored to the LAST REAL DAY (not calendar today), so the ROM rule governs every
+// forecast day the table shows — a rule change is visible immediately on all fuchsia-
+// side dailies, even when the data feed lags a few days behind today.
 function spFcPeriods(){
-  const today=new Date().toISOString().split('T')[0];
-  if(SP._periods&&SP._periods.today===today) return SP._periods.list;
-  const y=+today.slice(0,4), m=+today.slice(5,7);
+  const anchor=spLastReal();
+  if(SP._periods&&SP._periods.anchor===anchor) return SP._periods.list;
+  const y=+anchor.slice(0,4), m=+anchor.slice(5,7);
   const pad=n=>String(n).padStart(2,'0');
   const eom=(yy,mm)=>`${yy}-${pad(mm)}-${pad(new Date(yy,mm,0).getDate())}`;
   const monNames=['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
   const list=[];
-  const nd=new Date(today+'T00:00:00'); nd.setDate(nd.getDate()+1);
+  const nd=new Date(anchor+'T00:00:00'); nd.setDate(nd.getDate()+1);
   const romFrom=nd.toISOString().split('T')[0];
   if(romFrom<=eom(y,m)) list.push({id:'ROM',label:'ROM',from:romFrom,to:eom(y,m)});
   for(let k=1;k<=3;k++){
@@ -985,7 +988,7 @@ function spFcPeriods(){
   }
   const r4=new Date(y,m-1+4,1);
   if(r4.getFullYear()===y) list.push({id:'ROY',label:'ROY',from:`${y}-${pad(r4.getMonth()+1)}-01`,to:`${y}-12-31`});
-  SP._periods={today,list};
+  SP._periods={anchor,list};
   return list;
 }
 function spPeriodOf(ds){
