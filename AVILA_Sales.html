@@ -228,7 +228,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
           <div class="sp-chip" id="sp-quick-ytd"  onclick="spSetQuickDate('YTD')">YTD</div>
           <div class="sp-chip" id="sp-quick-r12m" onclick="spSetQuickDate('R12M')">R12M</div>
           <div style="width:1px;height:20px;background:var(--border2)"></div>
-          <button class="tb-btn amber" onclick="openDemandBuilder(null)">⚙ Forecast Builder</button>
+          <button class="tb-btn amber" onclick="spFcInfo()">⚙ Forecast Rules</button>
           <button class="tb-btn sec" onclick="openNonWorkingDaysPanel()">⊘ Non-Working Days</button>
           <div style="width:1px;height:20px;background:var(--border2)"></div>
           <button class="sp-upload-btn" onclick="document.getElementById('sp-file-input').click()">↑ Load Actuals</button>
@@ -689,8 +689,6 @@ function spRenderChart(){
   if(SP.chartInst){ SP.chartInst.destroy(); SP.chartInst=null; }
   const today=new Date().toISOString().split('T')[0];
   const scope=spCurrentScope();
-  const demIdx=spBuildDemandIndex();
-  const hasFc=Object.keys(demIdx).length>0;
 
   // Window: N days back and N days forward around today (All = full data span).
   const meta=DB.real_shipments_meta||{};
@@ -704,13 +702,37 @@ function spRenderChart(){
     const b=new Date(today+'T00:00:00'); b.setDate(b.getDate()+n); winEnd=b.toISOString().split('T')[0];
   }
 
-  // Actuals by date (past) for the current scope
-  const actByDate={};
+  // Actuals by date (past) for the current scope — plus a wider guide window so the
+  // 10/15/30-working-day averages are correct even when the visible range is short.
+  const meta0=DB.real_shipments_meta||{};
+  const guideRef=meta0.date_max&&meta0.date_max<today?meta0.date_max:today;
+  const g0=new Date(guideRef+'T00:00:00'); g0.setDate(g0.getDate()-70);
+  const guideCut=g0.toISOString().split('T')[0];
+  const actByDate={}, guideMap={};
   (DB.real_shipments_daily||[]).forEach(r=>{
-    if(!r.date||r.date<winStart||r.date>today) return;
+    if(!r.date||r.date>today) return;
     if(!spPassesBaseFilters(r)||!scope.pred(r)) return;
-    actByDate[r.date]=(actByDate[r.date]||0)+r.volume;
+    if(r.date>=guideCut) guideMap[r.date]=(guideMap[r.date]||0)+r.volume;
+    if(r.date>=winStart) actByDate[r.date]=(actByDate[r.date]||0)+r.volume;
   });
+
+  // Guide lines: last 10 / 15 / 30 working-day averages of the displayed scope,
+  // quantised to 25 t — the visual reference a rep sanity-checks before typing a rate.
+  const maOf=n=>{
+    let cnt=0,sum=0; const d=new Date(guideRef+'T00:00:00'); let g=0;
+    while(cnt<n&&g<70){
+      const dow=d.getDay();
+      if(dow>=1&&dow<=5){ sum+=guideMap[d.toISOString().split('T')[0]]||0; cnt++; }
+      d.setDate(d.getDate()-1); g++;
+    }
+    return cnt?sum/cnt:0;
+  };
+  const guides=[
+    {n:10,color:'rgba(0,255,157,.85)'},
+    {n:15,color:'rgba(255,184,48,.85)'},
+    {n:30,color:'rgba(255,80,120,.85)'},
+  ].map(gd=>({...gd,q:spQ25z(maOf(gd.n))})).filter(gd=>gd.q>0);
+  SP._lastGuides=guides;
 
   // Contiguous daily axis winStart..winEnd
   const labels=[];
@@ -719,10 +741,10 @@ function spRenderChart(){
   }
   if(!labels.length){ const leg0=document.getElementById('sp-chart-legend'); if(leg0) leg0.innerHTML=''; return; }
 
-  // Forecast by date (future) for the current scope
+  // Forecast by date (future) for the current scope — baseline + cascade rules
   const fcByDate={};
-  if(hasFc && scope.leaves && scope.leaves.length){
-    labels.forEach(ds=>{ if(ds>today){ let v=0; for(let i=0;i<scope.leaves.length;i++) v+=spLeafFc(scope.leaves[i],ds,demIdx); if(v) fcByDate[ds]=v; } });
+  if(scope.leaves && scope.leaves.length){
+    labels.forEach(ds=>{ if(ds>today){ let v=0; for(let i=0;i<scope.leaves.length;i++) v+=spLeafFcDay(scope.leaves[i],ds); if(v) fcByDate[ds]=v; } });
   }
 
   const actData=labels.map(d=> d<=today ? Math.round(actByDate[d]||0) : null);
@@ -746,6 +768,9 @@ function spRenderChart(){
     lh+= hasBudget
       ? `<div class="sp-leg-item"><div style="width:16px;height:2px;background:#7fd4ff;flex-shrink:0"></div>Budget</div>`
       : `<div class="sp-leg-item" style="opacity:.5"><div style="width:16px;height:2px;background:#7fd4ff;flex-shrink:0"></div>Budget (not loaded)</div>`;
+    guides.forEach(gd=>{
+      lh+=`<div class="sp-leg-item" style="margin-left:4px"><div style="width:14px;height:0;border-top:2px dotted ${gd.color};flex-shrink:0"></div>${gd.n}WD avg ${spFmtT(gd.q)}</div>`;
+    });
     leg.innerHTML=lh;
   }
 
@@ -758,6 +783,25 @@ function spRenderChart(){
 
   const todayPlugin={ id:'todayLine', afterDraw(chart){ const idx=chart.data.labels.indexOf(today); if(idx<0) return; const x=chart.scales.x.getPixelForValue(idx); const {top,bottom}=chart.chartArea; const c=chart.ctx; c.save(); c.strokeStyle='rgba(255,61,90,0.55)'; c.lineWidth=1; c.setLineDash([3,3]); c.beginPath(); c.moveTo(x,top); c.lineTo(x,bottom); c.stroke(); c.restore(); } };
 
+  // Dotted horizontal guides at the 10/15/30-working-day averages, each labelled
+  // with its 25 t-quantised value so a rep can eyeball a rate and type it.
+  const guidesPlugin={ id:'maGuides', afterDatasetsDraw(chart){
+    if(!guides.length) return;
+    const {left,right,top,bottom}=chart.chartArea, c=chart.ctx, ys=chart.scales.y;
+    c.save(); c.font='8px "Space Mono",monospace'; c.textBaseline='bottom';
+    guides.forEach((gd,i)=>{
+      const y=ys.getPixelForValue(gd.q);
+      if(y<top||y>bottom) return;
+      c.strokeStyle=gd.color; c.lineWidth=1; c.setLineDash([4,4]);
+      c.beginPath(); c.moveTo(left,y); c.lineTo(right,y); c.stroke();
+      const txt=`${gd.n}WD ${spFmtT(gd.q)}`;
+      const tw=c.measureText(txt).width, tx=left+6+i*(tw+26);
+      c.fillStyle='rgba(10,14,26,.85)'; c.fillRect(tx-2,y-11,tw+4,10);
+      c.fillStyle=gd.color; c.fillText(txt,tx,y-2);
+    });
+    c.restore();
+  }};
+
   const buildIt=()=>{
     SP.chartInst=new Chart(canvas,{ type:'bar', data:{labels:[...labels],datasets},
       options:{ responsive:true,maintainAspectRatio:false,
@@ -768,7 +812,7 @@ function spRenderChart(){
         scales:{ x:{stacked:true,grid:{color:'rgba(255,255,255,.03)'},ticks:{color:'#8e9ab8',font:{family:'Space Mono',size:8},maxTicksLimit:14,autoSkip:true,maxRotation:0}},
                  y:{stacked:true,grid:{color:'rgba(255,255,255,.05)'},ticks:{color:'#8e9ab8',font:{family:'Space Mono',size:8},callback:v=>v>=1000?Math.round(v/100)/10+'k':v}} },
         onClick:(_,els)=>{ if(!els.length) return; const date=SP.chartInst.data.labels[els[0].index]; if(date){ document.getElementById('sp-date-from').value=date; document.getElementById('sp-date-to').value=date; SP.f.dateFrom=date; SP.f.dateTo=date; spApplyFilters(); } }
-      }, plugins:[todayPlugin] });
+      }, plugins:[todayPlugin,guidesPlugin] });
   };
   if(typeof Chart==='undefined'){ const s=document.createElement('script'); s.src='https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js'; s.onload=buildIt; document.head.appendChild(s); }
   else buildIt();
@@ -794,7 +838,7 @@ function spScopeMatch(path){
 }
 function spCurrentScope(){
   if(SP.chartScope) return SP.chartScope;
-  if(!SP._tree) SP._tree=spBuildTree(SP.filteredRows, spGetGroupBy());
+  spEnsureTree();
   return { label:null, pred:()=>true, leaves:Object.values(SP._tree.leaves||{}) };
 }
 function spClearChartScope(){ SP.chartScope=null; spRenderChart(); spRenderSidePanels(); }
@@ -815,15 +859,12 @@ function spActualPeriod(scope, from, to, withForecast){
     if(!spPassesBaseFilters(r)||!scope.pred(r)) return;
     tot+=r.volume;
   });
-  if(withForecast){
-    const demIdx=spBuildDemandIndex();
-    if(Object.keys(demIdx).length && scope.leaves && scope.leaves.length){
-      let d=new Date(((today>from?today:from))+'T00:00:00'); d.setDate(d.getDate()+1);
-      const end=new Date(to+'T00:00:00');
-      for(; d<=end; d.setDate(d.getDate()+1)){
-        const ds=d.toISOString().split('T')[0];
-        for(let i=0;i<scope.leaves.length;i++) tot+=spLeafFc(scope.leaves[i],ds,demIdx);
-      }
+  if(withForecast && scope.leaves && scope.leaves.length){
+    let d=new Date(((today>from?today:from))+'T00:00:00'); d.setDate(d.getDate()+1);
+    const end=new Date(to+'T00:00:00');
+    for(; d<=end; d.setDate(d.getDate()+1)){
+      const ds=d.toISOString().split('T')[0];
+      for(let i=0;i<scope.leaves.length;i++) tot+=spLeafFcDay(scope.leaves[i],ds);
     }
   }
   return Math.round(tot);
@@ -890,6 +931,232 @@ function _spClearLegend(){
 // ══════════════════════════════════════════════════════
 // PERFORMANCE TABLE — Date-spine with Org Hierarchy
 // ══════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════
+// FORECAST ENGINE — baseline + cascade rules, 25 t steps
+// ═══════════════════════════════════════════════════════
+// Bottoms-up forecast that always exists: every demand-point × ship-to leaf gets
+// an auto-baseline (last 10 working days' run-rate + last 4 Saturdays, quantised
+// to 25 t truck loads). Reps then override by exception with rules attached to
+// any node of the group-by tree (rep / sold-to / ship-to / DP...): deepest rule
+// wins, parents distribute down proportionally to baseline shares, and every
+// allocation stays in whole 25 t steps (ported from the main app's builder).
+const FB_STEP=25;
+// Nearest step; an active rate never rounds away to nothing (min one truck).
+function spQ25(v){ if(!(v>0)) return 0; return Math.max(FB_STEP, Math.round(v/FB_STEP)*FB_STEP); }
+// Nearest step where zero is a legitimate answer.
+function spQ25z(v){ return v>0?Math.round(v/FB_STEP)*FB_STEP:0; }
+// Split total across weighted slots in whole steps (largest-remainder) so the
+// slots sum to the quantised total instead of each rounding independently.
+function spAlloc25(weights,total){
+  const n=weights.length; if(!n) return [];
+  if(!(total>0)) return new Array(n).fill(0);
+  const chunks=Math.max(1,Math.round(total/FB_STEP));
+  const wSum=weights.reduce((s,w)=>s+w,0)||1;
+  const ideal=weights.map(w=>chunks*w/wSum);
+  const out=ideal.map(Math.floor);
+  let short=chunks-out.reduce((s,v)=>s+v,0);
+  ideal.map((v,i)=>({i,frac:v-Math.floor(v)})).sort((a,b)=>b.frac-a.frac)
+       .forEach(({i})=>{ if(short>0){ out[i]++; short--; } });
+  return out.map(c=>c*FB_STEP);
+}
+
+const _dowCache={};
+function spDow(ds){ let v=_dowCache[ds]; if(v===undefined){ v=new Date(ds+'T00:00:00').getDay(); _dowCache[ds]=v; } return v; }
+function spEsc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>c==='&'?'&amp;':c==='<'?'&lt;':c==='>'?'&gt;':'&quot;'); }
+
+// ── Forecast periods: ROM · next 3 months · rest-of-year ──
+function spFcPeriods(){
+  const today=new Date().toISOString().split('T')[0];
+  if(SP._periods&&SP._periods.today===today) return SP._periods.list;
+  const y=+today.slice(0,4), m=+today.slice(5,7);
+  const pad=n=>String(n).padStart(2,'0');
+  const eom=(yy,mm)=>`${yy}-${pad(mm)}-${pad(new Date(yy,mm,0).getDate())}`;
+  const monNames=['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+  const list=[];
+  const nd=new Date(today+'T00:00:00'); nd.setDate(nd.getDate()+1);
+  const romFrom=nd.toISOString().split('T')[0];
+  if(romFrom<=eom(y,m)) list.push({id:'ROM',label:'ROM',from:romFrom,to:eom(y,m)});
+  for(let k=1;k<=3;k++){
+    const d=new Date(y,m-1+k,1), yy=d.getFullYear(), mm=d.getMonth()+1;
+    list.push({id:'M'+k,label:monNames[mm-1]+(yy!==y?String(yy).slice(2):''),from:`${yy}-${pad(mm)}-01`,to:eom(yy,mm)});
+  }
+  const r4=new Date(y,m-1+4,1);
+  if(r4.getFullYear()===y) list.push({id:'ROY',label:'ROY',from:`${y}-${pad(r4.getMonth()+1)}-01`,to:`${y}-12-31`});
+  SP._periods={today,list};
+  return list;
+}
+function spPeriodOf(ds){
+  const m=SP._dayPeriod; if(m) return m[ds]||null;   // O(1) map built in spFcRecompute
+  const l=spFcPeriods(); for(let i=0;i<l.length;i++){ if(ds>=l[i].from&&ds<=l[i].to) return l[i].id; } return null;
+}
+
+// ── Rule storage (persisted locally) ──
+// rule = { id, path:[{dim,value}…], period, type:'total'|'pct', value }
+function spFcLoadRules(){ if(SP._rulesLoaded) return; SP._rulesLoaded=true;
+  try{ const r=JSON.parse(localStorage.getItem('avila_sales_fc_rules')||'[]'); SP.fcRules=Array.isArray(r)?r:[]; }catch(e){ SP.fcRules=[]; } }
+function spFcSaveRules(){ try{ localStorage.setItem('avila_sales_fc_rules', JSON.stringify(SP.fcRules||[])); }catch(e){} }
+function spFcRuleAt(path,period){
+  const sig=JSON.stringify(path);
+  return (SP.fcRules||[]).find(r=>r.period===period&&JSON.stringify(r.path)===sig)||null;
+}
+function spFcSetRule(path,period,type,value){
+  spFcLoadRules();
+  const sig=JSON.stringify(path);
+  SP.fcRules=(SP.fcRules||[]).filter(r=>!(r.period===period&&JSON.stringify(r.path)===sig));
+  if(type!=='clear') SP.fcRules.push({id:'r'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),path,period,type,value:+value||0});
+  spFcSaveRules();
+  spFcRecompute();
+}
+
+// ── Recompute: stamp deepest rule per leaf×period, allocate rule totals in 25s,
+// and cache per-leaf period totals for the table's forecast columns. ──
+function spFcRecompute(){
+  const tree=SP._tree;
+  if(!tree){ SP._leafRule={}; SP._ruleDay={}; SP._leafPeriodTot={}; return; }
+  spFcLoadRules();
+  const leaves=Object.values(tree.leaves||{});
+  const periods=spFcPeriods();
+  const perDates={}, perCounts={};
+  periods.forEach(p=>{
+    const arr=[];
+    for(let d=new Date(p.from+'T00:00:00'); d.toISOString().split('T')[0]<=p.to; d.setDate(d.getDate()+1)) arr.push(d.toISOString().split('T')[0]);
+    perDates[p.id]=arr;
+    let nWk=0,nSat=0; arr.forEach(ds=>{ const dw=spDow(ds); if(dw>=1&&dw<=5) nWk++; else if(dw===6) nSat++; });
+    perCounts[p.id]={nWk,nSat};
+  });
+  SP._perCounts=perCounts;
+  const dayPer={}; periods.forEach(p=>perDates[p.id].forEach(ds=>{ dayPer[ds]=p.id; }));
+  SP._dayPeriod=dayPer;
+  const baseTot=(lf,pid)=>{ const c=perCounts[pid]; return c? c.nWk*(lf.wkRate||0)+c.nSat*(lf.satRate||0) : 0; };
+
+  // Deepest-wins stamping (rules sorted shallow→deep so deeper overwrite)
+  const leafRule={};
+  const rules=(SP.fcRules||[]).slice().sort((a,b)=>a.path.length-b.path.length);
+  const match=(lf,path)=>path.every(p=>lf.attrs && String(lf.attrs[p.dim]??'—').trim()===String(p.value).trim());
+  rules.forEach(r=>{ if(!perDates[r.period]) return;
+    leaves.forEach(lf=>{ if(match(lf,r.path)){ (leafRule[lf.id]=leafRule[lf.id]||{})[r.period]=r; } }); });
+
+  // Allocate each rule over the leaves it still owns (not taken by a deeper rule)
+  const ruleDay={};
+  rules.forEach(r=>{
+    const dates=perDates[r.period]; if(!dates) return;
+    const cov=leaves.filter(lf=>leafRule[lf.id]?.[r.period]===r);
+    if(!cov.length) return;
+    let total;
+    if(r.type==='pct'){ const b=cov.reduce((s,lf)=>s+baseTot(lf,r.period),0); total=spQ25z(b*(1+r.value/100)); }
+    else total=spQ25z(r.value);
+    const w=cov.map(lf=>{ const b=baseTot(lf,r.period); return b>0?b:(lf.histVol||1); });
+    const leafTot=spAlloc25(w,total);
+    const rd=ruleDay[r.id]={};
+    cov.forEach((lf,i)=>{
+      const dw=dates.map(ds=>{ const d=spDow(ds); return d===0?0:d===6?(lf.satRate>0?0.25:0):1; });
+      const dv=spAlloc25(dw,leafTot[i]);
+      const m={}; dates.forEach((ds,j)=>{ if(dv[j]) m[ds]=dv[j]; });
+      rd[lf.id]=m;
+    });
+  });
+
+  // Per-leaf period totals (rule sum, else baseline day-count formula)
+  const lpt={};
+  leaves.forEach(lf=>{
+    const m={};
+    periods.forEach(p=>{
+      const r=leafRule[lf.id]?.[p.id];
+      if(r){ const rd=ruleDay[r.id]?.[lf.id]; m[p.id]=rd?Object.values(rd).reduce((s,v)=>s+v,0):0; }
+      else m[p.id]=baseTot(lf,p.id);
+    });
+    lpt[lf.id]=m;
+  });
+  SP._leafRule=leafRule; SP._ruleDay=ruleDay; SP._leafPeriodTot=lpt;
+}
+
+// ── Daily forecast value for one leaf (date must be > today) ──
+function spLeafFcDay(lf, ds){
+  const per=spPeriodOf(ds);
+  if(per){
+    const r=SP._leafRule?.[lf.id]?.[per];
+    if(r) return SP._ruleDay?.[r.id]?.[lf.id]?.[ds]||0;
+  }
+  const dw=spDow(ds);
+  return dw===0?0:dw===6?(lf.satRate||0):(lf.wkRate||0);
+}
+function spNodeFcPeriod(node,pid){
+  const lpt=SP._leafPeriodTot||{}; let t=0;
+  for(let i=0;i<node.leaves.length;i++) t+=lpt[node.leaves[i].id]?.[pid]||0;
+  return t;
+}
+function spNodeBasePeriod(node,pid){
+  const c=SP._perCounts?.[pid]; if(!c) return 0; let t=0;
+  for(let i=0;i<node.leaves.length;i++){ const lf=node.leaves[i]; t+=c.nWk*(lf.wkRate||0)+c.nSat*(lf.satRate||0); }
+  return t;
+}
+
+// Build the tree (+ forecast caches) if missing; true if it was rebuilt.
+function spEnsureTree(){
+  if(SP._tree) return false;
+  SP._tree=spBuildTree(SP.filteredRows, spGetGroupBy());
+  spFcRecompute();
+  return true;
+}
+
+// ── Inline forecast editor (popover on the ROM/M+1…/ROY cells) ──
+function spFcCloseEdit(){
+  document.getElementById('sp-fc-pop')?.remove();
+  if(SP._fcPopCloser){ document.removeEventListener('mousedown',SP._fcPopCloser,true); SP._fcPopCloser=null; }
+}
+function spFcEdit(nodeKey,pid,el){
+  const node=SP._tree?.index?.[nodeKey]; if(!node) return;
+  spFcCloseEdit();
+  const cur=spNodeFcPeriod(node,pid);
+  const base=spNodeBasePeriod(node,pid);
+  const own=spFcRuleAt(node.path,pid);
+  const pLbl=(spFcPeriods().find(p=>p.id===pid)||{}).label||pid;
+  const btn='background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:8px;padding:4px 8px;cursor:pointer';
+  const pop=document.createElement('div'); pop.id='sp-fc-pop';
+  pop.style.cssText='position:fixed;z-index:99999;background:var(--surface);border:1px solid var(--amber);padding:10px;display:flex;flex-direction:column;gap:7px;box-shadow:0 6px 22px rgba(0,0,0,.65);min-width:210px';
+  const r=el.getBoundingClientRect();
+  pop.style.left=Math.max(4,Math.min(r.left,window.innerWidth-240))+'px';
+  pop.style.top=Math.min(r.bottom+4,window.innerHeight-190)+'px';
+  pop.innerHTML=`
+    <div style="font-family:var(--mono);font-size:8px;color:var(--text)"><strong>${spEsc(node.name)}</strong> · ${pLbl}</div>
+    <div style="font-family:var(--mono);font-size:7px;color:var(--text-dim)">Baseline ${base.toLocaleString()} t (last 10 working days)${own?` · rule: ${own.type==='pct'?(own.value>0?'+':'')+own.value+'%':own.value.toLocaleString()+' t'}`:''}</div>
+    <input id="sp-fc-in" type="number" step="${FB_STEP}" min="0" value="${cur}"
+      style="background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:11px;padding:5px 7px;outline:none;width:100%"
+      onkeydown="if(event.key==='Enter'){spFcApplyInput('${nodeKey}','${pid}')}else if(event.key==='Escape'){spFcCloseEdit()}">
+    <div style="display:flex;gap:4px;flex-wrap:wrap">
+      <button style="${btn}" onclick="spFcApply('${nodeKey}','${pid}','pct',10)">+10%</button>
+      <button style="${btn}" onclick="spFcApply('${nodeKey}','${pid}','pct',-10)">−10%</button>
+      <button style="${btn}" onclick="spFcApply('${nodeKey}','${pid}','total',0)">Zero</button>
+      <button style="${btn};color:var(--green);border-color:var(--green)" onclick="spFcApply('${nodeKey}','${pid}','clear',0)">Baseline</button>
+      <button style="${btn};color:var(--amber);border-color:var(--amber);margin-left:auto" onclick="spFcApplyInput('${nodeKey}','${pid}')">Apply</button>
+    </div>
+    <div style="font-family:var(--mono);font-size:6px;color:var(--text-dim)">Values snap to ${FB_STEP} t truck loads · applies to all rows under this one · deeper rules win</div>`;
+  document.body.appendChild(pop);
+  const inp=document.getElementById('sp-fc-in'); if(inp){ inp.focus(); inp.select(); }
+  SP._fcPopCloser=e=>{ if(!pop.contains(e.target)) spFcCloseEdit(); };
+  setTimeout(()=>document.addEventListener('mousedown',SP._fcPopCloser,true),0);
+}
+function spFcApplyInput(nodeKey,pid){
+  const v=parseFloat(document.getElementById('sp-fc-in')?.value);
+  if(isNaN(v)||v<0){ spFcCloseEdit(); return; }
+  spFcApply(nodeKey,pid,'total',v);
+}
+function spFcApply(nodeKey,pid,type,value){
+  const node=SP._tree?.index?.[nodeKey]; if(!node) return;
+  spFcSetRule(node.path,pid,type,value);
+  spFcCloseEdit();
+  spRenderTable(true);
+  spRenderChart();
+  spRenderSidePanels();
+  if(type==='clear') statMsg('Back to baseline','green');
+  else statMsg(`Forecast rule set — ${spNodeFcPeriod(node,pid).toLocaleString()} t for ${pid} under ${node.name}`,'green');
+}
+function spFcInfo(){
+  spFcLoadRules();
+  const n=(SP.fcRules||[]).length;
+  statMsg(`Forecast: baseline = last 10 working days in ${FB_STEP} t steps. ${n} override rule${n===1?'':'s'} active — click any ROM / month / ROY cell to adjust.`);
+}
 
 // ── Extract Sold-To name from Ship-To name ────────────
 function spExtractSoldTo(shipToName){
@@ -1024,7 +1291,11 @@ function spBuildTree(rows, groupBy){
   const cutoffStr=cutoffD.toISOString().split('T')[0];
 
   // Pass 1: finest-grain leaves (demand-point × ship-to) + global per-DP hist volume.
-  // Also stamps __dpName/__dpElId/__leafId on each row for the grouping pass.
+  // Also stamps __dpName/__dpElId/__leafId on each row for the grouping pass, keeps a
+  // recent-day map per leaf for the baseline run-rate, and an attribute bag (one value
+  // per group-by dimension) so cascade rules can match leaves under ANY grouping.
+  const rate0=new Date(refDate+'T00:00:00'); rate0.setDate(rate0.getDate()-70);
+  const rateCut=rate0.toISOString().split('T')[0];
   const dpGlobalHistVol={}, leaves={};
   rows.forEach(r=>{
     const dpEl=getDpEl(r.product);
@@ -1034,11 +1305,36 @@ function spBuildTree(rows, groupBy){
     const shipTo=r.ship_to_name||'—';
     const leafId=dpKey+'|'+shipTo; r.__leafId=leafId;
     let lf=leaves[leafId];
-    if(!lf) lf=leaves[leafId]={id:leafId, dpKey, dpElId:dpEl?.id||null, shipTo, histVol:0, recentVol:0};
+    if(!lf) lf=leaves[leafId]={id:leafId, dpKey, dpElId:dpEl?.id||null, shipTo, histVol:0, recentVol:0, dayMap:{}};
     lf.histVol+=(r.volume||0);
     if(r.date&&r.date>=cutoffStr) lf.recentVol+=(r.volume||0);
+    if(r.date&&r.date>=rateCut) lf.dayMap[r.date]=(lf.dayMap[r.date]||0)+(r.volume||0);
+    if(r.date&&(!lf._ad||r.date>=lf._ad)){
+      lf._ad=r.date;
+      lf.attrs={ rep:(r.sales_manager||'—'), origin:(r.origin||'—'), custType:(r.customer_type||'—'),
+                 soldTo:spExtractSoldTo(r.ship_to_name||'—'), shipTo:shipTo, demandPoint:r.__dpName };
+    }
   });
-  Object.values(leaves).forEach(lf=>{ lf.dpGlobalHistVol=dpGlobalHistVol[lf.dpKey]||lf.histVol||1; });
+  // Baseline rates: mean of the last 10 working days + last 4 Saturdays ending at the
+  // data max, quantised to 25 t truck loads (weekday rate floors at one truck when
+  // active; a leaf with no recent volume gets 0 — dead business forecasts nothing).
+  {
+    const wkD=[], satD=[];
+    const d=new Date(refDate+'T00:00:00'); let g=0;
+    while((wkD.length<10||satD.length<4)&&g<70){
+      const dow=d.getDay(), ds=d.toISOString().split('T')[0];
+      if(dow>=1&&dow<=5&&wkD.length<10) wkD.push(ds);
+      else if(dow===6&&satD.length<4) satD.push(ds);
+      d.setDate(d.getDate()-1); g++;
+    }
+    Object.values(leaves).forEach(lf=>{
+      const dm=lf.dayMap;
+      const wAvg=wkD.length?wkD.reduce((s,ds)=>s+(dm[ds]||0),0)/wkD.length:0;
+      const sAvg=satD.length?satD.reduce((s,ds)=>s+(dm[ds]||0),0)/satD.length:0;
+      lf.wkRate=spQ25(wAvg); lf.satRate=spQ25z(sAvg);
+      lf.dayMap=null; lf.dpGlobalHistVol=dpGlobalHistVol[lf.dpKey]||lf.histVol||1;
+    });
+  }
 
   // Pass 2: walk each row through the chosen dimensions, building nodes.
   const upd=(node,r)=>{
@@ -1127,9 +1423,8 @@ function spRenderTable(skipThead=false){
   const {months,today}=spBuildDateSpine();
   const demIdx=spBuildDemandIndex();
   const groupBy=spGetGroupBy();
-  const hasFc=Object.keys(demIdx).length>0;
-  let builtTree=false;
-  if(!SP._tree){ SP._tree=spBuildTree(rows, groupBy); builtTree=true; }
+  const fcPeriods=spFcPeriods();
+  const builtTree=spEnsureTree();
   const roots=SP._tree.roots;
   if(!SP.collapsed) SP.collapsed={};
 
@@ -1153,7 +1448,7 @@ function spRenderTable(skipThead=false){
       let t=0; const ds=monthDates[ym]||[];
       for(let i=0;i<ds.length;i++){ const d=ds[i];
         if(d<=today) t+=node.actMap[d]||0;
-        else if(hasFc){ for(let j=0;j<node.leaves.length;j++) t+=spLeafFc(node.leaves[j],d,demIdx); }
+        else { for(let j=0;j<node.leaves.length;j++) t+=spLeafFcDay(node.leaves[j],d); }
       }
       return t;
     };
@@ -1192,8 +1487,12 @@ function spRenderTable(skipThead=false){
       }
     });
     const hdrLbl=groupBy.map(d=>SP_DIMS[d]?.label).filter(Boolean).join(' / ')||'Group';
+    const perTh=fcPeriods.map(p=>
+      `<th rowspan="2" title="${p.from} → ${p.to} — click a cell below to set a forecast rule" style="vertical-align:bottom;text-align:right;background:rgba(255,184,48,.07);color:var(--amber);font-size:7px;letter-spacing:.5px;padding:3px 5px 8px;border-left:1px solid var(--border2);min-width:44px">${p.label}<br><span style="opacity:.55;font-size:5px">FCST t</span></th>`
+    ).join('');
     thead.innerHTML=`<tr>
-      <th class="th-lbl" style="vertical-align:bottom;padding-bottom:8px;border-right:2px solid var(--border2);font-size:8px" rowspan="2">${hdrLbl}</th>
+      <th class="th-lbl" style="vertical-align:bottom;padding-bottom:8px;font-size:8px" rowspan="2">${hdrLbl}</th>
+      ${perTh}<th rowspan="2" style="border-right:2px solid var(--border2);width:2px;padding:0"></th>
       ${h1}
     </tr><tr>${h2}</tr>`;
   }
@@ -1206,9 +1505,8 @@ function spRenderTable(skipThead=false){
   function renderCells(node){
     const leaves=node.leaves; const fcCache={};
     const getFc=(ds)=>{
-      if(!hasFc) return 0;
       let v=fcCache[ds]; if(v!==undefined) return v;
-      v=0; for(let i=0;i<leaves.length;i++) v+=spLeafFc(leaves[i],ds,demIdx);
+      v=0; for(let i=0;i<leaves.length;i++) v+=spLeafFcDay(leaves[i],ds);
       return fcCache[ds]=v;
     };
     const actMap=node.actMap;
@@ -1244,6 +1542,16 @@ function spRenderTable(skipThead=false){
 
   const esc=s=>String(s==null?'':s).replace(/[&<>]/g,c=>c==='&'?'&amp;':c==='<'?'&lt;':'&gt;');
 
+  // ── Forecast period cells (ROM · M+1..M+3 · ROY) — the fast entry path ──
+  // Amber bold = an override rule sits exactly on this row; dim = baseline/inherited.
+  const renderPeriodCells=node=>fcPeriods.map(p=>{
+    const tot=spNodeFcPeriod(node,p.id);
+    const own=spFcRuleAt(node.path,p.id);
+    const sty=own?'color:var(--amber);font-weight:700;background:rgba(255,184,48,.10)':'color:var(--text-dim);background:rgba(255,184,48,.03)';
+    return `<td onclick="event.stopPropagation();spFcEdit('${node.key}','${p.id}',this)" title="${p.label}: click to set forecast (t)"
+      style="cursor:pointer;text-align:right;padding:1px 5px;font-size:7px;border-left:1px solid var(--border2);${sty}">${tot?tot.toLocaleString():'—'}${own?'✎':''}</td>`;
+  }).join('')+`<td style="border-right:2px solid var(--border2);width:2px;padding:0"></td>`;
+
   // ── Render the group tree recursively (depth 0 = first Group-by level) ──
   // Non-leaf rows are click-to-toggle; the deepest level is a plain row. Indentation
   // and label weight scale with depth so up-to-4-level hierarchies stay readable.
@@ -1256,9 +1564,9 @@ function spRenderTable(skipThead=false){
     const toggle=hasKids?`<span class="sp-toggle">${col?'▸':'▾'}</span>`:'';
     const rowAttrs=`onclick="spRowClick('${key}')" style="cursor:pointer"`;
     h+=`<tr class="${cls}" data-sp-key="${key}" data-sp-depth="${depth}" ${rowAttrs}>
-      <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:${indent}px${depth>=2?';font-size:7px':''}">
+      <td class="td-lbl" style="padding-left:${indent}px${depth>=2?';font-size:7px':''}">
         ${toggle}${strong?'<strong>':''}${esc(node.name)}${strong?'</strong>':''}${fbBtn(node.dpElIds,node.name)}
-      </td>${renderCells(node)}</tr>`;
+      </td>${renderPeriodCells(node)}${renderCells(node)}</tr>`;
     if(hasKids&&!col) node.childList.forEach(renderNode);
   };
   roots.forEach(renderNode);
@@ -1931,9 +2239,9 @@ function spExpandAll(expand){
   SP._userExpanded={};
   if(!expand){
     // Collapse every non-leaf node down to the first level — use cached tree if available
-    const data=SP._tree||(SP._tree=spBuildTree(SP.filteredRows, spGetGroupBy()));
+    spEnsureTree();
     const walk=nodes=>nodes.forEach(n=>{ if(n.childList.length){ SP.collapsed[n.key]=true; walk(n.childList); } });
-    walk(data.roots);
+    walk(SP._tree.roots);
   }
   // skipThead=true so the default-collapse pass doesn't re-collapse what we just set
   spRenderTable(true);
@@ -2794,6 +3102,9 @@ document.addEventListener('DOMContentLoaded', () => {
       if(saved.real_shipments_meta)  DB.real_shipments_meta  = saved.real_shipments_meta;
     }
   } catch(e) { console.warn('sales.html: failed to load avila_sales_db', e); }
+
+  // Restore forecast override rules before first render
+  spFcLoadRules();
 
   // Render the SP view
   renderSalesPerfView();
