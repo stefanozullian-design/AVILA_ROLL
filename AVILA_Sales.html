@@ -285,9 +285,12 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
 
           <!-- PERFORMANCE TABLE — full width with inline forecast dropdowns -->
           <div class="sp-card" style="padding:0">
-            <div class="sp-card-hdr" style="padding:8px 12px">
+            <div class="sp-card-hdr" style="padding:8px 12px;flex-wrap:wrap;gap:8px">
               <span class="sp-card-title">Performance &amp; Forecast</span>
-              <div style="display:flex;gap:5px;align-items:center">
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <span style="font-family:var(--mono);font-size:8px;color:var(--text-dim);letter-spacing:.5px">GROUP BY</span>
+                <div id="sp-groupby" style="display:flex;gap:4px;align-items:center"></div>
+                <div style="width:1px;height:16px;background:var(--border2)"></div>
                 <div class="sp-ctrl" onclick="spExpandAll(true)">Expand All</div>
                 <div class="sp-ctrl" onclick="spExpandAll(false)">Collapse</div>
               </div>
@@ -452,6 +455,7 @@ function renderSalesPerfView(){
   spRebuildCascade();   // build all dropdowns from current state
   spSyncFilterUI();     // push state → UI elements
   spInitForecastBasis(); // init forecast basis button styling
+  spRenderGroupControls(); // build Group-by dropdowns
   spApplyFilters();     // compute filteredRows → render everything
 }
 
@@ -906,8 +910,54 @@ function spBuildDateSpine(){
   return {months,today};
 }
 
-// ── Build org hierarchy tree from filtered rows ───────
-function spBuildOrgTree(rows){
+// ── Group-by dimensions ───────────────────────────────
+// The table hierarchy is user-configurable: pick an ordered list of these
+// dimensions (up to 4 levels) via the Group-by dropdowns. Actuals sum under any
+// grouping; forecast is computed at the finest grain (demand-point × ship-to)
+// and summed up, so parent rows always equal the sum of their children.
+const SP_DIMS = {
+  rep:         { label:'Sales Rep',     key:r=>r.sales_manager||'—' },
+  origin:      { label:'Origin',        key:r=>r.origin||'—' },
+  custType:    { label:'Customer Type', key:r=>r.customer_type||'—' },
+  soldTo:      { label:'Sold-To',       key:r=>spExtractSoldTo(r.ship_to_name||'—') },
+  shipTo:      { label:'Ship-To',       key:r=>r.ship_to_name||'—' },
+  demandPoint: { label:'Demand Point',  key:r=>r.__dpName||r.product||'Unknown DP' },
+};
+const SP_DIM_ORDER = ['rep','origin','custType','soldTo','shipTo','demandPoint'];
+const SP_GROUPBY_DEFAULT = ['soldTo','shipTo','demandPoint'];
+const SP_GROUPBY_MAX = 4;
+
+// Current group-by list (restored from localStorage on first use, default matches
+// the original Sold-To → Ship-To → Demand Point layout so nothing changes untouched).
+function spGetGroupBy(){
+  if(!SP.groupBy){
+    try{ const s=JSON.parse(localStorage.getItem('avila_sales_groupby')||'null');
+      if(Array.isArray(s)) SP.groupBy=s.filter(d=>SP_DIMS[d]); }catch(e){}
+    if(!SP.groupBy||!SP.groupBy.length) SP.groupBy=SP_GROUPBY_DEFAULT.slice();
+  }
+  return SP.groupBy;
+}
+
+// Forecast for one finest-grain leaf (demand-point × ship-to). Mirrors the prior
+// DP-leaf rule: ship-to-specific demand value wins; otherwise a proportional share
+// of the top-down DP forecast, suppressed for leaves inactive in the last 7 days.
+function spLeafFc(lf, ds, demIdx){
+  if(!lf.dpElId) return 0;
+  const specific=demIdx[`${lf.dpElId}|${ds}|${lf.shipTo}`]||0;
+  if(specific>0) return specific;
+  if(lf.recentVol>0 && lf.dpGlobalHistVol>0){
+    const topDown=demIdx[`${lf.dpElId}|${ds}`]||0;
+    if(topDown>0) return topDown*(lf.histVol/lf.dpGlobalHistVol);
+  }
+  return 0;
+}
+
+// ── Build a nested tree from filtered rows grouped by an ordered dimension list ──
+// Returns { roots:[node], leaves:{} }. node = { key,id,name,depth, actMap, histVol,
+// recentVol, dpElIds:[], leaves:[leafRef], childList:[node] } (childList empty at
+// the last level). key is a stable, path-unique id used for collapse state.
+function spBuildTree(rows, groupBy){
+  const dims=groupBy.map(id=>SP_DIMS[id]).filter(Boolean);
   const dpEls=(DB.elements||[]).filter(e=>e.type==='demand_point');
   const dpNameIdx={};
   dpEls.forEach(el=>{
@@ -919,39 +969,55 @@ function spBuildOrgTree(rows){
   const refDate=DB.real_shipments_meta?.date_max||new Date().toISOString().split('T')[0];
   const cutoffD=new Date(refDate+'T00:00:00'); cutoffD.setDate(cutoffD.getDate()-7);
   const cutoffStr=cutoffD.toISOString().split('T')[0];
-  // Inline actMap + recentVol update: single pass, no re-scan of rows later
-  const upd=(node,r)=>{
-    if(r.date) node.actMap[r.date]=(node.actMap[r.date]||0)+(r.volume||0);
-    node.histVol+=(r.volume||0);
-    if(r.date&&r.date>=cutoffStr) node.recentVol+=(r.volume||0);
-  };
-  // Global per-DP volume across all customers — denominator for cascade fallback
-  const dpGlobalHistVol={};
-  const tree={};
+
+  // Pass 1: finest-grain leaves (demand-point × ship-to) + global per-DP hist volume.
+  // Also stamps __dpName/__dpElId/__leafId on each row for the grouping pass.
+  const dpGlobalHistVol={}, leaves={};
   rows.forEach(r=>{
     const dpEl=getDpEl(r.product);
     const dpKey=dpEl?dpEl.id:`__nodp_${(r.product||'').replace(/\W/g,'_')}`;
     dpGlobalHistVol[dpKey]=(dpGlobalHistVol[dpKey]||0)+(r.volume||0);
-    const soldTo=spExtractSoldTo(r.ship_to_name||'—'), shipTo=r.ship_to_name||'—';
-
-    if(!tree[soldTo]) tree[soldTo]={id:soldTo,name:soldTo,actMap:{},histVol:0,recentVol:0,dpElIdSet:new Set(),shiptos:{}};
-    upd(tree[soldTo],r); if(dpEl) tree[soldTo].dpElIdSet.add(dpEl.id);
-
-    if(!tree[soldTo].shiptos[shipTo]) tree[soldTo].shiptos[shipTo]={id:shipTo,name:shipTo,actMap:{},histVol:0,recentVol:0,dpElIdSet:new Set(),dps:{}};
-    upd(tree[soldTo].shiptos[shipTo],r); if(dpEl) tree[soldTo].shiptos[shipTo].dpElIdSet.add(dpEl.id);
-
-    if(!tree[soldTo].shiptos[shipTo].dps[dpKey]) tree[soldTo].shiptos[shipTo].dps[dpKey]={id:dpKey,name:dpEl?dpEl.name:(r.product||'Unknown DP'),dpElId:dpEl?.id||null,actMap:{},histVol:0,recentVol:0};
-    upd(tree[soldTo].shiptos[shipTo].dps[dpKey],r);
+    r.__dpName=dpEl?dpEl.name:(r.product||'Unknown DP'); r.__dpElId=dpEl?.id||null;
+    const shipTo=r.ship_to_name||'—';
+    const leafId=dpKey+'|'+shipTo; r.__leafId=leafId;
+    let lf=leaves[leafId];
+    if(!lf) lf=leaves[leafId]={id:leafId, dpKey, dpElId:dpEl?.id||null, shipTo, histVol:0, recentVol:0};
+    lf.histVol+=(r.volume||0);
+    if(r.date&&r.date>=cutoffStr) lf.recentVol+=(r.volume||0);
   });
-  // Convert per-node dpElIdSets → arrays for fbBtn and renderCells; stamp global DP denominator
-  Object.values(tree).forEach(so=>{
-    so.dpElIds=[...so.dpElIdSet];
-    Object.values(so.shiptos).forEach(st=>{
-      st.dpElIds=[...st.dpElIdSet];
-      Object.values(st.dps).forEach(dp=>{ dp.dpGlobalHistVol=dpGlobalHistVol[dp.id]||dp.histVol||1; });
-    });
+  Object.values(leaves).forEach(lf=>{ lf.dpGlobalHistVol=dpGlobalHistVol[lf.dpKey]||lf.histVol||1; });
+
+  // Pass 2: walk each row through the chosen dimensions, building nodes.
+  const upd=(node,r)=>{
+    if(r.date) node.actMap[r.date]=(node.actMap[r.date]||0)+(r.volume||0);
+    node.histVol+=(r.volume||0);
+    if(r.date&&r.date>=cutoffStr) node.recentVol+=(r.volume||0);
+    node._leafSet.add(r.__leafId);
+    if(r.__dpElId) node._dpSet.add(r.__dpElId);
+  };
+  const mkNode=(id,depth)=>({id,name:id,depth,actMap:{},histVol:0,recentVol:0,_leafSet:new Set(),_dpSet:new Set(),children:{}});
+  const root=mkNode('__root',-1);
+  rows.forEach(r=>{
+    let node=root;
+    for(let i=0;i<dims.length;i++){
+      const kval=(String(dims[i].key(r)??'—').trim())||'—';
+      if(!node.children[kval]) node.children[kval]=mkNode(kval,i);
+      node=node.children[kval];
+      upd(node,r);
+    }
   });
-  return tree;
+  // Finalize: assign path-unique keys, materialise leaf/DP arrays, sort children.
+  const finalize=(node,key)=>{
+    node.key=key;
+    node.dpElIds=[...node._dpSet];
+    node.leaves=[...node._leafSet].map(id=>leaves[id]);
+    node.childList=Object.values(node.children).sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+    node._leafSet=null; node._dpSet=null; node.children=null;
+    node.childList.forEach((ch,i)=>finalize(ch, key+'_'+i));
+  };
+  const roots=Object.values(root.children).sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+  roots.forEach((n,i)=>finalize(n,'g'+i));
+  return { roots, leaves };
 }
 
 // ── Demand values index for O(1) lookups ─────────────
@@ -1005,19 +1071,22 @@ function spRenderTable(skipThead=false){
   if(!rows.length){ tbody.innerHTML=`<tr><td colspan="10" class="sp-no-data">No data for current filters</td></tr>`; return; }
   const {months,today}=spBuildDateSpine();
   const demIdx=spBuildDemandIndex();
-  if(!SP._tree) SP._tree=spBuildOrgTree(rows);
-  const orgTree=SP._tree;
+  const groupBy=spGetGroupBy();
+  const hasFc=Object.keys(demIdx).length>0;
+  if(!SP._tree) SP._tree=spBuildTree(rows, groupBy);
+  const roots=SP._tree.roots;
   if(!SP.collapsed) SP.collapsed={};
 
-  // Default view: collapse Sold-To rows the user hasn't explicitly expanded. A full
-  // render (skipThead=false, i.e. filters changed / data (re)loaded) starts collapsed
-  // to Sold-To level so the initial paint is a few hundred rows, not thousands ×
-  // hundreds of columns. Row toggles (skipThead=true) leave SP.collapsed untouched.
+  // Default view: collapse every non-leaf node the user hasn't explicitly expanded,
+  // so a fresh render (skipThead=false: filters changed / data (re)loaded / regrouped)
+  // paints one level deep and each expand reveals only the next level. This keeps the
+  // initial DOM small regardless of how many grouping levels are chosen. Row toggles
+  // (skipThead=true) leave SP.collapsed untouched.
   if(!skipThead){
-    Object.keys(orgTree).forEach(k=>{
-      const soKey='so_'+k.replace(/\W/g,'_');
-      if(!SP._userExpanded[soKey]) SP.collapsed[soKey]=true;
+    const walk=nodes=>nodes.forEach(n=>{
+      if(n.childList.length){ if(!SP._userExpanded[n.key]) SP.collapsed[n.key]=true; walk(n.childList); }
     });
+    walk(roots);
   }
 
   // ── Rebuild thead dynamically (skipped on row-toggle since column structure is unchanged) ──
@@ -1043,39 +1112,27 @@ function spRenderTable(skipThead=false){
         h2+=`<th style="background:${bg};font-size:6px;text-align:center;font-weight:700;border-left:2px solid var(--border2);padding:2px 4px">Σ</th>`;
       }
     });
+    const hdrLbl=groupBy.map(d=>SP_DIMS[d]?.label).filter(Boolean).join(' / ')||'Group';
     thead.innerHTML=`<tr>
-      <th class="th-lbl" style="vertical-align:bottom;padding-bottom:8px;border-right:2px solid var(--border2);font-size:8px" rowspan="2">Sold To / Ship To / Demand Point</th>
+      <th class="th-lbl" style="vertical-align:bottom;padding-bottom:8px;border-right:2px solid var(--border2);font-size:8px" rowspan="2">${hdrLbl}</th>
       ${h1}
     </tr><tr>${h2}</tr>`;
   }
 
   // ── Per-row date cell renderer ──
-  // actMap/histVol/recentVol pre-computed in spBuildOrgTree (single O(N) pass).
-  // recentVol: volume in last 7 days — zero means inactive, cascade suppressed.
-  // shipTos: null=aggregated dp total | string[]=specific ship_to_names to sum
-  // dpHistVol: total historical volume at DP level (denominator for cascade proportion)
-  function renderCells(actMap, histVol, recentVol, dpElId, dpElIds, shipTos, dpHistVol){
-    // Inactive nodes (no shipments in last 7 days) get no cascade allocation.
-    // Specific demand_values entries still win (step 1 in getFc), so the forecast
-    // builder override for a specific sold-to continues to work regardless.
-    const cascadeProp=dpHistVol>0&&recentVol>0?histVol/dpHistVol:0;
+  // node.actMap/leaves pre-computed in spBuildTree. Forecast for a node = sum of its
+  // finest-grain (demand-point × ship-to) leaves, so any grouping is a pure summation
+  // and parent rows equal the sum of their children. Memoised per date; short-circuits
+  // when no forecast data exists (the common Excel-actuals-only case).
+  function renderCells(node){
+    const leaves=node.leaves; const fcCache={};
     const getFc=(ds)=>{
-      if(dpElId){
-        if(shipTos&&shipTos.length){
-          const specific=shipTos.reduce((s,st)=>s+spGetFcVal(dpElId,ds,demIdx,st),0);
-          if(specific>0) return specific;
-          // Cascade: proportional share of top-down DP forecast
-          if(cascadeProp>0){
-            const topDown=spGetFcVal(dpElId,ds,demIdx,null);
-            if(topDown>0) return topDown*cascadeProp;
-          }
-          return 0;
-        }
-        return spGetFcVal(dpElId,ds,demIdx,null);
-      }
-      if(dpElIds) return dpElIds.reduce((s,id)=>s+spGetFcVal(id,ds,demIdx,null),0);
-      return 0;
+      if(!hasFc) return 0;
+      let v=fcCache[ds]; if(v!==undefined) return v;
+      v=0; for(let i=0;i<leaves.length;i++) v+=spLeafFc(leaves[i],ds,demIdx);
+      return fcCache[ds]=v;
     };
+    const actMap=node.actMap;
     let cells='';
     months.forEach(mo=>{
       const col=SP.collapsedMonths.has(mo.ym);
@@ -1106,41 +1163,32 @@ function spRenderTable(skipThead=false){
     ?`<button class="sp-fb-btn" onclick="event.stopPropagation();openSpForecastBuilder(${JSON.stringify(elIds).replaceAll('"','&quot;')},${JSON.stringify(label).replaceAll('"','&quot;')})" title="⚙ Forecast Builder">⚙</button>`
     :'';
 
-  const sortObjs=obj=>Object.values(obj).sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+  const esc=s=>String(s==null?'':s).replace(/[&<>]/g,c=>c==='&'?'&amp;':c==='<'?'&lt;':'&gt;');
 
-  // ── Render tree rows: Sold To (L0) → Ship To (L1) → Demand Point (L2) ──
+  // ── Render the group tree recursively (depth 0 = first Group-by level) ──
+  // Non-leaf rows are click-to-toggle; the deepest level is a plain row. Indentation
+  // and label weight scale with depth so up-to-4-level hierarchies stay readable.
   let h='';
-  sortObjs(orgTree).forEach(so=>{
-    const soKey='so_'+so.id.replace(/\W/g,'_'), soCol=!!SP.collapsed[soKey];
-    h+=`<tr class="sp-row-l0" data-sp-key="${soKey}" data-sp-depth="0" onclick="spToggle('${soKey}')" style="cursor:pointer">
-      <td class="td-lbl" style="border-right:2px solid var(--border2)">
-        <span class="sp-toggle">${soCol?'▸':'▾'}</span><strong>${so.name}</strong>${fbBtn(so.dpElIds,so.name)}
-      </td>${renderCells(so.actMap,so.histVol,so.recentVol,null,so.dpElIds)}</tr>`;
-    if(soCol) return;
-
-    sortObjs(so.shiptos).forEach(st=>{
-      const stKey='st_'+soKey+'_'+st.id.replace(/\W/g,'_'), stCol=!!SP.collapsed[stKey];
-      h+=`<tr class="sp-row-l1" data-sp-key="${stKey}" data-sp-depth="1" onclick="spToggle('${stKey}')" style="cursor:pointer">
-        <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:18px">
-          <span class="sp-toggle">${stCol?'▸':'▾'}</span><strong>${st.name}</strong>${fbBtn(st.dpElIds,st.name)}
-        </td>${renderCells(st.actMap,st.histVol,st.recentVol,null,st.dpElIds)}</tr>`;
-      if(stCol) return;
-
-      sortObjs(st.dps).forEach(dp=>{
-        const dpElIds=dp.dpElId?[dp.dpElId]:[];
-        h+=`<tr class="sp-row-l2" data-sp-depth="2">
-          <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:30px;font-size:7px">
-            ${dp.name}${fbBtn(dpElIds,dp.name)}
-          </td>${renderCells(dp.actMap,dp.histVol,dp.recentVol,dp.dpElId,null,[st.name],dp.dpGlobalHistVol)}</tr>`;
-      });
-    });
-  });
+  const renderNode=node=>{
+    const key=node.key, hasKids=node.childList.length>0, col=!!SP.collapsed[key], depth=node.depth;
+    const cls=depth===0?'sp-row-l0':depth===1?'sp-row-l1':'sp-row-l2';
+    const indent=6+depth*16;
+    const strong=depth<=1;
+    const toggle=hasKids?`<span class="sp-toggle">${col?'▸':'▾'}</span>`:'';
+    const rowAttrs=hasKids?`onclick="spToggle('${key}')" style="cursor:pointer"`:'';
+    h+=`<tr class="${cls}" data-sp-key="${key}" data-sp-depth="${depth}" ${rowAttrs}>
+      <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:${indent}px${depth>=2?';font-size:7px':''}">
+        ${toggle}${strong?'<strong>':''}${esc(node.name)}${strong?'</strong>':''}${fbBtn(node.dpElIds,node.name)}
+      </td>${renderCells(node)}</tr>`;
+    if(hasKids&&!col) node.childList.forEach(renderNode);
+  };
+  roots.forEach(renderNode);
 
   if(!h) h=`<tr><td colspan="20" class="sp-no-data">No data for current filters</td></tr>`;
   tbody.innerHTML=h;
 }
 
-// ── [old helpers removed — replaced by spBuildDateSpine / spBuildOrgTree] ──
+// ── [old helpers removed — replaced by spBuildDateSpine / spBuildTree] ──
 function spGetRestOfMonthDates(dateNow){
   const [y,m,d] = dateNow.split('-');
   const current = new Date(y, parseInt(m)-1, parseInt(d));
@@ -1789,11 +1837,45 @@ function spExpandAll(expand){
   SP.collapsed={};
   SP._userExpanded={};
   if(!expand){
-    // Collapse all Sold To rows — use cached tree if available
-    const orgTree=SP._tree||spBuildOrgTree(SP.filteredRows);
-    Object.keys(orgTree).forEach(k=>{ SP.collapsed['so_'+k.replace(/\W/g,'_')]=true; });
+    // Collapse every non-leaf node down to the first level — use cached tree if available
+    const data=SP._tree||(SP._tree=spBuildTree(SP.filteredRows, spGetGroupBy()));
+    const walk=nodes=>nodes.forEach(n=>{ if(n.childList.length){ SP.collapsed[n.key]=true; walk(n.childList); } });
+    walk(data.roots);
   }
+  // skipThead=true so the default-collapse pass doesn't re-collapse what we just set
   spRenderTable(true);
+}
+
+// ── Group-by controls (up to SP_GROUPBY_MAX dropdowns) ──
+function spRenderGroupControls(){
+  const host=document.getElementById('sp-groupby'); if(!host) return;
+  const gb=spGetGroupBy();
+  let html='';
+  for(let i=0;i<SP_GROUPBY_MAX;i++){
+    const cur=gb[i]||'';
+    const used=new Set(gb.slice(0,i));  // dims chosen at earlier levels
+    const prevSet=i===0||!!gb[i-1];     // only enable a level once the previous one is set
+    const opts=[`<option value="">${i===0?'—':'— none —'}</option>`].concat(
+      SP_DIM_ORDER.map(d=>{
+        const dis=(used.has(d)&&d!==cur)?' disabled':'';
+        return `<option value="${d}"${d===cur?' selected':''}${dis}>${SP_DIMS[d].label}</option>`;
+      }));
+    html+=`<select class="sp-fi" style="height:22px;width:118px;${prevSet?'':'opacity:.45'}" ${prevSet?'':'disabled'} onchange="spSetGroupLevel(${i},this.value)">${opts.join('')}</select>`;
+    if(i<SP_GROUPBY_MAX-1) html+=`<span style="color:var(--text-dim);font-size:9px">→</span>`;
+  }
+  host.innerHTML=html;
+}
+
+function spSetGroupLevel(i, dim){
+  let gb=spGetGroupBy().slice(0,i);            // changing a level clears deeper levels
+  if(dim && SP_DIMS[dim] && !gb.includes(dim)) gb.push(dim);
+  if(!gb.length) gb=SP_GROUPBY_DEFAULT.slice(); // never allow zero levels
+  SP.groupBy=gb;
+  try{ localStorage.setItem('avila_sales_groupby', JSON.stringify(gb)); }catch(e){}
+  // Regroup: drop cached tree + collapse/expand state and repaint
+  SP._tree=null; SP.collapsed={}; SP._userExpanded={};
+  spRenderGroupControls();
+  spRenderTable(false);
 }
 
 // ── Forecast Builder from SP context ─────────────────
