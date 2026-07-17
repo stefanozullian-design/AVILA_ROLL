@@ -39,6 +39,17 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
 .sp-upload-btn{padding:4px 12px;background:transparent;color:var(--blue);border:1px solid var(--blue);font-family:var(--mono);font-size:9px;cursor:pointer;transition:all .15s;}
 .sp-upload-btn:hover{background:rgba(77,166,255,.08);}
 .sp-kpi-strip{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;}
+/* top tabs */
+.sp-tab{padding:7px 16px;font-family:var(--mono);font-size:10px;letter-spacing:.5px;color:var(--text-dim);cursor:pointer;border:1px solid transparent;border-bottom:none;background:transparent;transition:all .15s;white-space:nowrap;}
+.sp-tab:hover{color:var(--text);}
+.sp-tab.active{color:var(--amber);background:var(--surface);border-color:var(--border2);border-bottom:1px solid var(--surface);margin-bottom:-1px;}
+/* rep progress cards */
+.sp-repcard{border:1px solid var(--border2);background:var(--surface2);padding:10px 12px;transition:border-color .15s;}
+.sp-repcard.done{border-color:rgba(0,255,157,.35);}
+.sp-repbar{height:9px;background:var(--surface);border:1px solid var(--border);position:relative;border-radius:2px;overflow:hidden;}
+.sp-repbar>span{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,var(--orange,#ff8c1a),var(--amber));transition:width .25s;}
+.sp-repbar.done>span{background:linear-gradient(90deg,rgba(0,255,157,.55),rgba(0,255,157,.25));}
+.sp-repchk{cursor:pointer;user-select:none;}
 .sp-kpi{background:var(--surface);border:1px solid var(--border);padding:12px 14px;}
 .sp-kpi-lbl{font-family:var(--mono);font-size:8px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase;margin-bottom:5px;}
 .sp-kpi-val{font-family:var(--mono);font-size:18px;color:var(--text-bright);font-weight:700;}
@@ -188,6 +199,13 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
           <span id="sp-meta-lbl">No actuals loaded</span>
         </div>
 
+        <!-- TOP TABS: External Sales · Internal Sales · Rep Forecasting Progress -->
+        <div id="sp-tabs" style="display:flex;gap:2px;border-bottom:1px solid var(--border2);margin-bottom:10px">
+          <div class="sp-tab active" id="sp-tab-EXT" onclick="spSetTab('EXT')">External Sales</div>
+          <div class="sp-tab"        id="sp-tab-INT" onclick="spSetTab('INT')">Internal Sales</div>
+          <div class="sp-tab"        id="sp-tab-REP" onclick="spSetTab('REP')">Sales Rep Forecasting Progress</div>
+        </div>
+
         <!-- FILTER BAR — Cascading: Origin → Rep → Customer -->
         <div class="sp-filter-bar">
           <div class="sp-filter-label">Date</div>
@@ -218,18 +236,10 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
             <option value="ALL">All Products</option>
           </select>
           <div style="width:1px;height:20px;background:var(--border2)"></div>
-          <div class="sp-filter-label">Type</div>
-          <div class="sp-chip green active" id="sp-type-all"  onclick="spDispatch({custType:'all'})">ALL</div>
-          <div class="sp-chip"             id="sp-type-ext"   onclick="spDispatch({custType:'EXT'})">EXT</div>
-          <div class="sp-chip"             id="sp-type-int"   onclick="spDispatch({custType:'INT'})">INT</div>
-          <div style="width:1px;height:20px;background:var(--border2)"></div>
           <div class="sp-filter-label">Quick</div>
           <div class="sp-chip" id="sp-quick-mtd"  onclick="spSetQuickDate('MTD')">MTD</div>
           <div class="sp-chip" id="sp-quick-ytd"  onclick="spSetQuickDate('YTD')">YTD</div>
           <div class="sp-chip" id="sp-quick-r12m" onclick="spSetQuickDate('R12M')">R12M</div>
-          <div style="width:1px;height:20px;background:var(--border2)"></div>
-          <button class="tb-btn amber" onclick="spFcInfo()">⚙ Forecast Rules</button>
-          <button class="tb-btn sec" onclick="openNonWorkingDaysPanel()">⊘ Non-Working Days</button>
           <div style="width:1px;height:20px;background:var(--border2)"></div>
           <button class="sp-upload-btn" onclick="document.getElementById('sp-file-input').click()">↑ Load Actuals</button>
           <button class="sp-upload-btn" onclick="sdsPickFile()" title="Pin the location of the detailed shipments file so the page auto-updates when it changes">⚙ Data Source</button>
@@ -338,6 +348,10 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
             </div>
           </div>
         </div><!-- /sp-content -->
+
+        <!-- REP FORECASTING PROGRESS VIEW (tab 3) -->
+        <div id="sp-rep-view" style="display:none;flex-direction:column;gap:14px"></div>
+
       </div><!-- /sp-inner -->
     </div><!-- /salesperf-view -->
 
@@ -472,11 +486,13 @@ function renderSalesPerfView(){
   const candidates=[SP.f.dateTo, m.date_max, simEnd].filter(Boolean);
   SP.f.dateTo = candidates.reduce((a,b)=>a>b?a:b);
 
+  if(!SP.tab) SP.tab='EXT';
+  if(SP.f.custType==='all' && SP.tab!=='REP') SP.f.custType=SP.tab;   // tabs own the INT/EXT split
   spRebuildCascade();   // build all dropdowns from current state
   spSyncFilterUI();     // push state → UI elements
   spInitForecastBasis(); // init forecast basis button styling
   spRenderGroupControls(); // build Group-by dropdowns
-  spApplyFilters();     // compute filteredRows → render everything
+  spSetTab(SP.tab);     // apply active tab: EXT/INT table+chart, or REP progress
 }
 
 // ══════════════════════════════════════════════════════
@@ -968,15 +984,18 @@ function spDow(ds){ let v=_dowCache[ds]; if(v===undefined){ v=new Date(ds+'T00:0
 function spEsc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>c==='&'?'&amp;':c==='<'?'&lt;':c==='>'?'&gt;':'&quot;'); }
 
 // ── Forecast periods: ROM · next 3 months · rest-of-year ──
+// Anchored to the LAST REAL DAY (not calendar today), so the ROM rule governs every
+// forecast day the table shows — a rule change is visible immediately on all fuchsia-
+// side dailies, even when the data feed lags a few days behind today.
 function spFcPeriods(){
-  const today=new Date().toISOString().split('T')[0];
-  if(SP._periods&&SP._periods.today===today) return SP._periods.list;
-  const y=+today.slice(0,4), m=+today.slice(5,7);
+  const anchor=spLastReal();
+  if(SP._periods&&SP._periods.anchor===anchor) return SP._periods.list;
+  const y=+anchor.slice(0,4), m=+anchor.slice(5,7);
   const pad=n=>String(n).padStart(2,'0');
   const eom=(yy,mm)=>`${yy}-${pad(mm)}-${pad(new Date(yy,mm,0).getDate())}`;
   const monNames=['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
   const list=[];
-  const nd=new Date(today+'T00:00:00'); nd.setDate(nd.getDate()+1);
+  const nd=new Date(anchor+'T00:00:00'); nd.setDate(nd.getDate()+1);
   const romFrom=nd.toISOString().split('T')[0];
   if(romFrom<=eom(y,m)) list.push({id:'ROM',label:'ROM',from:romFrom,to:eom(y,m)});
   for(let k=1;k<=3;k++){
@@ -985,7 +1004,7 @@ function spFcPeriods(){
   }
   const r4=new Date(y,m-1+4,1);
   if(r4.getFullYear()===y) list.push({id:'ROY',label:'ROY',from:`${y}-${pad(r4.getMonth()+1)}-01`,to:`${y}-12-31`});
-  SP._periods={today,list};
+  SP._periods={anchor,list};
   return list;
 }
 function spPeriodOf(ds){
@@ -1008,6 +1027,7 @@ function spFcSetRule(path,period,type,value){
   SP.fcRules=(SP.fcRules||[]).filter(r=>!(r.period===period&&JSON.stringify(r.path)===sig));
   if(type!=='clear') SP.fcRules.push({id:'r'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),path,period,type,value:+value||0});
   spFcSaveRules();
+  SP._fcVer=(SP._fcVer||0)+1;   // invalidate the rep-progress model cache
   spFcRecompute();
 }
 
@@ -1176,6 +1196,7 @@ function spFcApplyInput(nodeKey,pid){
 function spFcApply(nodeKey,pid,type,value){
   const node=SP._tree?.index?.[nodeKey]; if(!node) return;
   spFcSetRule(node.path,pid,type,value);
+  spUncommitNode(node);   // editing re-opens the customer for a fresh sign-off
   spFcCloseEdit();
   spRenderTable(true);
   spRenderChart();
@@ -1190,6 +1211,177 @@ function spFcInfo(){
   spFcLoadRules();
   const n=(SP.fcRules||[]).length;
   statMsg(`Forecast: baseline = 10WD avg per row in ${FB_STEP} t steps. ${n} rule${n===1?'':'s'} active — click any fuchsia cell to apply a method (10/15/30WD, ±%, zero) or a t/day rate.`);
+}
+
+// ═══════════════════════════════════════════════════════
+// TABS + REP FORECASTING PROGRESS
+// ═══════════════════════════════════════════════════════
+// Three tabs: External Sales / Internal Sales (the forecast table+chart scoped to
+// that customer type) and Sales Rep Forecasting Progress (per-rep review tracking).
+function spSetTab(tab){
+  SP.tab=tab;
+  ['EXT','INT','REP'].forEach(t=>{ const el=document.getElementById('sp-tab-'+t); if(el) el.classList.toggle('active', t===tab); });
+  const content=document.getElementById('sp-content');
+  const repv=document.getElementById('sp-rep-view');
+  const fbar=document.querySelector('.sp-filter-bar');
+  const hasData=(DB.real_shipments_daily||[]).length>0;
+  if(tab==='REP'){
+    if(content) content.style.display='none';
+    if(fbar) fbar.style.display='none';
+    if(repv) repv.style.display=hasData?'flex':'none';
+    spRenderRepView();
+  } else {
+    if(repv) repv.style.display='none';
+    if(fbar) fbar.style.display='';
+    SP.f.custType=tab;                  // EXT or INT scopes the whole table+chart
+    SP.chartScope=null; SP._tree=null;
+    if(content) content.style.display=hasData?'flex':'none';
+    if(hasData) spApplyFilters();
+  }
+}
+
+// ── Commit store (per rep+customer, localStorage) ──
+function spCommitLoad(){ if(SP._commitsLoaded) return; SP._commitsLoaded=true; try{ SP.fcCommits=JSON.parse(localStorage.getItem('avila_sales_fc_commits')||'{}')||{}; }catch(e){ SP.fcCommits={}; } }
+function spCommitSave(){ try{ localStorage.setItem('avila_sales_fc_commits', JSON.stringify(SP.fcCommits||{})); }catch(e){} }
+function spCommitKey(rep,soldTo){ return rep+'␟'+soldTo; }
+function spIsCommitted(rep,soldTo){ spCommitLoad(); return !!SP.fcCommits[spCommitKey(rep,soldTo)]; }
+function spSetCommit(rep,soldTo,on){ spCommitLoad(); const k=spCommitKey(rep,soldTo); if(on) SP.fcCommits[k]=Date.now(); else delete SP.fcCommits[k]; spCommitSave(); }
+function spUncommitNode(node){ // called after an edit — a touched customer re-opens
+  if(!node||!node.leaves) return;
+  const seen={};
+  node.leaves.forEach(lf=>{ const rep=lf.attrs?.rep||'—', so=lf.attrs?.soldTo||'—', k=rep+'␟'+so;
+    if(!seen[k]){ seen[k]=1; if(spIsCommitted(rep,so)) spSetCommit(rep,so,false); } });
+}
+
+// ── Per-rep model over the FULL dataset (scope EXT/INT/ALL), rules applied ──
+// Cached by scope + forecast-rule version; commit flags refreshed cheaply on read.
+function spBuildRepModel(scope){
+  spCommitLoad();
+  const ver=(SP._fcVer||0)+'|'+(DB.real_shipments_meta?.loaded_at||'')+'|'+(DB.real_shipments_daily||[]).length;
+  const refreshDone=reps=>{ Object.values(reps).forEach(R=>{ R.done={ROM:0,N3M:0,ROY:0}; Object.values(R.custs).forEach(C=>{ C.committed=spIsCommitted(R.rep,C.soldTo); if(C.committed)['ROM','N3M','ROY'].forEach(h=>R.done[h]+=C.vol[h]); }); }); return reps; };
+  if(SP._repModel && SP._repModel.scope===scope && SP._repModel.ver===ver) return refreshDone(SP._repModel.reps);
+
+  const rows=(DB.real_shipments_daily||[]).filter(r=> scope==='ALL'?true:((r.customer_type||'EXT')===scope));
+  const dpEls=(DB.elements||[]).filter(e=>e.type==='demand_point');
+  const dpNameIdx={}; dpEls.forEach(el=>{ const k=(el.name||'').trim().toUpperCase(); if(k) dpNameIdx[k]=el; });
+  const getDpEl=p=>dpNameIdx[(p||'').trim().toUpperCase()]||null;
+  const refDate=DB.real_shipments_meta?.date_max||new Date().toISOString().split('T')[0];
+  const rate0=new Date(refDate+'T00:00:00'); rate0.setDate(rate0.getDate()-70); const rateCut=rate0.toISOString().split('T')[0];
+  const leaves={};
+  rows.forEach(r=>{
+    const dpEl=getDpEl(r.product), dpKey=dpEl?dpEl.id:'__nodp_'+(r.product||'').replace(/\W/g,'_');
+    const shipTo=r.ship_to_name||'—', id=dpKey+'|'+shipTo;
+    let lf=leaves[id]; if(!lf) lf=leaves[id]={id,histVol:0,dayMap:{},rep:'—',soldTo:'—',satRate:0,_ad:''};
+    lf.histVol+=(r.volume||0);
+    if(r.date&&r.date>=rateCut) lf.dayMap[r.date]=(lf.dayMap[r.date]||0)+(r.volume||0);
+    if(r.date&&r.date>=lf._ad){ lf._ad=r.date; lf.rep=(r.sales_manager||'—'); lf.soldTo=spExtractSoldTo(shipTo);
+      lf.attrs={rep:lf.rep,origin:(r.origin||'—'),custType:(r.customer_type||'—'),soldTo:lf.soldTo,shipTo,demandPoint:dpEl?dpEl.name:(r.product||'Unknown DP')}; }
+  });
+  const wkD=[],satD=[]; { const d=new Date(refDate+'T00:00:00'); let g=0; while((wkD.length<30||satD.length<4)&&g<70){ const dow=d.getDay(),ds=d.toISOString().split('T')[0]; if(dow>=1&&dow<=5&&wkD.length<30) wkD.push(ds); else if(dow===6&&satD.length<4) satD.push(ds); d.setDate(d.getDate()-1); g++; } }
+  const avgOver=(dm,n)=>{ const m=Math.min(n,wkD.length); if(!m) return 0; let s=0; for(let i=0;i<m;i++) s+=dm[wkD[i]]||0; return s/m; };
+  Object.values(leaves).forEach(lf=>{ const dm=lf.dayMap; lf.wk10=spQ25(avgOver(dm,10)); lf.wk15=spQ25(avgOver(dm,15)); lf.wk30=spQ25(avgOver(dm,30)); lf.wkRate=lf.wk10; const sAvg=satD.length?satD.reduce((s,ds)=>s+(dm[ds]||0),0)/satD.length:0; lf.satRate=spQ25z(sAvg); lf.dayMap=null; });
+
+  const periods=spFcPeriods(), leafArr=Object.values(leaves);
+  const perCounts={},perDates={};
+  periods.forEach(p=>{ const arr=[]; for(let d=new Date(p.from+'T00:00:00'); d.toISOString().split('T')[0]<=p.to; d.setDate(d.getDate()+1)) arr.push(d.toISOString().split('T')[0]); perDates[p.id]=arr; let nWk=0,nSat=0; arr.forEach(ds=>{ const dw=spDow(ds); if(dw>=1&&dw<=5)nWk++; else if(dw===6)nSat++; }); perCounts[p.id]={nWk,nSat}; });
+  spFcLoadRules();
+  const rules=(SP.fcRules||[]).slice().sort((a,b)=>a.path.length-b.path.length);
+  const match=(lf,path)=>path.every(pp=>lf.attrs&&String(lf.attrs[pp.dim]??'—').trim()===String(pp.value).trim());
+  const leafRule={};
+  rules.forEach(r=>{ if(!perDates[r.period])return; leafArr.forEach(lf=>{ if(match(lf,r.path)){ (leafRule[lf.id]=leafRule[lf.id]||{})[r.period]=r; } }); });
+  const n3m=['M1','M2','M3'];
+  const reps={};
+  leafArr.forEach(lf=>{
+    const tm={};
+    periods.forEach(p=>{ const r=leafRule[lf.id]?.[p.id]; let wk,sat;
+      if(r){ if(r.type==='avg'){ wk=lf['wk'+r.value]||0; sat=lf.satRate||0; }
+        else if(r.type==='pct'){ wk=spQ25z((lf.wkRate||0)*(1+r.value/100)); sat=spQ25z((lf.satRate||0)*(1+r.value/100)); }
+        else { const c=perCounts[p.id]; let R=r.type==='total'?(c.nWk?r.value/c.nWk:0):r.value; R=spQ25z(R); wk=R; sat=lf.satRate>0?spQ25z(R*0.25):0; } }
+      else { wk=lf.wkRate||0; sat=lf.satRate||0; }
+      const c=perCounts[p.id]; tm[p.id]=c.nWk*wk+c.nSat*sat; });
+    const hv={ ROM:tm.ROM||0, N3M:n3m.reduce((s,k)=>s+(tm[k]||0),0), ROY:periods.reduce((s,p)=>s+(tm[p.id]||0),0) };
+    const rep=lf.rep||'—', so=lf.soldTo||'—';
+    let R=reps[rep]; if(!R) R=reps[rep]={rep,custs:{},total:{ROM:0,N3M:0,ROY:0},done:{ROM:0,N3M:0,ROY:0}};
+    let C=R.custs[so]; if(!C) C=R.custs[so]={soldTo:so,vol:{ROM:0,N3M:0,ROY:0},committed:false};
+    ['ROM','N3M','ROY'].forEach(h=>{ C.vol[h]+=hv[h]; R.total[h]+=hv[h]; });
+  });
+  SP._repModel={scope,ver,reps};
+  return refreshDone(reps);
+}
+
+function spSetRepScope(s){ SP.repScope=s; try{localStorage.setItem('avila_sales_rep_scope',s);}catch(e){} spRenderRepView(); }
+function spRepToggle(erep){ const rep=decodeURIComponent(erep); SP._repOpen=SP._repOpen||{}; SP._repOpen[rep]=!SP._repOpen[rep]; spRenderRepView(); }
+function spRepCommit(erep,eso,on){ spSetCommit(decodeURIComponent(erep),decodeURIComponent(eso),!!on); spRenderRepView(); }
+function spRepCommitAll(erep){ const rep=decodeURIComponent(erep); const m=spBuildRepModel(SP.repScope||'EXT'); const R=m[rep];
+  if(R){ let n=0; Object.values(R.custs).forEach(C=>{ if(!C.committed){ spSetCommit(rep,C.soldTo,true); n++; } }); statMsg(`Committed ${n} remaining customer${n===1?'':'s'} for ${rep}`,'green'); }
+  spRenderRepView();
+}
+function spRepReview(erep){ const rep=decodeURIComponent(erep);
+  SP.f.rep=rep; SP.f.customer='ALL'; SP.f.product='ALL'; SP.f.origin='ALL';
+  SP.groupBy=['soldTo','shipTo','demandPoint']; try{localStorage.setItem('avila_sales_groupby',JSON.stringify(SP.groupBy));}catch(e){}
+  spSetTab(SP.repScope==='INT'?'INT':'EXT');
+  spRebuildCascade(); spSyncFilterUI(); spRenderGroupControls();
+  const sel=document.getElementById('sp-rep-sel'); if(sel) sel.value=rep;
+  statMsg(`Reviewing ${rep}'s book — set rules on the fuchsia cells, then commit on the Progress tab`);
+}
+
+function spRenderRepView(){
+  const host=document.getElementById('sp-rep-view'); if(!host) return;
+  if(!(DB.real_shipments_daily||[]).length){ host.innerHTML='<div style="padding:22px;font-family:var(--mono);font-size:10px;color:var(--text-dim)">Load actuals to see rep forecasting progress.</div>'; return; }
+  const scope=SP.repScope||'EXT';
+  const reps=Object.values(spBuildRepModel(scope)).filter(R=>R.total.ROY>0).sort((a,b)=>b.total.ROY-a.total.ROY);
+  const pct=(d,t)=>t>0?Math.round(d/t*100):0;
+  const tot={ROM:0,N3M:0,ROY:0},done={ROM:0,N3M:0,ROY:0};
+  reps.forEach(R=>['ROM','N3M','ROY'].forEach(h=>{ tot[h]+=R.total[h]; done[h]+=R.done[h]; }));
+  const nDoneReps=reps.filter(R=>pct(R.done.ROY,R.total.ROY)>=100).length;
+  const scChip=(s,lbl)=>`<span onclick="spSetRepScope('${s}')" class="sp-chip ${scope===s?'green active':''}" style="cursor:pointer">${lbl}</span>`;
+  const bar=(lbl,d,t)=>{ const p=pct(d,t); return `<div style="flex:1;min-width:0">
+      <div style="display:flex;justify-content:space-between;font-family:var(--mono);font-size:7px;color:var(--text-dim)"><span>${lbl}</span><span style="color:${p>=100?'var(--green)':'var(--amber)'}">${p}%</span></div>
+      <div class="sp-repbar ${p>=100?'done':''}"><span style="width:${Math.min(100,p)}%"></span></div>
+      <div style="font-family:var(--mono);font-size:6px;color:var(--text-dim);text-align:right">${spFmtT(Math.round(d))} / ${spFmtT(Math.round(t))}</div>
+    </div>`; };
+  let h=`<div class="sp-card" style="padding:12px 14px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px">
+      <div style="font-family:var(--mono);font-size:11px;color:var(--text)">FORECAST REVIEW PROGRESS <span style="color:var(--text-dim);font-size:8px">· committed volume by sales rep · ${nDoneReps}/${reps.length} reps complete</span></div>
+      <div style="display:flex;gap:4px;align-items:center"><span style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">BOOK</span>${scChip('EXT','External')}${scChip('INT','Internal')}${scChip('ALL','All')}</div>
+    </div>
+    <div style="display:flex;gap:16px">${bar('ROM',done.ROM,tot.ROM)}${bar('N3M',done.N3M,tot.N3M)}${bar('ROY',done.ROY,tot.ROY)}</div>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:8px">`;
+  SP._repOpen=SP._repOpen||{};
+  reps.forEach(R=>{
+    const royP=pct(R.done.ROY,R.total.ROY);
+    const custs=Object.values(R.custs), nCust=custs.length, nDone=custs.filter(c=>c.committed).length;
+    const open=!!SP._repOpen[R.rep], erep=encodeURIComponent(R.rep);
+    h+=`<div class="sp-repcard ${royP>=100?'done':''}">
+      <div style="display:flex;align-items:center;gap:12px;cursor:pointer" onclick="spRepToggle('${erep}')">
+        <span class="sp-toggle" style="flex:0 0 auto">${open?'▾':'▸'}</span>
+        <div style="flex:0 0 210px;font-family:var(--mono);font-size:10px;font-weight:700;color:${royP>=100?'var(--green)':'var(--text)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${spEsc(R.rep)}</div>
+        <div style="flex:1;display:flex;gap:14px;min-width:0">${bar('ROM',R.done.ROM,R.total.ROM)}${bar('N3M',R.done.N3M,R.total.N3M)}${bar('ROY',R.done.ROY,R.total.ROY)}</div>
+        <div style="flex:0 0 110px;text-align:right;font-family:var(--mono);font-size:8px;color:var(--text-dim)">${nDone}/${nCust} custs
+          <button class="sp-chip" style="display:block;margin:3px 0 0 auto;cursor:pointer" onclick="event.stopPropagation();spRepReview('${erep}')">Review ▸</button></div>
+      </div>`;
+    if(open){
+      const cs=custs.slice().sort((a,b)=>b.vol.ROY-a.vol.ROY);
+      h+=`<div style="margin-top:8px;border-top:1px solid var(--border);padding-top:6px">
+        <div style="display:flex;justify-content:flex-end;margin-bottom:4px"><button class="sp-chip" style="cursor:pointer;color:var(--amber);border-color:var(--amber)" onclick="spRepCommitAll('${erep}')">✓ Commit all remaining as baseline</button></div>
+        <table style="width:100%;border-collapse:collapse">
+          <tr style="font-family:var(--mono);font-size:7px;color:var(--text-dim)"><td style="text-align:left;padding:2px 6px">Customer</td><td style="text-align:right;padding:2px 6px">ROM</td><td style="text-align:right;padding:2px 6px">N3M</td><td style="text-align:right;padding:2px 6px">ROY</td><td style="text-align:center;padding:2px 6px">commit</td></tr>`;
+      cs.forEach(C=>{ const eso=encodeURIComponent(C.soldTo);
+        h+=`<tr style="font-family:var(--mono);font-size:8px;${C.committed?'background:rgba(0,255,157,.05)':''}">
+          <td style="text-align:left;padding:2px 6px;color:${C.committed?'var(--green)':'var(--text)'}">${C.committed?'✓ ':'◻ '}${spEsc(C.soldTo)}</td>
+          <td style="text-align:right;padding:2px 6px;color:var(--fuchsia)">${spFmtT(Math.round(C.vol.ROM))}</td>
+          <td style="text-align:right;padding:2px 6px;color:var(--fuchsia)">${spFmtT(Math.round(C.vol.N3M))}</td>
+          <td style="text-align:right;padding:2px 6px;color:var(--fuchsia)">${spFmtT(Math.round(C.vol.ROY))}</td>
+          <td style="text-align:center;padding:2px 6px"><span class="sp-repchk" onclick="spRepCommit('${erep}','${eso}',${C.committed?0:1})" style="color:${C.committed?'var(--green)':'var(--text-dim)'}">${C.committed?'✓ committed':'commit'}</span></td>
+        </tr>`;
+      });
+      h+=`</table></div>`;
+    }
+    h+=`</div>`;
+  });
+  h+=`</div>`;
+  host.innerHTML=h;
 }
 
 // ── Extract Sold-To name from Ship-To name ────────────
@@ -3161,8 +3353,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   } catch(e) { console.warn('sales.html: failed to load avila_sales_db', e); }
 
-  // Restore forecast override rules before first render
+  // Restore forecast override rules + rep commits before first render
   spFcLoadRules();
+  spCommitLoad();
+  try{ const rs=localStorage.getItem('avila_sales_rep_scope'); if(rs) SP.repScope=rs; }catch(e){}
 
   // Render the SP view
   renderSalesPerfView();
