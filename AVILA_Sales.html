@@ -925,6 +925,16 @@ function spToggleMonth(ym){
   spRenderTable();
 }
 
+// Sort table rows by a month's Σ total. Cycles desc → asc → off (back to name order).
+// Uses the cached tree (no re-collapse), and rebuilds the header so the arrow updates.
+function spSortByMonth(ym){
+  if(SP.sortMonth===ym){
+    if(SP.sortDir==='desc') SP.sortDir='asc';
+    else { SP.sortMonth=null; SP.sortDir='desc'; }
+  } else { SP.sortMonth=ym; SP.sortDir='desc'; }
+  spRenderTable(false);
+}
+
 // ── Build date spine from current filter range ────────
 function spBuildDateSpine(){
   const today=new Date().toISOString().split('T')[0];
@@ -1118,20 +1128,42 @@ function spRenderTable(skipThead=false){
   const demIdx=spBuildDemandIndex();
   const groupBy=spGetGroupBy();
   const hasFc=Object.keys(demIdx).length>0;
-  if(!SP._tree) SP._tree=spBuildTree(rows, groupBy);
+  let builtTree=false;
+  if(!SP._tree){ SP._tree=spBuildTree(rows, groupBy); builtTree=true; }
   const roots=SP._tree.roots;
   if(!SP.collapsed) SP.collapsed={};
 
   // Default view: collapse every non-leaf node the user hasn't explicitly expanded,
-  // so a fresh render (skipThead=false: filters changed / data (re)loaded / regrouped)
-  // paints one level deep and each expand reveals only the next level. This keeps the
-  // initial DOM small regardless of how many grouping levels are chosen. Row toggles
-  // (skipThead=true) leave SP.collapsed untouched.
-  if(!skipThead){
+  // so a fresh render (tree just (re)built: filters changed / data (re)loaded / regrouped)
+  // paints one level deep and each expand reveals only the next level. Row/month toggles
+  // and sorts reuse the cached tree (builtTree=false) and keep the user's expansion state.
+  if(builtTree){
     const walk=nodes=>nodes.forEach(n=>{
       if(n.childList.length){ if(!SP._userExpanded[n.key]) SP.collapsed[n.key]=true; walk(n.childList); }
     });
     walk(roots);
+  }
+
+  // Sort each level by a month's Σ total when a month sort is active, else by name.
+  // Σ total = actuals (past dates) + forecast (future dates) within that month.
+  {
+    const monthDates={}; months.forEach(mo=>{ monthDates[mo.ym]=mo.dates; });
+    const sortYm=(SP.sortMonth && monthDates[SP.sortMonth])?SP.sortMonth:null;
+    const nodeMonthTot=(node,ym)=>{
+      let t=0; const ds=monthDates[ym]||[];
+      for(let i=0;i<ds.length;i++){ const d=ds[i];
+        if(d<=today) t+=node.actMap[d]||0;
+        else if(hasFc){ for(let j=0;j<node.leaves.length;j++) t+=spLeafFc(node.leaves[j],d,demIdx); }
+      }
+      return t;
+    };
+    const dir=SP.sortDir==='asc'?1:-1;
+    const sortLevel=nodes=>{
+      if(sortYm) nodes.sort((a,b)=>dir*(nodeMonthTot(a,sortYm)-nodeMonthTot(b,sortYm)));
+      else nodes.sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+      nodes.forEach(n=>{ if(n.childList.length) sortLevel(n.childList); });
+    };
+    sortLevel(roots);
   }
 
   // ── Rebuild thead dynamically (skipped on row-toggle since column structure is unchanged) ──
@@ -1144,8 +1176,10 @@ function spRenderTable(skipThead=false){
       const bg=mo.isPast?'rgba(0,255,157,.06)':mo.isCurrent?'rgba(77,166,255,.06)':'rgba(255,184,48,.04)';
       const tc=mo.isPast?'var(--green)':mo.isCurrent?'var(--blue)':'var(--amber)';
       h1+=`<th colspan="${span}" style="background:${bg};color:${tc};font-size:7px;text-align:center;cursor:pointer;letter-spacing:.5px;border-left:1px solid var(--border2);padding:3px 4px" onclick="spToggleMonth('${mo.ym}')">${col?'▸':'▾'} ${mo.label}</th>`;
+      const sortArrow = SP.sortMonth===mo.ym ? (SP.sortDir==='asc'?' ▲':' ▼') : '';
+      const sortActive = SP.sortMonth===mo.ym;
       if(col){
-        h2+=`<th style="background:${bg};font-size:6px;text-align:center;border-left:1px solid var(--border2);padding:2px 4px">Σ</th>`;
+        h2+=`<th onclick="spSortByMonth('${mo.ym}')" title="Sort rows by ${mo.label} total" style="background:${sortActive?'rgba(77,166,255,.14)':bg};color:${sortActive?'var(--blue)':'inherit'};font-size:6px;text-align:center;border-left:1px solid var(--border2);padding:2px 4px;cursor:pointer">Σ${sortArrow}</th>`;
       } else {
         mo.dates.forEach(ds=>{
           const isToday=ds===today;
@@ -1154,7 +1188,7 @@ function spRenderTable(skipThead=false){
           const dow=['S','M','T','W','T','F','S'][new Date(ds+'T00:00:00').getDay()];
           h2+=`<th style="${bg2?'background:'+bg2+';':''}${bd};font-size:5px;padding:2px 1px;text-align:center;min-width:20px" title="${ds}">${ds.slice(8)}<br><span style="opacity:.5">${dow}</span></th>`;
         });
-        h2+=`<th style="background:${bg};font-size:6px;text-align:center;font-weight:700;border-left:2px solid var(--border2);padding:2px 4px">Σ</th>`;
+        h2+=`<th onclick="spSortByMonth('${mo.ym}')" title="Sort rows by ${mo.label} total" style="background:${sortActive?'rgba(77,166,255,.14)':bg};color:${sortActive?'var(--blue)':'inherit'};font-size:6px;text-align:center;font-weight:700;border-left:2px solid var(--border2);padding:2px 4px;cursor:pointer">Σ${sortArrow}</th>`;
       }
     });
     const hdrLbl=groupBy.map(d=>SP_DIMS[d]?.label).filter(Boolean).join(' / ')||'Group';
