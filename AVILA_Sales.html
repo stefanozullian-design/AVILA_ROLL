@@ -886,7 +886,7 @@ function spBuildDateSpine(){
   const to  =SP.f.dateTo  ||`${today.slice(0,4)}-12-31`;
   // Return cached spine if date range hasn't changed
   if(SP._spine&&SP._spine.from===from&&SP._spine.to===to){
-    if(!SP.collapsedMonths) SP.collapsedMonths=new Set(SP._spine.months.filter(m=>m.isPast).map(m=>m.ym));
+    if(!SP.collapsedMonths) SP.collapsedMonths=new Set(SP._spine.months.filter(m=>!m.isCurrent).map(m=>m.ym));
     return {months:SP._spine.months,today};
   }
   const months=[];
@@ -897,7 +897,10 @@ function spBuildDateSpine(){
     mo.dates.push(ds);
   }
   if(!SP.collapsedMonths){
-    SP.collapsedMonths=new Set(months.filter(m=>m.isPast).map(m=>m.ym));
+    // Collapse every month to a single Σ column by default (keep the current month
+    // expanded for daily context). Rendering ~560 daily columns for every row is the
+    // main cause of the multi-second render / huge DOM; users expand a month on demand.
+    SP.collapsedMonths=new Set(months.filter(m=>!m.isCurrent).map(m=>m.ym));
   }
   SP._spine={from,to,months};
   return {months,today};
@@ -1005,6 +1008,17 @@ function spRenderTable(skipThead=false){
   if(!SP._tree) SP._tree=spBuildOrgTree(rows);
   const orgTree=SP._tree;
   if(!SP.collapsed) SP.collapsed={};
+
+  // Default view: collapse Sold-To rows the user hasn't explicitly expanded. A full
+  // render (skipThead=false, i.e. filters changed / data (re)loaded) starts collapsed
+  // to Sold-To level so the initial paint is a few hundred rows, not thousands ×
+  // hundreds of columns. Row toggles (skipThead=true) leave SP.collapsed untouched.
+  if(!skipThead){
+    Object.keys(orgTree).forEach(k=>{
+      const soKey='so_'+k.replace(/\W/g,'_');
+      if(!SP._userExpanded[soKey]) SP.collapsed[soKey]=true;
+    });
+  }
 
   // ── Rebuild thead dynamically (skipped on row-toggle since column structure is unchanged) ──
   const thead=document.getElementById('sp-thead');
@@ -2337,12 +2351,16 @@ async function spIngestFile(buf, fileName){
     });
   }
 
-  const wb = XLSX.read(buf, {type:'array', cellDates:false, raw:true});
-  const sheetName = wb.SheetNames.find(n=>n==='RealShip')
-    || wb.SheetNames.find(n=>n==='SalesDetailed')
-    || wb.SheetNames.find(n=>n==='SalesConsolidated')
-    || wb.SheetNames.find(n=>n==='Shipping History Cement')
-    || wb.SheetNames[0];
+  // Parse only the sheet we actually use. XLSX.read parses every sheet by default;
+  // this workbook also carries a 42k-row 'Sheet1' we ignore, so a full read roughly
+  // doubles parse time. First get the names cheaply (bookSheets), then read one sheet.
+  const names = XLSX.read(buf, {type:'array', bookSheets:true}).SheetNames;
+  const sheetName = names.find(n=>n==='RealShip')
+    || names.find(n=>n==='SalesDetailed')
+    || names.find(n=>n==='SalesConsolidated')
+    || names.find(n=>n==='Shipping History Cement')
+    || names[0];
+  const wb  = XLSX.read(buf, {type:'array', sheets:[sheetName], cellDates:false, raw:true});
   const ws  = wb.Sheets[sheetName];
   const raw = XLSX.utils.sheet_to_json(ws, {raw:false, defval:''});
   if(!raw.length) throw new Error('Sheet is empty');
