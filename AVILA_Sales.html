@@ -232,7 +232,9 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
           <button class="tb-btn sec" onclick="openNonWorkingDaysPanel()">⊘ Non-Working Days</button>
           <div style="width:1px;height:20px;background:var(--border2)"></div>
           <button class="sp-upload-btn" onclick="document.getElementById('sp-file-input').click()">↑ Load Actuals</button>
-          <button class="sp-upload-btn" style="border-color:var(--green);color:var(--green)" onclick="statMsg('No data sources configured in standalone mode')">↻ Refresh</button>
+          <button class="sp-upload-btn" onclick="sdsPickFile()" title="Pin the location of the detailed shipments file so the page auto-updates when it changes">⚙ Data Source</button>
+          <button class="sp-upload-btn" style="border-color:var(--green);color:var(--green)" onclick="sdsRefresh(true)">↻ Refresh</button>
+          <span id="sds-status" style="font-family:var(--mono);font-size:9px;color:var(--text-dim);margin-left:6px"></span>
           <input type="file" id="sp-file-input" accept=".xlsx,.xls" style="display:none" onchange="spHandleFile(this)">
         </div>
 
@@ -242,8 +244,8 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
           ondragleave="this.classList.remove('drag')"
           ondrop="event.preventDefault();this.classList.remove('drag');spHandleFile({files:event.dataTransfer.files})">
           <div class="sp-upload-icon">↑</div>
-          <div class="sp-upload-title">Drop SalesConsolidated.xlsx here or click to browse</div>
-          <div class="sp-upload-hint">Drop file to load manually</div>
+          <div class="sp-upload-title">Drop Avila_Shipments_Detail.xlsx here or click to browse</div>
+          <div class="sp-upload-hint">Drop file to load manually · or use ⚙ Data Source to pin its location and auto-update when it changes (Chrome/Edge)</div>
           <div id="sp-upload-msg" style="margin-top:10px"></div>
           <div class="sp-progress" id="sp-progress" style="width:300px;margin:10px auto 0;display:none"><div class="sp-progress-bar" id="sp-progress-bar" style="width:0%"></div></div>
         </div>
@@ -2337,6 +2339,7 @@ async function spIngestFile(buf, fileName){
 
   const wb = XLSX.read(buf, {type:'array', cellDates:false, raw:true});
   const sheetName = wb.SheetNames.find(n=>n==='RealShip')
+    || wb.SheetNames.find(n=>n==='SalesDetailed')
     || wb.SheetNames.find(n=>n==='SalesConsolidated')
     || wb.SheetNames.find(n=>n==='Shipping History Cement')
     || wb.SheetNames[0];
@@ -2474,6 +2477,120 @@ function pushForecastToMain(){
   }
 }
 
+// ═══════════════════════════════════════════════════════
+// SALES DATA SOURCE — persistent detailed-shipments file
+// Pin the location of Avila_Shipments_Detail.xlsx once; the page re-reads it
+// on startup and auto-updates when the file changes on disk. Isolated to this
+// standalone Sales page — it only feeds real_shipments_daily / _meta via
+// spIngestFile and never writes the demand grid or the main-app topology, so
+// it cannot cause the data loss seen when this lived in the main dashboard.
+// ═══════════════════════════════════════════════════════
+const SDS = { handle:null, lastModified:0, fileName:'', checkTimer:null, refreshing:false };
+const SDS_IDB = 'avila_sales_datasource';
+const SDS_META_KEY = 'avila_sales_ds_meta';
+function sdsSupported(){ return ('showOpenFilePicker' in window); }
+
+// ── IndexedDB (stores the non-serialisable file handle) ──
+function sdsOpenIDB(){
+  return new Promise((res,rej)=>{
+    const req = indexedDB.open(SDS_IDB, 1);
+    req.onupgradeneeded = e => e.target.result.createObjectStore('handles');
+    req.onsuccess = e => res(e.target.result);
+    req.onerror   = () => rej(req.error);
+  });
+}
+async function sdsSaveHandle(h){
+  try{ const db=await sdsOpenIDB(); await new Promise((res,rej)=>{ const tx=db.transaction('handles','readwrite'); tx.objectStore('handles').put(h,'salesDetail'); tx.oncomplete=res; tx.onerror=rej; }); }
+  catch(e){ console.warn('SDS: save handle failed', e); }
+}
+async function sdsLoadHandle(){
+  try{ const db=await sdsOpenIDB(); return await new Promise((res)=>{ const tx=db.transaction('handles','readonly'); const r=tx.objectStore('handles').get('salesDetail'); r.onsuccess=()=>res(r.result||null); r.onerror=()=>res(null); }); }
+  catch(e){ return null; }
+}
+
+// ── Filename/mtime label persisted so we can show it before permission ──
+function sdsSaveMeta(){ try{ localStorage.setItem(SDS_META_KEY, JSON.stringify({fileName:SDS.fileName, lastModified:SDS.lastModified})); }catch(e){} }
+function sdsLoadMeta(){ try{ const r=localStorage.getItem(SDS_META_KEY); if(r){ const m=JSON.parse(r); SDS.fileName=m.fileName||''; SDS.lastModified=m.lastModified||0; } }catch(e){} }
+
+function sdsSetStatus(html, color){
+  const el=document.getElementById('sds-status');
+  if(el){ el.innerHTML=html; el.style.color=color||'var(--text-dim)'; }
+}
+function sdsRenderStatus(state, extra){
+  if(!SDS.fileName){ sdsSetStatus('No data source · click ⚙ Data Source', 'var(--text-dim)'); return; }
+  if(state==='loading'){ sdsSetStatus(`↻ Reading ${SDS.fileName}…`, 'var(--blue)'); return; }
+  if(state==='error'){ sdsSetStatus(`✗ ${SDS.fileName} · ${extra||'error'}`, 'var(--red)'); return; }
+  if(state==='needs-permission'){ sdsSetStatus(`⚠ ${SDS.fileName} · click ↻ Refresh to grant access`, 'var(--amber)'); return; }
+  sdsSetStatus(`✓ ${SDS.fileName}${extra?(' · '+extra):''}`, 'var(--green)');
+}
+
+// ── Pick file (requires a user gesture) ──
+async function sdsPickFile(){
+  if(!sdsSupported()){ statMsg('Data Source pinning needs Chrome or Edge — use ↑ Load Actuals instead'); return; }
+  try{
+    const [handle] = await window.showOpenFilePicker({ multiple:false, types:[{ description:'Excel / CSV', accept:{
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':['.xlsx'],
+      'application/vnd.ms-excel':['.xls'],'text/csv':['.csv'] } }] });
+    SDS.handle = handle; SDS.fileName = handle.name; SDS.lastModified = 0;
+    await sdsSaveHandle(handle); sdsSaveMeta();
+    statMsg('Data source set: '+handle.name, 'green');
+    await sdsRefresh(true);
+    sdsStartAutoCheck();
+  }catch(e){ if(e.name!=='AbortError') statMsg('File pick cancelled or failed'); }
+}
+
+// ── Read + ingest the pinned file ──
+// force=true (Refresh / just-picked): may prompt for permission, always re-imports.
+// force=false (startup / poll): only proceeds if permission already granted, and
+// skips re-parsing when the file is unchanged AND data is already in memory.
+async function sdsRefresh(force){
+  if(SDS.refreshing) return;
+  if(!SDS.handle) SDS.handle = await sdsLoadHandle();
+  if(!SDS.handle){ if(force) statMsg('No data source set — click ⚙ Data Source first'); return; }
+  SDS.refreshing = true;
+  try{
+    let perm = await SDS.handle.queryPermission({mode:'read'});
+    if(perm!=='granted'){
+      if(force) perm = await SDS.handle.requestPermission({mode:'read'});
+      if(perm!=='granted'){ sdsRenderStatus('needs-permission'); return; }
+    }
+    const file = await SDS.handle.getFile();
+    const haveData = (DB.real_shipments_daily||[]).length > 0;
+    if(!force && haveData && SDS.lastModified && file.lastModified<=SDS.lastModified) return; // unchanged
+    sdsRenderStatus('loading');
+    const buf = await file.arrayBuffer();
+    await spIngestFile(buf, file.name);
+    SDS.lastModified = file.lastModified; SDS.fileName = file.name; sdsSaveMeta();
+    const m = DB.real_shipments_meta||{};
+    sdsRenderStatus('ok', `${Number(m.row_count||0).toLocaleString()} rows · updated ${new Date().toLocaleTimeString()}`);
+    const zone=document.getElementById('sp-upload-zone'); if(zone) zone.style.display='none';
+    const content=document.getElementById('sp-content'); if(content){ content.style.display='flex'; content.style.flexDirection='column'; content.style.gap='14px'; }
+  }catch(err){
+    console.error('SDS refresh error', err);
+    sdsRenderStatus('error', err && err.name==='NotFoundError' ? 'file moved/renamed — re-pick it' : (err.message||'error'));
+    if(force) statMsg('Data source refresh failed: '+(err.message||err.name), 'red');
+  }finally{ SDS.refreshing=false; }
+}
+
+// ── Poll for on-disk changes while the page is open ──
+function sdsStartAutoCheck(){
+  if(SDS.checkTimer) return; // idempotent
+  SDS.checkTimer = setInterval(()=>{ sdsRefresh(false); }, 30000);        // every 30s
+  window.addEventListener('focus', ()=>{ sdsRefresh(false); });           // and when tab refocuses
+  document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) sdsRefresh(false); });
+}
+
+// ── Init on startup ──
+async function sdsInit(){
+  sdsLoadMeta();
+  if(!sdsSupported()){ if(SDS.fileName) sdsRenderStatus('error','needs Chrome/Edge for auto-refresh'); else sdsRenderStatus(); return; }
+  SDS.handle = await sdsLoadHandle();
+  if(!SDS.handle){ sdsRenderStatus(); return; }
+  const perm = await SDS.handle.queryPermission({mode:'read'});
+  if(perm==='granted'){ await sdsRefresh(false); sdsStartAutoCheck(); }
+  else sdsRenderStatus('needs-permission');
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   // Restore from avila_sales_db localStorage
   try {
@@ -2484,9 +2601,12 @@ document.addEventListener('DOMContentLoaded', () => {
       if(saved.real_shipments_meta)  DB.real_shipments_meta  = saved.real_shipments_meta;
     }
   } catch(e) { console.warn('sales.html: failed to load avila_sales_db', e); }
-  
+
   // Render the SP view
   renderSalesPerfView();
+
+  // Bring up the persistent data source (re-reads the pinned file / auto-refresh)
+  sdsInit();
 });
 </script>
 </body>
