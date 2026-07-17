@@ -1309,7 +1309,10 @@ function spBuildRepModel(scope){
   return refreshDone(reps);
 }
 
-function spSetRepScope(s){ SP.repScope=s; try{localStorage.setItem('avila_sales_rep_scope',s);}catch(e){} spRenderRepView(); }
+// BOOK scope is a within-session view switch (not persisted), so the rep page
+// always opens on External — where all reps live — instead of a possibly near-empty
+// Internal book from a previous click.
+function spSetRepScope(s){ SP.repScope=s; spRenderRepView(); }
 function spRepToggle(erep){ const rep=decodeURIComponent(erep); SP._repOpen=SP._repOpen||{}; SP._repOpen[rep]=!SP._repOpen[rep]; spRenderRepView(); }
 function spRepCommit(erep,eso,on){ spSetCommit(decodeURIComponent(erep),decodeURIComponent(eso),!!on); spRenderRepView(); }
 function spRepCommitAll(erep){ const rep=decodeURIComponent(erep); const m=spBuildRepModel(SP.repScope||'EXT'); const R=m[rep];
@@ -1340,11 +1343,15 @@ function spRenderRepView(){
       <div class="sp-repbar ${p>=100?'done':''}"><span style="width:${Math.min(100,p)}%"></span></div>
       <div style="font-family:var(--mono);font-size:6px;color:var(--text-dim);text-align:right">${spFmtT(Math.round(d))} / ${spFmtT(Math.round(t))}</div>
     </div>`; };
+  const bookLbl={EXT:'External',INT:'Internal',ALL:'All'}[scope]||scope;
+  const sparse = reps.length<=1 && scope!=='EXT'
+    ? `<div style="font-family:var(--mono);font-size:8px;color:var(--amber);margin-bottom:8px">⚠ The ${bookLbl} book has only ${reps.length} rep${reps.length===1?'':'s'} in this data — switch BOOK to <b>External</b> or <b>All</b> to see everyone.</div>` : '';
   let h=`<div class="sp-card" style="padding:12px 14px">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px">
-      <div style="font-family:var(--mono);font-size:11px;color:var(--text)">FORECAST REVIEW PROGRESS <span style="color:var(--text-dim);font-size:8px">· committed volume by sales rep · ${nDoneReps}/${reps.length} reps complete</span></div>
+      <div style="font-family:var(--mono);font-size:11px;color:var(--text)">FORECAST REVIEW PROGRESS <span style="color:var(--text-dim);font-size:8px">· <b style="color:var(--amber)">${bookLbl}</b> book · ${reps.length} rep${reps.length===1?'':'s'} · ${nDoneReps}/${reps.length} complete</span></div>
       <div style="display:flex;gap:4px;align-items:center"><span style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">BOOK</span>${scChip('EXT','External')}${scChip('INT','Internal')}${scChip('ALL','All')}</div>
     </div>
+    ${sparse}
     <div style="display:flex;gap:16px">${bar('ROM',done.ROM,tot.ROM)}${bar('N3M',done.N3M,tot.N3M)}${bar('ROY',done.ROY,tot.ROY)}</div>
   </div>
   <div style="display:flex;flex-direction:column;gap:8px">`;
@@ -3356,7 +3363,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Restore forecast override rules + rep commits before first render
   spFcLoadRules();
   spCommitLoad();
-  try{ const rs=localStorage.getItem('avila_sales_rep_scope'); if(rs) SP.repScope=rs; }catch(e){}
+  SP.repScope='EXT';   // rep page defaults to the External book on load
 
   // Render the SP view
   renderSalesPerfView();
