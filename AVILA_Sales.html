@@ -279,8 +279,28 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
                 </div>
               </div>
             </div>
-            <div class="sp-legend" id="sp-chart-legend"></div>
-            <div style="position:relative;height:220px"><canvas id="sp-chart"></canvas></div>
+            <div style="display:flex;gap:12px;align-items:stretch">
+              <!-- LEFT: MTD / YTD comparison (LY · CY · BGT) -->
+              <div style="flex:0 0 150px;display:flex;flex-direction:column;gap:4px;border-right:1px solid var(--border2);padding-right:10px">
+                <div style="display:flex;gap:4px;align-items:center;justify-content:center">
+                  <span class="sp-ctrl active" id="sp-side-mtd" onclick="spSetSideMode('MTD')">MTD</span>
+                  <span class="sp-ctrl" id="sp-side-ytd" onclick="spSetSideMode('YTD')">YTD</span>
+                </div>
+                <div style="position:relative;height:180px"><canvas id="sp-chart-mtd"></canvas></div>
+                <div id="sp-side-cap-mtd" style="font-family:var(--mono);font-size:7px;color:var(--text-dim);text-align:center;line-height:1.6"></div>
+              </div>
+              <!-- CENTER: daily actual + forecast bars, budget line -->
+              <div style="flex:1;min-width:0;display:flex;flex-direction:column">
+                <div class="sp-legend" id="sp-chart-legend"></div>
+                <div style="position:relative;height:200px"><canvas id="sp-chart"></canvas></div>
+              </div>
+              <!-- RIGHT: full-year comparison (LY · CY · BGT) -->
+              <div style="flex:0 0 150px;display:flex;flex-direction:column;gap:4px;border-left:1px solid var(--border2);padding-left:10px">
+                <div style="height:20px"></div>
+                <div style="position:relative;height:180px"><canvas id="sp-chart-fy"></canvas></div>
+                <div id="sp-side-cap-fy" style="font-family:var(--mono);font-size:7px;color:var(--text-dim);text-align:center;line-height:1.6"></div>
+              </div>
+            </div>
           </div>
 
           <!-- PERFORMANCE TABLE — full width with inline forecast dropdowns -->
@@ -611,13 +631,15 @@ function spApplyFilters(){
   // Filters changed — invalidate tree (depends on filteredRows) and spine (date range may differ)
   SP._tree  = null;
   SP._spine = null;
+  SP.chartScope = null;   // reset chart/panel scope when filters change
 
   // Scoped rows = filteredRows narrowed to selected table scope (if any)
   SP.scopedRows = SP.selScope ? spGetScopeRows(SP.filteredRows, SP.selScope) : SP.filteredRows;
 
   spRenderKPIs();
+  spRenderTable();        // builds SP._tree (needed by chart scope/leaves)
   spRenderChart();
-  spRenderTable();
+  spRenderSidePanels();
 }
 
 function spSetRange(r, el){
@@ -660,176 +682,197 @@ function spRenderKPIs(){
 function spFmtT(v){ return v>=1000000?(v/1000000).toFixed(2)+'M t':v>=1000?Math.round(v/100)/10+'k t':v+' t'; }
 
 // ══════════════════════════════════════════════════════
-// CHART — product-level stacked bars
+// CHART — composite: MTD/YTD panel · daily actual+forecast (+budget line) · FY panel
 // ══════════════════════════════════════════════════════
 function spRenderChart(){
-  const canvas = document.getElementById('sp-chart'); if(!canvas) return;
+  const canvas=document.getElementById('sp-chart'); if(!canvas) return;
   if(SP.chartInst){ SP.chartInst.destroy(); SP.chartInst=null; }
+  const today=new Date().toISOString().split('T')[0];
+  const scope=spCurrentScope();
+  const demIdx=spBuildDemandIndex();
+  const hasFc=Object.keys(demIdx).length>0;
 
-  const rows  = SP.scopedRows;
-  const today = new Date().toISOString().split('T')[0];
-
-  // Date window cutoff
-  let cutoff='';
-  if(SP.chartRange !== 'all'){
-    const d=new Date(today); d.setDate(d.getDate()-parseInt(SP.chartRange));
-    cutoff=d.toISOString().split('T')[0];
-  }
-
-  const visRows = cutoff ? rows.filter(r=>r.date>=cutoff) : rows;
-
-  // Build date labels
-  const dateSet = new Set(visRows.map(r=>r.date));
-  const labels  = [...dateSet].sort();
-  if(!labels.length){ _spClearLegend(); return; }
-
-  // Determine stack dimension:
-  // - If scoped to a single customer OR a specific rep → stack by product
-  // - Otherwise → stack by origin
-  const useProductStack = SP.f.customer!=='ALL' || SP.f.rep!=='ALL' || SP.f.product!=='ALL'
-    || SP.selScope?.type==='customer' || SP.selScope?.type==='product' || SP.selScope?.type==='rep';
-
-  const datasets = [];
-
-  if(useProductStack){
-    // ── Product-level stacks ─────────────────────────
-    const prods = [...new Set(visRows.map(r=>r.product))].sort();
-    // Aggregate: date → product → volume
-    const byDateProd = {};
-    visRows.forEach(r=>{
-      if(!byDateProd[r.date]) byDateProd[r.date]={};
-      byDateProd[r.date][r.product]=(byDateProd[r.date][r.product]||0)+r.volume;
-    });
-    prods.forEach(p=>{
-      datasets.push({
-        label: p,
-        data:  labels.map(d=>Math.round(byDateProd[d]?.[p]||0)),
-        backgroundColor: spProdColor(p, true),
-        stack:'actual', order:2,
-        _prod: p
-      });
-    });
+  // Window: N days back and N days forward around today (All = full data span).
+  const meta=DB.real_shipments_meta||{};
+  let winStart, winEnd;
+  if(SP.chartRange==='all'){
+    winStart=meta.date_min||today;
+    winEnd=(SP.f.dateTo||meta.date_max||today);
   } else {
-    // ── Origin-level stacks (default) ────────────────
-    const originColors={
-      BRS:'rgba(77,166,255,0.78)',MIA:'rgba(0,255,157,0.62)',PEV:'rgba(255,184,48,0.72)',
-      SUT:'rgba(204,122,255,0.72)',JAX:'rgba(255,140,66,0.72)',ORL:'rgba(80,210,180,0.70)',
-      WPB:'rgba(255,80,120,0.70)',PEN:'rgba(140,180,255,0.70)',EXT:'rgba(120,120,140,0.65)',
-    };
-    const byDateOrigin={};
-    visRows.forEach(r=>{
-      if(!byDateOrigin[r.date]) byDateOrigin[r.date]={};
-      byDateOrigin[r.date][r.origin]=(byDateOrigin[r.date][r.origin]||0)+r.volume;
-    });
-    const origins=[...new Set(visRows.map(r=>r.origin))].sort();
-    origins.forEach(o=>{
-      datasets.push({
-        label:o,
-        data:labels.map(d=>Math.round(byDateOrigin[d]?.[o]||0)),
-        backgroundColor:originColors[o]||'rgba(150,150,170,0.65)',
-        stack:'actual',order:2
-      });
-    });
+    const n=parseInt(SP.chartRange)||90;
+    const a=new Date(today+'T00:00:00'); a.setDate(a.getDate()-n); winStart=a.toISOString().split('T')[0];
+    const b=new Date(today+'T00:00:00'); b.setDate(b.getDate()+n); winEnd=b.toISOString().split('T')[0];
   }
 
-  // Chart is historical actuals only — no future/simulated data shown here
+  // Actuals by date (past) for the current scope
+  const actByDate={};
+  (DB.real_shipments_daily||[]).forEach(r=>{
+    if(!r.date||r.date<winStart||r.date>today) return;
+    if(!spPassesBaseFilters(r)||!scope.pred(r)) return;
+    actByDate[r.date]=(actByDate[r.date]||0)+r.volume;
+  });
 
-  // Moving averages — computed on TOTAL of scoped rows per day
-  const totByDate={};
-  visRows.forEach(r=>{ totByDate[r.date]=(totByDate[r.date]||0)+r.volume; });
-  const totArr=labels.map(d=>totByDate[d]||0);
-  const ma=(arr,w)=>arr.map((_,i)=>i<w-1?null:Math.round(arr.slice(i-w+1,i+1).reduce((a,b)=>a+b,0)/w));
+  // Contiguous daily axis winStart..winEnd
+  const labels=[];
+  for(let d=new Date(winStart+'T00:00:00'); d.toISOString().split('T')[0]<=winEnd; d.setDate(d.getDate()+1)){
+    labels.push(d.toISOString().split('T')[0]);
+  }
+  if(!labels.length){ const leg0=document.getElementById('sp-chart-legend'); if(leg0) leg0.innerHTML=''; return; }
 
-  datasets.push({type:'line',label:'10D MA',data:ma(totArr,10),borderColor:'#4da6ff',borderWidth:1.5,pointRadius:0,tension:.4,fill:false,stack:'',order:0,_isMA:true});
-  datasets.push({type:'line',label:'30D MA',data:ma(totArr,30),borderColor:'#ff3d5a',borderWidth:1.5,borderDash:[5,4],pointRadius:0,tension:.4,fill:false,stack:'',order:0,_isMA:true});
+  // Forecast by date (future) for the current scope
+  const fcByDate={};
+  if(hasFc && scope.leaves && scope.leaves.length){
+    labels.forEach(ds=>{ if(ds>today){ let v=0; for(let i=0;i<scope.leaves.length;i++) v+=spLeafFc(scope.leaves[i],ds,demIdx); if(v) fcByDate[ds]=v; } });
+  }
 
-  // Build legend
-  spRenderChartLegend(datasets, useProductStack);
+  const actData=labels.map(d=> d<=today ? Math.round(actByDate[d]||0) : null);
+  const fcData =labels.map(d=> d> today ? Math.round(fcByDate[d]||0) : null);
+  const bgtData=labels.map(d=> spBudgetForDate(d,scope));
+  const hasBudget=bgtData.some(v=>v!=null);
+
+  const datasets=[
+    { label:'Actual',   data:actData, backgroundColor:'rgba(0,200,120,0.75)',  stack:'v', order:3 },
+    { label:'Forecast', data:fcData,  backgroundColor:'rgba(255,140,50,0.78)',  stack:'v', order:3 },
+  ];
+  if(hasBudget){
+    datasets.push({ type:'line', label:'Budget', data:bgtData, borderColor:'#7fd4ff', borderWidth:1.6, pointRadius:0, tension:.3, spanGaps:true, fill:false, order:0 });
+  }
+
+  // Legend (Actual / Forecast / Budget — Budget dimmed until a budget file is loaded)
+  const leg=document.getElementById('sp-chart-legend');
+  if(leg){
+    let lh=`<div class="sp-leg-item"><div class="sp-leg-sq" style="background:rgba(0,200,120,0.75)"></div>Actual</div>`+
+           `<div class="sp-leg-item"><div class="sp-leg-sq" style="background:rgba(255,140,50,0.78)"></div>Forecast</div>`;
+    lh+= hasBudget
+      ? `<div class="sp-leg-item"><div style="width:16px;height:2px;background:#7fd4ff;flex-shrink:0"></div>Budget</div>`
+      : `<div class="sp-leg-item" style="opacity:.5"><div style="width:16px;height:2px;background:#7fd4ff;flex-shrink:0"></div>Budget (not loaded)</div>`;
+    leg.innerHTML=lh;
+  }
 
   // Scope badge
   const badge=document.getElementById('sp-scope-badge');
   if(badge){
-    if(SP.selScope||SP.f.rep!=='ALL'||SP.f.customer!=='ALL'){
-      const lbl=SP.f.customer!=='ALL'?SP.f.customer:SP.f.rep!=='ALL'?SP.f.rep:SP.selScope?.label||'';
-      badge.style.display='inline-flex';
-      badge.className='sp-crumb';
-      badge.innerHTML=`${lbl} <span class="sp-crumb-x" onclick="spClearScope()">✕</span>`;
-    } else {
-      badge.style.display='none';
-    }
+    if(scope.label){ badge.style.display='inline-flex'; badge.className='sp-crumb'; badge.innerHTML=`${scope.label} <span class="sp-crumb-x" onclick="spClearChartScope()">✕</span>`; }
+    else badge.style.display='none';
   }
 
-  // Today vertical line plugin
-  const todayPlugin={
-    id:'todayLine',
-    afterDraw(chart){
-      const idx=chart.data.labels.indexOf(today);
-      if(idx<0) return;
-      const x=chart.scales.x.getPixelForValue(idx);
-      const {top,bottom}=chart.chartArea;
-      const ctx2=chart.ctx;
-      ctx2.save(); ctx2.strokeStyle='rgba(255,61,90,0.55)'; ctx2.lineWidth=1;
-      ctx2.setLineDash([3,3]); ctx2.beginPath();
-      ctx2.moveTo(x,top); ctx2.lineTo(x,bottom); ctx2.stroke(); ctx2.restore();
-    }
-  };
+  const todayPlugin={ id:'todayLine', afterDraw(chart){ const idx=chart.data.labels.indexOf(today); if(idx<0) return; const x=chart.scales.x.getPixelForValue(idx); const {top,bottom}=chart.chartArea; const c=chart.ctx; c.save(); c.strokeStyle='rgba(255,61,90,0.55)'; c.lineWidth=1; c.setLineDash([3,3]); c.beginPath(); c.moveTo(x,top); c.lineTo(x,bottom); c.stroke(); c.restore(); } };
 
   const buildIt=()=>{
-    SP.chartInst=new Chart(canvas,{
-      type:'bar',
-      data:{labels:[...labels],datasets},
-      options:{
-        responsive:true,maintainAspectRatio:false,
-        plugins:{
-          legend:{display:false},
-          tooltip:{mode:'index',intersect:false,
-            callbacks:{
-              title:items=>items[0]?.label||'',
-              label:c=>c.raw!=null&&c.raw!==0?`${c.dataset.label}: ${Number(c.raw).toLocaleString()} t`:'',
-              footer:items=>{
-                const total=items.filter(i=>!i.dataset._isMA).reduce((s,i)=>s+(i.raw||0),0);
-                return total>0?`Total: ${Number(Math.round(total)).toLocaleString()} t`:'';
-              }
-            }
-          }
-        },
-        scales:{
-          x:{stacked:true,grid:{color:'rgba(255,255,255,.03)'},
-            ticks:{color:'#8e9ab8',font:{family:'Space Mono',size:8},maxTicksLimit:14,autoSkip:true,maxRotation:0}},
-          y:{stacked:true,grid:{color:'rgba(255,255,255,.05)'},
-            ticks:{color:'#8e9ab8',font:{family:'Space Mono',size:8},callback:v=>v>=1000?Math.round(v/100)/10+'k':v}}
-        },
-        onClick:(_,els)=>{
-          if(!els.length) return;
-          const date=SP.chartInst.data.labels[els[0].index];
-          if(date){
-            document.getElementById('sp-date-from').value=date;
-            document.getElementById('sp-date-to').value=date;
-            SP.f.dateFrom=date; SP.f.dateTo=date;
-            spApplyFilters();
-          }
-        }
-      },
-      plugins:[todayPlugin]
-    });
+    SP.chartInst=new Chart(canvas,{ type:'bar', data:{labels:[...labels],datasets},
+      options:{ responsive:true,maintainAspectRatio:false,
+        plugins:{ legend:{display:false},
+          tooltip:{mode:'index',intersect:false,callbacks:{
+            title:items=>items[0]?.label||'',
+            label:c=>c.raw!=null?`${c.dataset.label}: ${Number(c.raw).toLocaleString()} t`:'' }} },
+        scales:{ x:{stacked:true,grid:{color:'rgba(255,255,255,.03)'},ticks:{color:'#8e9ab8',font:{family:'Space Mono',size:8},maxTicksLimit:14,autoSkip:true,maxRotation:0}},
+                 y:{stacked:true,grid:{color:'rgba(255,255,255,.05)'},ticks:{color:'#8e9ab8',font:{family:'Space Mono',size:8},callback:v=>v>=1000?Math.round(v/100)/10+'k':v}} },
+        onClick:(_,els)=>{ if(!els.length) return; const date=SP.chartInst.data.labels[els[0].index]; if(date){ document.getElementById('sp-date-from').value=date; document.getElementById('sp-date-to').value=date; SP.f.dateFrom=date; SP.f.dateTo=date; spApplyFilters(); } }
+      }, plugins:[todayPlugin] });
   };
-
-  if(typeof Chart==='undefined'){
-    const s=document.createElement('script');
-    s.src='https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js';
-    s.onload=buildIt; document.head.appendChild(s);
-  } else { buildIt(); }
+  if(typeof Chart==='undefined'){ const s=document.createElement('script'); s.src='https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js'; s.onload=buildIt; document.head.appendChild(s); }
+  else buildIt();
 }
 
-function spRenderChartLegend(datasets, isProductMode){
-  const leg=document.getElementById('sp-chart-legend'); if(!leg) return;
-  const bars=datasets.filter(d=>!d._isMA);
-  const items=bars.map(d=>
-    `<div class="sp-leg-item"><div class="sp-leg-sq" style="background:${d.backgroundColor}"></div>${isProductMode?spShortProd(d.label):d.label}</div>`
-  );
-  items.push(`<div class="sp-leg-item" style="margin-left:8px"><div style="width:16px;height:2px;background:#4da6ff;flex-shrink:0"></div>10D MA</div>`);
-  items.push(`<div class="sp-leg-item"><div style="width:16px;height:2px;background:repeating-linear-gradient(90deg,#ff3d5a 0,#ff3d5a 4px,transparent 4px,transparent 7px);flex-shrink:0"></div>30D MA</div>`);
-  leg.innerHTML=items.join('');
+// ── Base (non-date) filters mirrored from spApplyFilters, so the chart/panels can
+// aggregate straight off DB.real_shipments_daily — including prior-year rows outside
+// the table's date window — with the same origin/rep/customer/type/product filters. ──
+function spPassesBaseFilters(r){
+  if(SP.f.origin  !== 'ALL' && r.origin               !== SP.f.origin)    return false;
+  if(SP.f.rep     !== 'ALL' && (r.sales_manager||'—') !== SP.f.rep)       return false;
+  if(SP.f.customer!== 'ALL' && r.ship_to_name          !== SP.f.customer) return false;
+  if(SP.f.custType!== 'all' && r.customer_type         !== SP.f.custType) return false;
+  if(SP.f.product !== 'ALL' && (r.product||'')         !== SP.f.product)  return false;
+  return true;
+}
+
+// ── Chart scope: narrows the whole composite to one table node. {label,pred,leaves} ──
+function spScopeMatch(path){
+  if(!path||!path.length) return ()=>true;
+  const tests=path.map(p=>({keyFn:SP_DIMS[p.dim]?.key, val:String(p.value).trim()}));
+  return r=>tests.every(t=>t.keyFn && String(t.keyFn(r)??'—').trim()===t.val);
+}
+function spCurrentScope(){
+  if(SP.chartScope) return SP.chartScope;
+  if(!SP._tree) SP._tree=spBuildTree(SP.filteredRows, spGetGroupBy());
+  return { label:null, pred:()=>true, leaves:Object.values(SP._tree.leaves||{}) };
+}
+function spClearChartScope(){ SP.chartScope=null; spRenderChart(); spRenderSidePanels(); }
+
+// ── Budget interface (no-op until a Budget file is loaded) ──
+// Intended shape: monthly budget per demand point, spread evenly across the month
+// for the daily line. Returns null so the line / BGT bars stay hidden for now.
+function spBudgetForDate(ds, scope){ return null; }
+function spBudgetPeriod(scope, from, to){ return null; }
+
+// ── Period actual (+ optional remaining-year forecast) for a scope ──
+function spShiftYear(ds,n){ return (parseInt(ds.slice(0,4))+n)+ds.slice(4); }
+function spActualPeriod(scope, from, to, withForecast){
+  const today=new Date().toISOString().split('T')[0];
+  let tot=0;
+  (DB.real_shipments_daily||[]).forEach(r=>{
+    if(!r.date||r.date<from||r.date>to||r.date>today) return;
+    if(!spPassesBaseFilters(r)||!scope.pred(r)) return;
+    tot+=r.volume;
+  });
+  if(withForecast){
+    const demIdx=spBuildDemandIndex();
+    if(Object.keys(demIdx).length && scope.leaves && scope.leaves.length){
+      let d=new Date(((today>from?today:from))+'T00:00:00'); d.setDate(d.getDate()+1);
+      const end=new Date(to+'T00:00:00');
+      for(; d<=end; d.setDate(d.getDate()+1)){
+        const ds=d.toISOString().split('T')[0];
+        for(let i=0;i<scope.leaves.length;i++) tot+=spLeafFc(scope.leaves[i],ds,demIdx);
+      }
+    }
+  }
+  return Math.round(tot);
+}
+
+// ── SIDE PANELS: LY vs CY vs BGT for MTD/YTD (left) and FY (right) ──
+function spSetSideMode(m){
+  SP.sideMode=m;
+  ['MTD','YTD'].forEach(k=>{ const el=document.getElementById('sp-side-'+k.toLowerCase()); if(el) el.classList.toggle('active', k===m); });
+  spRenderSidePanels();
+}
+function spRenderSidePanels(){
+  const scope=spCurrentScope();
+  const today=new Date().toISOString().split('T')[0];
+  const y=today.slice(0,4), mo=today.slice(5,7);
+  const mode=SP.sideMode||'MTD';
+  const lFrom = mode==='YTD' ? `${y}-01-01` : `${y}-${mo}-01`;
+  const lTo   = today;
+  const left={ LY:spActualPeriod(scope, spShiftYear(lFrom,-1), spShiftYear(lTo,-1), false),
+               CY:spActualPeriod(scope, lFrom, lTo, false),
+               BGT:spBudgetPeriod(scope, lFrom, lTo) };
+  const fFrom=`${y}-01-01`, fTo=`${y}-12-31`;
+  const fy={ LY:spActualPeriod(scope, spShiftYear(fFrom,-1), spShiftYear(fTo,-1), false),
+             CY:spActualPeriod(scope, fFrom, fTo, true),
+             BGT:spBudgetPeriod(scope, fFrom, fTo) };
+  spDrawMiniBars('sp-chart-mtd', left, mode);
+  spDrawMiniBars('sp-chart-fy',  fy,  'FY');
+  const capL=document.getElementById('sp-side-cap-mtd'); if(capL) capL.innerHTML=spMiniCaption(left);
+  const capF=document.getElementById('sp-side-cap-fy');  if(capF) capF.innerHTML=spMiniCaption(fy);
+}
+function spMiniCaption(v){
+  const f=x=>x==null?'<span style="opacity:.5">—</span>':spFmtT(x);
+  return `<span style="color:rgba(77,166,255,.75)">LY</span> ${f(v.LY)} · <span style="color:var(--green)">CY</span> ${f(v.CY)} · <span style="color:var(--amber)">BGT</span> ${f(v.BGT)}`;
+}
+function spDrawMiniBars(canvasId, v, title){
+  const canvas=document.getElementById(canvasId); if(!canvas) return;
+  SP._miniCharts=SP._miniCharts||{};
+  if(SP._miniCharts[canvasId]){ SP._miniCharts[canvasId].destroy(); SP._miniCharts[canvasId]=null; }
+  const data=[v.LY||0, v.CY||0, v.BGT||0];
+  const colors=['rgba(77,166,255,.45)','rgba(0,200,120,.8)','rgba(255,184,48,.7)'];
+  const build=()=>{ SP._miniCharts[canvasId]=new Chart(canvas,{ type:'bar',
+    data:{labels:['LY','CY','BGT'],datasets:[{data,backgroundColor:colors,borderWidth:0}]},
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:false},title:{display:true,text:title,color:'#8e9ab8',font:{family:'Space Mono',size:10}},
+        tooltip:{callbacks:{label:c=>c.raw!=null?Number(c.raw).toLocaleString()+' t':''}}},
+      scales:{x:{grid:{display:false},ticks:{color:'#8e9ab8',font:{family:'Space Mono',size:8}}},
+              y:{grid:{color:'rgba(255,255,255,.05)'},ticks:{color:'#8e9ab8',font:{family:'Space Mono',size:7},callback:x=>x>=1000?Math.round(x/100)/10+'k':x}}} } }); };
+  if(typeof Chart==='undefined'){ const s=document.createElement('script'); s.src='https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js'; s.onload=build; document.head.appendChild(s); }
+  else build();
 }
 
 function spShortProd(p){
@@ -1006,18 +1049,20 @@ function spBuildTree(rows, groupBy){
       upd(node,r);
     }
   });
-  // Finalize: assign path-unique keys, materialise leaf/DP arrays, sort children.
-  const finalize=(node,key)=>{
-    node.key=key;
+  // Finalize: assign path-unique keys, group-path (for chart scoping), materialise
+  // leaf/DP arrays, sort children, and index nodes by key for O(1) click lookup.
+  const index={};
+  const finalize=(node,key,path)=>{
+    node.key=key; node.path=path; index[key]=node;
     node.dpElIds=[...node._dpSet];
     node.leaves=[...node._leafSet].map(id=>leaves[id]);
     node.childList=Object.values(node.children).sort((a,b)=>(a.name||'').localeCompare(b.name||''));
     node._leafSet=null; node._dpSet=null; node.children=null;
-    node.childList.forEach((ch,i)=>finalize(ch, key+'_'+i));
+    node.childList.forEach((ch,i)=>finalize(ch, key+'_'+i, path.concat([{dim:groupBy[ch.depth], value:ch.id}])));
   };
   const roots=Object.values(root.children).sort((a,b)=>(a.name||'').localeCompare(b.name||''));
-  roots.forEach((n,i)=>finalize(n,'g'+i));
-  return { roots, leaves };
+  roots.forEach((n,i)=>finalize(n,'g'+i, [{dim:groupBy[0], value:n.id}]));
+  return { roots, leaves, index };
 }
 
 // ── Demand values index for O(1) lookups ─────────────
@@ -1175,7 +1220,7 @@ function spRenderTable(skipThead=false){
     const indent=6+depth*16;
     const strong=depth<=1;
     const toggle=hasKids?`<span class="sp-toggle">${col?'▸':'▾'}</span>`:'';
-    const rowAttrs=hasKids?`onclick="spToggle('${key}')" style="cursor:pointer"`:'';
+    const rowAttrs=`onclick="spRowClick('${key}')" style="cursor:pointer"`;
     h+=`<tr class="${cls}" data-sp-key="${key}" data-sp-depth="${depth}" ${rowAttrs}>
       <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:${indent}px${depth>=2?';font-size:7px':''}">
         ${toggle}${strong?'<strong>':''}${esc(node.name)}${strong?'</strong>':''}${fbBtn(node.dpElIds,node.name)}
@@ -1831,6 +1876,20 @@ function spToggle(key){
   else delete SP._userExpanded[key];
   // skipThead: column structure doesn't change on row toggle
   spRenderTable(true);
+}
+
+// Clicking a table row expands/collapses it (if it has children) AND scopes the
+// composite chart + MTD/FY panels to that node. Clear via the ✕ on the scope badge.
+function spRowClick(key){
+  const node=SP._tree?.index?.[key];
+  if(node && node.childList.length){
+    SP.collapsed[key]=!SP.collapsed[key];
+    if(!SP.collapsed[key]) SP._userExpanded[key]=true; else delete SP._userExpanded[key];
+  }
+  if(node){ SP.chartScope={ label:node.name, pred:spScopeMatch(node.path), leaves:node.leaves }; }
+  spRenderTable(true);
+  spRenderChart();
+  spRenderSidePanels();
 }
 
 function spExpandAll(expand){
