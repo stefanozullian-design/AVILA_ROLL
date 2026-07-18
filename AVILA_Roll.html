@@ -6643,6 +6643,67 @@ function _monthTotalsToEnd(root, cls, markedIsTotal){
   });
 }
 
+// ── Year-total columns for the logistics planners (post-render DOM pass) ──
+// Runs AFTER _monthTotalsToEnd, so each row already has its month-total cells
+// (class `cls`, one per month, in month order) sitting at end-of-month. This adds a
+// heavier Σ YYYY cell after the last month of each year. Flow rows sum their months;
+// inventory rows (tp-row-inv) carry the year-END snapshot (last month's value). It
+// also widens full-width group-header rows so their colspan covers the new columns.
+//   monYms  : ordered month keys ('YYYY-MM') matching the month-total cell order
+//   yearEnds: boolean[] — yearEnds[k]=true if month k is the last month of its year
+function _logiYearTotalsToEnd(root, cls, monYms, yearEnds, nYears){
+  if(!root||!nYears) return;
+  const rows = root.matches&&root.matches('tr') ? [root] : [...root.querySelectorAll('tr')];
+  rows.forEach(tr=>{
+    const cells=[...tr.children];
+    // Full-width group/divider header: widen its colspan to span the year columns.
+    if(cells.length===1 && cells[0].hasAttribute('colspan')){
+      const cs=parseInt(cells[0].getAttribute('colspan'))||1;
+      if(cs>1) cells[0].setAttribute('colspan', cs+nYears);
+      return;
+    }
+    if(cells.length<3) return;
+    const mcols=cells.filter(c=>(c.className||'').includes(cls));
+    if(mcols.length!==monYms.length) return; // structure mismatch → leave row untouched
+    const isLast=(tr.className||'').includes('tp-row-inv'); // inventory → end-of-year snapshot
+    let acc=0, has=false, unit='';
+    for(let k=0;k<mcols.length;k++){
+      const txt=mcols[k].textContent||'';
+      const num=parseFloat(txt.replace(/[^0-9.\-]/g,''));
+      if(!isNaN(num)){ has=true; if(/cars/.test(txt)) unit=' cars'; else if(/t/.test(txt)) unit='t';
+        if(isLast) acc=num; else acc+=num; }
+      if(yearEnds[k]){
+        const yc=document.createElement('td');
+        yc.className='logi-ycol';
+        yc.setAttribute('style','background:var(--total-faint);border-left:3px double var(--border2);border-right:1px solid var(--border2);font-weight:700;color:var(--total);text-align:right;padding:3px 9px;');
+        yc.textContent=has?Number(Math.round(acc)).toLocaleString()+unit:'—';
+        tr.insertBefore(yc, mcols[k].nextSibling);
+        acc=0; has=false; unit='';
+      }
+    }
+  });
+}
+// Header variant: inserts a Σ YYYY <th> after each year's last month header cell.
+function _logiYearHeader(root, cls, monYms, yearEnds){
+  if(!root) return;
+  const mcols=[...root.children].filter(c=>(c.className||'').includes(cls));
+  if(mcols.length!==monYms.length) return;
+  mcols.forEach((th,k)=>{
+    if(!yearEnds[k]) return;
+    const yth=document.createElement('th');
+    yth.className='logi-ycol';
+    yth.setAttribute('style','border-left:3px double var(--border2);border-right:1px solid var(--border2);color:var(--total);font-size:8px;font-weight:700;text-align:center;padding:4px 7px;position:sticky;top:0;background:var(--surface2);white-space:nowrap');
+    yth.textContent='Σ '+monYms[k].slice(0,4);
+    th.parentNode.insertBefore(yth, th.nextSibling);
+  });
+}
+// Build (monYms, yearEnds, nYears) from a logistics `months` array.
+function _logiYearMeta(months){
+  const monYms=months.map(m=>m.ym);
+  const yearEnds=months.map((m,i)=>i===months.length-1||months[i+1].ym.slice(0,4)!==m.ym.slice(0,4));
+  return {monYms, yearEnds, nYears:yearEnds.filter(Boolean).length};
+}
+
 // Production-Gantt downtime fills — one distinct diagonal hatch per reason, so a
 // zero-output day shows WHY the kiln/mill/packer is down instead of a blank cell.
 // Shared by the clinker, finish-mill and packing rows.
@@ -10819,6 +10880,8 @@ function rpRender(){
   }).join('');
   document.getElementById('rp-thead-row').innerHTML=thHtml;
   _monthTotalsToEnd(document.getElementById('rp-thead-row'),'logi-mcol',true); // month total at END
+  const _rpYr=_logiYearMeta(months);
+  _logiYearHeader(document.getElementById('rp-thead-row'),'logi-mcol',_rpYr.monYms,_rpYr.yearEnds);
   const _railColspan=days.length+months.length+1;
 
   // ── DESTINATION TABLE ─────────────────────────────────────────
@@ -11081,6 +11144,7 @@ function rpRender(){
   const _origDestSep=`<tr><td colspan="${_railColspan}" style="padding:0;height:0;border-top:4px solid var(--text-dim)"></td></tr>`;
   document.getElementById('rp-rail-tbody').innerHTML=origRows.join('')+_origDestSep+destRows.join('');
   _monthTotalsToEnd(document.getElementById('rp-rail-tbody'),'logi-mcol',true); // month total at END
+  _logiYearTotalsToEnd(document.getElementById('rp-rail-tbody'),'logi-mcol',_rpYr.monYms,_rpYr.yearEnds,_rpYr.nYears);
   // Re-flag over-allocated switches for any surviving drafts (they persist across re-renders).
   new Set(Object.keys(window._rpDrafts||{}).map(k=>k.split('|').slice(0,2).join('|'))).forEach(k=>{
     const [dpId,sw]=k.split('|'); _rpValidateSwitch(dpId,sw);
@@ -11539,6 +11603,9 @@ function vpRender(){
   document.getElementById('vp-orig-thead-row').innerHTML=thHtml;
   _monthTotalsToEnd(document.getElementById('vp-dest-thead-row'),'logi-mcol',true); // month total at END
   _monthTotalsToEnd(document.getElementById('vp-orig-thead-row'),'logi-mcol',true);
+  const _vpYr=_logiYearMeta(months);
+  _logiYearHeader(document.getElementById('vp-dest-thead-row'),'logi-mcol',_vpYr.monYms,_vpYr.yearEnds);
+  _logiYearHeader(document.getElementById('vp-orig-thead-row'),'logi-mcol',_vpYr.monYms,_vpYr.yearEnds);
 
   const _statusPriority=['In Transit','Unloading','Confirmed','Planned','Proposed','Finished'];
   const destRows=[];
@@ -11669,6 +11736,7 @@ function vpRender(){
   });
   document.getElementById('vp-dest-tbody').innerHTML=destRows.join('');
   _monthTotalsToEnd(document.getElementById('vp-dest-tbody'),'logi-mcol',true); // month total at END
+  _logiYearTotalsToEnd(document.getElementById('vp-dest-tbody'),'logi-mcol',_vpYr.monYms,_vpYr.yearEnds,_vpYr.nYears);
   document.getElementById('vp-orig-tbody').innerHTML=
     `<tr><td colspan="999" style="color:var(--text-dim);font-size:9px;padding:10px">Vessels are external supply — no origin inventory deducted</td></tr>`;
 }
@@ -15399,6 +15467,56 @@ function renderResultsTable(){
   h+=`<th style="background:rgba(0,229,160,.04);color:var(--green-dim)">Transport<br><span style="font-size:7px;opacity:.6">Events</span></th>`;
   h+=`</tr></thead><tbody>`;
 
+  // ── Totals-row builder — computes each column over an arbitrary set of sim-days.
+  // Reused for the per-year rows (emitted at each year boundary) and the grand total.
+  const _yrDate=(day)=>{ const dt=new Date(S.simCfg.start_date+'T00:00:00'); dt.setDate(dt.getDate()+day-1); return dt; };
+  const buildTotalsRow=(label, dayArr, isYear)=>{
+    let row=`<tr style="background:${isYear?'var(--surface)':'var(--surface2)'};font-weight:700;${isYear?'border-top:2px solid var(--border2);border-bottom:2px solid var(--border2);':'position:sticky;bottom:0;'}">
+      <td class="col-day" style="color:${isYear?'var(--total,var(--amber))':'var(--text)'}">${label}</td>
+      <td class="col-date" style="color:var(--text-dim)">${dayArr.length} days</td>`;
+    if(showDemand && demandCols.length){
+      demandCols.forEach(d=>{
+        const dpEl=DB.elements.find(e=>e.id===d.element_id);
+        let total=0;
+        if(dpEl){ dayArr.forEach(day=>{ total+=_demandRate(dpEl.id,_yrDate(day)._ymd()); }); }
+        else { total=(d.daily_tonnage||0)*dayArr.length; }
+        row+=`<td style="color:var(--green)">${Number(Math.round(total)).toLocaleString()}</td>`;
+      });
+    }
+    if(showInv && invCols.length){
+      invCols.forEach(el=>{
+        const hist=r.inventoryHistory[el.id]||[];
+        let s=0,n=0; dayArr.forEach(day=>{ const v=hist[day-1]; if(v!==undefined&&v!==null){ s+=v; n++; } });
+        row+=`<td style="color:var(--blue)">avg: ${Number(n?Math.round(s/n):0).toLocaleString()}</td>`;
+      });
+    }
+    if(showProd && prodCols.length){
+      prodCols.forEach(el=>{
+        const states=r.elementStates[el.id]||[];
+        const caps=DB.element_product_capacities.filter(c=>c.element_id===el.id);
+        const rate=caps.length?caps.reduce((a,c)=>a+(c.capacity_tpd||0),0):parseFloat(el.props.rated_capacity_tpd)||0;
+        let runDays=0; dayArr.forEach(day=>{ const st=states[day-1]; if(st==='running'||st==='rampup') runDays++; });
+        row+=`<td style="color:var(--amber)">${Number(Math.round(runDays*rate)).toLocaleString()}</td>`;
+      });
+    }
+    if(railDispCols.length){
+      railDispCols.forEach(el=>{
+        const rh=r.railHistory?.[el.id]||[];
+        let totalLoaded=0,totalDispatched=0;
+        dayArr.forEach(day=>{ const entry=rh[day-1]||{}; totalLoaded+=Object.values(entry.carsLoadedByProduct||{}).reduce((a,b)=>a+b,0); totalDispatched+=Object.values(entry.dispatchByDest||{}).reduce((a,b)=>a+b,0); });
+        const carCap=parseFloat(el.props.car_capacity_t)||50;
+        row+=`<td style="color:var(--blue);font-family:var(--mono);border-left:2px solid rgba(77,166,255,.2)">${totalLoaded} cars</td>`;
+        row+=`<td style="color:var(--blue);font-family:var(--mono)">${totalDispatched} cars · ${Number(totalDispatched*carCap).toLocaleString()}t</td>`;
+      });
+    }
+    let railT=0,vesselT=0;
+    dayArr.forEach(day=>{ (railEvsByDay[day]||[]).forEach(rm=>railT+=(rm.total_capacity_t||0)); (vesselEvsByDay[day]||[]).forEach(v=>vesselT+=(v.quantity_t||0)); });
+    row+=`<td style="font-family:var(--mono);font-size:8px">${railT?`<span style="color:var(--blue)">Rail: ${Number(railT).toLocaleString()}t</span> `:''}${vesselT?`<span style="color:var(--amber)">Vessel: ${Number(vesselT).toLocaleString()}t</span>`:''}${!railT&&!vesselT?'—':''}</td>`;
+    row+=`</tr>`;
+    return row;
+  };
+  let yearDays=[]; const yearsSeen=new Set();
+
   // Build rows — iterate over view window days
   for(let i=0;i<horizon;i++){
     const day=startDay+i; // actual simulation day
@@ -15571,66 +15689,19 @@ function renderResultsTable(){
     h+=transportCell;
 
     h+=`</tr>`;
+
+    // Year-total row at each year boundary (sums this year's rows).
+    yearsSeen.add(dateStr.slice(0,4));
+    yearDays.push(day);
+    let _isYearEnd=(i===horizon-1);
+    if(!_isYearEnd){ const nd=new Date(S.simCfg.start_date+'T00:00:00'); nd.setDate(nd.getDate()+(startDay+i+1)-1); _isYearEnd=(nd.getFullYear()!==date.getFullYear()); }
+    if(_isYearEnd){ h+=buildTotalsRow('Σ '+date.getFullYear(), yearDays.slice(), true); yearDays=[]; }
   }
 
-  // Totals row
-  h+=`<tr style="background:var(--surface2);font-weight:700;position:sticky;bottom:0">
-    <td class="col-day" style="color:var(--text)">TOTAL</td>
-    <td class="col-date" style="color:var(--text-dim)">${horizon} days</td>`;
-
-  if(showDemand && demandCols.length){
-    demandCols.forEach(d=>{
-      const dpEl=DB.elements.find(e=>e.id===d.element_id);
-      let total=0;
-      if(dpEl){
-        for(let i=0;i<horizon;i++){
-          const dt=new Date(S.simCfg.start_date+'T00:00:00');
-          dt.setDate(dt.getDate()+startDay-1+i);
-          total+=_demandRate(dpEl.id,dt._ymd());
-        }
-      } else { total=(d.daily_tonnage||0)*horizon; }
-      h+=`<td style="color:var(--green)">${Number(Math.round(total)).toLocaleString()}</td>`;
-    });
-  }
-  if(showInv && invCols.length){
-    invCols.forEach(el=>{
-      const hist=r.inventoryHistory[el.id]||[];
-      const avg=hist.length?Math.round(hist.reduce((a,b)=>a+b,0)/hist.length):0;
-      h+=`<td style="color:var(--blue)">avg: ${Number(avg).toLocaleString()}</td>`;
-    });
-  }
-  if(showProd && prodCols.length){
-    prodCols.forEach(el=>{
-      const states=r.elementStates[el.id]||[];
-      const runDays=states.filter(s=>s==='running'||s==='rampup').length;
-      const caps=DB.element_product_capacities.filter(c=>c.element_id===el.id);
-      const rate=caps.length?caps.reduce((a,c)=>a+(c.capacity_tpd||0),0):parseFloat(el.props.rated_capacity_tpd)||0;
-      const total=Math.round(runDays*rate);
-      h+=`<td style="color:var(--amber)">${Number(total).toLocaleString()}</td>`;
-    });
-  }
-  if(railDispCols.length){
-    railDispCols.forEach(el=>{
-      const rh=r.railHistory?.[el.id]||[];
-      // Total loaded cars across all days
-      const totalLoaded=rh.reduce((sum,entry)=>
-        sum+Object.values(entry.carsLoadedByProduct||{}).reduce((a,b)=>a+b,0),0);
-      // Total dispatched cars across all switch days
-      const totalDispatched=rh.reduce((sum,entry)=>
-        sum+Object.values(entry.dispatchByDest||{}).reduce((a,b)=>a+b,0),0);
-      const carCap=parseFloat(el.props.car_capacity_t)||50;
-      h+=`<td style="color:var(--blue);font-family:var(--mono);border-left:2px solid rgba(77,166,255,.2)">${totalLoaded} cars</td>`;
-      h+=`<td style="color:var(--blue);font-family:var(--mono)">${totalDispatched} cars · ${Number(totalDispatched*carCap).toLocaleString()}t</td>`;
-    });
-  }
-  const totalRailT=DB.rail_movements.filter(r=>r.to_facility_id===S.facility_id).reduce((a,r)=>a+(r.total_capacity_t||0),0);
-  const totalVesselT=DB.vessel_calls.filter(v=>facBerthIds.has(v.berth_element_id)).reduce((a,v)=>a+(v.quantity_t||0),0);
-  h+=`<td style="font-family:var(--mono);font-size:8px">
-    ${totalRailT?`<span style="color:var(--blue)">Rail: ${Number(totalRailT).toLocaleString()}t</span> `:''}
-    ${totalVesselT?`<span style="color:var(--amber)">Vessel: ${Number(totalVesselT).toLocaleString()}t</span>`:''}
-    ${!totalRailT&&!totalVesselT?'—':''}
-  </td>`;
-  h+=`</tr></tbody></table>`;
+  // Grand total across the whole view window — only when it spans more than one
+  // year (otherwise it would duplicate the single year-total row above).
+  if(yearsSeen.size>1) h+=buildTotalsRow('TOTAL', Array.from({length:horizon},(_,i)=>startDay+i), false);
+  h+=`</tbody></table>`;
   wrap.innerHTML=h;
 
   // ── Sync top scrollbar width to actual table width ────
@@ -16551,24 +16622,44 @@ function renderDtree(r){
     monthsD.filter(m=>m.ym!==curYm).forEach(m=>monCol.add(m.ym));
   }
   const isLevelId=id=>/_inv\b|_inv_|inventor/i.test(id||''); // inventory rows summarize as end-of-month, others as monthly total
-  const visCols=monthsD.reduce((s,mon)=>s+1+(monCol.has(mon.ym)?0:mon.dayNums.length),0);
+  // Year boundaries: a Σ YYYY column follows the last month of each year (inventory
+  // years read the last snapshot; flows sum). yearEndIdx[i]=true if month i ends its year.
+  const yearEndIdx=monthsD.map((mon,i)=>i===monthsD.length-1||monthsD[i+1].ym.slice(0,4)!==mon.ym.slice(0,4));
+  const nYears=yearEndIdx.filter(Boolean).length;
+  const visCols=monthsD.reduce((s,mon)=>s+1+(monCol.has(mon.ym)?0:mon.dayNums.length),0)+nYears;
   const _msumSty='background:var(--total-faint);border-left:2px solid var(--border2);font-weight:700;text-align:right;padding:4px 8px;';
-  // Build a row's cells: that month's day cells (unless collapsed), then the summary cell at the END of the month.
-  const monCells=(valArr,agg,dayCellFn,sumColor)=>monthsD.map(mon=>{
-    const isCol=monCol.has(mon.ym);
-    const vals=mon.idxs.map(i=>valArr?valArr[i]:null).filter(v=>v!==null&&v!==undefined&&!isNaN(v));
-    let sv=null;
-    if(vals.length) sv=agg==='last'?vals[vals.length-1]:vals.reduce((a,b)=>a+b,0);
-    const sumTd=`<td class="dtree-mcol" style="${_msumSty}color:${sumColor||'var(--total)'}">${sv!==null?Number(Math.round(sv)).toLocaleString():'—'}</td>`;
-    const dayTds=isCol?'':mon.dayNums.map(dayCellFn).join('');
-    return dayTds+sumTd;
-  }).join('');
-  const monHeaderCells=monthsD.map(mon=>{
-    const isCol=monCol.has(mon.ym);
-    const sumTh=`<th class="dtree-mcol" onclick="_dtreeToggleMonth('${mon.ym}')" title="Click to ${isCol?'expand':'collapse'} ${mon.label}" style="cursor:pointer;user-select:none;background:var(--surface2);border-left:2px solid var(--border2);font-weight:700;color:var(--total);text-align:center;padding:6px 6px;position:sticky;top:0;z-index:3"><span style="margin-right:3px">${isCol?'▶':'▼'}</span>${mon.label}</th>`;
-    const dayThs=isCol?'':mon.dayNums.map(d=>`<th title="Day ${d}" style="${wkendThStyle(d)}">${dayToDate(d).slice(5)}</th>`).join('');
-    return dayThs+sumTh;
-  }).join('');
+  const _ysumSty='background:var(--total-faint);border-left:3px double var(--border2);font-weight:700;text-align:right;padding:4px 9px;';
+  // Build a row's cells: that month's day cells (unless collapsed), then the month
+  // summary cell; after each year's final month, a heavier Σ YYYY cell.
+  const monCells=(valArr,agg,dayCellFn,sumColor)=>{
+    let out='', yearVals=[];
+    monthsD.forEach((mon,mi)=>{
+      const isCol=monCol.has(mon.ym);
+      const vals=mon.idxs.map(i=>valArr?valArr[i]:null).filter(v=>v!==null&&v!==undefined&&!isNaN(v));
+      let sv=null;
+      if(vals.length) sv=agg==='last'?vals[vals.length-1]:vals.reduce((a,b)=>a+b,0);
+      const sumTd=`<td class="dtree-mcol" style="${_msumSty}color:${sumColor||'var(--total)'}">${sv!==null?Number(Math.round(sv)).toLocaleString():'—'}</td>`;
+      const dayTds=isCol?'':mon.dayNums.map(dayCellFn).join('');
+      out+=dayTds+sumTd;
+      yearVals=yearVals.concat(vals);
+      if(yearEndIdx[mi]){
+        let yv=null;
+        if(yearVals.length) yv=agg==='last'?yearVals[yearVals.length-1]:yearVals.reduce((a,b)=>a+b,0);
+        out+=`<td class="dtree-ycol" style="${_ysumSty}color:${sumColor||'var(--total)'}">${yv!==null?Number(Math.round(yv)).toLocaleString():'—'}</td>`;
+        yearVals=[];
+      }
+    });
+    return out;
+  };
+  const monHeaderCells=(()=>{ let out='';
+    monthsD.forEach((mon,mi)=>{
+      const isCol=monCol.has(mon.ym);
+      const sumTh=`<th class="dtree-mcol" onclick="_dtreeToggleMonth('${mon.ym}')" title="Click to ${isCol?'expand':'collapse'} ${mon.label}" style="cursor:pointer;user-select:none;background:var(--surface2);border-left:2px solid var(--border2);font-weight:700;color:var(--total);text-align:center;padding:6px 6px;position:sticky;top:0;z-index:3"><span style="margin-right:3px">${isCol?'▶':'▼'}</span>${mon.label}</th>`;
+      const dayThs=isCol?'':mon.dayNums.map(d=>`<th title="Day ${d}" style="${wkendThStyle(d)}">${dayToDate(d).slice(5)}</th>`).join('');
+      out+=dayThs+sumTh;
+      if(yearEndIdx[mi]) out+=`<th class="dtree-ycol" title="Full-year ${mon.ym.slice(0,4)} total" style="background:var(--surface2);border-left:3px double var(--border2);font-weight:700;color:var(--total);text-align:center;padding:6px 7px;position:sticky;top:0;z-index:3">Σ ${mon.ym.slice(0,4)}</th>`;
+    });
+    return out; })();
 
   let h=`<table class="dtree-table"><thead><tr>
     <th class="th-label">Element</th>
@@ -19322,7 +19413,13 @@ function spRenderTable(skipThead=false){
   const thead=document.getElementById('sp-thead');
   if(thead&&!skipThead){
     let h1='',h2='';
-    months.forEach(mo=>{
+    const spLastYear=today.slice(0,4);
+    const yrTh=(yr)=>{
+      const color=yr<spLastYear?'var(--green)':yr>spLastYear?'var(--amber)':'var(--blue)';
+      const bg=yr<spLastYear?'rgba(0,255,157,.10)':yr>spLastYear?'rgba(255,184,48,.10)':'rgba(77,166,255,.10)';
+      return `<th rowspan="2" title="Full-year ${yr} total" style="background:${bg};color:${color};font-size:7px;font-weight:700;text-align:center;letter-spacing:.5px;border-left:3px double var(--border2);padding:3px 5px;white-space:nowrap;position:sticky;top:0">Σ ${yr}</th>`;
+    };
+    months.forEach((mo,mi)=>{
       const col=SP.collapsedMonths.has(mo.ym);
       const span=col?1:mo.dates.length+1;
       const bg=mo.isPast?'rgba(0,255,157,.06)':mo.isCurrent?'rgba(77,166,255,.06)':'rgba(255,184,48,.04)';
@@ -19340,6 +19437,9 @@ function spRenderTable(skipThead=false){
         });
         h2+=`<th class="sp-mcol" style="background:${bg};font-size:6px;text-align:center;font-weight:700;border-left:2px solid var(--border2);padding:2px 4px">Σ</th>`;
       }
+      // Year-total column after each year's last month (rowspan=2 spans both header rows).
+      const yearEnd = mi===months.length-1 || months[mi+1].ym.slice(0,4)!==mo.ym.slice(0,4);
+      if(yearEnd) h1+=yrTh(mo.ym.slice(0,4));
     });
     thead.innerHTML=`<tr>
       <th class="th-lbl" style="vertical-align:bottom;padding-bottom:8px;border-right:2px solid var(--border2);font-size:8px" rowspan="2">Region / Sub-Region / Plant / Demand Point / Sold To / Ship To</th>
@@ -19375,13 +19475,21 @@ function spRenderTable(skipThead=false){
       return 0;
     };
     let cells='';
-    months.forEach(mo=>{
+    const spLastYear=today.slice(0,4);
+    let yearSum=0;
+    const yrTd=(yr)=>{
+      const color=yr<spLastYear?'var(--green)':yr>spLastYear?'var(--amber)':'var(--blue)';
+      const bg=yr<spLastYear?'rgba(0,255,157,.07)':yr>spLastYear?'rgba(255,184,48,.08)':'rgba(77,166,255,.08)';
+      return `<td title="Full-year ${yr}" style="text-align:right;padding:1px 5px;font-size:7px;font-weight:700;color:${color};background:${bg};border-left:3px double var(--border2)">${yearSum?Math.round(yearSum).toLocaleString():'—'}</td>`;
+    };
+    months.forEach((mo,mi)=>{
       const col=SP.collapsedMonths.has(mo.ym);
       const bgBase=mo.isPast?'rgba(0,255,157,.03)':'';
       if(col){
         let moSum=0;
         mo.dates.forEach(ds=>{ moSum+=actMap[ds]||0; if(ds>today) moSum+=getFc(ds); });
         cells+=`<td class="sp-mcol" style="text-align:right;padding:1px 4px;font-size:7px;${bgBase?'background:'+bgBase+';':''}border-left:1px solid var(--border2)">${moSum?Math.round(moSum).toLocaleString():'—'}</td>`;
+        yearSum+=moSum;
       } else {
         let moSum=0;
         mo.dates.forEach(ds=>{
@@ -19394,7 +19502,10 @@ function spRenderTable(skipThead=false){
           cells+=`<td style="${bgCell?'background:'+bgCell+';':''}${bd};text-align:right;padding:1px 2px;font-size:7px">${val?Math.round(val).toLocaleString():''}</td>`;
         });
         cells+=`<td class="sp-mcol" style="text-align:right;padding:1px 4px;font-size:7px;font-weight:700;${bgBase?'background:'+bgBase+';':''}border-left:2px solid var(--border2)">${moSum?Math.round(moSum).toLocaleString():'—'}</td>`;
+        yearSum+=moSum;
       }
+      const yearEnd = mi===months.length-1 || months[mi+1].ym.slice(0,4)!==mo.ym.slice(0,4);
+      if(yearEnd){ cells+=yrTd(mo.ym.slice(0,4)); yearSum=0; }
     });
     return cells;
   }
