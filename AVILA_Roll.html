@@ -16171,8 +16171,9 @@ function _dashToggle(bodyId, hdrEl){
 
 function renderDashCharts(r){
   if(!r) return;
-  _chartRedrawFns['dash-clk-legend']=()=>{_drawClinkerChart('dash-clk-chart',_clkSimResults);_attachTooltip('dash-clk-chart');};
-  _chartRedrawFns['dash-cem-legend']=()=>{_drawProdBarChart('dash-cem-chart',_clkSimResults,'cement');_attachTooltip('dash-cem-chart');};
+  _clkSimResults=r; // cache current results so legend-toggle redraws use live data
+  _chartRedrawFns['dash-clk-legend']=()=>{const rr=_clkSimResults||S.simResults;if(!rr)return;_drawClinkerChart('dash-clk-chart',rr);_attachTooltip('dash-clk-chart');};
+  _chartRedrawFns['dash-cem-legend']=()=>{const rr=_clkSimResults||S.simResults;if(!rr)return;_drawProdBarChart('dash-cem-chart',rr,'cement');_attachTooltip('dash-cem-chart');};
   const clkBody=document.getElementById('dash-clk-body');
   const cemBody=document.getElementById('dash-cem-body');
   if(clkBody&&clkBody.style.display!=='none'){
@@ -16731,7 +16732,7 @@ function _attachTooltip(canvasId){
     const rect=cv.getBoundingClientRect();
     const mx=e.clientX-rect.left;
     const {P,days,startDay}=meta;
-    const cW=cv.width-P.l-P.r;
+    const cW=rect.width-P.l-P.r; // CSS-pixel width (canvas backing store is dpr-scaled)
     // Find day index from mouse x
     const rawIdx=(mx-P.l)/cW*(days-1);
     const idx=Math.max(0,Math.min(days-1,Math.round(rawIdx)));
@@ -16802,10 +16803,12 @@ function _attachTooltip(canvasId){
 // ── Shared drawing helpers ──────────────────────────────
 function _chartSetup(id,heightFallback){
   const cv=document.getElementById(id); if(!cv) return null;
-  cv.width=cv.offsetWidth||800;
-  cv.height=parseInt(cv.style.height)||heightFallback||160;
-  const W=cv.width,H=cv.height,P={t:14,r:16,b:28,l:56};
+  const W=cv.offsetWidth||800, H=parseInt(cv.style.height)||heightFallback||160;
+  const dpr=window.devicePixelRatio||1;      // HiDPI: crisp rendering at device resolution
+  cv.width=Math.round(W*dpr); cv.height=Math.round(H*dpr);
+  const P={t:14,r:16,b:28,l:56};
   const ctx=cv.getContext('2d');
+  ctx.setTransform(dpr,0,0,dpr,0,0);          // draw in CSS-pixel coords, backing store scaled by dpr
   ctx.clearRect(0,0,W,H);
   const cW=W-P.l-P.r,cH=H-P.t-P.b;
   // Grid
@@ -16890,13 +16893,14 @@ function _drawLegendPanel(panelId, groups){
 function _drawClinkerChart(id, r){
   if(!r) return;
   const cv=document.getElementById(id); if(!cv) return;
-  cv.width=cv.offsetWidth||800;
-  cv.height=cv.offsetHeight||220;
-  const W=cv.width, H=cv.height;
+  const W=cv.offsetWidth||800, H=cv.offsetHeight||220;
+  const dpr=window.devicePixelRatio||1;      // HiDPI: render backing store at device resolution → crisp text/lines
+  cv.width=Math.round(W*dpr); cv.height=Math.round(H*dpr);
   const LEGEND_W=130; // reserved for right legend panel (drawn in HTML, not canvas)
   const P={t:16, r:48, b:30, l:58};
   const cW=W-P.l-P.r, cH=H-P.t-P.b;
   const ctx=cv.getContext('2d');
+  ctx.setTransform(dpr,0,0,dpr,0,0);          // draw in CSS-pixel coords, backing store scaled by dpr
   ctx.clearRect(0,0,W,H);
 
   const {startDay,endDay}=getViewRange();
