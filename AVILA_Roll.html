@@ -17170,8 +17170,10 @@ function _drawClinkerChart(id, r){
   const autoLeft=Math.max(...maxProdPerDay,...maxDemPerDay,1)*1.15;
   const prodMax=userProdMax||autoLeft;
 
-  // Right axis: stacked inventory (cumulative top)
-  const maxInvPerDay=Array.from({length:days},(_,i)=>visInv.reduce((s,ser)=>s+(ser.data[i]||0),0));
+  // Right axis: inventory is a LEVEL, not a flow — each silo is drawn from the zero
+  // baseline (NOT stacked), so a silo running to 0 is always visible regardless of which
+  // other silos are shown. Scale to the largest single silo, not the sum.
+  const maxInvPerDay=Array.from({length:days},(_,i)=>Math.max(0,...visInv.map(ser=>ser.data[i]||0)));
   const autoInv=Math.max(...maxInvPerDay,1)*1.1;
   const invMax=userInvMax||autoInv;
 
@@ -17200,39 +17202,25 @@ function _drawClinkerChart(id, r){
   ctx.save(); ctx.fillStyle='rgba(56,189,248,0.35)'; ctx.font='7px Space Mono'; ctx.textAlign='center';
   ctx.translate(W-8,P.t+cH/2); ctx.rotate(Math.PI/2); ctx.fillText('INV t',0,0); ctx.restore();
 
-  // ── Draw: stacked inventory areas (right axis, behind bars) ──
+  // ── Draw: inventory areas (each from the zero baseline, overlapping — NOT stacked) ──
   if(visInv.length){
-    // Draw from largest cumulative down so areas stack visually
-    const cumData=Array(days).fill(0);
-    visInv.forEach((ser,si)=>{
-      const prevCum=[...cumData];
-      ser.data.forEach((v,i)=>{ cumData[i]+=v||0; });
-      // Draw filled area between cumData and prevCum
+    const baseY=P.t+cH; // zero line
+    visInv.forEach((ser)=>{
       const col=ser.col;
       ctx.beginPath();
       for(let i=0;i<days;i++){
         const x=P.l+(i+0.5)*(cW/days);
-        const y=P.t+cH-(Math.min(cumData[i],invMax)/invMax)*cH;
+        const y=P.t+cH-(Math.min(ser.data[i]||0,invMax)/invMax)*cH;
         i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
       }
-      // Return path along previous cumulative (bottom of this band)
-      for(let i=days-1;i>=0;i--){
-        const x=P.l+(i+0.5)*(cW/days);
-        const y=P.t+cH-(Math.min(prevCum[i],invMax)/invMax)*cH;
-        ctx.lineTo(x,y);
-      }
+      for(let i=days-1;i>=0;i--){ ctx.lineTo(P.l+(i+0.5)*(cW/days),baseY); }
       ctx.closePath();
-      ctx.fillStyle=col.replace(')',',0.18)').replace('rgb(','rgba(').replace('#',()=>{
-        const r=parseInt(col.slice(1,3),16),g=parseInt(col.slice(3,5),16),b=parseInt(col.slice(5,7),16);
-        return `rgba(${r},${g},${b},0.18`;
-      });
-      // Simpler: use globalAlpha
-      ctx.globalAlpha=0.18; ctx.fillStyle=col; ctx.fill(); ctx.globalAlpha=1;
+      ctx.globalAlpha=0.14; ctx.fillStyle=col; ctx.fill(); ctx.globalAlpha=1;
       // Top border line
       ctx.beginPath();
       for(let i=0;i<days;i++){
         const x=P.l+(i+0.5)*(cW/days);
-        const y=P.t+cH-(Math.min(cumData[i],invMax)/invMax)*cH;
+        const y=P.t+cH-(Math.min(ser.data[i]||0,invMax)/invMax)*cH;
         i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
       }
       ctx.strokeStyle=col; ctx.lineWidth=1.5; ctx.setLineDash([]); ctx.stroke();
@@ -17430,7 +17418,10 @@ function _drawProdBarChart(id,r,type){
     const maxDemPerDay =Array.from({length:days},(_,i)=>visDem.reduce((s,ser)=>s+(ser.data[i]||0),0));
     const autoLeft=Math.max(...maxProdPerDay,...maxDemPerDay,1)*1.15;
     const prodMax=userLeft||autoLeft;
-    const maxInvPerDay=Array.from({length:days},(_,i)=>visInv.reduce((s,ser)=>s+(ser.data[i]||0),0));
+    // Inventory is a LEVEL, not a flow: each silo is drawn from the zero baseline (NOT
+    // stacked), so a silo running to 0 is always visible regardless of which other silos
+    // are shown. Scale to the largest single silo, not the sum.
+    const maxInvPerDay=Array.from({length:days},(_,i)=>Math.max(0,...visInv.map(ser=>ser.data[i]||0)));
     const autoInv=Math.max(...maxInvPerDay,1)*1.1;
     const invMax=userRight||autoInv;
     const hasInv=visInv.length>0;
@@ -17456,29 +17447,23 @@ function _drawProdBarChart(id,r,type){
       }
     }
 
-    // ── Draw: stacked inventory areas ──
+    // ── Draw: inventory areas (each from the zero baseline, overlapping — NOT stacked) ──
     if(hasInv){
-      const cumData=Array(days).fill(0);
+      const baseY=P.t+cH; // zero line
       visInv.forEach(ser=>{
-        const prevCum=[...cumData];
-        ser.data.forEach((v,i)=>{ cumData[i]+=v||0; });
         ctx.beginPath();
         for(let i=0;i<days;i++){
           const x=P.l+(i+0.5)*(cWadj/days);
-          const y=P.t+cH-(Math.min(cumData[i],invMax)/invMax)*cH;
+          const y=P.t+cH-(Math.min(ser.data[i]||0,invMax)/invMax)*cH;
           i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
         }
-        for(let i=days-1;i>=0;i--){
-          const x=P.l+(i+0.5)*(cWadj/days);
-          const y=P.t+cH-(Math.min(prevCum[i],invMax)/invMax)*cH;
-          ctx.lineTo(x,y);
-        }
+        for(let i=days-1;i>=0;i--){ ctx.lineTo(P.l+(i+0.5)*(cWadj/days),baseY); }
         ctx.closePath();
-        ctx.globalAlpha=0.15; ctx.fillStyle=ser.col; ctx.fill(); ctx.globalAlpha=1;
+        ctx.globalAlpha=0.12; ctx.fillStyle=ser.col; ctx.fill(); ctx.globalAlpha=1;
         ctx.beginPath();
         for(let i=0;i<days;i++){
           const x=P.l+(i+0.5)*(cWadj/days);
-          const y=P.t+cH-(Math.min(cumData[i],invMax)/invMax)*cH;
+          const y=P.t+cH-(Math.min(ser.data[i]||0,invMax)/invMax)*cH;
           i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
         }
         ctx.strokeStyle=ser.col; ctx.lineWidth=1.5; ctx.setLineDash([]); ctx.stroke();
