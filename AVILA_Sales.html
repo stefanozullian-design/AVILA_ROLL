@@ -1369,7 +1369,7 @@ function spRenderRepView(){
   const curM=+spLastReal().slice(5,7);
   const bookLbl={EXT:'External',INT:'Internal',ALL:'All'}[scope]||scope;
   const scChip=(s,lbl)=>`<span onclick="spSetRepScope('${s}')" class="sp-chip ${scope===s?'green active':''}" style="cursor:pointer">${lbl}</span>`;
-  const grid='display:grid;grid-template-columns:18px 186px repeat(12,minmax(34px,1fr)) 100px;align-items:center;gap:2px';
+  const grid='display:grid;grid-template-columns:18px 186px repeat(12,minmax(34px,1fr)) 64px 100px;align-items:center;gap:2px';
   const ORANGE='#ff8c1a';
   // month cell: green = all real · orange = forecast fully committed · fuchsia = forecast pending
   const monCell=(act,fc,fcC)=>{ const val=act+fc; let color,bg;
@@ -1378,6 +1378,13 @@ function spRenderRepView(){
     else { color='var(--fuchsia)'; bg='rgba(255,77,210,.09)'; }
     return `<div style="text-align:right;padding:0 4px;font-size:7px;color:${color};background:${bg};border-radius:1px">${val?spFmtT(Math.round(val)):'—'}</div>`; };
   const monCells=(mAct,mFc,mFcC)=>Array.from({length:12},(_,i)=>monCell(mAct[i+1]||0,mFc[i+1]||0,mFcC[i+1]||0)).join('');
+  // Full-year total cell (sum of the 12 months) — same actual/committed/pending colouring, bolder.
+  const yrCell=(mAct,mFc,mFcC)=>{ let a=0,f=0,fc=0; for(let m=1;m<=12;m++){ a+=mAct[m]||0; f+=mFc[m]||0; fc+=mFcC[m]||0; }
+    const val=a+f; let color,bg;
+    if(f<=0.5){ if(val>0){color='var(--green)';bg='rgba(0,255,157,.12)';} else {color='var(--text-dim)';bg='';} }
+    else if(fc>=f-0.5){ color=ORANGE; bg='rgba(255,140,26,.18)'; }
+    else { color='var(--fuchsia)'; bg='rgba(255,77,210,.15)'; }
+    return `<div title="Full-year total" style="text-align:right;padding:0 5px;font-size:8px;font-weight:700;color:${color};background:${bg};border-radius:1px;border-left:2px solid var(--border2)">${val?spFmtT(Math.round(val)):'—'}</div>`; };
   // overall aggregate across reps
   const oAct={},oFc={},oFcC={}; reps.forEach(R=>{ for(let m=1;m<=12;m++){ oAct[m]=(oAct[m]||0)+(R.monAct[m]||0); oFc[m]=(oFc[m]||0)+(R.monFc[m]||0); oFcC[m]=(oFcC[m]||0)+(R.monFcCommit[m]||0); } });
   const nDoneReps=reps.filter(R=>{ const cs=Object.values(R.custs); return cs.length&&cs.every(c=>c.committed); }).length;
@@ -1390,8 +1397,8 @@ function spRenderRepView(){
         <span style="margin-left:10px;font-family:var(--mono);font-size:7px;color:var(--text-dim)"><span style="color:var(--green)">■</span>actual <span style="color:var(--fuchsia)">■</span>forecast <span style="color:${ORANGE}">■</span>committed</span></div>
     </div>
     ${sparse}
-    <div style="${grid}"><div></div><div style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">SALES REP</div>${monHdr}<div style="text-align:right;font-family:var(--mono);font-size:7px;color:var(--text-dim)">custs</div></div>
-    <div style="${grid};border-top:1px solid var(--border2);margin-top:2px;padding-top:2px"><div></div><div style="font-family:var(--mono);font-size:9px;font-weight:700;color:var(--text)">ALL REPS</div>${monCells(oAct,oFc,oFcC)}<div></div></div>
+    <div style="${grid}"><div></div><div style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">SALES REP</div>${monHdr}<div style="text-align:right;font-family:var(--mono);font-size:7px;font-weight:700;color:var(--text-dim);border-left:2px solid var(--border2)">Year</div><div style="text-align:right;font-family:var(--mono);font-size:7px;color:var(--text-dim)">custs</div></div>
+    <div style="${grid};border-top:1px solid var(--border2);margin-top:2px;padding-top:2px"><div></div><div style="font-family:var(--mono);font-size:9px;font-weight:700;color:var(--text)">ALL REPS</div>${monCells(oAct,oFc,oFcC)}${yrCell(oAct,oFc,oFcC)}<div></div></div>
   </div>
   <div style="display:flex;flex-direction:column;gap:2px">`;
   SP._repOpen=SP._repOpen||{};
@@ -1402,18 +1409,18 @@ function spRenderRepView(){
       <div style="${grid};cursor:pointer" onclick="spRepToggle('${erep}')">
         <span class="sp-toggle">${open?'▾':'▸'}</span>
         <div style="display:flex;align-items:center;gap:6px;min-width:0"><span style="font-family:var(--mono);font-size:9px;font-weight:700;color:${complete?ORANGE:'var(--text)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${spEsc(R.rep)}">${spEsc(R.rep)}</span><span style="font-family:var(--mono);font-size:7px;color:${complete?ORANGE:'var(--text-dim)'}">${nDone}/${nCust}</span></div>
-        ${monCells(R.monAct,R.monFc,R.monFcCommit)}
+        ${monCells(R.monAct,R.monFc,R.monFcCommit)}${yrCell(R.monAct,R.monFc,R.monFcCommit)}
         <div style="text-align:right"><button class="sp-chip" style="cursor:pointer;padding:0 6px;font-size:8px" onclick="event.stopPropagation();spRepReview('${erep}')">Review ▸</button></div>
       </div>`;
     if(open){
       const custs=cs.slice().sort((a,b)=>b.vol.ROY-a.vol.ROY);
-      h+=`<div style="${grid};border-top:1px dashed var(--border2);margin-top:2px;padding-top:2px"><div></div><div></div><div style="grid-column:span 12"></div><div style="text-align:right"><span class="sp-repchk" style="font-family:var(--mono);font-size:7px;color:${ORANGE};cursor:pointer" onclick="spRepCommitAll('${erep}')">✓ commit all</span></div></div>`;
+      h+=`<div style="${grid};border-top:1px dashed var(--border2);margin-top:2px;padding-top:2px"><div></div><div></div><div style="grid-column:span 13"></div><div style="text-align:right"><span class="sp-repchk" style="font-family:var(--mono);font-size:7px;color:${ORANGE};cursor:pointer" onclick="spRepCommitAll('${erep}')">✓ commit all</span></div></div>`;
       custs.forEach(C=>{ const eso=encodeURIComponent(C.soldTo);
         const cCommit={}; if(C.committed) for(const mo in (C.monFc||{})) cCommit[mo]=C.monFc[mo];
         h+=`<div style="${grid};padding:0;${C.committed?'background:rgba(255,140,26,.05)':''}">
           <div></div>
           <div style="font-family:var(--mono);font-size:7px;color:${C.committed?ORANGE:'var(--text-dim)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-left:12px" title="${spEsc(C.soldTo)}">${C.committed?'✓ ':''}${spEsc(C.soldTo)}</div>
-          ${monCells(C.monAct||{},C.monFc||{},cCommit)}
+          ${monCells(C.monAct||{},C.monFc||{},cCommit)}${yrCell(C.monAct||{},C.monFc||{},cCommit)}
           <div style="text-align:right"><span class="sp-repchk" onclick="spRepCommit('${erep}','${eso}',${C.committed?0:1})" style="font-family:var(--mono);font-size:7px;color:${C.committed?ORANGE:'var(--blue)'};cursor:pointer">${C.committed?'✓':'commit'}</span></div>
         </div>`;
       });
@@ -1712,7 +1719,7 @@ function spRenderTable(skipThead=false){
   const groupBy=spGetGroupBy();
   const fcPeriods=spFcPeriods();
   // Boundary between green actuals and the fuchsia forecast world: the last real day.
-  const lastReal=spLastReal(), lastYm=lastReal.slice(0,7);
+  const lastReal=spLastReal(), lastYm=lastReal.slice(0,7), lastYear=lastReal.slice(0,4);
   const FCC='#ff4dd2';
   const fcBL='border-left:3px double rgba(255,77,210,.55)';
   const fcBR='border-right:3px double rgba(255,77,210,.55)';
@@ -1757,7 +1764,12 @@ function spRenderTable(skipThead=false){
   const thead=document.getElementById('sp-thead');
   if(thead&&!skipThead){
     let h1='',h2='';
-    months.forEach(mo=>{
+    const yrTh=(yr)=>{
+      const color=yr<lastYear?'var(--green)':yr>lastYear?FCC:'var(--amber)';
+      const bg=yr<lastYear?'rgba(0,255,157,.10)':yr>lastYear?'rgba(255,77,210,.10)':'rgba(255,184,48,.10)';
+      return `<th rowspan="2" title="Full-year ${yr} total (actuals + forecast)" style="background:${bg};color:${color};font-size:7px;font-weight:700;text-align:center;letter-spacing:.5px;border-left:3px double var(--border2);padding:3px 5px;white-space:nowrap">Σ ${yr}</th>`;
+    };
+    months.forEach((mo,mi)=>{
       const col=SP.collapsedMonths.has(mo.ym);
       const bg=mo.isPast?'rgba(0,255,157,.06)':mo.isCurrent?'rgba(77,166,255,.06)':'rgba(255,184,48,.04)';
       const tc=mo.isPast?'var(--green)':mo.isCurrent?'var(--blue)':'var(--amber)';
@@ -1793,6 +1805,10 @@ function spRenderTable(skipThead=false){
         if(!col) mo.dates.forEach(ds=>{ h2+=dayTh(ds); });
         h2+=sumTh('Σ',!col);
       }
+      // Year-total column after the last month of each year (rowspan=2 so it
+      // occupies both header rows; body rows emit a matching cell).
+      const yearEnd = mi===months.length-1 || months[mi+1].ym.slice(0,4)!==mo.ym.slice(0,4);
+      if(yearEnd) h1+=yrTh(mo.ym.slice(0,4));
     });
     const hdrLbl=groupBy.map(d=>SP_DIMS[d]?.label).filter(Boolean).join(' / ')||'Group';
     thead.innerHTML=`<tr>
@@ -1822,7 +1838,15 @@ function spRenderTable(skipThead=false){
       return {val, html:`<td style="${isAct?'background:rgba(0,255,157,.04);':FUT+';'}${bd};text-align:right;padding:1px 2px;font-size:7px">${val?Math.round(val).toLocaleString():''}</td>`};
     };
     const sumTd=(v,heavy,fut,bgBase)=>`<td style="text-align:right;padding:1px 4px;font-size:7px;${heavy?'font-weight:700;':''}${fut?FUT+';':''}${bgBase?'background:'+bgBase+';':''}border-left:${heavy?'2px solid':'1px solid'} var(--border2)">${v?Math.round(v).toLocaleString():'—'}</td>`;
-    months.forEach(mo=>{
+    // Full-year total column (mirrors the thead Σ YYYY): accumulate each month's
+    // contribution and flush a cell at each year boundary.
+    let yearTot=0;
+    const yrTd=(yr)=>{
+      const color=yr<lastYear?'var(--green)':yr>lastYear?FCC:'var(--amber)';
+      const bg=yr<lastYear?'rgba(0,255,157,.07)':yr>lastYear?'rgba(255,77,210,.07)':'rgba(255,184,48,.08)';
+      return `<td title="Full-year ${yr}" style="text-align:right;padding:1px 5px;font-size:7px;font-weight:700;color:${color};background:${bg};border-left:3px double var(--border2)">${yearTot?Math.round(yearTot).toLocaleString():'—'}</td>`;
+    };
+    months.forEach((mo,mi)=>{
       const col=SP.collapsedMonths.has(mo.ym);
       const bgBase=mo.isPast?'rgba(0,255,157,.03)':'';
       if(mo.ym===lastYm){
@@ -1830,6 +1854,7 @@ function spRenderTable(skipThead=false){
         let mtd=0;
         if(col){ actD.forEach(ds=>{ mtd+=actMap[ds]||0; }); cells+=sumTd(mtd,false,false,'rgba(0,255,157,.03)'); }
         else { actD.forEach(ds=>{ const c=dayTd(ds); mtd+=c.val; cells+=c.html; }); cells+=sumTd(mtd,true,false,'rgba(0,255,157,.03)'); }
+        yearTot+=mtd;
         fcPeriods.forEach((p,i)=>{
           const rate=spNodeFcRate(node,p.id);
           const own=spFcRuleAt(node.path,p.id);
@@ -1839,6 +1864,7 @@ function spRenderTable(skipThead=false){
           let rom=0;
           if(col){ futD.forEach(ds=>{ rom+=getFc(ds); }); }
           else { futD.forEach(ds=>{ const c=dayTd(ds); rom+=c.val; cells+=c.html; }); }
+          yearTot+=rom;
           // End-of-month Σ = full month total (actuals to date + forecast) for easy
           // month-to-month comparison — amber to flag it mixes real + forecast.
           const monthTot=mtd+rom;
@@ -1848,11 +1874,15 @@ function spRenderTable(skipThead=false){
         let s=0;
         if(col){ mo.dates.forEach(ds=>{ s+=actMap[ds]||0; }); cells+=sumTd(s,false,false,bgBase); }
         else { mo.dates.forEach(ds=>{ const c=dayTd(ds); s+=c.val; cells+=c.html; }); cells+=sumTd(s,true,false,bgBase); }
+        yearTot+=s;
       } else {
         let s=0;
         if(col){ mo.dates.forEach(ds=>{ s+=getFc(ds); }); cells+=sumTd(s,false,true,''); }
         else { mo.dates.forEach(ds=>{ const c=dayTd(ds); s+=c.val; cells+=c.html; }); cells+=sumTd(s,true,true,''); }
+        yearTot+=s;
       }
+      const yearEnd = mi===months.length-1 || months[mi+1].ym.slice(0,4)!==mo.ym.slice(0,4);
+      if(yearEnd){ cells+=yrTd(mo.ym.slice(0,4)); yearTot=0; }
     });
     return cells;
   }
