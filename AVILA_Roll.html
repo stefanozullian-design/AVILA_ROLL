@@ -3762,7 +3762,8 @@ function maintModalHTML(ev, elementId){
           <option value="recurring" ${type==='recurring'?'selected':''}>Recurring</option>
         </select></div>
         <div class="ff"><div class="fl">Duration (days)</div>
-          <input class="fi" type="number" id="me-dur" value="${durDays}" min="1" onchange="calcMeEndDate()">
+          <input class="fi" type="number" id="me-dur" value="${durDays}" min="0.5" step="0.5" onchange="calcMeEndDate()">
+          <div class="fhint">Half-days allowed (e.g. 0.5) — a fractional tail day runs at reduced output</div>
         </div>
       </div>
       <div class="fr"><div class="ff"><div class="fl">Start Date</div>
@@ -3814,7 +3815,9 @@ function openMaintModalFromCalendar(){
 function calcEndDate(startDate, durationDays){
   try{
     const d=new Date(startDate);
-    d.setDate(d.getDate()+(parseInt(durationDays)||1)-1);
+    // Fractional durations (e.g. 0.5, 1.5) span ceil(dur) calendar days — the last is the
+    // partial/reduced-output day — so the end date is start + ceil(dur) - 1.
+    d.setDate(d.getDate()+Math.max(1,Math.ceil(parseFloat(durationDays)||1))-1);
     return d._ymd();
   }catch(e){return startDate;}
 }
@@ -3851,7 +3854,7 @@ function getMeFormValues(){
   const days=parseInt(document.getElementById('me-rampdays')?.value)||0;
   const ramp=[]; for(let i=1;i<=days;i++){const v=document.getElementById(`ru-${i}`);ramp.push(v?parseFloat(v.value)||100:100);}
   const startDate=document.getElementById('me-start')?.value||'';
-  const durDays=parseInt(document.getElementById('me-dur')?.value)||1;
+  const durDays=parseFloat(document.getElementById('me-dur')?.value)||1;
   return {
     name:document.getElementById('me-name')?.value||'Maintenance',
     type:document.getElementById('me-type')?.value||'fixed',
@@ -4364,7 +4367,7 @@ function showCampaignPopup(elId, dateStr, runStart, runEnd, runProduct){
     return `<option value="${c.product_id}" data-rate="${rr}" ${selProd===c.product_id?'selected':''}>${p?.name||c.product_id} (${rr} t/d rated)</option>`;
   }).join('')
   + `<option value="__down_repair__" data-rate="0" data-down="1" ${selProd==='__down_repair__'?'selected':''}>🔧 Down For Repairs (0 t/d)</option>`
-  + `<option value="__down_pm__" data-rate="0" data-down="1" ${selProd==='__down_pm__'?'selected':''}>🗓 Down PM Day (0 t/d)</option>`;
+  + `<option value="__down_pm__" data-rate="0" data-down="1" data-pm="1" ${selProd==='__down_pm__'?'selected':''}>🗓 Down PM Day (½ day · 50%)</option>`;
 
   const selCap=caps.find(c=>c.product_id===selProd);
   const currentRate=existing?.rate_tpd||(selCap?_rowRate(selCap):_rowRate(caps[0]))||0;
@@ -4469,12 +4472,13 @@ function _campProductChanged(sel){
   const rateLbl=document.getElementById('camp-rate-label');
   const rateHint=document.getElementById('camp-rate-hint');
   if(window._campMode!=='real'&&rate) rate.value=opt?opt.dataset.rate:rate.value;
+  const isPm=opt&&opt.dataset&&opt.dataset.pm==='1'; // Down PM Day → half-day at 50% (not a full stop)
   if(rate){ rate.disabled=!!isDown; rate.style.opacity=isDown?'.5':'1'; }
   if(isDown){
     if(rate) rate.value='0';
     if(rateLbl) rateLbl.textContent='Rate (t/d)';
-    if(rateHint){ rateHint.textContent='no production'; rateHint.style.display=''; }
-  } else if(rateHint&&rateHint.textContent==='no production'){
+    if(rateHint){ rateHint.textContent=isPm?'½ day · runs at 50%':'no production'; rateHint.style.display=''; }
+  } else if(rateHint&&(rateHint.textContent==='no production'||rateHint.textContent==='½ day · runs at 50%')){
     rateHint.textContent='override topology';
   }
 }
@@ -5781,7 +5785,7 @@ function renderSupplyKPIs(){
       // Rated (skip maintenance days)
       const isMaint=DB.element_maintenance_events.some(m=>{
         const sd=new Date(m.start_date+'T00:00:00');
-        const dur=parseInt(m.duration_days)||1;
+        const dur=Math.max(1,Math.ceil(parseFloat(m.duration_days)||1));
         const ed=new Date(sd.getTime()+(dur-1)*864e5);
         return m.element_id===el.id&&ds>=m.start_date&&ds<=ed._ymd();
       });
@@ -6912,7 +6916,8 @@ function _renderSupplyViewInner(wrap){
     const horizon=S.simCfg.horizon||365;
     evts.forEach(ev=>{
       const sd=new Date((ev.start_date||'')+'T00:00:00');
-      const dur=parseInt(ev.duration_days)||1;
+      // ceil so a fractional/partial day (e.g. 0.5) still gets a MAINT badge.
+      const dur=Math.max(1,Math.ceil(parseFloat(ev.duration_days)||1));
       const freq=parseInt(ev.frequency_days)||0;
       // Add all days for one occurrence starting at 'occStart'
       const addOccurrence=(occStart)=>{
@@ -6955,16 +6960,20 @@ function _renderSupplyViewInner(wrap){
       c.element_id===el.id && ds>=c.start_date && ds<=c.end_date
     );
     if(managerCampaign){
-      // Downtime campaign ("Down For Repairs" / "Down PM Day"): 0 production, tagged
-      // reason. Must return BEFORE the rate fallback below (else a 0 rate would fall
-      // back to rated capacity and the element would wrongly "produce" while down).
+      // "Down For Repairs" is a full stop (0 production). "Down PM Day" is a HALF-day: the
+      // element actually ran at ~50%, so fall through to the sim tiers below instead of
+      // showing 0. A normal (non-downtime) campaign shows its locked product/rate.
       const dt=DOWNTIME_PRODUCTS[managerCampaign.product_id];
-      if(dt) return {product_id:null, capacity_tpd:0, isCampaign:true, downtime:dt};
-      const campRate=parseFloat(managerCampaign.rate_tpd)||0;
-      const fallbackCap=DB.element_product_capacities.find(c=>c.element_id===el.id&&c.product_id===managerCampaign.product_id);
-      const fbRate=_isPackingRow(fallbackCap)?_packLineCapT(fallbackCap):(parseFloat(fallbackCap?.capacity_tpd)||0);
-      const rate=campRate||fbRate;
-      return {product_id:managerCampaign.product_id, capacity_tpd:rate, isCampaign:true};
+      if(dt && managerCampaign.product_id!=='__down_pm__')
+        return {product_id:null, capacity_tpd:0, isCampaign:true, downtime:dt};
+      if(!dt){
+        const campRate=parseFloat(managerCampaign.rate_tpd)||0;
+        const fallbackCap=DB.element_product_capacities.find(c=>c.element_id===el.id&&c.product_id===managerCampaign.product_id);
+        const fbRate=_isPackingRow(fallbackCap)?_packLineCapT(fallbackCap):(parseFloat(fallbackCap?.capacity_tpd)||0);
+        const rate=campRate||fbRate;
+        return {product_id:managerCampaign.product_id, capacity_tpd:rate, isCampaign:true};
+      }
+      // __down_pm__ → fall through to sim results (it ran at ~50%)
     }
 
     // Tier 1: sim results — KILNS report ACTUAL produced clinker (0 when blocked), so the
@@ -12959,18 +12968,29 @@ function simulate(elements, connections, horizon, includeProposed=false){
     .forEach(ev=>{
       if(!maintMap[ev.element_id]) maintMap[ev.element_id]=[];
       const sd=dateToDayOffset(ev.start_date, S.simCfg.start_date);
-      const dur=parseInt(ev.duration_days)||1;
+      // Fractional durations are allowed (e.g. 0.5 = half-day PM). A whole part of N
+      // means N full-down days; a 0.5 remainder means the following day runs at 50%.
+      const durF=parseFloat(ev.duration_days)||1;
+      const fullDur=Math.floor(durF);        // number of full-down days
+      const frac=durF-fullDur;                // remainder → partial day at (1-frac) output
+      const rampDays=parseInt(ev.rampup_days)||0;
       const freq=parseInt(ev.frequency_days)||0;
-      const entry={sd, ed:sd+dur-1, rampDays:parseInt(ev.rampup_days)||0,
-                   ramp:ev.rampup_profile||[], name:ev.name||'PM'};
+      // ed = last FULL-down day (sd-1 when there are none, i.e. a pure half-day event).
+      // partial = the reduced-output day after the full-down block; pPct = output fraction.
+      const mkEntry=(s0)=>{
+        const ed=s0+fullDur-1;
+        const partial=frac>1e-9?ed+1:null;
+        return {sd:s0, ed, partial, pPct:frac>1e-9?(1-frac):1,
+                rampDays, ramp:ev.rampup_profile||[], name:ev.name||'PM'};
+      };
+      const entry=mkEntry(sd);
       if(sd>=0&&sd<horizon) maintMap[ev.element_id].push(entry);
       if(ev.type==='recurring'&&freq>0){
         const recEnd=ev.recurrence_end_date
           ?dateToDayOffset(ev.recurrence_end_date,S.simCfg.start_date):horizon;
         let next=sd+freq;
         while(next<horizon&&next<=recEnd){
-          maintMap[ev.element_id].push(
-            {sd:next,ed:next+dur-1,rampDays:entry.rampDays,ramp:entry.ramp,name:entry.name});
+          maintMap[ev.element_id].push(mkEntry(next));
           next+=freq;
         }
       }
@@ -13611,8 +13631,10 @@ function simulate(elements, connections, horizon, includeProposed=false){
     elements.forEach(el=>{
       const s=state[el.id];
       const evts=maintMap[el.id]||[];
-      const maint=evts.find(m=>day>=m.sd+1&&day<=m.ed+1);
-      const ramp=evts.find(m=>day>m.ed+1&&day<=m.ed+1+m.rampDays);
+      const maint=evts.find(m=>day>=m.sd+1&&day<=m.ed+1);      // full-down day(s)
+      const partial=evts.find(m=>m.partial!=null&&day===m.partial+1); // reduced-output tail day
+      // Ramp-up begins after the LAST down day (the partial tail day if there is one).
+      const ramp=evts.find(m=>{const last=m.partial!=null?m.partial:m.ed; return day>last+1&&day<=last+1+m.rampDays;});
       if(maint){
         // ── RULE: maintenance_guard ───────────────────
         // If a maintenance_guard rule exists, block this maintenance if any
@@ -13633,8 +13655,14 @@ function simulate(elements, connections, horizon, includeProposed=false){
         }
         s.status='maintenance';
         logStop(el.id,el.name,day,'maintenance',`PM: ${maint.name}`);
+      } else if(partial){
+        // Partial (e.g. half-day) PM: element runs this day at pPct of capacity. Reuse the
+        // rampup path — every production step already scales output by _rampPct.
+        s.status='rampup';
+        s._rampPct=partial.pPct;
       } else if(ramp){
-        const rd=day-(ramp.ed+1);
+        const last=ramp.partial!=null?ramp.partial:ramp.ed;
+        const rd=day-(last+1);
         const pct=(ramp.ramp[rd-1]||100)/100;
         s.status='rampup';
         s._rampPct=pct;
@@ -13678,9 +13706,15 @@ function simulate(elements, connections, horizon, includeProposed=false){
       // AFTER the real-production anchor so actual recorded output still wins.
       const _kCamp=(DB.production_campaigns||[]).find(c=>c.element_id===el.id&&_kilnDate>=c.start_date&&_kilnDate<=c.end_date);
       if(_kCamp&&DOWNTIME_PRODUCTS[_kCamp.product_id]){
-        s.status='idle';
-        logStop(el.id,el.name,day,'idle',_kCamp.product_id==='__down_repair__'?'Down for repairs (manual)':'Down PM day (manual)');
-        recK(0); return;
+        if(_kCamp.product_id==='__down_pm__'){
+          // Half-day PM: run at 50% of capacity (via the rampup scaling) rather than a full stop.
+          const prev=(s.status==='rampup'&&s._rampPct!=null)?s._rampPct:1;
+          s.status='rampup'; s._rampPct=Math.min(prev,0.5);
+        } else {
+          s.status='idle';
+          logStop(el.id,el.name,day,'idle','Down for repairs (manual)');
+          recK(0); return;
+        }
       }
 
       const caps=capMap[el.id]||[];
@@ -13963,12 +13997,19 @@ function simulate(elements, connections, horizon, includeProposed=false){
         );
         if(camp){
           const campProdId=camp.product_id;
-          // Downtime campaign ("Down For Repairs" / "Down PM Day") — force the mill down
-          // for the day: produce nothing, exactly like a maintenance/idle day.
+          // Downtime campaign. "Down For Repairs" forces a full stop (idle). "Down PM Day"
+          // is a HALF-day: run at 50% via the rampup scaling and fall through to normal
+          // routing (rate_tpd is 0 and there's no cap for __down_pm__, so the campaign-force
+          // block below is skipped and the mill picks a product by urgency at 50%).
           if(DOWNTIME_PRODUCTS[campProdId]){
-            s.status='idle'; r.millProductHistory[mill.id].push(null);
-            logStop(mill.id,mill.name,day,'idle',campProdId==='__down_repair__'?'Down for repairs (manual)':'Down PM day (manual)');
-            return;
+            if(campProdId==='__down_pm__'){
+              const prev=(s.status==='rampup'&&s._rampPct!=null)?s._rampPct:1;
+              s.status='rampup'; s._rampPct=Math.min(prev,0.5);
+            } else {
+              s.status='idle'; r.millProductHistory[mill.id].push(null);
+              logStop(mill.id,mill.name,day,'idle','Down for repairs (manual)');
+              return;
+            }
           }
           const campRate=parseFloat(camp.rate_tpd)||0;
           const campCap=caps.find(c=>c.product_id===campProdId);
@@ -14236,7 +14277,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
     elements.filter(e=>e.type==='packing_plant').forEach(el=>{
       const s=state[el.id];
       if(s.status==='maintenance'){ r.packProductHistory[el.id].push(null); return; }
-      const ramp=s.status==='rampup'?(s._rampPct||1):1;
+      let ramp=s.status==='rampup'?(s._rampPct||1):1;
       const lines=packLineMap[el.id]||[];
 
       // Withdraw `bulkNeeded` of inPid from sourcing silos + add `outputT` of outPid to packed silos.
@@ -14281,12 +14322,20 @@ function simulate(elements, connections, horizon, includeProposed=false){
       const camp=(DB.production_campaigns||[]).find(c=>
         c.element_id===el.id && packDate>=c.start_date && packDate<=c.end_date);
       if(camp){
-        // Downtime campaign — force the packer down for the day (no production).
+        // Downtime campaign. "Down For Repairs" fully stops the packer; "Down PM Day" is a
+        // HALF-day — run at 50% via the rampup scaling and fall through to urgency selection
+        // (no packing line matches __down_pm__, so the campaign-force block is skipped).
         if(DOWNTIME_PRODUCTS[camp.product_id]){
-          s.status='idle'; s.currentProduct=null;
-          logStop(el.id,el.name,day,'idle',camp.product_id==='__down_repair__'?'Down for repairs (manual)':'Down PM day (manual)');
-          r.packProductHistory[el.id].push(null);
-          return;
+          if(camp.product_id==='__down_pm__'){
+            const prev=(s.status==='rampup'&&s._rampPct!=null)?s._rampPct:1;
+            s.status='rampup'; s._rampPct=Math.min(prev,0.5);
+            ramp=s._rampPct; // refresh the captured factor so packing capacity scales to 50%
+          } else {
+            s.status='idle'; s.currentProduct=null;
+            logStop(el.id,el.name,day,'idle','Down for repairs (manual)');
+            r.packProductHistory[el.id].push(null);
+            return;
+          }
         }
         const line=lines.find(l=>l.product_id===camp.product_id);
         if(line){
@@ -15384,7 +15433,7 @@ function renderResultsTable(){
       const m=new Map();
       DB.element_maintenance_events.filter(ev=>ev.element_id===elId).forEach(ev=>{
         const sd=new Date((ev.start_date||'')+'T00:00:00');
-        const dur=parseInt(ev.duration_days)||1;
+        const dur=Math.max(1,Math.ceil(parseFloat(ev.duration_days)||1));
         const freq=parseInt(ev.frequency_days)||0;
         const addOcc=(occStart)=>{
           for(let d=0;d<dur;d++){
@@ -21896,7 +21945,7 @@ async function agentToolRunWhatif({horizon_days, maintenance_overrides}={}){
         id:`whatif_${Date.now()}_${Math.random().toString(36).slice(2,7)}`,
         element_id:el.id, facility_id:S.facility_id, element_name:el.name, element_type:el.type,
         name:'What-if outage', type:'fixed', start_date:mo.start_date,
-        duration_days:parseInt(mo.duration_days)||1, end_date:null,
+        duration_days:parseFloat(mo.duration_days)||1, end_date:null,
         frequency_days:null, recurrence_end_date:null, rampup_days:0, rampup_profile:[],
         notes:'Sandboxed AI what-if — not saved'
       });
@@ -22076,7 +22125,7 @@ const AGENT_TOOLS=[
       maintenance_overrides:{type:'array',description:'Optional. Hypothetical downtime events to add for this trial only.',items:{type:'object',properties:{
         element_name:{type:'string',description:'Name (or partial match) of the element to take down.'},
         start_date:{type:'string',description:'YYYY-MM-DD'},
-        duration_days:{type:'integer'}
+        duration_days:{type:'number',description:'Days of downtime. Fractional allowed: 0.5 = half-day PM (element runs at 50% that day).'}
       },required:['element_name','start_date','duration_days']}}
     }}
   },
