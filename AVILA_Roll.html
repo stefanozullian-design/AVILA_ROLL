@@ -12776,7 +12776,8 @@ function simulate(elements, connections, horizon, includeProposed=false){
     berthVesselHistory:{},    // berthVesselHistory[berthId][day-1] = {docked, state:'unloading'|'anchorage'|'idle', waiting, waitingList:[{name,reason}]}
     vesselArrivalHistory:{},  // vesselArrivalHistory[siloId][day-1] = full vessel qty on arrival day, 0 otherwise
     siloUnloadHistory:{},     // siloUnloadHistory[siloId][day-1] = daily tonnes unloaded into that silo
-    railShortfalls:[]         // {dpId, dpName, switchDay, date, toFacId, plannedCars, shippedCars, shortCars} — scheduled cars the origin could not load/ship in time
+    railShortfalls:[],        // {dpId, dpName, switchDay, date, toFacId, plannedCars, shippedCars, shortCars} — scheduled cars the origin could not load/ship in time
+    demandFill:{}             // demandFill[dpId] = {name, products, requested, served, shortDays} — per demand point, requested vs actually served over the horizon (a shortfall = a stock-out at that point)
   };
 
   // ── STATE ────────────────────────────────────────────
@@ -14934,7 +14935,13 @@ function simulate(elements, connections, horizon, includeProposed=false){
         products=[...topoProds];
       }
 
-      _pullDemand(products, effective, topoSilos, dp.facilityId, false);
+      const _served=_pullDemand(products, effective, topoSilos, dp.facilityId, false);
+      if(effective>0){
+        let df=r.demandFill[dp.id];
+        if(!df) df=r.demandFill[dp.id]={name:dp.name, products:products.slice(), requested:0, served:0, shortDays:0};
+        df.requested+=effective; df.served+=_served;
+        if(_served < effective-0.5) df.shortDays++;
+      }
       if(swOut>0||swIn>0){
         if(!r.demandSwapHistory[dp.id]) r.demandSwapHistory[dp.id]=[];
         r.demandSwapHistory[dp.id][day-1]={own:ownRate, swappedOut:swOut, swappedIn:swIn, effective, toElement:swOutR?.toElement||null, toProduct:swOutR?.toProduct||null};
@@ -21798,10 +21805,134 @@ async function agentToolRunWhatif({horizon_days, maintenance_overrides}={}){
   }
 }
 
+function _agentProdName(pid){ const p=(DB.products||[]).find(x=>x.id===pid); return p?p.name:pid; }
+
+// Static production/capacity digest for the active facility — lets the agent reason
+// about bottlenecks (which mill can make what, clinker factors, demand by product).
+function agentToolGetProductionModel(){
+  if(!S.facility_id) return {error:'No active facility selected.'};
+  const els=getFacElements();
+  const byId=Object.fromEntries(els.map(e=>[e.id,e]));
+  const rec={};
+  (DB.recipes||[]).forEach(r=>{ if(r.product_id&&r.material_id!=null){ (rec[r.product_id]=rec[r.product_id]||{})[r.material_id]=r.pct; }});
+  const clinkerFactor=pid=>{ const m=rec[pid]||{}; let f=0; Object.entries(m).forEach(([mid,pct])=>{ if(/clk|clinker/i.test(mid)) f+=(+pct||0); }); return f?Math.round(f*10)/10:null; };
+  const caps=DB.element_product_capacities||[];
+  const prodEls=els.filter(e=>['kiln','finish_mill','cement_mill','raw_mill','packing_plant'].includes(e.type)).map(e=>({
+    name:e.name, type:e.type,
+    can_make:caps.filter(c=>c.element_id===e.id).map(c=>({product:_agentProdName(c.product_id), rate_tpd:c.capacity_tpd}))
+  }));
+  const eligible={};
+  caps.filter(c=>byId[c.element_id]).forEach(c=>{ (eligible[c.product_id]=eligible[c.product_id]||new Set()).add(byId[c.element_id].name); });
+  const silos=els.filter(e=>['bulk_silo','packed_silo','clinker_silo'].includes(e.type)).map(e=>({
+    name:e.name, type:e.type, capacity_t:e.props?.max_capacity||0, start_inventory_t:e.props?.start_inventory||0,
+    products:(e.props?.products||[e.props?.product_id]).filter(Boolean).map(_agentProdName)
+  }));
+  const start=S.simCfg.start_date, horizon=_simEffectiveHorizon();
+  const endD=new Date(new Date(start+'T00:00:00').getTime()+horizon*864e5)._ymd();
+  const demByPoint={};
+  els.filter(e=>e.type==='demand_point').forEach(e=>{
+    let tot=0; (DB.demand_values||[]).forEach(v=>{ if(v.element_id===e.id && v.date>=start && v.date<endD) tot+=(+v.value_t||0); });
+    if(tot>0){ const dpRec=DB.demand_points.find(d=>d.element_id===e.id); demByPoint[e.name]={annual_t:Math.round(tot), products:(dpRec?.products||[]).map(p=>_agentProdName(p.product_id))}; }
+  });
+  const maint=(DB.element_maintenance_events||[]).filter(m=>byId[m.element_id]).map(m=>({element:m.element_name, type:m.type, start:m.start_date, duration_days:m.duration_days, every_days:m.frequency_days||null}));
+  return {
+    facility:getFacility()?.name, start_date:start, horizon_days:horizon,
+    clinker_factors_pct:Object.fromEntries((DB.products||[]).map(p=>[p.name,clinkerFactor(p.id)]).filter(x=>x[1]!=null)),
+    production_elements:prodEls,
+    product_can_be_made_by:Object.fromEntries(Object.entries(eligible).map(([pid,s])=>[_agentProdName(pid),[...s]])),
+    silos, demand_by_point:demByPoint, maintenance:maint,
+    note:'Rates in t/day. product_can_be_made_by lists the ONLY mills able to grind each product — a product with a single eligible mill is a likely bottleneck. Use find_max_demand for exact stock-out ceilings.'
+  };
+}
+
+// Run a sandbox sim with one demand point scaled by `mult` (nothing saved).
+function _agentSimWithDemand(targetElId, mult){
+  const dvSnap=DB.demand_values;
+  try{
+    DB.demand_values=DB.demand_values.map(v=> v.element_id===targetElId ? {...v, value_t:(parseFloat(v.value_t)||0)*mult} : v);
+    _demandCacheInvalidate();
+    return simulate(getFacElements(), getFacConnections(), _simEffectiveHorizon(), true);
+  } finally { DB.demand_values=dvSnap; _demandCacheInvalidate(); }
+}
+
+// Binary-search the max demand of one point before ANY OTHER product can't be fully served.
+async function agentToolFindMaxDemand({demand_point, max_multiplier=4, tolerance_pct=1}={}){
+  if(!S.facility_id) return {error:'No active facility selected.'};
+  if(typeof _simQ!=='undefined' && _simQ.running) return {error:'A real simulation is running — try again in a moment.'};
+  const target=agentFindElement(demand_point);
+  if(!target || target.type!=='demand_point') return {error:`No demand point matching "${demand_point}". Use get_production_model to see demand point names.`};
+  const tol=Math.max(0,(tolerance_pct||1)/100);
+  const shortMap=(r)=>{ const m={};
+    Object.entries(r.demandFill||{}).forEach(([id,df])=>{ if(id===target.id) return;
+      m[id]={name:df.name, products:(df.products||[]).map(_agentProdName).join(', ')||df.name, requested:df.requested, served:df.served, short:Math.max(0,df.requested-df.served), shortDays:df.shortDays}; });
+    return m; };
+  let runs=0;
+  const sim=m=>{ runs++; return _agentSimWithDemand(target.id,m); };
+  const base=sim(1);
+  const baseAnnual=Math.round((base.demandFill[target.id]||{requested:0}).requested);
+  const baseShort=shortMap(base);
+  // Pre-existing shortfalls (already short before we touch anything) — reported as context, not the answer.
+  const preExisting=Object.values(baseShort).filter(d=>d.requested>0 && d.served<d.requested*(1-tol))
+    .map(d=>({product:d.products, point:d.name, short_t:Math.round(d.short)})).sort((a,b)=>b.short_t-a.short_t);
+  // A stock-out CAUSED BY the increase = a point that gets materially worse than baseline.
+  const newlyBroken=(r)=>{ const cur=shortMap(r); const out=[];
+    Object.entries(cur).forEach(([id,d])=>{ const b=baseShort[id]||{short:0}; const thr=Math.max(50, d.requested*tol);
+      if(d.short > b.short + thr) out.push({product:d.products, point:d.name, short_t:Math.round(d.short), extra_short_vs_now_t:Math.round(d.short-b.short), short_days:d.shortDays}); });
+    return out.sort((a,b)=>b.extra_short_vs_now_t-a.extra_short_vs_now_t); };
+  let lo=1, hi=null, m=2;
+  while(m<=max_multiplier){ if(newlyBroken(sim(m)).length){ hi=m; break; } lo=m; m*=2; }
+  const common={ demand_point:target.name, current_annual_t:baseAnnual, sim_runs:0,
+    already_short_at_current_demand: preExisting.length?preExisting.slice(0,5):undefined };
+  if(hi===null){ common.sim_runs=runs; common.status='no_extra_stockout_within_range';
+    common.max_annual_t=Math.round(baseAnnual*max_multiplier);
+    common.message=`Pushing this demand up to ${max_multiplier}× (~${Math.round(baseAnnual*max_multiplier).toLocaleString()} t/yr) doesn't push any OTHER product further short than it already is`+(preExisting.length?` (note: ${preExisting.length} point(s) are already short at today's demand — see already_short_at_current_demand)`:`.`);
+    return common; }
+  let firstBreak=null;
+  for(let i=0;i<7;i++){ const mid=(lo+hi)/2; const nb=newlyBroken(sim(mid)); if(nb.length){ hi=mid; firstBreak=nb; } else lo=mid; }
+  common.sim_runs=runs; common.status='found';
+  common.max_annual_t=Math.round(baseAnnual*lo);
+  common.headroom_t=Math.round(baseAnnual*lo)-baseAnnual;
+  common.max_multiple_of_current=Math.round(lo*100)/100;
+  common.first_product_to_stock_out=firstBreak?firstBreak[0]:null;
+  common.note='Max annual demand for this point (holding production & maintenance as-is) before it pushes ANOTHER product further short than it is today. From binary-searched sandbox sims — nothing saved; demand scaled proportionally. Report max_annual_t, the first product to break, and mention any already_short points as separate context.';
+  return common;
+}
+
+// Generate a downloadable HTML report from agent-provided content.
+function agentToolCreateReport({title, subtitle, sections}={}){
+  if(!title || !Array.isArray(sections)) return {error:'Provide a title and a sections array ([{heading, body, table?}]).'};
+  const esc=s=>String(s==null?'':s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  const mdInline=s=>esc(s).replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/`(.+?)`/g,'<code>$1</code>');
+  const secHtml=(sections||[]).map(sec=>{
+    let h=`<h2>${esc(sec.heading||'')}</h2>`;
+    if(sec.body) h+=sec.body.split(/\n\n+/).map(p=>`<p>${p.split('\n').map(mdInline).join('<br>')}</p>`).join('');
+    if(sec.table&&sec.table.rows){ const t=sec.table;
+      h+=`<table>${t.headers?`<tr>${t.headers.map(x=>`<th>${esc(x)}</th>`).join('')}</tr>`:''}${t.rows.map(row=>`<tr>${row.map(x=>`<td>${esc(x)}</td>`).join('')}</tr>`).join('')}</table>`; }
+    return h;
+  }).join('');
+  const doc=`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(title)}</title>
+<style>body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#1a2233;max-width:820px;margin:0 auto;padding:36px 30px;line-height:1.55;font-size:14px}h1{font-size:23px;margin:0 0 3px}.sub{color:#5b6b86;font-size:13px;margin-bottom:8px;border-bottom:2px solid #d7deea;padding-bottom:14px}h2{font-size:16px;margin:26px 0 8px;border-bottom:1px solid #d7deea;padding-bottom:5px}table{border-collapse:collapse;width:100%;margin:12px 0;font-size:12.5px}th,td{border:1px solid #d7deea;padding:6px 9px;text-align:right}th{background:#f4f7fb}th:first-child,td:first-child{text-align:left}code{background:#f4f7fb;padding:1px 5px;border-radius:3px;font-size:12.5px}.foot{margin-top:36px;padding-top:12px;border-top:1px solid #d7deea;color:#5b6b86;font-size:11px}@media print{body{padding:0}}</style></head>
+<body><h1>${esc(title)}</h1><div class="sub">${mdInline(subtitle||'')}</div>${secHtml}
+<div class="foot">Generated by the AVILA Roll AI agent · ${new Date().toLocaleString()}</div></body></html>`;
+  try{
+    const blob=new Blob([doc],{type:'text/html'});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a'); a.href=url;
+    a.download=(title.replace(/[\\/:*?"<>|]/g,'').slice(0,60)||'AVILA_report')+'.html';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),4000);
+    if(typeof statMsg==='function') statMsg('Report downloaded: '+a.download);
+    return {ok:true, filename:a.download, note:'The report was downloaded to the user\'s computer. Tell them the filename and that they can open it in a browser and print to PDF.'};
+  }catch(e){ return {error:'Could not generate the report: '+e.message}; }
+}
+
 const AGENT_TOOL_FNS={
   get_stop_events: agentToolGetStopEvents,
   get_inventory_on_date: agentToolGetInventoryOnDate,
-  run_whatif_simulation: agentToolRunWhatif
+  run_whatif_simulation: agentToolRunWhatif,
+  get_production_model: agentToolGetProductionModel,
+  find_max_demand: agentToolFindMaxDemand,
+  create_report: agentToolCreateReport
 };
 
 const AGENT_TOOLS=[
@@ -21833,6 +21964,33 @@ const AGENT_TOOLS=[
         duration_days:{type:'integer'}
       },required:['element_name','start_date','duration_days']}}
     }}
+  },
+  {
+    name:'get_production_model',
+    description:'Get the active facility\'s production/capacity structure: each kiln/mill with its per-product grinding rates, which mills can make each product (single-mill products are bottlenecks), recipe clinker factors, silos with capacities, demand by point/product, and maintenance. Use this to reason about bottlenecks and "where is the constraint / how much headroom" questions before doing math.',
+    input_schema:{type:'object',properties:{}}
+  },
+  {
+    name:'find_max_demand',
+    description:'Find the maximum demand a demand point can carry before ANY OTHER product can no longer be fully served, holding the production and maintenance schedules as-is. Binary-searches real sandbox simulations (nothing saved). Use for "how much X can we sell/supply before we stock out of something else" questions. Returns the max annual tonnage and which product stocks out first.',
+    input_schema:{type:'object',properties:{
+      demand_point:{type:'string',description:'Name (or partial, case-insensitive) of the demand point to push, e.g. "MIA/DEM/MIA_IL(08)/BLK".'},
+      max_multiplier:{type:'number',description:'Optional upper bound as a multiple of current demand to search up to. Default 4.'},
+      tolerance_pct:{type:'number',description:'Optional. A point counts as short only if served falls more than this % below requested. Default 1.'}
+    },required:['demand_point']}
+  },
+  {
+    name:'create_report',
+    description:'Generate a formatted HTML report and download it to the user\'s computer (they can open it in a browser and print to PDF). Use when the user asks for a document/report/write-up of an answer. Put the full analysis into sections yourself — this tool only renders and downloads what you provide.',
+    input_schema:{type:'object',properties:{
+      title:{type:'string'},
+      subtitle:{type:'string',description:'Optional one-line context under the title.'},
+      sections:{type:'array',description:'Ordered sections.',items:{type:'object',properties:{
+        heading:{type:'string'},
+        body:{type:'string',description:'Text. Blank lines start new paragraphs; **bold** and `code` supported.'},
+        table:{type:'object',description:'Optional table.',properties:{headers:{type:'array',items:{type:'string'}},rows:{type:'array',items:{type:'array',items:{type:'string'}}}}}
+      },required:['heading']}}
+    },required:['title','sections']}
   }
 ];
 
@@ -21853,6 +22011,8 @@ async function sendChat(){
     const system=`You are the AI agent embedded in AVILA Roll, a cement production planning tool. You're talking directly to the planner running the simulation — think of yourself as the colleague at the next desk who happens to have the whole database memorized, not a database interface. Answer in plain, conversational language: lead with the takeaway, then the supporting numbers, and only mention table/field names if the person actually asks about the data model. Offer a natural next step when it's useful ("want me to check X?") instead of just stopping. Keep it tight — a few sentences, not a report — unless the question calls for a real breakdown.
 
 You have tools to look up real simulation results and to try sandboxed "what if" runs. Use get_stop_events / get_inventory_on_date to ground answers in the actual last run instead of guessing at numbers. Use run_whatif_simulation when the user proposes a hypothetical change — it's a throwaway trial against a sandbox copy, so always tell the user plainly that nothing was saved and the real plan is unchanged. If there's no simulation result yet, say so and suggest running one rather than inventing numbers.
+
+For capacity / bottleneck questions ("where's the constraint", "which mill limits X", "how much headroom"), call get_production_model first — it hands you every mill's per-product rate, which mills can make each product (a single-mill product is usually the bottleneck), clinker factors, and demand by product, so you can reason about it. For "how much of product X can we supply before we stock out of something else" questions, call find_max_demand with that demand point — it binary-searches real sandbox sims and returns the max annual tonnage plus which product breaks first; report those, and note it holds production & maintenance as-is and saved nothing. When the user asks for a document/report/write-up, do the analysis, then call create_report with clear sections (and tables where useful) to download it for them.
 
 What you're working with:
 Database tables: macro_regions, countries, regions, sub_regions, facilities, elements, connections, products, recipes, raw_materials, fuels, element_maintenance_events, element_product_capacities, vessel_calls, rail_movements, truck_movements, transport_links, in_transit_inventory, demand_points, simulation_runs, simulation_stop_events. Element types: raw_material_storage, fuel_storage, bulk_silo (replaces clinker_silo/cement_silo/homo_silo — color by product category), packed_silo, raw_meal_mill, kiln, finish_mill, packing_plant, berth, dispatch_point (truck=no constraint same-day; rail=car accumulation with switch days and transit lag), demand_point, supply_source. Products have category: clinker, raw_meal, cement_bulk, cement_packed, additive. Kiln product capacities include capacity_tpd, specific_heat_kcal_kg, raw_meal_ratio per clinker product. Rail dispatch points have: car_capacity_t, std_loading_cars_day, max_loading_cars_day, working_days, switch_days (array of 0-6 Mon-Sun), transit_days.
