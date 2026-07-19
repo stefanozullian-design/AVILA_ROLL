@@ -1160,6 +1160,40 @@ function spNodeAvgRate(node,n){
   for(let i=0;i<node.leaves.length;i++) t+=node.leaves[i][key]||0;
   return t;
 }
+
+// ── Rule → colour mapping (the forecast-cell method dot) ──────────────────────
+// Each method gets a colour; baseline (no rule) is white. The dot left of every
+// forecast value shows which method is EFFECTIVE for that row — its own rule, or
+// the nearest ancestor's (rules cascade to children), or baseline. So a parent and
+// its untouched children always show the same colour; an explicitly-changed child
+// shows its own. Colours echo the 10/15/30-WD guide lines on the chart.
+const SP_FC_COLORS={ base:'#ffffff', avg10:'#00e58d', avg15:'#ffb830', avg30:'#ff6b8a', pct:'#4da6ff', rate:'#c9a0e8' };
+const SP_FC_LABELS={ base:'Baseline (10WD avg)', avg10:'10WD avg', avg15:'15WD avg', avg30:'30WD avg', pct:'± % of baseline', rate:'Typed t/day' };
+function spFcRuleKey(r){
+  if(!r) return 'base';
+  if(r.type==='avg') return (r.value===15?'avg15':r.value===30?'avg30':'avg10');
+  if(r.type==='pct') return 'pct';
+  return 'rate'; // 'rate' | legacy 'total' | Zero
+}
+// Effective rule governing a node for a period: own rule, else the deepest ancestor
+// rule whose path is a prefix of this node's path (that's how the engine cascades).
+function spFcEffRule(node,pid){
+  const np=node.path||[]; let best=null;
+  (SP.fcRules||[]).forEach(r=>{
+    if(r.period!==pid) return;
+    const rp=r.path||[]; if(rp.length>np.length) return;
+    for(let i=0;i<rp.length;i++){ if(rp[i].dim!==np[i].dim||String(rp[i].value).trim()!==String(np[i].value).trim()) return; }
+    if(!best||rp.length>best.path.length) best=r;
+  });
+  return best;
+}
+function spFcDot(node,pid){
+  const key=spFcRuleKey(spFcEffRule(node,pid));
+  const col=SP_FC_COLORS[key]||'#ffffff';
+  return `<span title="Rule: ${SP_FC_LABELS[key]||key}" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${col};margin-right:4px;vertical-align:middle;box-shadow:0 0 0 1px rgba(0,0,0,.55)"></span>`;
+}
+// Legend dot for the editor popover buttons (same palette, inline before a label).
+function spFcPdot(col){ return `<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${col};box-shadow:0 0 0 1px rgba(0,0,0,.55);vertical-align:middle;margin-right:3px"></span>`; }
 // Last day with real data (boundary between green actuals and fuchsia forecast)
 function spLastReal(){
   return DB.real_shipments_meta?.date_max || new Date().toISOString().split('T')[0];
@@ -1188,7 +1222,7 @@ function spFcEdit(nodeKey,pid,el){
   const ownLbl=own?(own.type==='avg'?own.value+'WD avg':own.type==='pct'?((own.value>0?'+':'')+own.value+'%'):own.value.toLocaleString()+' t/day'):null;
   const btn='background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:8px;padding:4px 7px;cursor:pointer';
   const avgBtn=n=>{ const v=n===10?a10:n===15?a15:a30; const act=own&&own.type==='avg'&&own.value===n;
-    return `<button style="${btn};display:flex;flex-direction:column;align-items:center;gap:1px;flex:1;${act?'border-color:#ff4dd2;color:#ff4dd2':''}" onclick="spFcApply('${nodeKey}','${pid}','avg',${n})">${n}WD<span style="font-size:7px;opacity:.75">${v.toLocaleString()}</span></button>`; };
+    return `<button style="${btn};display:flex;flex-direction:column;align-items:center;gap:1px;flex:1;${act?'border-color:#ff4dd2;color:#ff4dd2':''}" onclick="spFcApply('${nodeKey}','${pid}','avg',${n})"><span>${spFcPdot(SP_FC_COLORS['avg'+n])}${n}WD</span><span style="font-size:7px;opacity:.75">${v.toLocaleString()}</span></button>`; };
   const pop=document.createElement('div'); pop.id='sp-fc-pop';
   pop.style.cssText='position:fixed;z-index:99999;background:var(--surface);border:1px solid #ff4dd2;padding:10px;display:flex;flex-direction:column;gap:7px;box-shadow:0 6px 22px rgba(0,0,0,.65);min-width:230px';
   const r=el.getBoundingClientRect();
@@ -1200,16 +1234,16 @@ function spFcEdit(nodeKey,pid,el){
     <div style="font-family:var(--mono);font-size:6px;color:var(--text-dim);letter-spacing:.5px">APPLY A METHOD — each row below computes its own value</div>
     <div style="display:flex;gap:4px">${avgBtn(10)}${avgBtn(15)}${avgBtn(30)}</div>
     <div style="display:flex;gap:4px;flex-wrap:wrap">
-      <button style="${btn}" onclick="spFcApply('${nodeKey}','${pid}','pct',10)">+10%</button>
-      <button style="${btn}" onclick="spFcApply('${nodeKey}','${pid}','pct',-10)">−10%</button>
-      <button style="${btn}" onclick="spFcApply('${nodeKey}','${pid}','rate',0)">Zero</button>
-      <button style="${btn};color:var(--green);border-color:var(--green)" onclick="spFcApply('${nodeKey}','${pid}','clear',0)">Baseline</button>
+      <button style="${btn}" onclick="spFcApply('${nodeKey}','${pid}','pct',10)">${spFcPdot(SP_FC_COLORS.pct)}+10%</button>
+      <button style="${btn}" onclick="spFcApply('${nodeKey}','${pid}','pct',-10)">${spFcPdot(SP_FC_COLORS.pct)}−10%</button>
+      <button style="${btn}" onclick="spFcApply('${nodeKey}','${pid}','rate',0)">${spFcPdot(SP_FC_COLORS.rate)}Zero</button>
+      <button style="${btn};color:var(--green);border-color:var(--green)" onclick="spFcApply('${nodeKey}','${pid}','clear',0)">${spFcPdot('#ffffff')}Baseline</button>
     </div>
     <div style="display:flex;gap:4px;align-items:center">
       <input id="sp-fc-in" type="number" step="${FB_STEP}" min="0" value="${cur}" title="Typed rate = this row's own total t/day, split by each child's historical share"
         style="background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:11px;padding:5px 7px;outline:none;flex:1;min-width:0"
         onkeydown="if(event.key==='Enter'){spFcApplyInput('${nodeKey}','${pid}')}else if(event.key==='Escape'){spFcCloseEdit()}">
-      <button style="${btn};color:#ff4dd2;border-color:#ff4dd2" onclick="spFcApplyInput('${nodeKey}','${pid}')">Set t/day</button>
+      <button style="${btn};color:#ff4dd2;border-color:#ff4dd2" onclick="spFcApplyInput('${nodeKey}','${pid}')">${spFcPdot(SP_FC_COLORS.rate)}Set t/day</button>
     </div>
     <div style="font-family:var(--mono);font-size:6px;color:var(--text-dim)">${FB_STEP} t truck-load steps · method rules cascade to every hidden row below · deeper rules win</div>`;
   document.body.appendChild(pop);
@@ -1874,7 +1908,7 @@ function spRenderTable(skipThead=false){
         fcPeriods.forEach((p,i)=>{
           const rate=spNodeFcRate(node,p.id);
           const own=spFcRuleAt(node.path,p.id);
-          cells+=`<td onclick="event.stopPropagation();spFcEdit('${node.key}','${p.id}',this)" title="${p.label} avg t/day — click to apply a rule" style="${i===0?fcBL+';':''}${i===fcPeriods.length-1?fcBR+';':''}cursor:pointer;text-align:right;padding:1px 5px;font-size:7px;color:${FCC};${own?'font-weight:700;background:rgba(255,77,210,.16)':'background:rgba(255,77,210,.05)'}">${rate?rate.toLocaleString():'—'}${own?'✎':''}</td>`;
+          cells+=`<td onclick="event.stopPropagation();spFcEdit('${node.key}','${p.id}',this)" title="${p.label} avg t/day — click to apply a rule" style="${i===0?fcBL+';':''}${i===fcPeriods.length-1?fcBR+';':''}cursor:pointer;text-align:right;padding:1px 5px;font-size:7px;color:${FCC};${own?'font-weight:700;background:rgba(255,77,210,.16)':'background:rgba(255,77,210,.05)'}">${spFcDot(node,p.id)}${rate?rate.toLocaleString():'—'}${own?'✎':''}</td>`;
         });
         if(futD.length){
           let rom=0;
