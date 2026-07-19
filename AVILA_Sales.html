@@ -738,10 +738,11 @@ function spRenderChart(){
   const guideRef=meta0.date_max&&meta0.date_max<today?meta0.date_max:today;
   const g0=new Date(guideRef+'T00:00:00'); g0.setDate(g0.getDate()-70);
   const guideCut=g0.toISOString().split('T')[0];
-  const actByDate={}, guideMap={};
+  const actByDate={}, guideMap={}, lyMap={};
   (DB.real_shipments_daily||[]).forEach(r=>{
     if(!r.date||r.date>today) return;
     if(!spPassesBaseFilters(r)||!scope.pred(r)) return;
+    lyMap[r.date]=(lyMap[r.date]||0)+r.volume;   // all past dates → looked up one year forward for the LY area
     if(r.date>=guideCut) guideMap[r.date]=(guideMap[r.date]||0)+r.volume;
     if(r.date>=winStart) actByDate[r.date]=(actByDate[r.date]||0)+r.volume;
   });
@@ -782,12 +783,26 @@ function spRenderChart(){
   const bgtData=labels.map(d=> spBudgetForDate(d,scope));
   const hasBudget=bgtData.some(v=>v!=null);
 
-  const datasets=[
+  // Last-year actuals for the same calendar day, as a soft filled area BEHIND the bars.
+  // 0 within the loaded data span (so the area dips on quiet days), null outside it.
+  // Its own stack group + fill:'origin' keep it absolute (not stacked onto the bars);
+  // the high order draws it first, i.e. behind the Actual/Forecast bars.
+  const _dmin=meta.date_min, _dmax=meta.date_max;
+  const lyData=labels.map(ds=>{ const ld=spShiftYear(ds,-1); if((_dmin&&ld<_dmin)||(_dmax&&ld>_dmax)) return null; return Math.round(lyMap[ld]||0); });
+  const hasLY=lyData.some(v=>v);
+
+  const datasets=[];
+  if(hasLY){
+    datasets.push({ type:'line', label:'Last Year', data:lyData, stack:'ly', fill:'origin',
+      backgroundColor:'rgba(77,166,255,0.13)', borderColor:'rgba(77,166,255,0.45)', borderWidth:1,
+      pointRadius:0, tension:.25, spanGaps:true, order:10 });
+  }
+  datasets.push(
     { label:'Actual',   data:actData, backgroundColor:'rgba(0,200,120,0.75)',  stack:'v', order:3 },
     { label:'Forecast', data:fcData,  backgroundColor:'rgba(255,140,50,0.78)',  stack:'v', order:3 },
-  ];
+  );
   if(hasBudget){
-    datasets.push({ type:'line', label:'Budget', data:bgtData, borderColor:'#7fd4ff', borderWidth:1.6, pointRadius:0, tension:.3, spanGaps:true, fill:false, order:0 });
+    datasets.push({ type:'line', label:'Budget', data:bgtData, stack:'bgt', borderColor:'#7fd4ff', borderWidth:1.6, pointRadius:0, tension:.3, spanGaps:true, fill:false, order:0 });
   }
 
   // Legend (Actual / Forecast / Budget — Budget dimmed until a budget file is loaded)
@@ -795,6 +810,7 @@ function spRenderChart(){
   if(leg){
     let lh=`<div class="sp-leg-item"><div class="sp-leg-sq" style="background:rgba(0,200,120,0.75)"></div>Actual</div>`+
            `<div class="sp-leg-item"><div class="sp-leg-sq" style="background:rgba(255,140,50,0.78)"></div>Forecast</div>`;
+    if(hasLY) lh+=`<div class="sp-leg-item"><div class="sp-leg-sq" style="background:rgba(77,166,255,0.18);border-top:2px solid rgba(77,166,255,0.6)"></div>Last Year</div>`;
     lh+= hasBudget
       ? `<div class="sp-leg-item"><div style="width:16px;height:2px;background:#7fd4ff;flex-shrink:0"></div>Budget</div>`
       : `<div class="sp-leg-item" style="opacity:.5"><div style="width:16px;height:2px;background:#7fd4ff;flex-shrink:0"></div>Budget (not loaded)</div>`;
