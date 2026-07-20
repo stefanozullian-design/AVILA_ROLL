@@ -775,7 +775,7 @@ function spRenderChart(){
   // Forecast by date (after the last real day) for the current scope
   const fcByDate={};
   if(scope.leaves && scope.leaves.length){
-    labels.forEach(ds=>{ if(ds>lastReal){ let v=0; for(let i=0;i<scope.leaves.length;i++) v+=spLeafFcDay(scope.leaves[i],ds); if(v) fcByDate[ds]=v; } });
+    labels.forEach(ds=>{ if(ds>lastReal){ let v=0; for(let i=0;i<scope.leaves.length;i++) v+=spLeafFcDay(scope.leaves[i],ds); v=spQ25z(v); if(v) fcByDate[ds]=v; } }); // row-level truck-load rounding (matches the table)
   }
 
   const actData=labels.map(d=> d<=lastReal ? Math.round(actByDate[d]||0) : null);
@@ -1110,7 +1110,7 @@ function spFcRecompute(){
       const key='wk'+r.value; // wk10 / wk15 / wk30, precomputed per leaf
       cov.forEach(lf=>{ rr[lf.id]={wk:lf[key]||0, sat:lf.satRate||0}; });
     } else if(r.type==='pct'){
-      cov.forEach(lf=>{ rr[lf.id]={wk:spQ25z((lf.wkRate||0)*(1+r.value/100)), sat:spQ25z((lf.satRate||0)*(1+r.value/100))}; });
+      cov.forEach(lf=>{ rr[lf.id]={wk:(lf.wkRate||0)*(1+r.value/100), sat:(lf.satRate||0)*(1+r.value/100)}; }); // raw; rounded once at the row
     } else if(r.type==='auto'){
       // Auto: the period column shows the weekday-average of the leaf's per-month rates;
       // the exact per-month (seasonal) values are applied in spLeafFcDay.
@@ -1155,22 +1155,25 @@ function spLeafFcDay(lf, ds){
   }
   return dw===6?(lf.satRate||0):(lf.wkRate||0);
 }
-// Node's average daily rate for a period = Σ of its leaves' weekday rates.
+// Node's average daily rate for a period = Σ of its leaves' RAW weekday rates, rounded
+// ONCE to a 25 t truck-load at this row (one-truck minimum when active). Rounding here —
+// not per hidden leaf — keeps the row equal to its aggregate average.
 function spNodeFcRate(node,pid){
   const lpr=SP._leafPeriodRate||{}; let t=0;
   for(let i=0;i<node.leaves.length;i++){ const rr=lpr[node.leaves[i].id]?.[pid]; t+=rr?rr.wk:(node.leaves[i].wkRate||0); }
-  return t;
+  return spQ25(t);
 }
 function spNodeFcPeriod(node,pid){
   const lpt=SP._leafPeriodTot||{}; let t=0;
   for(let i=0;i<node.leaves.length;i++) t+=lpt[node.leaves[i].id]?.[pid]||0;
   return t;
 }
-// Node aggregate of the three avg-method rates (for the editor's method buttons)
+// Node aggregate of the three avg-method rates (for the editor's method buttons),
+// rounded once to a 25 t truck-load at this row.
 function spNodeAvgRate(node,n){
   const key='wk'+n; let t=0;
   for(let i=0;i<node.leaves.length;i++) t+=node.leaves[i][key]||0;
-  return t;
+  return spQ25(t);
 }
 
 // ── Rule → colour mapping (the forecast-cell method dot) ──────────────────────
@@ -1281,7 +1284,7 @@ function spAutoComputeRates(leafMonth, allMonth, cutoffYm, futureYms, satShare){
     if(n>=6){ const mean=(a,b)=>{ let s=0,c=0; for(let i=a;i<b;i++){s+=series[i];c++;} return c?s/c:0; }; const rec=mean(n-3,n), old=mean(n-6,n-3); if(old>0){ trend=Math.pow(rec/old,1/3)-1; } }
     trend=Math.max(-SP_AUTO.TREND_CLAMP,Math.min(SP_AUTO.TREND_CLAMP,trend));
     const rates={};
-    futureYms.forEach(ym=>{ if(ym<=cutoffYm) return; const k=_spMonthDiff(cutoffYm,ym); const effK=(1-Math.pow(SP_AUTO.TREND_DAMP,k))/(1-SP_AUTO.TREND_DAMP); const wkRaw=level*(seasIdx[+ym.slice(5,7)]||1)*Math.pow(1+trend,effK); rates[ym]={wk:spQ25z(wkRaw), sat:spQ25z(wkRaw*satShare), _lvl:level, _trend:trend}; });
+    futureYms.forEach(ym=>{ if(ym<=cutoffYm) return; const k=_spMonthDiff(cutoffYm,ym); const effK=(1-Math.pow(SP_AUTO.TREND_DAMP,k))/(1-SP_AUTO.TREND_DAMP); const wkRaw=level*(seasIdx[+ym.slice(5,7)]||1)*Math.pow(1+trend,effK); rates[ym]={wk:wkRaw, sat:wkRaw*satShare, _lvl:level, _trend:trend}; }); // raw; rounded once at the row
     leafRate[id]=rates;
   });
   return { seasIdx, leafRate };
@@ -1323,7 +1326,7 @@ function spNodeAutoRate(node,pid){
   if(!wkYms.length) return 0;
   let t=0;
   node.leaves.forEach(lf=>{ const mr=SP._auto?.leafMonthRate?.[lf.id]; let s=0; for(let i=0;i<wkYms.length;i++){ const m=mr?.[wkYms[i]]; s+= m?m.wk:(lf.wkRate||0); } t+=s/wkYms.length; });
-  return Math.round(t);
+  return spQ25(t); // round once at the row
 }
 // Period-average {wk,sat} from a leaf's per-month auto rates (for the flat period cache).
 function spAutoLeafPeriodAvg(lf,periodDates){
@@ -1497,7 +1500,7 @@ function spBuildRepModel(scope){
   });
   const wkD=[],satD=[]; { const d=new Date(refDate+'T00:00:00'); let g=0; while((wkD.length<30||satD.length<4)&&g<70){ const dow=d.getDay(),ds=d.toISOString().split('T')[0]; if(dow>=1&&dow<=5&&wkD.length<30) wkD.push(ds); else if(dow===6&&satD.length<4) satD.push(ds); d.setDate(d.getDate()-1); g++; } }
   const avgOver=(dm,n)=>{ const m=Math.min(n,wkD.length); if(!m) return 0; let s=0; for(let i=0;i<m;i++) s+=dm[wkD[i]]||0; return s/m; };
-  Object.values(leaves).forEach(lf=>{ const dm=lf.dayMap; lf.wk10=spQ25(avgOver(dm,10)); lf.wk15=spQ25(avgOver(dm,15)); lf.wk30=spQ25(avgOver(dm,30)); lf.wkRate=lf.wk10; const sAvg=satD.length?satD.reduce((s,ds)=>s+(dm[ds]||0),0)/satD.length:0; lf.satRate=spQ25z(sAvg); lf.dayMap=null; });
+  Object.values(leaves).forEach(lf=>{ const dm=lf.dayMap; lf.wk10=avgOver(dm,10); lf.wk15=avgOver(dm,15); lf.wk30=avgOver(dm,30); lf.wkRate=lf.wk10; lf.satRate=satD.length?satD.reduce((s,ds)=>s+(dm[ds]||0),0)/satD.length:0; lf.dayMap=null; });
 
   const periods=spFcPeriods(), leafArr=Object.values(leaves);
   const year=+spLastReal().slice(0,4), lastReal=spLastReal();
@@ -1506,6 +1509,7 @@ function spBuildRepModel(scope){
     perDates[p.id]=arr; perMonth[p.id]=mm; let nWk=0,nSat=0; arr.forEach(ds=>{ const dw=spDow(ds); if(dw>=1&&dw<=5)nWk++; else if(dw===6)nSat++; }); perCounts[p.id]={nWk,nSat}; });
   spFcLoadRules();
   const rules=(SP.fcRules||[]).slice().sort((a,b)=>a.path.length-b.path.length);
+  if(rules.some(r=>r.type==='auto')) spAutoEnsure();
   const match=(lf,path)=>path.every(pp=>lf.attrs&&String(lf.attrs[pp.dim]??'—').trim()===String(pp.value).trim());
   const leafRule={};
   rules.forEach(r=>{ if(!perDates[r.period])return; leafArr.forEach(lf=>{ if(match(lf,r.path)){ (leafRule[lf.id]=leafRule[lf.id]||{})[r.period]=r; } }); });
@@ -1519,7 +1523,8 @@ function spBuildRepModel(scope){
     const tm={}, mfc={};   // period totals + monthly forecast
     periods.forEach(p=>{ const r=leafRule[lf.id]?.[p.id]; let wk,sat;
       if(r){ if(r.type==='avg'){ wk=lf['wk'+r.value]||0; sat=lf.satRate||0; }
-        else if(r.type==='pct'){ wk=spQ25z((lf.wkRate||0)*(1+r.value/100)); sat=spQ25z((lf.satRate||0)*(1+r.value/100)); }
+        else if(r.type==='pct'){ wk=(lf.wkRate||0)*(1+r.value/100); sat=(lf.satRate||0)*(1+r.value/100); } // raw
+        else if(r.type==='auto'){ const mr=SP._auto?.leafMonthRate?.[lf.id]; const pd=perDates[p.id]||[]; let sw=0,nw=0,ss=0,ns=0; for(let i=0;i<pd.length;i++){ const ds=pd[i],dw=spDow(ds),m=mr?.[_spYm(ds)]; if(dw>=1&&dw<=5){nw++;sw+=m?m.wk:(lf.wkRate||0);}else if(dw===6){ns++;ss+=m?m.sat:(lf.satRate||0);} } wk=nw?sw/nw:(lf.wkRate||0); sat=ns?ss/ns:(lf.satRate||0); }
         else { const c=perCounts[p.id]; let R=r.type==='total'?(c.nWk?r.value/c.nWk:0):r.value; R=spQ25z(R); wk=R; sat=lf.satRate>0?spQ25z(R*0.25):0; } }
       else { wk=lf.wkRate||0; sat=lf.satRate||0; }
       const c=perCounts[p.id]; tm[p.id]=c.nWk*wk+c.nSat*sat;
@@ -1819,10 +1824,13 @@ function spBuildTree(rows, groupBy){
     const avgOver=(dm,n)=>{ const m=Math.min(n,wkD.length); if(!m) return 0; let s=0; for(let i=0;i<m;i++) s+=dm[wkD[i]]||0; return s/m; };
     Object.values(leaves).forEach(lf=>{
       const dm=lf.dayMap;
-      lf.wk10=spQ25(avgOver(dm,10)); lf.wk15=spQ25(avgOver(dm,15)); lf.wk30=spQ25(avgOver(dm,30));
+      // RAW (un-rounded) per-leaf averages. 25 t truck-load rounding is applied ONCE at the
+      // ROW being shown (spNodeFcRate / spNodeAvgRate), not per hidden product — otherwise a
+      // row with several small products would sum several rounded-up trucks and over-state
+      // (e.g. 4 products × ~38 t/day each → 4×50 = 200 instead of the true ~150).
+      lf.wk10=avgOver(dm,10); lf.wk15=avgOver(dm,15); lf.wk30=avgOver(dm,30);
       lf.wkRate=lf.wk10;
-      const sAvg=satD.length?satD.reduce((s,ds)=>s+(dm[ds]||0),0)/satD.length:0;
-      lf.satRate=spQ25z(sAvg);
+      lf.satRate=satD.length?satD.reduce((s,ds)=>s+(dm[ds]||0),0)/satD.length:0;
       lf.dayMap=null; lf.dpGlobalHistVol=dpGlobalHistVol[lf.dpKey]||lf.histVol||1;
     });
   }
@@ -2024,6 +2032,7 @@ function spRenderTable(skipThead=false){
     const getFc=(ds)=>{
       let v=fcCache[ds]; if(v!==undefined) return v;
       v=0; for(let i=0;i<leaves.length;i++) v+=spLeafFcDay(leaves[i],ds);
+      v=spQ25z(v); // round the ROW's daily forecast to a truck-load — matches the row's rounded rate
       return fcCache[ds]=v;
     };
     const actMap=node.actMap;
