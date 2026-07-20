@@ -1022,14 +1022,17 @@ function spFcPeriods(){
   const y=+anchor.slice(0,4), m=+anchor.slice(5,7);
   const pad=n=>String(n).padStart(2,'0');
   const eom=(yy,mm)=>`${yy}-${pad(mm)}-${pad(new Date(yy,mm,0).getDate())}`;
-  const monNames=['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
   const list=[];
   const nd=new Date(anchor+'T00:00:00'); nd.setDate(nd.getDate()+1);
   const romFrom=nd.toISOString().split('T')[0];
   if(romFrom<=eom(y,m)) list.push({id:'ROM',label:'ROM',from:romFrom,to:eom(y,m)});
-  for(let k=1;k<=3;k++){
-    const d=new Date(y,m-1+k,1), yy=d.getFullYear(), mm=d.getMonth()+1;
-    list.push({id:'M'+k,label:monNames[mm-1]+(yy!==y?String(yy).slice(2):''),from:`${yy}-${pad(mm)}-01`,to:eom(yy,mm)});
+  // Next 3 months consolidated into ONE period. A rule chosen for N3M applies across all
+  // three months — every calendar month inside the range inherits the same daily rate.
+  {
+    const s=new Date(y,m-1+1,1), sy=s.getFullYear(), sm=s.getMonth()+1;
+    const e=new Date(y,m-1+3,1), ey=e.getFullYear(), em=e.getMonth()+1;
+    const n3mFrom=`${sy}-${pad(sm)}-01`, n3mTo=eom(ey,em);
+    if(n3mFrom<=n3mTo) list.push({id:'N3M',label:'N3M',from:n3mFrom,to:n3mTo});
   }
   const r4=new Date(y,m-1+4,1);
   if(r4.getFullYear()===y) list.push({id:'ROY',label:'ROY',from:`${y}-${pad(r4.getMonth()+1)}-01`,to:`${y}-12-31`});
@@ -1207,7 +1210,7 @@ function spEnsureTree(){
   return true;
 }
 
-// ── Inline forecast editor (popover on the ROM/M+1…/ROY cells) ──
+// ── Inline forecast editor (popover on the ROM/N3M/ROY cells) ──
 function spFcCloseEdit(){
   document.getElementById('sp-fc-pop')?.remove();
   if(SP._fcPopCloser){ document.removeEventListener('mousedown',SP._fcPopCloser,true); SP._fcPopCloser=null; }
@@ -1366,7 +1369,6 @@ function spBuildRepModel(scope){
   rows.forEach(r=>{ if(!r.date||r.date>lastReal||+r.date.slice(0,4)!==year) return;
     const rep=r.sales_manager||'—', so=spExtractSoldTo(r.ship_to_name||'—'), mo=+r.date.slice(5,7);
     ((actMon[rep]=actMon[rep]||{})[so]=actMon[rep][so]||{})[mo]=(actMon[rep][so][mo]||0)+(r.volume||0); });
-  const n3m=['M1','M2','M3'];
   const reps={};
   leafArr.forEach(lf=>{
     const tm={}, mfc={};   // period totals + monthly forecast
@@ -1377,7 +1379,7 @@ function spBuildRepModel(scope){
       else { wk=lf.wkRate||0; sat=lf.satRate||0; }
       const c=perCounts[p.id]; tm[p.id]=c.nWk*wk+c.nSat*sat;
       const mm=perMonth[p.id]; for(const mo in mm){ mfc[mo]=(mfc[mo]||0)+mm[mo].nWk*wk+mm[mo].nSat*sat; } });
-    const hv={ ROM:tm.ROM||0, N3M:n3m.reduce((s,k)=>s+(tm[k]||0),0), ROY:periods.reduce((s,p)=>s+(tm[p.id]||0),0) };
+    const hv={ ROM:tm.ROM||0, N3M:tm.N3M||0, ROY:periods.reduce((s,p)=>s+(tm[p.id]||0),0) };
     const rep=lf.rep||'—', so=lf.soldTo||'—';
     let R=reps[rep]; if(!R) R=reps[rep]={rep,custs:{},total:{ROM:0,N3M:0,ROY:0},done:{ROM:0,N3M:0,ROY:0},monFc:{},monAct:{},monFcCommit:{}};
     let C=R.custs[so]; if(!C) C=R.custs[so]={soldTo:so,vol:{ROM:0,N3M:0,ROY:0},monFc:{},committed:false};
