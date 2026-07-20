@@ -1094,6 +1094,7 @@ function spFcRecompute(){
   // Deepest-wins stamping (rules sorted shallow→deep so deeper overwrite)
   const leafRule={};
   const rules=(SP.fcRules||[]).slice().sort((a,b)=>a.path.length-b.path.length);
+  if(rules.some(r=>r.type==='auto')) spAutoEnsure();   // build the Auto model if any auto rule is active
   const match=(lf,path)=>path.every(p=>lf.attrs && String(lf.attrs[p.dim]??'—').trim()===String(p.value).trim());
   rules.forEach(r=>{ if(!perDates[r.period]) return;
     leaves.forEach(lf=>{ if(match(lf,r.path)){ (leafRule[lf.id]=leafRule[lf.id]||{})[r.period]=r; } }); });
@@ -1110,6 +1111,10 @@ function spFcRecompute(){
       cov.forEach(lf=>{ rr[lf.id]={wk:lf[key]||0, sat:lf.satRate||0}; });
     } else if(r.type==='pct'){
       cov.forEach(lf=>{ rr[lf.id]={wk:spQ25z((lf.wkRate||0)*(1+r.value/100)), sat:spQ25z((lf.satRate||0)*(1+r.value/100))}; });
+    } else if(r.type==='auto'){
+      // Auto: the period column shows the weekday-average of the leaf's per-month rates;
+      // the exact per-month (seasonal) values are applied in spLeafFcDay.
+      cov.forEach(lf=>{ const pa=spAutoLeafPeriodAvg(lf, perDates[r.period]); rr[lf.id]= pa || {wk:lf.wkRate||0, sat:lf.satRate||0}; });
     } else { // 'rate' (typed t/day); legacy 'total' rules convert total → daily rate
       let R=r.type==='total' ? (c.nWk? r.value/c.nWk : 0) : r.value;
       R=spQ25z(R);
@@ -1127,7 +1132,7 @@ function spFcRecompute(){
       const r=leafRule[lf.id]?.[p.id];
       const rr=r?ruleRate[r.id]?.[lf.id]:null;
       const wk=rr?rr.wk:(lf.wkRate||0), sat=rr?rr.sat:(lf.satRate||0);
-      rm[p.id]={wk,sat};
+      rm[p.id]= (rr&&rr.auto) ? {wk,sat,auto:true} : {wk,sat};   // auto flag → per-month seasonal daily values
       const c=perCounts[p.id]; tm[p.id]=c.nWk*wk+c.nSat*sat;
     });
     lpr[lf.id]=rm; lpt[lf.id]=tm;
@@ -1142,7 +1147,11 @@ function spLeafFcDay(lf, ds){
   const per=spPeriodOf(ds);
   if(per){
     const rr=SP._leafPeriodRate?.[lf.id]?.[per];
-    if(rr) return dw===6?rr.sat:rr.wk;
+    if(rr){
+      // Auto rule → use the leaf's seasonal per-MONTH rate for this day's month.
+      if(rr.auto){ const mr=SP._auto?.leafMonthRate?.[lf.id]?.[_spYm(ds)]; if(mr) return dw===6?mr.sat:mr.wk; }
+      return dw===6?rr.sat:rr.wk;
+    }
   }
   return dw===6?(lf.satRate||0):(lf.wkRate||0);
 }
@@ -1170,10 +1179,11 @@ function spNodeAvgRate(node,n){
 // the nearest ancestor's (rules cascade to children), or baseline. So a parent and
 // its untouched children always show the same colour; an explicitly-changed child
 // shows its own. Colours echo the 10/15/30-WD guide lines on the chart.
-const SP_FC_COLORS={ base:'#ffffff', avg10:'#00e58d', avg15:'#ffb830', avg30:'#ff6b8a', pct:'#4da6ff', rate:'#c9a0e8' };
-const SP_FC_LABELS={ base:'Baseline (10WD avg)', avg10:'10WD avg', avg15:'15WD avg', avg30:'30WD avg', pct:'± % of baseline', rate:'Typed t/day' };
+const SP_FC_COLORS={ base:'#ffffff', avg10:'#00e58d', avg15:'#ffb830', avg30:'#ff6b8a', pct:'#4da6ff', rate:'#c9a0e8', auto:'#20e3c0' };
+const SP_FC_LABELS={ base:'Baseline (10WD avg)', avg10:'10WD avg', avg15:'15WD avg', avg30:'30WD avg', pct:'± % of baseline', rate:'Typed t/day', auto:'Auto · best-fit (seasonality+trend)' };
 function spFcRuleKey(r){
   if(!r) return 'base';
+  if(r.type==='auto') return 'auto';
   if(r.type==='avg') return (r.value===15?'avg15':r.value===30?'avg30':'avg10');
   if(r.type==='pct') return 'pct';
   return 'rate'; // 'rate' | legacy 'total' | Zero
@@ -1197,6 +1207,132 @@ function spFcDot(node,pid){
 }
 // Legend dot for the editor popover buttons (same palette, inline before a label).
 function spFcPdot(col){ return `<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${col};box-shadow:0 0 0 1px rgba(0,0,0,.55);vertical-align:middle;margin-right:3px"></span>`; }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AUTO / BEST-FIT FORECAST — bottoms-up per leaf: recency-weighted, deseasonalised
+// LEVEL × shared SHRUNK monthly SEASONAL index × damped TREND, spread to weekday/
+// Saturday daily rates in 25 t steps. A rolling holdout backtests it vs the flat
+// run-rate so the popover can show a trust number. Seasonality is estimated at the
+// whole-book level (many observations) and applied per leaf (thin history) — the key
+// move with only ~1 seasonal cycle of data. Everything here is explainable, not a
+// black box, because reps sign off on the result.
+// ═══════════════════════════════════════════════════════════════════════════
+const SP_AUTO={ SHRINK:0.75, LEVEL_MONTHS:8, LEVEL_DECAY:0.85, TREND_CLAMP:0.05, TREND_DAMP:0.9, HOLDOUT:3, GLOBAL_SAT:0.3 };
+function _spYm(ds){ return ds.slice(0,7); }
+function _spMonthAdd(ym,k){ let y=+ym.slice(0,4), m=+ym.slice(5,7)-1+k; y+=Math.floor(m/12); m=((m%12)+12)%12; return y+'-'+String(m+1).padStart(2,'0'); }
+function _spMonthDiff(a,b){ return (+b.slice(0,4)-+a.slice(0,4))*12+(+b.slice(5,7)-+a.slice(5,7)); }
+function _spWd(ym){ const y=+ym.slice(0,4), m=+ym.slice(5,7); const days=new Date(y,m,0).getDate(); let nWk=0,nSat=0; for(let d=1;d<=days;d++){ const dw=new Date(y,m-1,d).getDay(); if(dw>=1&&dw<=5)nWk++; else if(dw===6)nSat++; } return {nWk,nSat}; }
+
+// Cache key — the auto model depends on the data + the base (non-date) filters, not on rules.
+function spAutoKey(){ const m=DB.real_shipments_meta||{}; return [m.loaded_at,m.date_max,SP.f?.origin,SP.f?.rep,SP.f?.customer,SP.f?.custType,SP.f?.product].join('|'); }
+function spAutoEnsure(){ const k=spAutoKey(); if(SP._auto&&SP._auto.key===k) return SP._auto; SP._auto=spAutoBuild(k); return SP._auto; }
+
+// Build per-leaf monthly history (full, base-filtered) + the model + the backtest.
+function spAutoBuild(key){
+  const lastReal=spLastReal(), lastYm=_spYm(lastReal);
+  // product → demand-point index (mirror spBuildTree's leaf keying)
+  const dpEls=(DB.elements||[]).filter(e=>e.type==='demand_point'); const dpIdx={};
+  dpEls.forEach(el=>{ const k=(el.name||'').trim().toUpperCase(); if(k)dpIdx[k]=el; const c=(el.props?.dp_code||'').trim().toUpperCase(); if(c)dpIdx[c]=el; });
+  const leafIdOf=r=>{ const el=dpIdx[(r.product||'').trim().toUpperCase()]; const dpKey=el?el.id:('__nodp_'+(r.product||'').replace(/\W/g,'_')); return dpKey+'|'+(r.ship_to_name||'—'); };
+  const leafMonth={}, allMonth={}; let satVol=0, wkVol=0;
+  (DB.real_shipments_daily||[]).forEach(r=>{
+    if(!r.date||!spPassesBaseFilters(r)) return;
+    const ym=_spYm(r.date), id=leafIdOf(r), v=r.volume||0;
+    (leafMonth[id]=leafMonth[id]||{})[ym]=(leafMonth[id][ym]||0)+v;
+    allMonth[ym]=(allMonth[ym]||0)+v;
+    const dw=spDow(r.date); if(dw>=1&&dw<=5) wkVol+=v; else if(dw===6) satVol+=v;
+  });
+  // Book-level Saturday factor = avg Saturday daily ÷ avg weekday daily over the data span.
+  const dmin=DB.real_shipments_meta?.date_min, dmax=DB.real_shipments_meta?.date_max;
+  let spanWk=0,spanSat=0;
+  if(dmin&&dmax){ for(let d=new Date(dmin+'T00:00:00'), e=new Date(dmax+'T00:00:00'); d<=e; d.setDate(d.getDate()+1)){ const dw=d.getDay(); if(dw>=1&&dw<=5)spanWk++; else if(dw===6)spanSat++; } }
+  const satShare=(spanWk&&spanSat&&wkVol>0)?Math.max(0,Math.min(1,(satVol/spanSat)/(wkVol/spanWk))):SP_AUTO.GLOBAL_SAT;
+
+  const futureYms=[]; for(let k=0;k<=15;k++) futureYms.push(_spMonthAdd(lastYm,k));
+  const full=spAutoComputeRates(leafMonth,allMonth,lastYm,futureYms,satShare);
+  const bt=spAutoBacktest(leafMonth,allMonth,lastYm,satShare);
+  return { key, seasIdx:full.seasIdx, leafMonthRate:full.leafRate, satShare, backtest:bt.perLeaf, btMeta:bt.meta };
+}
+
+// Core: shared seasonal index (months ≤ cutoff) + per-leaf level/trend → future {wk,sat} rates.
+function spAutoComputeRates(leafMonth, allMonth, cutoffYm, futureYms, satShare){
+  // 1) Shared monthly seasonal index from the whole book (weekday-normalised), smoothed + shrunk.
+  const moSum=Array(13).fill(0), moCnt=Array(13).fill(0);
+  Object.keys(allMonth).forEach(ym=>{ if(ym>cutoffYm) return; const wd=_spWd(ym); if(!wd.nWk) return; const mo=+ym.slice(5,7); moSum[mo]+=allMonth[ym]/wd.nWk; moCnt[mo]++; });
+  const rawIdx=Array(13).fill(NaN); let gSum=0,gN=0;
+  for(let mo=1;mo<=12;mo++){ if(moCnt[mo]){ rawIdx[mo]=moSum[mo]/moCnt[mo]; gSum+=rawIdx[mo]; gN++; } }
+  const gAvg=gN?gSum/gN:1;
+  for(let mo=1;mo<=12;mo++){ if(isNaN(rawIdx[mo])) rawIdx[mo]=gAvg; rawIdx[mo]=gAvg>0?rawIdx[mo]/gAvg:1; }
+  const sm=Array(13).fill(1);
+  for(let mo=1;mo<=12;mo++){ const a=rawIdx[mo===1?12:mo-1], b=rawIdx[mo], c=rawIdx[mo===12?1:mo+1]; sm[mo]=(a+2*b+c)/4; }
+  let smMean=0; for(let mo=1;mo<=12;mo++) smMean+=sm[mo]; smMean/=12;
+  const seasIdx={}; for(let mo=1;mo<=12;mo++) seasIdx[mo]= smMean>0 ? 1+((sm[mo]/smMean)-1)*SP_AUTO.SHRINK : 1;
+
+  // 2) Per-leaf recency-weighted deseasonalised level + damped trend → project future months.
+  const L=SP_AUTO.LEVEL_MONTHS, leafRate={};
+  Object.keys(leafMonth).forEach(id=>{
+    const lm=leafMonth[id];
+    if(!Object.keys(lm).some(ym=>ym<=cutoffYm)) return; // no history at/before cutoff
+    const series=[]; // last L months ending at cutoff (gaps = 0), deseasonalised weekday level
+    for(let k=L-1;k>=0;k--){ const ym=_spMonthAdd(cutoffYm,-k); const wd=_spWd(ym); const perwd=wd.nWk?((lm[ym]||0)/wd.nWk):0; series.push(perwd/(seasIdx[+ym.slice(5,7)]||1)); }
+    let wsum=0,vsum=0; series.forEach((v,i)=>{ const w=Math.pow(SP_AUTO.LEVEL_DECAY,(series.length-1-i)); wsum+=w; vsum+=w*v; });
+    const level=wsum?vsum/wsum:0;
+    let trend=0; const n=series.length;
+    if(n>=6){ const mean=(a,b)=>{ let s=0,c=0; for(let i=a;i<b;i++){s+=series[i];c++;} return c?s/c:0; }; const rec=mean(n-3,n), old=mean(n-6,n-3); if(old>0){ trend=Math.pow(rec/old,1/3)-1; } }
+    trend=Math.max(-SP_AUTO.TREND_CLAMP,Math.min(SP_AUTO.TREND_CLAMP,trend));
+    const rates={};
+    futureYms.forEach(ym=>{ if(ym<=cutoffYm) return; const k=_spMonthDiff(cutoffYm,ym); const effK=(1-Math.pow(SP_AUTO.TREND_DAMP,k))/(1-SP_AUTO.TREND_DAMP); const wkRaw=level*(seasIdx[+ym.slice(5,7)]||1)*Math.pow(1+trend,effK); rates[ym]={wk:spQ25z(wkRaw), sat:spQ25z(wkRaw*satShare), _lvl:level, _trend:trend}; });
+    leafRate[id]=rates;
+  });
+  return { seasIdx, leafRate };
+}
+
+// Holdout backtest: forecast the last HOLDOUT complete months from data before them,
+// per leaf, for Auto and for the flat run-rate baseline; keep the abs-error + actual.
+function spAutoBacktest(leafMonth, allMonth, lastYm, satShare){
+  const lastComplete=_spMonthAdd(lastYm,-1); // current month is partial → exclude
+  const holdout=[]; for(let k=SP_AUTO.HOLDOUT-1;k>=0;k--) holdout.push(_spMonthAdd(lastComplete,-k));
+  const cutoff=_spMonthAdd(holdout[0],-1);
+  const auto=spAutoComputeRates(leafMonth,allMonth,cutoff,holdout,satShare);
+  const perLeaf={}; let tAuto=0,tBase=0,tAct=0;
+  Object.keys(leafMonth).forEach(id=>{
+    const lm=leafMonth[id];
+    let bw=0,bc=0; for(let k=0;k<2;k++){ const ym=_spMonthAdd(cutoff,-k); const wd=_spWd(ym); if(wd.nWk){ bw+=(lm[ym]||0)/wd.nWk; bc++; } }
+    const baseWk=bc?bw/bc:0, baseSat=baseWk*satShare;
+    let aErr=0,bErr=0,act=0;
+    holdout.forEach(ym=>{ const wd=_spWd(ym); const actual=lm[ym]||0; act+=actual; const ar=auto.leafRate[id]?.[ym]; const aFc=ar?ar.wk*wd.nWk+ar.sat*wd.nSat:0; const bFc=baseWk*wd.nWk+baseSat*wd.nSat; aErr+=Math.abs(aFc-actual); bErr+=Math.abs(bFc-actual); });
+    perLeaf[id]={auto:aErr,base:bErr,act}; tAuto+=aErr; tBase+=bErr; tAct+=act;
+  });
+  return { perLeaf, meta:{holdout,cutoff,tAuto,tBase,tAct} };
+}
+
+// Node accuracy from the cached backtest (WAPE → accuracy%) for Auto vs Baseline.
+function spAutoNodeAcc(node){
+  const bt=SP._auto?.backtest; if(!bt||!node) return null;
+  let a=0,b=0,act=0;
+  node.leaves.forEach(lf=>{ const e=bt[lf.id]; if(e){ a+=e.auto; b+=e.base; act+=e.act; } });
+  if(act<=0) return null;
+  return { auto:Math.round(Math.max(0,Math.min(100,100*(1-a/act)))), base:Math.round(Math.max(0,Math.min(100,100*(1-b/act)))) };
+}
+// Node's Auto weekday rate for a period (preview for the popover button) = Σ leaves'
+// weekday-average of their per-month auto rates over the period.
+function spNodeAutoRate(node,pid){
+  spAutoEnsure();
+  const per=spFcPeriods().find(p=>p.id===pid); if(!per) return 0;
+  const wkYms=[]; for(let d=new Date(per.from+'T00:00:00'); d.toISOString().split('T')[0]<=per.to; d.setDate(d.getDate()+1)){ if(d.getDay()>=1&&d.getDay()<=5) wkYms.push(_spYm(d.toISOString().split('T')[0])); }
+  if(!wkYms.length) return 0;
+  let t=0;
+  node.leaves.forEach(lf=>{ const mr=SP._auto?.leafMonthRate?.[lf.id]; let s=0; for(let i=0;i<wkYms.length;i++){ const m=mr?.[wkYms[i]]; s+= m?m.wk:(lf.wkRate||0); } t+=s/wkYms.length; });
+  return Math.round(t);
+}
+// Period-average {wk,sat} from a leaf's per-month auto rates (for the flat period cache).
+function spAutoLeafPeriodAvg(lf,periodDates){
+  const mr=SP._auto?.leafMonthRate?.[lf.id];
+  if(!mr) return null; // no auto data → caller falls back to baseline
+  let sw=0,nw=0,ss=0,ns=0;
+  for(let i=0;i<periodDates.length;i++){ const ds=periodDates[i], dw=spDow(ds), m=mr[_spYm(ds)]; if(dw>=1&&dw<=5){ nw++; sw+= m?m.wk:(lf.wkRate||0); } else if(dw===6){ ns++; ss+= m?m.sat:(lf.satRate||0); } }
+  return { wk:nw?sw/nw:(lf.wkRate||0), sat:ns?ss/ns:(lf.satRate||0), auto:true };
+}
 // Last day with real data (boundary between green actuals and fuchsia forecast)
 function spLastReal(){
   return DB.real_shipments_meta?.date_max || new Date().toISOString().split('T')[0];
@@ -1222,7 +1358,9 @@ function spFcEdit(nodeKey,pid,el){
   const own=spFcRuleAt(node.path,pid);
   const pLbl=(spFcPeriods().find(p=>p.id===pid)||{}).label||pid;
   const a10=spNodeAvgRate(node,10), a15=spNodeAvgRate(node,15), a30=spNodeAvgRate(node,30);
-  const ownLbl=own?(own.type==='avg'?own.value+'WD avg':own.type==='pct'?((own.value>0?'+':'')+own.value+'%'):own.value.toLocaleString()+' t/day'):null;
+  const ownLbl=own?(own.type==='auto'?'Auto (best-fit)':own.type==='avg'?own.value+'WD avg':own.type==='pct'?((own.value>0?'+':'')+own.value+'%'):own.value.toLocaleString()+' t/day'):null;
+  spAutoEnsure();
+  const autoAcc=spAutoNodeAcc(node), autoRate=spNodeAutoRate(node,pid), autoActive=!!(own&&own.type==='auto');
   const btn='background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:8px;padding:4px 7px;cursor:pointer';
   const avgBtn=n=>{ const v=n===10?a10:n===15?a15:a30; const act=own&&own.type==='avg'&&own.value===n;
     return `<button style="${btn};display:flex;flex-direction:column;align-items:center;gap:1px;flex:1;${act?'border-color:#ff4dd2;color:#ff4dd2':''}" onclick="spFcApply('${nodeKey}','${pid}','avg',${n})"><span>${spFcPdot(SP_FC_COLORS['avg'+n])}${n}WD</span><span style="font-size:7px;opacity:.75">${v.toLocaleString()}</span></button>`; };
@@ -1234,7 +1372,14 @@ function spFcEdit(nodeKey,pid,el){
   pop.innerHTML=`
     <div style="font-family:var(--mono);font-size:8px;color:var(--text)"><strong>${spEsc(node.name)}</strong> · ${pLbl} <span style="color:#ff4dd2">avg t/day</span></div>
     <div style="font-family:var(--mono);font-size:7px;color:var(--text-dim)">Current ${cur.toLocaleString()} t/day${ownLbl?` · own rule: ${ownLbl}`:' · inherited/baseline'}</div>
-    <div style="font-family:var(--mono);font-size:6px;color:var(--text-dim);letter-spacing:.5px">APPLY A METHOD — each row below computes its own value</div>
+    <div style="border:1px solid ${SP_FC_COLORS.auto};border-radius:3px;padding:6px 7px;background:rgba(32,227,192,.06)">
+      <button style="${btn};width:100%;color:${SP_FC_COLORS.auto};border-color:${SP_FC_COLORS.auto};${autoActive?'background:rgba(32,227,192,.20)':''};display:flex;justify-content:space-between;align-items:center;padding:6px 8px" onclick="spFcApply('${nodeKey}','${pid}','auto',0)">
+        <span>${spFcPdot(SP_FC_COLORS.auto)}<b>Auto · best-fit</b></span>
+        <span style="font-size:9px">${autoRate.toLocaleString()} t/day</span>
+      </button>
+      ${autoAcc?`<div style="font-family:var(--mono);font-size:6.5px;color:var(--text-dim);margin-top:4px;text-align:center">3-month backtest accuracy · <span style="color:${SP_FC_COLORS.auto};font-weight:700">Auto ${autoAcc.auto}%</span> vs baseline ${autoAcc.base}%</div>`:`<div style="font-family:var(--mono);font-size:6.5px;color:var(--text-dim);margin-top:4px;text-align:center">seasonality + trend + behaviour, per row</div>`}
+    </div>
+    <div style="font-family:var(--mono);font-size:6px;color:var(--text-dim);letter-spacing:.5px">…OR APPLY A MANUAL METHOD — each row computes its own value</div>
     <div style="display:flex;gap:4px">${avgBtn(10)}${avgBtn(15)}${avgBtn(30)}</div>
     <div style="display:flex;gap:4px;flex-wrap:wrap">
       <button style="${btn}" onclick="spFcApply('${nodeKey}','${pid}','pct',10)">${spFcPdot(SP_FC_COLORS.pct)}+10%</button>
