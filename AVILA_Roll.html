@@ -1173,7 +1173,24 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
             <button class="tb-btn sec dem-chart-rng" onclick="_demChartSetRange('all',this)">All</button>
           </div>
         </div>
-        <div id="dem-chart-body" style="height:190px;padding:0 10px 6px"><canvas id="dem-chart" style="width:100%;height:100%"></canvas></div>
+        <div id="dem-chart-body" style="height:200px;padding:0 10px 6px;display:flex;gap:10px">
+          <!-- LEFT: MTD/YTD comparison (LY · CY · BGT) -->
+          <div style="width:180px;flex-shrink:0;display:flex;flex-direction:column;border-right:1px solid var(--border2);padding-right:10px">
+            <div style="display:flex;gap:4px;justify-content:center;padding:2px 0">
+              <span class="sp-chip active" id="dem-side-mtd" onclick="_demSideMode('MTD')" style="cursor:pointer">MTD</span>
+              <span class="sp-chip" id="dem-side-ytd" onclick="_demSideMode('YTD')" style="cursor:pointer">YTD</span>
+            </div>
+            <div style="flex:1;min-height:0"><canvas id="dem-mini-mtd"></canvas></div>
+            <div id="dem-side-cap-mtd" style="font-family:var(--mono);font-size:7px;text-align:center;color:var(--text-dim);padding:2px 0"></div>
+          </div>
+          <!-- CENTER: daily actual+forecast bars -->
+          <div style="flex:1;min-width:0"><canvas id="dem-chart" style="width:100%;height:100%"></canvas></div>
+          <!-- RIGHT: full-year comparison (LY · CY · BGT) -->
+          <div style="width:180px;flex-shrink:0;display:flex;flex-direction:column;border-left:1px solid var(--border2);padding-left:10px">
+            <div style="flex:1;min-height:0"><canvas id="dem-mini-fy"></canvas></div>
+            <div id="dem-side-cap-fy" style="font-family:var(--mono);font-size:7px;text-align:center;color:var(--text-dim);padding:2px 0"></div>
+          </div>
+        </div>
       </div>
       <!-- Top scrollbar mirror -->
       <div style="overflow-x:auto;overflow-y:hidden;height:10px;flex-shrink:0;background:var(--surface);border-bottom:1px solid var(--border)" id="dem-top-scroll">
@@ -6566,6 +6583,30 @@ function _demChartSetRange(r,btn){
   document.querySelectorAll('.dem-chart-rng').forEach(b=>b.classList.toggle('active',b===btn));
   renderDemandChart();
 }
+// MTD/YTD toggle for the left side panel (mirrors the Sales page)
+function _demSideMode(m){
+  window._demSideM=m;
+  ['mtd','ytd'].forEach(k=>{ const el=document.getElementById('dem-side-'+k); if(el) el.classList.toggle('active', k===m.toLowerCase()); });
+  renderDemandChart();
+}
+// Mini LY·CY·BGT bar chart (same look as the Sales side panels)
+const _demMiniCharts={};
+function _demMiniBars(canvasId,v,title){
+  const canvas=document.getElementById(canvasId); if(!canvas) return;
+  if(_demMiniCharts[canvasId]){ _demMiniCharts[canvasId].destroy(); _demMiniCharts[canvasId]=null; }
+  _demMiniCharts[canvasId]=new Chart(canvas,{ type:'bar',
+    data:{labels:['LY','CY','BGT'],datasets:[{data:[v.LY||0,v.CY||0,v.BGT||0],
+      backgroundColor:['rgba(77,166,255,.45)','rgba(0,200,120,.8)','rgba(255,184,48,.7)'],borderWidth:0}]},
+    options:{responsive:true,maintainAspectRatio:false,animation:false,
+      plugins:{legend:{display:false},title:{display:true,text:title,color:'#8e9ab8',font:{family:'Space Mono',size:10}},
+        tooltip:{callbacks:{label:c=>c.raw!=null?Number(c.raw).toLocaleString()+' t':''}}},
+      scales:{x:{grid:{display:false},ticks:{color:'#8e9ab8',font:{family:'Space Mono',size:8}}},
+              y:{grid:{color:'rgba(255,255,255,.05)'},ticks:{color:'#8e9ab8',font:{family:'Space Mono',size:7},callback:x=>x>=1000?Math.round(x/100)/10+'k':x}}} } });
+}
+function _demMiniCaption(v){
+  const f=x=>x==null?'<span style="opacity:.5">—</span>':(x>=1e6?(x/1e6).toFixed(2)+'M t':x>=1000?Math.round(x/100)/10+'k t':Math.round(x)+' t');
+  return `<span style="color:rgba(77,166,255,.75)">LY</span> ${f(v.LY)} · <span style="color:var(--green)">CY</span> ${f(v.CY)} · <span style="color:var(--amber)">BGT</span> ${f(v.BGT)}`;
+}
 let _demChartInst=null;
 function renderDemandChart(){
   const canvas=document.getElementById('dem-chart'); if(canvas===null) return;
@@ -6646,6 +6687,23 @@ function renderDemandChart(){
     leg.innerHTML=lh;
   }
 
+  // ── Side panels: LY vs CY vs BGT for MTD/YTD (left) and full-year (right) ──
+  // MTD/YTD compare ACTUALS to date vs the same period last year; FY adds this
+  // year's forecast for the remainder. BGT stays null until a budget feed exists.
+  const shiftY=ds=>(parseInt(ds.slice(0,4))-1)+ds.slice(4);
+  const sumRange=(map,from,to)=>{ let t=0; for(const ds in map){ if(ds>=from&&ds<=to) t+=map[ds]; } return t; };
+  const y=todayStr.slice(0,4), mo=todayStr.slice(5,7);
+  const sideMode=window._demSideM||'MTD';
+  const lFrom=sideMode==='YTD'?`${y}-01-01`:`${y}-${mo}-01`, lTo=todayStr;
+  const left={ LY:Math.round(sumRange(actMap,shiftY(lFrom),shiftY(lTo))),
+               CY:Math.round(sumRange(actMap,lFrom,lTo)), BGT:null };
+  const fFrom=`${y}-01-01`, fTo=`${y}-12-31`;
+  const fcFrom=actMax?new Date(actMax+'T00:00:00'):null; if(fcFrom) fcFrom.setDate(fcFrom.getDate()+1);
+  const fy={ LY:Math.round(sumRange(actMap,shiftY(fFrom),shiftY(fTo))),
+             CY:Math.round(sumRange(actMap,fFrom,fTo)+sumRange(fcMap,fcFrom?(fcFrom._ymd()>fFrom?fcFrom._ymd():fFrom):fFrom,fTo)), BGT:null };
+  const capL=document.getElementById('dem-side-cap-mtd'); if(capL) capL.innerHTML=_demMiniCaption(left);
+  const capF=document.getElementById('dem-side-cap-fy');  if(capF) capF.innerHTML=_demMiniCaption(fy);
+
   const datasets=[];
   if(hasLY) datasets.push({ type:'line', label:'Last Year', data:lyData, stack:'ly', fill:'origin',
     backgroundColor:'rgba(77,166,255,0.13)', borderColor:'rgba(77,166,255,0.45)', borderWidth:1,
@@ -6672,6 +6730,8 @@ function renderDemandChart(){
     c.restore(); } };
 
   const buildIt=()=>{
+    _demMiniBars('dem-mini-mtd', left, sideMode);
+    _demMiniBars('dem-mini-fy',  fy,  'FY');
     if(_demChartInst){ _demChartInst.destroy(); _demChartInst=null; }
     _demChartInst=new Chart(canvas,{ type:'bar', data:{labels:[...labels],datasets},
       options:{ responsive:true,maintainAspectRatio:false,animation:false,
