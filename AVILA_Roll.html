@@ -37,6 +37,7 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
 .tb-btn:hover{box-shadow:0 0 14px var(--green);}
 .tb-btn.sec{background:transparent;color:var(--text-dim);border:1px solid var(--border2);}
 .tb-btn.sec:hover{color:var(--text);border-color:var(--text-dim);box-shadow:none;}
+.dem-chart-rng.active{color:var(--green);border-color:var(--green);}
 .tb-btn.amber{background:var(--amber);color:var(--bg);}
 .tb-btn.amber:hover{box-shadow:0 0 14px var(--amber);}
 .tb-btn.blue{background:var(--blue);color:var(--bg);}
@@ -1157,6 +1158,22 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
         <div class="sp-chip"             id="dem-type-ext" onclick="_demOnTypeChange('EXT')">EXT</div>
         <div class="sp-chip"             id="dem-type-int" onclick="_demOnTypeChange('INT')">INT</div>
         <button class="tb-btn sec" style="margin-left:auto" onclick="_demClearFilters()">✕ Clear</button>
+      </div>
+      <!-- Daily demand chart — mirrors the Sales page daily chart (actual+forecast bars,
+           last-year area behind, working-day average guides) -->
+      <div style="flex-shrink:0;background:var(--surface);border-bottom:1px solid var(--border)">
+        <div style="display:flex;align-items:center;gap:8px;padding:5px 14px;cursor:pointer;user-select:none" onclick="_demChartToggle()">
+          <span id="dem-chart-arrow" style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">▼</span>
+          <span style="font-family:var(--mono);font-size:9px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase">Daily Demand — Volume (MT)</span>
+          <div id="dem-chart-legend" style="display:flex;gap:12px;margin-left:14px;font-family:var(--mono);font-size:8px;color:var(--text-dim);flex-wrap:wrap"></div>
+          <div style="margin-left:auto;display:flex;gap:4px" onclick="event.stopPropagation()">
+            <button class="tb-btn sec dem-chart-rng" onclick="_demChartSetRange('30',this)">30D</button>
+            <button class="tb-btn sec dem-chart-rng active" onclick="_demChartSetRange('90',this)">90D</button>
+            <button class="tb-btn sec dem-chart-rng" onclick="_demChartSetRange('180',this)">6M</button>
+            <button class="tb-btn sec dem-chart-rng" onclick="_demChartSetRange('all',this)">All</button>
+          </div>
+        </div>
+        <div id="dem-chart-body" style="height:190px;padding:0 10px 6px"><canvas id="dem-chart" style="width:100%;height:100%"></canvas></div>
       </div>
       <!-- Top scrollbar mirror -->
       <div style="overflow-x:auto;overflow-y:hidden;height:10px;flex-shrink:0;background:var(--surface);border-bottom:1px solid var(--border)" id="dem-top-scroll">
@@ -6528,6 +6545,149 @@ function renderDemandView(){
     topScroll.onscroll=()=>{ wrap.scrollLeft=topScroll.scrollLeft; };
     wrap.onscroll=()=>{ topScroll.scrollLeft=wrap.scrollLeft; };
   }
+
+  renderDemandChart(); // daily chart above the grid — same filters as the table
+}
+
+// ── DAILY DEMAND CHART — mirror of the Sales page daily shipments chart ──────
+// Green actual bars + orange forecast bars (stacked from the same demand grid the
+// table shows), last year's actual demand as a soft blue area behind, dotted
+// 10/15/30-working-day average guide lines, and a today marker. Honors the same
+// facility/category/product/type filters as the grid; collapsible; range buttons
+// window the view around today.
+function _demChartToggle(){
+  window._demChartCol=!window._demChartCol;
+  const b=document.getElementById('dem-chart-body'); if(b) b.style.display=window._demChartCol?'none':'block';
+  const a=document.getElementById('dem-chart-arrow'); if(a) a.textContent=window._demChartCol?'▶':'▼';
+  if(!window._demChartCol) renderDemandChart();
+}
+function _demChartSetRange(r,btn){
+  window._demChartRng=r;
+  document.querySelectorAll('.dem-chart-rng').forEach(b=>b.classList.toggle('active',b===btn));
+  renderDemandChart();
+}
+let _demChartInst=null;
+function renderDemandChart(){
+  const canvas=document.getElementById('dem-chart'); if(canvas===null) return;
+  if(window._demChartCol) return;
+  const todayStr=new Date()._ymd();
+
+  // Same filtered element set as the demand grid
+  let els=getFacElements().filter(e=>e.type==='demand_point');
+  const df=_demEnsureFilter();
+  const facFor=el=>el.assigned_facility_id||el.facility_id||S.facility_id;
+  if(df.facId)  els=els.filter(el=>facFor(el)===df.facId);
+  if(df.cat)    els=els.filter(el=>_demElMatchesCat(el,df.cat));
+  if(df.prodId) els=els.filter(el=>_demElMatchesProd(el,df.prodId));
+  if(df.custType!=='all') els=els.filter(el=>_demElType(el)===df.custType);
+  const elIds=new Set(els.map(e=>e.id));
+
+  // Aggregate demand_values per element|date (ship-to rows override the dp-level row,
+  // mirroring the grid's map), then per date split by source: actual vs forecast.
+  const perKey={};
+  (DB.demand_values||[]).forEach(v=>{
+    if(!v.element_id||!v.date||!elIds.has(v.element_id)) return;
+    const k=v.element_id+'|'+v.date;
+    if(v.ship_to){
+      const r=(perKey[k]&&perKey[k].hasShip)?perKey[k]:{v:0,src:v.source,hasShip:true};
+      r.v+=(parseFloat(v.value_t)||0); perKey[k]=r;
+    } else if(!perKey[k]?.hasShip) perKey[k]={v:parseFloat(v.value_t)||0,src:v.source,hasShip:false};
+  });
+  const actMap={}, fcMap={}; let actMin=null, actMax=null;
+  Object.keys(perKey).forEach(k=>{
+    const ds=k.slice(k.indexOf('|')+1), r=perKey[k];
+    if(r.src==='actual'){ actMap[ds]=(actMap[ds]||0)+r.v; if(!actMin||ds<actMin) actMin=ds; if(!actMax||ds>actMax) actMax=ds; }
+    else fcMap[ds]=(fcMap[ds]||0)+r.v;
+  });
+
+  // Window around today (30/90/180 back+forward), or the full grid span
+  const rng=window._demChartRng||'90';
+  let winStart, winEnd;
+  const simStartStr=S.simCfg.start_date||todayStr;
+  const simEnd=new Date(simStartStr+'T00:00:00'); simEnd.setDate(simEnd.getDate()+(S.simCfg.horizon||90));
+  if(rng==='all'){
+    winStart=actMin&&actMin<simStartStr?actMin:simStartStr;
+    winEnd=simEnd._ymd();
+  } else {
+    const n=parseInt(rng)||90;
+    const a=new Date(todayStr+'T00:00:00'); a.setDate(a.getDate()-n); winStart=a._ymd();
+    const b2=new Date(todayStr+'T00:00:00'); b2.setDate(b2.getDate()+n); winEnd=b2._ymd();
+  }
+  const labels=[];
+  for(let d=new Date(winStart+'T00:00:00'); d._ymd()<=winEnd; d.setDate(d.getDate()+1)) labels.push(d._ymd());
+  if(!labels.length) return;
+
+  const actData=labels.map(ds=>actMap[ds]?Math.round(actMap[ds]):null);
+  const fcData =labels.map(ds=>fcMap[ds]?Math.round(fcMap[ds]):null);
+  // Last year's actual demand for the same calendar day — soft area behind the bars
+  const lyData=labels.map(ds=>{
+    const ld=(parseInt(ds.slice(0,4))-1)+ds.slice(4);
+    if(!actMin||ld<actMin||ld>(actMax||todayStr)) return null;
+    return Math.round(actMap[ld]||0);
+  });
+  const hasLY=lyData.some(v=>v);
+
+  // Guide lines: 10/15/30 working-day averages of actuals ending at the last actual day
+  const guides=[];
+  if(actMax){
+    const maOf=n=>{ let cnt=0,sum=0; const d=new Date(actMax+'T00:00:00'); let g=0;
+      while(cnt<n&&g<70){ const dow=d.getDay(); if(dow>=1&&dow<=5){ sum+=actMap[d._ymd()]||0; cnt++; } d.setDate(d.getDate()-1); g++; }
+      return cnt?sum/cnt:0; };
+    [{n:10,color:'rgba(0,255,157,.85)'},{n:15,color:'rgba(255,184,48,.85)'},{n:30,color:'rgba(255,80,120,.85)'}]
+      .forEach(gd=>{ const v=Math.round(maOf(gd.n)); if(v>0) guides.push({...gd,q:v}); });
+  }
+
+  // Legend
+  const leg=document.getElementById('dem-chart-legend');
+  if(leg){
+    let lh=`<span style="color:var(--green)">■ Actual</span><span style="color:#ff8c32">■ Forecast</span>`;
+    if(hasLY) lh+=`<span style="color:rgba(77,166,255,.8)">▨ Last Year</span>`;
+    guides.forEach(gd=>{ lh+=`<span style="color:${gd.color}">╌ ${gd.n}WD ${gd.q>=1000?(gd.q/1000).toFixed(1)+'k':gd.q} t</span>`; });
+    leg.innerHTML=lh;
+  }
+
+  const datasets=[];
+  if(hasLY) datasets.push({ type:'line', label:'Last Year', data:lyData, stack:'ly', fill:'origin',
+    backgroundColor:'rgba(77,166,255,0.13)', borderColor:'rgba(77,166,255,0.45)', borderWidth:1,
+    pointRadius:0, tension:.25, spanGaps:true, order:10 });
+  datasets.push(
+    { label:'Actual',   data:actData, backgroundColor:'rgba(0,200,120,0.75)', stack:'v', order:3 },
+    { label:'Forecast', data:fcData,  backgroundColor:'rgba(255,140,50,0.78)', stack:'v', order:3 },
+  );
+
+  const todayPlugin={ id:'demToday', afterDraw(chart){ const idx=chart.data.labels.indexOf(todayStr); if(idx<0) return;
+    const x=chart.scales.x.getPixelForValue(idx); const {top,bottom}=chart.chartArea; const c=chart.ctx;
+    c.save(); c.strokeStyle='rgba(255,61,90,0.55)'; c.lineWidth=1; c.setLineDash([3,3]);
+    c.beginPath(); c.moveTo(x,top); c.lineTo(x,bottom); c.stroke(); c.restore(); } };
+  const guidesPlugin={ id:'demGuides', afterDatasetsDraw(chart){ if(!guides.length) return;
+    const {left,right,top,bottom}=chart.chartArea, c=chart.ctx, ys=chart.scales.y;
+    c.save(); c.font='8px "Space Mono",monospace'; c.textBaseline='bottom';
+    guides.forEach((gd,i)=>{ const y=ys.getPixelForValue(gd.q); if(y<top||y>bottom) return;
+      c.strokeStyle=gd.color; c.lineWidth=1; c.setLineDash([4,4]);
+      c.beginPath(); c.moveTo(left,y); c.lineTo(right,y); c.stroke();
+      const txt=`${gd.n}WD ${gd.q>=1000?(gd.q/1000).toFixed(1)+'k':gd.q}`;
+      const tw=c.measureText(txt).width, tx=left+6+i*(tw+26);
+      c.fillStyle='rgba(10,14,26,.85)'; c.fillRect(tx-2,y-11,tw+4,10);
+      c.fillStyle=gd.color; c.fillText(txt,tx,y-2); });
+    c.restore(); } };
+
+  const buildIt=()=>{
+    if(_demChartInst){ _demChartInst.destroy(); _demChartInst=null; }
+    _demChartInst=new Chart(canvas,{ type:'bar', data:{labels:[...labels],datasets},
+      options:{ responsive:true,maintainAspectRatio:false,animation:false,
+        plugins:{ legend:{display:false},
+          tooltip:{mode:'index',intersect:false,callbacks:{
+            title:items=>items[0]?.label||'',
+            label:c=>c.raw!=null?`${c.dataset.label}: ${Number(c.raw).toLocaleString()} t`:'' }} },
+        scales:{ x:{stacked:true,grid:{color:'rgba(255,255,255,.03)'},ticks:{color:'#8e9ab8',font:{family:'Space Mono',size:8},maxTicksLimit:14,autoSkip:true,maxRotation:0}},
+                 y:{stacked:true,grid:{color:'rgba(255,255,255,.05)'},ticks:{color:'#8e9ab8',font:{family:'Space Mono',size:8},callback:v=>v>=1000?Math.round(v/100)/10+'k':v}} }
+      }, plugins:[todayPlugin,guidesPlugin] });
+  };
+  if(typeof Chart==='undefined'){
+    const s=document.createElement('script');
+    s.src='https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js';
+    s.onload=buildIt; document.head.appendChild(s);
+  } else buildIt();
 }
 
 function _demToggleGrp(id){
