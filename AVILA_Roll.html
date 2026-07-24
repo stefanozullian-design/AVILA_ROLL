@@ -872,6 +872,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
   <div class="mode-wrap">
     <span class="mode-lbl" id="mode-lbl" style="display:none"></span>
     <button class="tb-btn sec" id="sc-save-btn" onclick="scManualSave()" title="Save the current scenario to its file now">💾 Save</button>
+    <button class="tb-btn sec" onclick="scOpenHistoryPanel()" title="Browse and restore saved versions of this scenario">🕒 History</button>
     <div class="sc-pill" id="sc-switcher" onclick="scToggleDropdown(event)" title="Switch scenario">
       <span class="sc-dot none" id="sc-dot" title="Save status"></span>
       <span class="sc-name" id="sc-name">No scenario</span>
@@ -23024,7 +23025,7 @@ function _mgShowMergeBanner(fileName, info){
 // Replaces the old single "Topology JSON" Data Source: the active scenario IS
 // the topology source of truth, and autoSave mirrors edits into its file.
 // ═══════════════════════════════════════════════════════════════════════
-const SC = { meta:{}, handles:{}, baselines:{}, activeId:null, _writeTimer:null, _writeBusy:false, _writeQueued:false };
+const SC = { meta:{}, handles:{}, baselines:{}, historyDirs:{}, activeId:null, _writeTimer:null, _writeBusy:false, _writeQueued:false };
 const SC_COLORS = ['#4da6ff','#ff3d5a','#ffb830','#00ff9d','#a78bfa','#f472b6','#2dd4bf','#fb923c'];
 // Only truly regenerated-on-run tables are transient. Real data (production,
 // shipments, etc.) BELONGS to the app once imported/entered — it is saved with
@@ -23039,11 +23040,12 @@ let _scDB=null;
 function scOpenIDB(){
   return new Promise((res,rej)=>{
     if(_scDB){res(_scDB);return;}
-    const req=indexedDB.open('avila_scenarios',2);
+    const req=indexedDB.open('avila_scenarios',3);
     req.onupgradeneeded=e=>{
       const d=e.target.result;
-      if(!d.objectStoreNames.contains('handles'))   d.createObjectStore('handles');
-      if(!d.objectStoreNames.contains('baselines')) d.createObjectStore('baselines');
+      if(!d.objectStoreNames.contains('handles'))     d.createObjectStore('handles');
+      if(!d.objectStoreNames.contains('baselines'))   d.createObjectStore('baselines');
+      if(!d.objectStoreNames.contains('historyDirs')) d.createObjectStore('historyDirs');
     };
     req.onsuccess=e=>{_scDB=e.target.result;res(_scDB);};
     req.onerror=()=>rej(req.error);
@@ -23052,6 +23054,9 @@ function scOpenIDB(){
 async function scSaveHandle(id,h){ try{const db=await scOpenIDB();await new Promise((r,j)=>{const tx=db.transaction('handles','readwrite');tx.objectStore('handles').put(h,id);tx.oncomplete=r;tx.onerror=j;});}catch(e){console.warn('SC handle save',e);} }
 async function scLoadHandle(id){ try{const db=await scOpenIDB();return await new Promise(r=>{const tx=db.transaction('handles','readonly');const q=tx.objectStore('handles').get(id);q.onsuccess=()=>r(q.result||null);q.onerror=()=>r(null);});}catch(e){return null;} }
 async function scDeleteHandleIDB(id){ try{const db=await scOpenIDB();await new Promise(r=>{const tx=db.transaction('handles','readwrite');tx.objectStore('handles').delete(id);tx.oncomplete=r;tx.onerror=r;});}catch(e){} }
+async function scSaveHistoryDirHandle(id,h){ try{const db=await scOpenIDB();await new Promise((r,j)=>{const tx=db.transaction('historyDirs','readwrite');tx.objectStore('historyDirs').put(h,id);tx.oncomplete=r;tx.onerror=j;});}catch(e){console.warn('SC history dir save',e);} }
+async function scLoadHistoryDirHandle(id){ try{const db=await scOpenIDB();return await new Promise(r=>{const tx=db.transaction('historyDirs','readonly');const q=tx.objectStore('historyDirs').get(id);q.onsuccess=()=>r(q.result||null);q.onerror=()=>r(null);});}catch(e){return null;} }
+async function scDeleteHistoryDirHandle(id){ try{const db=await scOpenIDB();await new Promise(r=>{const tx=db.transaction('historyDirs','readwrite');tx.objectStore('historyDirs').delete(id);tx.oncomplete=r;tx.onerror=r;});}catch(e){} }
 
 // ── Merge baselines — the file state this browser last synced with ──
 // Persisted in IndexedDB so the three-way merge survives a reload; without a
@@ -23090,7 +23095,8 @@ function scSetSaveStatus(state){ const d=document.getElementById('sc-dot'); if(!
 // Merge-aware: before writing, re-reads the file — if a teammate saved a
 // different version since our last sync (shared SharePoint/OneDrive folder),
 // their rows are three-way-merged with ours instead of being overwritten.
-async function scWriteActive(id){
+async function scWriteActive(id, opts){
+  opts=opts||{};
   id=id||SC.activeId; const m=SC.meta[id]; const handle=SC.handles[id];
   if(!m||!handle){ scSetSaveStatus('none'); return; }
   if(SC._writeBusy){ SC._writeQueued=true; return; }  // a sync is already running — coalesce
@@ -23106,6 +23112,7 @@ async function scWriteActive(id){
       scSaveBaseline(id, prep.diskText, prep.theirs.savedAt||null, prep.fileMod);
       scSetSaveStatus('saved'); _dsHideWriteBlockedBanner(); scRenderDropdown();
       if(prep.mergeInfo.remoteApplied) _mgShowMergeBanner(m.fileName, prep.mergeInfo);
+      scMaybeSnapshot(id, prep.diskText, {forced:opts.forceSnapshot});
       return;
     }
     let out=ours;
@@ -23117,6 +23124,7 @@ async function scWriteActive(id){
     m.lastSaved=new Date().toISOString(); scSaveMeta();
     scSetSaveStatus('saved'); _dsHideWriteBlockedBanner(); scRenderDropdown();
     if(prep.mode==='merge') _mgShowMergeBanner(m.fileName, prep.mergeInfo);
+    scMaybeSnapshot(id, outText, {forced:opts.forceSnapshot, conflict:prep.mode==='merge'&&prep.mergeInfo.conflicts.length>0});
   }catch(err){ scSetSaveStatus('error'); _dsWriteBlockedBanner('scenario:'+id, m.fileName, 'write failed — '+err.message); console.warn('SC write',err); }
   finally{ SC._writeBusy=false; if(SC._writeQueued){ SC._writeQueued=false; scScheduleWrite(); } }
 }
@@ -23132,11 +23140,101 @@ async function scManualSave(){
   autoSave();                        // refresh localStorage cache
   clearTimeout(SC._writeTimer);      // cancel the debounce; write now
   if(scActive() && SC.handles[SC.activeId]){
-    await scWriteActive();
+    await scWriteActive(SC.activeId, {forceSnapshot:true});
     statMsg('Scenario saved ✓ — '+(SC.meta[SC.activeId]?.fileName||''));
   } else {
     statMsg('Saved to browser (no scenario file linked — use the scenario menu to pick one)');
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// VERSION HISTORY — deliberate, timestamped snapshots of the scenario, kept
+// in a folder the user picks once. Turns "a OneDrive conflict copy happened
+// to save me" into an intentional, reliable rollback point: nobody's later
+// edit — colleague's or your own — can ever touch a written snapshot, so
+// there's always a known-good state to go back to.
+//   - Every successful write to the live scenario file MAY also drop a
+//     snapshot: forced on a manual Save, forced when the merge found a real
+//     conflict (that's exactly the moment something might need undoing),
+//     otherwise throttled to at most one per SC_HIST_THROTTLE_MS so autosave
+//     doesn't spam the folder.
+//   - Nothing is prompted automatically — the folder is opt-in per scenario
+//     (📂 Choose folder…) so this stays silent until the user asks for it.
+//   - Retention: oldest snapshots beyond SC_HIST_KEEP are pruned on write.
+// ═══════════════════════════════════════════════════════════════════════
+const SC_HIST_THROTTLE_MS = 20*60*1000; // autosave-driven snapshots: at most one per 20 min
+const SC_HIST_KEEP = 60;                 // retention cap per scenario folder
+
+function _scSanitize(s){ return String(s||'').replace(/[\\/:*?"<>|]/g,'').trim()||'Scenario'; }
+function _scHistPrefix(m){ return _scSanitize(m.name)+'__'; }
+function _scHistFileName(m, tag){
+  const d=new Date(); const p=n=>String(n).padStart(2,'0');
+  const stamp=`${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  const rand=Math.random().toString(16).slice(2,6); // guards against same-second collisions
+  return `${_scHistPrefix(m)}${stamp}_${rand}${tag?'_'+tag:''}.json`;
+}
+// Parse a snapshot's timestamp (+ optional tag) back out of its filename.
+function _scHistParse(name, prefix){
+  if(!name.startsWith(prefix)||!name.endsWith('.json')) return null;
+  const rest=name.slice(prefix.length, -5);
+  const m=rest.match(/^(\d{4})-(\d{2})-(\d{2})_(\d{2})(\d{2})(\d{2})_[0-9a-f]{4}(?:_(.+))?$/);
+  if(!m) return null;
+  return { name, date:new Date(+m[1],+m[2]-1,+m[3],+m[4],+m[5],+m[6]), tag:m[7]||null };
+}
+
+// Get (or, if `promptIfMissing`, ask the user to pick) the folder this
+// scenario's snapshots live in. Returns null if unavailable/declined/lapsed —
+// callers treat that as "history isn't set up for this scenario" and stay silent.
+async function scEnsureHistoryDir(id, promptIfMissing){
+  try{
+    if(SC.historyDirs[id]) return SC.historyDirs[id];
+    let h=await scLoadHistoryDirHandle(id);
+    if(h){
+      const ok=await _dsEnsureWritePermission(h);
+      if(ok){ SC.historyDirs[id]=h; return h; }
+      if(!promptIfMissing) return null;
+    }
+    if(!promptIfMissing) return null;
+    if(!window.showDirectoryPicker){ statMsg('This browser cannot manage version history directly — use Chrome or Edge.'); return null; }
+    h=await window.showDirectoryPicker({id:'avila-history-'+id, mode:'readwrite'});
+    SC.historyDirs[id]=h; await scSaveHistoryDirHandle(id,h);
+    return h;
+  }catch(e){ return null; } // user cancelled the picker, or permission denied
+}
+
+// Write one timestamped snapshot and prune the oldest beyond the retention cap.
+// `payloadText` is reused verbatim from whatever was just written to the live
+// file, so the snapshot is byte-identical to that moment — not a fresh rebuild.
+async function scWriteSnapshot(id, payloadText, tag){
+  const dir=await scEnsureHistoryDir(id, false); if(!dir) return false; // not set up — silent no-op
+  const m=SC.meta[id]; if(!m) return false;
+  try{
+    const fh=await dir.getFileHandle(_scHistFileName(m,tag), {create:true});
+    const w=await fh.createWritable(); await w.write(new Blob([payloadText],{type:'application/json'})); await w.close();
+    m.lastSnapshot=new Date().toISOString(); scSaveMeta();
+    await scPruneHistory(dir, _scHistPrefix(m));
+    return true;
+  }catch(e){ console.warn('SC snapshot write',e); return false; }
+}
+async function scPruneHistory(dir, prefix){
+  try{
+    const names=[];
+    for await (const [name,h] of dir.entries()){ if(h.kind==='file'&&name.startsWith(prefix)&&name.endsWith('.json')) names.push(name); }
+    names.sort(); // the timestamp embedded in the name sorts chronologically
+    const excess=names.length-SC_HIST_KEEP;
+    if(excess>0) for(const name of names.slice(0,excess)){ try{ await dir.removeEntry(name); }catch(e){} }
+  }catch(e){ /* permission lapsed or folder unavailable — skip pruning this round */ }
+}
+// Decide whether this write should also drop a snapshot (see header comment
+// for the forced/throttled rules), then do it. Silently no-ops if the
+// scenario has no history folder linked.
+async function scMaybeSnapshot(id, payloadText, {forced, conflict}={}){
+  const m=SC.meta[id]; if(!m) return;
+  if(!forced && !conflict){
+    const last=m.lastSnapshot?new Date(m.lastSnapshot).getTime():0;
+    if(Date.now()-last < SC_HIST_THROTTLE_MS) return; // too soon — autosave snapshots are throttled
+  }
+  await scWriteSnapshot(id, payloadText, conflict?'conflict':(forced?'manual':null));
 }
 async function scRetryWrite(id){
   const handle=SC.handles[id]; if(!handle){ statMsg('No file for that scenario'); return; }
@@ -23338,6 +23436,7 @@ function scRowMenu(ev,id){
   const menu=document.createElement('div'); menu.className='sc-rowmenu';
   menu.innerHTML=`<div onclick="scRename('${id}');this.parentNode.remove()">✎ Rename</div>
     <div onclick="(scSwitch('${id}').then(()=>scDuplicate()));this.parentNode.remove()">⧉ Duplicate</div>
+    <div onclick="(scSwitch('${id}').then(()=>scOpenHistoryPanel()));this.parentNode.remove()">🕒 Version History</div>
     <div style="color:var(--red);border-top:1px solid var(--border2)" onclick="scDelete('${id}');this.parentNode.remove()">🗑 Delete</div>`;
   document.body.appendChild(menu);
   const r=ev.target.getBoundingClientRect();
@@ -23345,6 +23444,96 @@ function scRowMenu(ev,id){
   setTimeout(()=>document.addEventListener('click',function _c(){ menu.remove(); document.removeEventListener('click',_c); },{once:true}),0);
 }
 function _scEsc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+// ── Version History panel — browse/restore/delete snapshots (reuses the
+// app's generic modal: showModalContent/closeModal). ──
+function scOpenHistoryPanel(){
+  const id=SC.activeId; const m=id?SC.meta[id]:null;
+  if(!id||!m){ statMsg('Open or create a scenario first.'); return; }
+  showModalContent(`
+    <div class="modal-hdr"><span class="modal-title">🕒 Version History — ${_scEsc(m.name)}</span><span class="modal-close" onclick="closeModal()">✕</span></div>
+    <div class="modal-body" id="sc-hist-body" style="min-height:100px">
+      <div style="padding:20px;text-align:center;color:var(--text-dim);font-family:var(--mono);font-size:10px">Loading…</div>
+    </div>
+    <div class="modal-footer" style="justify-content:space-between;align-items:center;flex-wrap:wrap">
+      <span id="sc-hist-folder" style="font-family:var(--mono);font-size:8px;color:var(--text-dim);flex:1;min-width:120px"></span>
+      <button class="btn-sec" onclick="scHistChooseFolder()">📂 Change folder…</button>
+      <button class="btn-pri" onclick="scHistSnapshotNow()">🕒 Snapshot now</button>
+    </div>`);
+  scRenderHistoryList(id);
+}
+async function scHistChooseFolder(){
+  const id=SC.activeId; if(!id) return;
+  const dir=await scEnsureHistoryDir(id, true);
+  if(dir) await scRenderHistoryList(id);
+}
+async function scHistSnapshotNow(){
+  const id=SC.activeId; if(!id) return;
+  const dir=await scEnsureHistoryDir(id, true); if(!dir) return;
+  const ok=await scWriteSnapshot(id, JSON.stringify(scBuildPayload(),null,2), 'manual');
+  statMsg(ok?'Snapshot saved ✓':'Snapshot failed');
+  await scRenderHistoryList(id);
+}
+async function scRenderHistoryList(id){
+  const body=document.getElementById('sc-hist-body'); if(!body) return; // panel closed mid-await
+  const m=SC.meta[id]; if(!m) return;
+  const folderEl=document.getElementById('sc-hist-folder');
+  const dir=await scEnsureHistoryDir(id, false);
+  if(!document.getElementById('sc-hist-body')) return; // closed while we awaited
+  if(!dir){
+    if(folderEl) folderEl.textContent='';
+    body.innerHTML=`<div style="padding:16px 4px;text-align:center;font-family:var(--mono);font-size:10px;color:var(--text-dim);line-height:1.7">
+      No history folder linked yet for <b style="color:var(--text)">${_scEsc(m.name)}</b>.<br>
+      Pick a folder (e.g. a "History" subfolder next to your scenario file) — from then on, every meaningful save drops a dated copy there that nobody's later edit can ever touch.
+      <div style="margin-top:12px"><button class="btn-pri" onclick="scHistChooseFolder()">📂 Choose folder…</button></div>
+    </div>`;
+    return;
+  }
+  if(folderEl) folderEl.textContent='📁 '+(dir.name||'linked folder');
+  const prefix=_scHistPrefix(m);
+  const items=[];
+  try{
+    for await (const [name,h] of dir.entries()){
+      if(h.kind!=='file') continue;
+      const p=_scHistParse(name,prefix); if(p) items.push(p);
+    }
+  }catch(e){ body.innerHTML=`<div style="padding:16px 4px;color:var(--red);font-family:var(--mono);font-size:10px">Couldn't read the folder — permission may have lapsed. Try "Change folder…".</div>`; return; }
+  items.sort((a,b)=>b.date-a.date);
+  if(!items.length){ body.innerHTML=`<div style="padding:16px 4px;text-align:center;font-family:var(--mono);font-size:10px;color:var(--text-dim)">No snapshots yet — they'll appear here as you work (or click "Snapshot now").</div>`; return; }
+  const tagBadge=t=> t==='conflict'?`<span style="color:var(--red);border:1px solid var(--red);border-radius:3px;padding:0 5px;font-size:8px;margin-left:6px">CONFLICT</span>`
+                    :t==='manual'?`<span style="color:var(--green);border:1px solid var(--green);border-radius:3px;padding:0 5px;font-size:8px;margin-left:6px">MANUAL</span>`
+                    :t==='pre-restore'?`<span style="color:var(--blue);border:1px solid var(--blue);border-radius:3px;padding:0 5px;font-size:8px;margin-left:6px">BEFORE RESTORE</span>`:'';
+  body.innerHTML=items.map(it=>{
+    const safe=it.name.replace(/'/g,"\\'");
+    return `<div style="display:flex;align-items:center;gap:10px;padding:8px 2px;border-bottom:1px solid var(--border2);font-family:var(--mono)">
+      <div style="flex:1;font-size:10px;color:var(--text)">${it.date.toLocaleString()}${tagBadge(it.tag)}</div>
+      <button class="btn-sec" onclick="scRestoreSnapshot('${id}','${safe}')">↩ Restore</button>
+      <span style="color:var(--red);cursor:pointer;font-size:12px;padding:0 4px" title="Delete" onclick="scDeleteSnapshot('${id}','${safe}')">🗑</span>
+    </div>`;
+  }).join('');
+}
+async function scDeleteSnapshot(id,name){
+  const dir=await scEnsureHistoryDir(id,false); if(!dir) return;
+  if(!confirm('Delete this snapshot? This cannot be undone.')) return;
+  try{ await dir.removeEntry(name); }catch(e){ statMsg('Delete failed'); return; }
+  await scRenderHistoryList(id);
+}
+async function scRestoreSnapshot(id, name){
+  const dir=await scEnsureHistoryDir(id,false); if(!dir) return;
+  const m=SC.meta[id]; if(!m) return;
+  if(!confirm('Restore the scenario to this saved version?\n\nYour current state will be snapshotted first, so this restore itself can be undone.')) return;
+  try{
+    await scWriteSnapshot(id, JSON.stringify(scBuildPayload(),null,2), 'pre-restore'); // safety net for the restore itself
+    const fh=await dir.getFileHandle(name);
+    const text=await (await fh.getFile()).text();
+    const payload=JSON.parse(text);
+    if(!payload||!payload.DB) throw new Error('not a valid scenario snapshot');
+    _mgApplyPayloadToApp(payload);
+    await scManualSave(); // pushes the restored state back into the live file (merge-aware) + snapshots it
+    closeModal();
+    statMsg('Restored ✓ — '+name);
+  }catch(e){ statMsg('Restore failed — '+e.message); console.warn('SC restore',e); }
+}
 
 // ── Startup picker ──
 function scOpenStartup(firstRun){
