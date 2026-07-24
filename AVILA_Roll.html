@@ -9301,6 +9301,7 @@ function openDemandBuilder(elId, startDate){
     <div style="display:grid;grid-template-columns:1.2fr 1fr;gap:8px">
       <div style="${pf}"><div style="${pl}">Method</div>
         <select style="${pi}" id="fb-method" onchange="_fbSyncMethod();_fbLivePreview()">
+          <option value="adaptive" selected>Adaptive (auto-pick 5/10/15/30WD)</option>
           <option value="rolling">Rolling weekday average</option>
           <option value="fixed">Fixed daily value</option>
           <option value="distribute">Distribute monthly total</option>
@@ -9575,6 +9576,33 @@ function _fbAlloc25(weights, total){
   return out.map(c=>c*FB_STEP);
 }
 
+// ── Adaptive forecasting engine ───────────────────────────
+// Ported from the Avila Sales adaptive engine. Walk-forward, next-weekday
+// backtest over the last 3 calendar months of actuals to auto-pick the best
+// moving-average window; the winning window's average becomes the daily rate.
+// Rules: weekdays only (Sat/Sun ignored in the backtest), never uses future
+// data, same period scored for every candidate, lowest MAPE always wins.
+const FB_ADAPT_WINDOWS=[5,10,15,30];
+function _fbAdaptConf(m){ return m<5?{lbl:'Excellent',col:'var(--green)'}:m<10?{lbl:'Good',col:'#4da6ff'}:m<15?{lbl:'Fair',col:'var(--amber)'}:{lbl:'Poor',col:'var(--red)'}; }
+function _fbAdaptiveRun(dates, vols){
+  const L=vols.length; if(L<8) return null;
+  const last=new Date(dates[L-1]+'T00:00:00'); last.setMonth(last.getMonth()-3);
+  const cut=last._ymd();
+  let h0=0; while(h0<L && dates[h0]<cut) h0++;
+  const P=new Array(L+1); P[0]=0; for(let i=0;i<L;i++) P[i+1]=P[i]+(vols[i]||0);
+  const ma=(i,n)=>(P[i+1]-P[i+1-n])/n;              // avg of the n weekdays ending at index i
+  const errs={}; FB_ADAPT_WINDOWS.forEach(n=>errs[n]=0);
+  let pts=0;
+  // Stand on each historical weekday with ≥30 prior points, forecast ONLY the
+  // next weekday with each candidate, using only data available at that moment.
+  for(let i=Math.max(h0,29); i<L-1; i++){ const a=vols[i+1]; if(!(a>0)) continue; for(const n of FB_ADAPT_WINDOWS) errs[n]+=Math.abs(a-ma(i,n))/a; pts++; }
+  if(pts<5) return null;
+  const mape={}; FB_ADAPT_WINDOWS.forEach(n=>{ mape[n]=errs[n]/pts*100; });
+  let best=FB_ADAPT_WINDOWS[0]; FB_ADAPT_WINDOWS.forEach(n=>{ if(mape[n]<mape[best]) best=n; });
+  const avg=L>=best ? (P[L]-P[L-best])/best : P[L]/L;  // forecast = avg of most recent N weekdays of winner
+  return {n:best, avg, mape, points:pts, conf:_fbAdaptConf(mape[best])};
+}
+
 function _fbBuildRows(elIdOverride){
   const elId=elIdOverride||document.getElementById('fb-el-id')?.value||null;
   const start=document.getElementById('fb-start')?.value; if(!start) return null;
@@ -9621,7 +9649,30 @@ function _fbBuildRows(elIdOverride){
   actRows.forEach(r=>{ if(r.date) actualsMap[r.date]=(actualsMap[r.date]||0)+(parseFloat(r.volume)||0); });
 
   let rows=[];
-  if(method==='rolling'){
+  if(method==='adaptive'){
+    // Build a weekday history spine (up to ~170 weekdays) ending the day before `start`,
+    // then let the adaptive engine pick the best window and rate.
+    const histDates=[]; let ch=addDays(start,-1), gh=0;
+    while(histDates.length<170&&gh<800){ gh++; if(isWkday(ch)) histDates.push(ch); ch=addDays(ch,-1); }
+    histDates.reverse();
+    const histVols=histDates.map(ds=>actualsMap[ds]||0);
+    const ad=_fbAdaptiveRun(histDates,histVols);
+    const scope=shipTo?` · ${shipTo}`:'';
+    if(!ad){
+      // Not enough history for a backtest — fall back to a plain 10-weekday average.
+      const samp=histVols.slice(-10).filter(v=>v>0);
+      const avgW=samp.length?samp.reduce((a,b)=>a+b,0)/samp.length:0;
+      const rateW=_fbQ25(avgW), rateS=shipsSat?_fbQ25z(avgW*satCoef):0;
+      msgs.push(`Adaptive: not enough history to backtest — using 10WD avg ${avgW.toFixed(1)} t → ${rateW.toLocaleString()} t/day${scope}`);
+      rows=spine.map(ds=>({date:ds,value:isSun(ds)||nwdSet.has(ds)?0:isSat(ds)?rateS:rateW}));
+    } else {
+      const rateW=_fbQ25(ad.avg), rateS=shipsSat?_fbQ25z(ad.avg*satCoef):0;
+      const mapeStr=FB_ADAPT_WINDOWS.map(n=>`${n}WD ${ad.mape[n].toFixed(1)}%${n===ad.n?'★':''}`).join('  ');
+      msgs.push(`Adaptive → ${ad.n}WD auto-selected (MAPE ${ad.mape[ad.n].toFixed(1)}% · ${ad.conf.lbl}) · avg ${ad.avg.toFixed(1)} t → ${rateW.toLocaleString()} t/day · ${ad.points} backtest pts${scope}`);
+      msgs.push(`MAPE by window: ${mapeStr}`);
+      rows=spine.map(ds=>({date:ds,value:isSun(ds)||nwdSet.has(ds)?0:isSat(ds)?rateS:rateW}));
+    }
+  } else if(method==='rolling'){
     const n=parseInt(document.getElementById('fb-rolling-n')?.value)||10;
     const samples=[];
     let cur=addDays(start,-1);
@@ -19944,6 +19995,7 @@ function openSpForecastBuilder(dpElIds, label){
       </div>
       <div style="${pf}"><div style="${pl}">Method</div>
         <select style="${pi}" id="fb-method" onchange="_fbSyncMethod()">
+          <option value="adaptive" selected>Adaptive (auto-pick 5/10/15/30WD)</option>
           <option value="rolling">Rolling weekday average</option>
           <option value="fixed">Fixed daily value</option>
           <option value="distribute">Distribute monthly total</option>
