@@ -486,6 +486,7 @@ function renderSalesPerfView(){
   content.style.flexDirection = 'column';
   content.style.gap = '14px';
   if(!hasData) return;
+  spMigrateSoldToKeys(); // one-time: rewrite any rules/commits stored under the old Sold-To guess
 
   const m = DB.real_shipments_meta;
   document.getElementById('sp-meta-lbl').textContent =
@@ -1049,6 +1050,45 @@ function spPeriodOf(ds){
 function spFcLoadRules(){ if(SP._rulesLoaded) return; SP._rulesLoaded=true;
   try{ const r=JSON.parse(localStorage.getItem('avila_sales_fc_rules')||'[]'); SP.fcRules=Array.isArray(r)?r:[]; }catch(e){ SP.fcRules=[]; } }
 function spFcSaveRules(){ try{ localStorage.setItem('avila_sales_fc_rules', JSON.stringify(SP.fcRules||[])); }catch(e){} }
+
+// ── One-time migration: Sold-To used to be keyed by the name-splitting guess
+// (spExtractSoldTo) — the same real customer could land under several different
+// "Sold-To" strings depending on how its Ship-To names happened to be formatted.
+// Sold-To is now keyed by the real Sold-To NUMBER (spSoldToKey), so any rule or
+// rep-commit saved under the old guess needs its stored value rewritten to the
+// new key — otherwise it would just go quietly inactive instead of erroring,
+// which is worse. Runs once (localStorage flag), and only once real data +
+// rules/commits actually need it.
+function spMigrateSoldToKeys(){
+  if(localStorage.getItem('avila_sales_soldto_migrated_v1')) return;
+  const rows=DB.real_shipments_daily||[];
+  if(!rows.length) return; // try again once data is actually loaded
+  const oldToNew={};
+  rows.forEach(r=>{
+    const oldK=spExtractSoldTo(r.ship_to_name||'—'), newK=spSoldToKey(r);
+    if(oldK && newK && oldK!==newK && !(oldK in oldToNew)) oldToNew[oldK]=newK;
+  });
+  if(Object.keys(oldToNew).length){
+    spFcLoadRules();
+    let changed=0;
+    (SP.fcRules||[]).forEach(rule=>{
+      (rule.path||[]).forEach(p=>{ if(p.dim==='soldTo' && oldToNew[p.value]!==undefined && oldToNew[p.value]!==p.value){ p.value=oldToNew[p.value]; changed++; } });
+    });
+    if(changed) spFcSaveRules();
+    spCommitLoad();
+    const newCommits={}; let cchanged=0;
+    Object.entries(SP.fcCommits||{}).forEach(([k,v])=>{
+      const sep=k.indexOf('␟');
+      if(sep<0){ newCommits[k]=v; return; }
+      const rep=k.slice(0,sep), so=k.slice(sep+1), mapped=oldToNew[so];
+      const newKey = mapped!==undefined ? rep+'␟'+mapped : k;
+      if(newKey!==k) cchanged++;
+      newCommits[newKey]=v;
+    });
+    if(cchanged){ SP.fcCommits=newCommits; spCommitSave(); }
+  }
+  localStorage.setItem('avila_sales_soldto_migrated_v1','1');
+}
 function spFcRuleAt(path,period){
   const sig=JSON.stringify(path);
   return (SP.fcRules||[]).find(r=>r.period===period&&JSON.stringify(r.path)===sig)||null;
@@ -1492,10 +1532,10 @@ function spBuildRepModel(scope){
   rows.forEach(r=>{
     const dpEl=getDpEl(r.product), dpKey=dpEl?dpEl.id:'__nodp_'+(r.product||'').replace(/\W/g,'_');
     const shipTo=r.ship_to_name||'—', id=dpKey+'|'+shipTo;
-    let lf=leaves[id]; if(!lf) lf=leaves[id]={id,histVol:0,dayMap:{},rep:'—',soldTo:'—',satRate:0,_ad:''};
+    let lf=leaves[id]; if(!lf) lf=leaves[id]={id,histVol:0,dayMap:{},rep:'—',soldTo:'—',soldToName:'—',satRate:0,_ad:''};
     lf.histVol+=(r.volume||0);
     if(r.date&&r.date>=rateCut) lf.dayMap[r.date]=(lf.dayMap[r.date]||0)+(r.volume||0);
-    if(r.date&&r.date>=lf._ad){ lf._ad=r.date; lf.rep=(r.sales_manager||'—'); lf.soldTo=spExtractSoldTo(shipTo);
+    if(r.date&&r.date>=lf._ad){ lf._ad=r.date; lf.rep=(r.sales_manager||'—'); lf.soldTo=spSoldToKey(r); lf.soldToName=spSoldToName(r);
       lf.attrs={rep:lf.rep,origin:(r.origin||'—'),custType:(r.customer_type||'—'),soldTo:lf.soldTo,shipTo,demandPoint:dpEl?dpEl.name:(r.product||'Unknown DP')}; }
   });
   const wkD=[],satD=[]; { const d=new Date(refDate+'T00:00:00'); let g=0; while((wkD.length<30||satD.length<4)&&g<70){ const dow=d.getDay(),ds=d.toISOString().split('T')[0]; if(dow>=1&&dow<=5&&wkD.length<30) wkD.push(ds); else if(dow===6&&satD.length<4) satD.push(ds); d.setDate(d.getDate()-1); g++; } }
@@ -1516,7 +1556,7 @@ function spBuildRepModel(scope){
   // Monthly ACTUAL per rep+customer (this calendar year, days ≤ last real day)
   const actMon={}; // rep → soldTo → {month → vol}
   rows.forEach(r=>{ if(!r.date||r.date>lastReal||+r.date.slice(0,4)!==year) return;
-    const rep=r.sales_manager||'—', so=spExtractSoldTo(r.ship_to_name||'—'), mo=+r.date.slice(5,7);
+    const rep=r.sales_manager||'—', so=spSoldToKey(r), mo=+r.date.slice(5,7);
     ((actMon[rep]=actMon[rep]||{})[so]=actMon[rep][so]||{})[mo]=(actMon[rep][so][mo]||0)+(r.volume||0); });
   const reps={};
   leafArr.forEach(lf=>{
@@ -1532,7 +1572,7 @@ function spBuildRepModel(scope){
     const hv={ ROM:tm.ROM||0, N3M:tm.N3M||0, ROY:periods.reduce((s,p)=>s+(tm[p.id]||0),0) };
     const rep=lf.rep||'—', so=lf.soldTo||'—';
     let R=reps[rep]; if(!R) R=reps[rep]={rep,custs:{},total:{ROM:0,N3M:0,ROY:0},done:{ROM:0,N3M:0,ROY:0},monFc:{},monAct:{},monFcCommit:{}};
-    let C=R.custs[so]; if(!C) C=R.custs[so]={soldTo:so,vol:{ROM:0,N3M:0,ROY:0},monFc:{},committed:false};
+    let C=R.custs[so]; if(!C) C=R.custs[so]={soldTo:so,soldToName:lf.soldToName||so,vol:{ROM:0,N3M:0,ROY:0},monFc:{},committed:false};
     ['ROM','N3M','ROY'].forEach(h=>{ C.vol[h]+=hv[h]; R.total[h]+=hv[h]; });
     for(const mo in mfc){ C.monFc[mo]=(C.monFc[mo]||0)+mfc[mo]; R.monFc[mo]=(R.monFc[mo]||0)+mfc[mo]; }
   });
@@ -1621,7 +1661,7 @@ function spRenderRepView(){
         const cCommit={}; if(C.committed) for(const mo in (C.monFc||{})) cCommit[mo]=C.monFc[mo];
         h+=`<div style="${grid};padding:0;${C.committed?'background:rgba(255,140,26,.05)':''}">
           <div></div>
-          <div style="font-family:var(--mono);font-size:7px;color:${C.committed?ORANGE:'var(--text-dim)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-left:12px" title="${spEsc(C.soldTo)}">${C.committed?'✓ ':''}${spEsc(C.soldTo)}</div>
+          <div style="font-family:var(--mono);font-size:7px;color:${C.committed?ORANGE:'var(--text-dim)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-left:12px" title="${spEsc(C.soldToName||C.soldTo)}">${C.committed?'✓ ':''}${spEsc(C.soldToName||C.soldTo)}</div>
           ${monCells(C.monAct||{},C.monFc||{},cCommit)}${yrCell(C.monAct||{},C.monFc||{},cCommit)}
           <div style="text-align:right"><span class="sp-repchk" onclick="spRepCommit('${erep}','${eso}',${C.committed?0:1})" style="font-family:var(--mono);font-size:7px;color:${C.committed?ORANGE:'var(--blue)'};cursor:pointer">${C.committed?'✓':'commit'}</span></div>
         </div>`;
@@ -1651,11 +1691,23 @@ function _setTblZoom(dir){
   statMsg(dir===0?'Table text size reset to 100%':'Table text size '+Math.round(zc*100)+'%');
 }
 
-// ── Extract Sold-To name from Ship-To name ────────────
+// ── Extract Sold-To name from Ship-To name (legacy fallback only — see below) ──
 function spExtractSoldTo(shipToName){
   if(!shipToName) return '—';
   return shipToName.split(' - ')[0].trim();
 }
+// ── Sold-To identity vs display (the real fix) ──────────
+// One customer account (Sold-To) can have many Ship-Tos, and their Ship-To NAMES
+// are not consistently formatted (e.g. "MASCHMEYER CONCRETE - LAKE PARK" vs
+// "MASCHMEYER CONCRETE-ORLANDO-BULK" vs "MASCHMEYER - APOLLO BEACH PLANT -BU").
+// Splitting the Ship-To name on " - " to guess the Sold-To (spExtractSoldTo,
+// above) fragmented a single real customer into several different "Sold-To"
+// groups. The source file carries the real Sold-To NUMBER + NAME — use the
+// number as the stable grouping key and the name only for display. Rows
+// imported before this field existed (no sold_to) fall back to the old guess
+// so they don't just vanish.
+function spSoldToKey(r){ return r && r.sold_to ? String(r.sold_to) : spExtractSoldTo(r&&r.ship_to_name||'—'); }
+function spSoldToName(r){ return (r && r.sold_to_name) || spExtractSoldTo(r&&r.ship_to_name||'—'); }
 
 // ── Quick date range buttons ──────────────────────────
 function spSetQuickDate(mode){
@@ -1732,7 +1784,7 @@ const SP_DIMS = {
   rep:         { label:'Sales Rep',     key:r=>r.sales_manager||'—' },
   origin:      { label:'Origin',        key:r=>r.origin||'—' },
   custType:    { label:'Customer Type', key:r=>r.customer_type||'—' },
-  soldTo:      { label:'Sold-To',       key:r=>spExtractSoldTo(r.ship_to_name||'—') },
+  soldTo:      { label:'Sold-To',       key:spSoldToKey, display:spSoldToName },
   shipTo:      { label:'Ship-To',       key:r=>r.ship_to_name||'—' },
   demandPoint: { label:'Demand Point',  key:r=>r.__dpName||r.product||'Unknown DP' },
 };
@@ -1805,7 +1857,7 @@ function spBuildTree(rows, groupBy){
     if(r.date&&(!lf._ad||r.date>=lf._ad)){
       lf._ad=r.date;
       lf.attrs={ rep:(r.sales_manager||'—'), origin:(r.origin||'—'), custType:(r.customer_type||'—'),
-                 soldTo:spExtractSoldTo(r.ship_to_name||'—'), shipTo:shipTo, demandPoint:r.__dpName };
+                 soldTo:spSoldToKey(r), shipTo:shipTo, demandPoint:r.__dpName };
     }
   });
   // Baseline rates per leaf: mean of the last 10 / 15 / 30 working days (+ last 4
@@ -1843,13 +1895,19 @@ function spBuildTree(rows, groupBy){
     node._leafSet.add(r.__leafId);
     if(r.__dpElId) node._dpSet.add(r.__dpElId);
   };
-  const mkNode=(id,depth)=>({id,name:id,depth,actMap:{},histVol:0,recentVol:0,_leafSet:new Set(),_dpSet:new Set(),children:{}});
+  // `name` defaults to the grouping key itself (unchanged behaviour for every
+  // dimension except Sold-To, which supplies a `display(r)` so the node shows
+  // the real Sold-To Name while still being keyed/matched by the stable number.
+  const mkNode=(id,depth,name)=>({id,name:name!==undefined?name:id,depth,actMap:{},histVol:0,recentVol:0,_leafSet:new Set(),_dpSet:new Set(),children:{}});
   const root=mkNode('__root',-1);
   rows.forEach(r=>{
     let node=root;
     for(let i=0;i<dims.length;i++){
       const kval=(String(dims[i].key(r)??'—').trim())||'—';
-      if(!node.children[kval]) node.children[kval]=mkNode(kval,i);
+      if(!node.children[kval]){
+        const dname=dims[i].display?(String(dims[i].display(r)??kval).trim()||kval):kval;
+        node.children[kval]=mkNode(kval,i,dname);
+      }
       node=node.children[kval];
       upd(node,r);
     }
@@ -3469,9 +3527,16 @@ async function spIngestFile(buf, fileName){
     if(!product || product.toUpperCase()==='N/A' || product.startsWith('N/A/')){ skipped++; return; }
     if(date<dateMin) dateMin=date;
     if(date>dateMax) dateMax=date;
+    // Sold-To number/name: read directly off the row regardless of format branch — the
+    // real customer-account fields, when present, replace the old "split the Ship-To
+    // name on ' - '" guess that fragmented one customer into several different Sold-To
+    // groups whenever their Ship-To names weren't formatted identically.
+    const soldTo    = String(r['Sold-To'] || '').trim();
+    const soldToName= (r['Sold-To Name'] || '').trim();
     const key = `${date}|${origin}|${product}|${custType}|${shipTo}`;
     if(!aggMap[key]) aggMap[key]={date,origin,product,customer_type:custType,
-      ship_to:parseInt(shipTo)||0,ship_to_name:shipToName,sales_manager:rep,volume:0};
+      ship_to:parseInt(shipTo)||0,ship_to_name:shipToName,sales_manager:rep,volume:0,
+      sold_to:parseInt(soldTo)||0,sold_to_name:soldToName};
     aggMap[key].volume += vol;
     origins.add(origin); products.add(product);
   });
