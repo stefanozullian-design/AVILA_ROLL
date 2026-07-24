@@ -9404,8 +9404,11 @@ function _fbSyncActuals(){
   if(ctype)          rows=rows.filter(r=>(r.customer_type||'')===ctype);
 
   const uniqField=(key)=>[...new Set(rows.map(r=>r[key]||'').filter(Boolean))].sort();
-  // Sold To = first part of ship_to_name before " - "
-  const soldTos=[...new Set(rows.map(r=>spExtractSoldTo(r.ship_to_name||'')).filter(s=>s&&s!=='—'))].sort();
+  // Sold To: keyed by the real Sold-To number (spSoldToKey) so one customer with
+  // several differently-formatted Ship-To names lists once, not several times;
+  // the dropdown shows the real Sold-To Name (spSoldToName).
+  const soldToMap={}; rows.forEach(r=>{ const k=spSoldToKey(r); if(k&&k!=='—'&&!(k in soldToMap)) soldToMap[k]=spSoldToName(r); });
+  const soldTos=Object.entries(soldToMap).sort((a,b)=>a[1].localeCompare(b[1]));
   // Ship To = full ship_to_name
   const shipTos=[...new Set(rows.map(r=>r.ship_to_name||'').filter(Boolean))].sort();
 
@@ -9413,7 +9416,7 @@ function _fbSyncActuals(){
   const soldSel=document.getElementById('fb-f-soldto');
   const shipSel=document.getElementById('fb-f-shipto');
   if(repSel) {const p=repSel.value;  repSel.innerHTML =`<option value="">All</option>`+uniqField('sales_manager').map(v=>`<option value="${v}" ${v===p?'selected':''}>${v}</option>`).join('');}
-  if(soldSel){const p=soldSel.value; soldSel.innerHTML=`<option value="">All</option>`+soldTos.map(v=>`<option value="${v}" ${v===p?'selected':''}>${v}</option>`).join('');}
+  if(soldSel){const p=soldSel.value; soldSel.innerHTML=`<option value="">All</option>`+soldTos.map(([k,name])=>`<option value="${k}" ${k===p?'selected':''}>${name}</option>`).join('');}
   if(shipSel){const p=shipSel.value; shipSel.innerHTML=`<option value="">All</option>` +shipTos.map(v=>`<option value="${v}" ${v===p?'selected':''}>${v}</option>`).join('');}
 }
 
@@ -9524,10 +9527,10 @@ function _fbGetDpSplit(shipTo){
   return parts.map(p=>({elId:p.elId,name:p.name,proportion:p.vol/total}));
 }
 
-// Get all ship_to_name values that belong to a given soldTo prefix, optionally filtered by elId
+// Get all ship_to_name values that belong to a given Sold-To key, optionally filtered by elId
 function _fbGetShipToSplit(soldTo, elId){
   if(!soldTo) return null;
-  let rows=(DB.real_shipments_daily||[]).filter(r=>spExtractSoldTo(r.ship_to_name||'')===soldTo);
+  let rows=(DB.real_shipments_daily||[]).filter(r=>spSoldToKey(r)===soldTo);
   if(elId){ const prods=_fbDpProducts(elId); if(prods.length) rows=rows.filter(r=>prods.includes((r.product||'').trim().toUpperCase())); }
   if(!rows.length) return null;
   const volBySt={};
@@ -9613,7 +9616,7 @@ function _fbBuildRows(elIdOverride){
   let actRows=(DB.real_shipments_daily||[]);
   if(prods.length) actRows=actRows.filter(r=>prods.includes((r.product||'').trim().toUpperCase()));
   if(shipTo) actRows=actRows.filter(r=>r.ship_to_name===shipTo);
-  else if(soldTo) actRows=actRows.filter(r=>spExtractSoldTo(r.ship_to_name||'')===soldTo);
+  else if(soldTo) actRows=actRows.filter(r=>spSoldToKey(r)===soldTo);
   const actualsMap={};
   actRows.forEach(r=>{ if(r.date) actualsMap[r.date]=(actualsMap[r.date]||0)+(parseFloat(r.volume)||0); });
 
@@ -19491,11 +19494,22 @@ function _spClearLegend(){
 // PERFORMANCE TABLE — Date-spine with Org Hierarchy
 // ══════════════════════════════════════════════════════
 
-// ── Extract Sold-To name from Ship-To name ────────────
+// ── Extract Sold-To name from Ship-To name (legacy fallback only — see below) ──
 function spExtractSoldTo(shipToName){
   if(!shipToName) return '—';
   return shipToName.split(' - ')[0].trim();
 }
+// ── Sold-To identity vs display (the real fix) ──────────
+// One customer account (Sold-To) can have many Ship-Tos, and their Ship-To NAMES
+// are not consistently formatted (e.g. "MASCHMEYER CONCRETE - LAKE PARK" vs
+// "MASCHMEYER CONCRETE-ORLANDO-BULK"). Splitting the Ship-To name on " - " to
+// guess the Sold-To (spExtractSoldTo, above) fragmented a single real customer
+// into several different "Sold-To" groups. The source file carries the real
+// Sold-To NUMBER + NAME — use the number as the stable grouping key and the
+// name only for display. Rows imported before this field existed (no sold_to)
+// fall back to the old guess so they don't just vanish.
+function spSoldToKey(r){ return r && r.sold_to ? String(r.sold_to) : spExtractSoldTo(r&&r.ship_to_name||'—'); }
+function spSoldToName(r){ return (r && r.sold_to_name) || spExtractSoldTo(r&&r.ship_to_name||'—'); }
 
 // ── Quick date range buttons ──────────────────────────
 function spSetQuickDate(mode){
@@ -19590,7 +19604,7 @@ function spBuildOrgTree(rows){
     const subId =sub ?sub.id  :`__nosub_${regId}`;
     const facKey=fac ?fac.id  :`__nofac_${(r.origin||'').replace(/\W/g,'_')}`;
     const dpKey =dpEl?dpEl.id :`__nodp_${(r.product||'').replace(/\W/g,'_')}`;
-    const soldTo=spExtractSoldTo(r.ship_to_name||'—'), shipTo=r.ship_to_name||'—';
+    const soldTo=spSoldToKey(r), soldToName=spSoldToName(r), shipTo=r.ship_to_name||'—';
     if(!tree[regId]) tree[regId]={id:regId,name:reg?reg.name:'Unknown Region',actMap:{},histVol:0,recentVol:0,dpElIdSet:new Set(),subs:{}};
     upd(tree[regId],r); if(dpEl) tree[regId].dpElIdSet.add(dpEl.id);
     if(!tree[regId].subs[subId]) tree[regId].subs[subId]={id:subId,name:sub?sub.name:r.origin||'Unknown',actMap:{},histVol:0,recentVol:0,dpElIdSet:new Set(),facs:{}};
@@ -19599,7 +19613,7 @@ function spBuildOrgTree(rows){
     upd(tree[regId].subs[subId].facs[facKey],r); if(dpEl) tree[regId].subs[subId].facs[facKey].dpElIdSet.add(dpEl.id);
     if(!tree[regId].subs[subId].facs[facKey].dps[dpKey]) tree[regId].subs[subId].facs[facKey].dps[dpKey]={id:dpKey,name:dpEl?dpEl.name:r.product||'Unknown DP',dpElId:dpEl?.id||null,actMap:{},histVol:0,recentVol:0,soldtos:{}};
     upd(tree[regId].subs[subId].facs[facKey].dps[dpKey],r);
-    if(!tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo]) tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo]={name:soldTo,actMap:{},histVol:0,recentVol:0,shiptos:{}};
+    if(!tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo]) tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo]={name:soldToName,actMap:{},histVol:0,recentVol:0,shiptos:{}};
     upd(tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo],r);
     if(!tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo].shiptos[shipTo]) tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo].shiptos[shipTo]={name:shipTo,actMap:{},histVol:0,recentVol:0};
     upd(tree[regId].subs[subId].facs[facKey].dps[dpKey].soldtos[soldTo].shiptos[shipTo],r);
@@ -20707,9 +20721,16 @@ async function spIngestFile(buf, fileName){
     if(!product || product.toUpperCase()==='N/A' || product.startsWith('N/A/')){ skipped++; return; }
     if(date<dateMin) dateMin=date;
     if(date>dateMax) dateMax=date;
+    // Sold-To number/name: read directly off the row regardless of format branch — the
+    // real customer-account fields, when present, replace the old "split the Ship-To
+    // name on ' - '" guess that fragmented one customer into several different Sold-To
+    // groups whenever their Ship-To names weren't formatted identically.
+    const soldTo    = String(r['Sold-To'] || '').trim();
+    const soldToName= (r['Sold-To Name'] || '').trim();
     const key = `${date}|${origin}|${product}|${custType}|${shipTo}`;
     if(!aggMap[key]) aggMap[key]={date,origin,product,customer_type:custType,
-      ship_to:parseInt(shipTo)||0,ship_to_name:shipToName,sales_manager:rep,volume:0};
+      ship_to:parseInt(shipTo)||0,ship_to_name:shipToName,sales_manager:rep,volume:0,
+      sold_to:parseInt(soldTo)||0,sold_to_name:soldToName};
     aggMap[key].volume += vol;
     origins.add(origin); products.add(product);
   });
