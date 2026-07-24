@@ -1496,12 +1496,9 @@ function spFcEdit(nodeKey,pid,el){
     return `<button style="${btn};display:flex;flex-direction:column;align-items:center;gap:1px;flex:1;border-color:${bc};color:${tc}" onclick="spFcApply('${nodeKey}','${pid}','avg',${n})"><span>${spFcPdot(SP_FC_COLORS['avg'+n])}${n}WD${isBest?` <span style="color:${bestCol}">★</span>`:''}</span><span style="font-size:8px;font-weight:700">${v.toLocaleString()}</span>${mape!=null?`<span style="font-size:6.5px;opacity:.7">${mape.toFixed(1)}%</span>`:''}</button>`; };
   const pop=document.createElement('div'); pop.id='sp-fc-pop';
   pop.style.cssText='position:fixed;z-index:99999;background:var(--surface);border:1px solid #ff4dd2;padding:10px;display:flex;flex-direction:column;gap:7px;box-shadow:0 6px 22px rgba(0,0,0,.65);min-width:280px;max-width:330px';
-  const r=el.getBoundingClientRect();
-  pop.style.left=Math.max(4,Math.min(r.left,window.innerWidth-260))+'px';
-  pop.style.top=Math.min(r.bottom+4,window.innerHeight-230)+'px';
   pop.innerHTML=`
-    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px">
-      <div style="font-family:var(--mono);font-size:8px;color:var(--text)"><strong>${spEsc(node.name)}</strong> · ${pLbl} <span style="color:#ff4dd2">avg t/day</span></div>
+    <div onmousedown="spFcPopDragStart(event)" title="Drag to move — position is remembered" style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px;cursor:move;user-select:none">
+      <div style="font-family:var(--mono);font-size:8px;color:var(--text)"><span style="color:var(--text-dim);margin-right:4px;letter-spacing:-1px">⠿</span><strong>${spEsc(node.name)}</strong> · ${pLbl} <span style="color:#ff4dd2">avg t/day</span></div>
       <button title="How these forecasts work" onclick="var e=document.getElementById('sp-fc-info');e.style.display=e.style.display==='none'?'block':'none';" style="flex:none;background:transparent;border:1px solid #4da6ff;color:#4da6ff;font-family:var(--mono);font-size:9px;font-style:italic;font-weight:700;width:16px;height:16px;border-radius:3px;line-height:1;cursor:pointer;padding:0">i</button>
     </div>
     <div style="font-family:var(--mono);font-size:7px;color:var(--text-dim)">Current ${cur.toLocaleString()} t/day${ownLbl?` · own rule: ${ownLbl}`:' · inherited/adaptive baseline'}</div>
@@ -1533,9 +1530,47 @@ function spFcEdit(nodeKey,pid,el){
     </div>
     <div style="font-family:var(--mono);font-size:6px;color:var(--text-dim)">${FB_STEP} t truck-load steps · method rules cascade to every hidden row below · deeper rules win</div>`;
   document.body.appendChild(pop);
+  spFcPopPlace(pop, el);
   const inp=document.getElementById('sp-fc-in'); if(inp){ inp.focus(); inp.select(); }
   SP._fcPopCloser=e=>{ if(!pop.contains(e.target)) spFcCloseEdit(); };
   setTimeout(()=>document.addEventListener('mousedown',SP._fcPopCloser,true),0);
+}
+// Position the popover: use the remembered spot if the user has dragged it
+// before, otherwise drop it just under the clicked cell. Either way clamp it
+// fully on-screen (measuring the real size) so a low row can't hide it.
+const SP_FC_POP_POS_KEY='avila_sp_fc_pop_pos';
+function spFcPopClamp(pop,left,top){
+  const w=pop.offsetWidth, h=pop.offsetHeight;
+  left=Math.max(2,Math.min(left,window.innerWidth -w-2));
+  top =Math.max(2,Math.min(top ,window.innerHeight-h-2));
+  return {left,top};
+}
+function spFcPopPlace(pop, el){
+  let pos=null;
+  try{ pos=JSON.parse(localStorage.getItem(SP_FC_POP_POS_KEY)||'null'); }catch(_){}
+  let left, top;
+  if(pos && isFinite(pos.left) && isFinite(pos.top)){ left=pos.left; top=pos.top; }
+  else { const r=el.getBoundingClientRect(); left=r.left; top=r.bottom+4; }
+  const c=spFcPopClamp(pop,left,top);
+  pop.style.left=c.left+'px'; pop.style.top=c.top+'px';
+}
+function spFcPopDragStart(e){
+  const pop=document.getElementById('sp-fc-pop'); if(!pop) return;
+  if(e.target.closest('button,input,select')) return; // let the controls work
+  e.preventDefault();
+  const r=pop.getBoundingClientRect();
+  const offX=e.clientX-r.left, offY=e.clientY-r.top;
+  const move=ev=>{
+    const c=spFcPopClamp(pop, ev.clientX-offX, ev.clientY-offY);
+    pop.style.left=c.left+'px'; pop.style.top=c.top+'px';
+  };
+  const up=()=>{
+    document.removeEventListener('mousemove',move,true);
+    document.removeEventListener('mouseup',up,true);
+    try{ localStorage.setItem(SP_FC_POP_POS_KEY, JSON.stringify({left:parseFloat(pop.style.left),top:parseFloat(pop.style.top)})); }catch(_){}
+  };
+  document.addEventListener('mousemove',move,true);
+  document.addEventListener('mouseup',up,true);
 }
 function spFcApplyInput(nodeKey,pid){
   const v=parseFloat(document.getElementById('sp-fc-in')?.value);
