@@ -6209,6 +6209,7 @@ function renderDemandView(){
   const _df=window._demFilter;
   if(_df.cat===undefined) _df.cat='';
   if(_df.custType===undefined) _df.custType='all';
+  if(_df.elId===undefined) _df.elId='';
 
   // Category labels (mirrors the Product editor — Supply/Product page)
   const _demCatLabels={cement_bulk:'Cement Bulk',cement_packed:'Cement Packed',clinker:'Clinker',raw_meal:'Raw Material',additive:'SCM'};
@@ -6459,10 +6460,12 @@ function renderDemandView(){
         const sortedEls=[...node.els].sort((a,b)=>a.name.localeCompare(b.name));
 
         sortedEls.forEach(el=>{
-          // Demand point row (no product rows beneath)
-          h+=`<tr style="background:rgba(76,175,80,.05)">
-            <td style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:var(--green);font-size:9px;font-weight:600" title="${el.name}">
-              ${el.name}<button class="sp-fb-btn" onclick="event.stopPropagation();openSpForecastBuilder(${JSON.stringify([el.id]).replaceAll('"','&quot;')},${JSON.stringify(el.name).replaceAll('"','&quot;')})" title="⚙ Forecast Builder">⚙</button>
+          // Demand point row (no product rows beneath). Clicking the name cell
+          // filters the chart to just this demand point.
+          const _elSel=el.id===_df.elId;
+          h+=`<tr style="background:${_elSel?'rgba(255,184,48,.12)':'rgba(76,175,80,.05)'}">
+            <td onclick="_demSelectEl('${el.id}')" title="Click to filter the chart to ${el.name.replace(/"/g,'&quot;')}" style="${stickyLeft(_elSel?'#2a2612':'var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${_elSel?'var(--amber)':'var(--green)'};font-size:9px;font-weight:600;cursor:pointer">
+              ${_elSel?'<span style="color:var(--amber)">▸ </span>':''}${el.name}<button class="sp-fb-btn" onclick="event.stopPropagation();openSpForecastBuilder(${JSON.stringify([el.id]).replaceAll('"','&quot;')},${JSON.stringify(el.name).replaceAll('"','&quot;')})" title="⚙ Forecast Builder">⚙</button>
             </td>`;
           months.forEach(mon=>{
             const isCol=collapsed.has(mon.ym);
@@ -6622,7 +6625,10 @@ function renderDemandChart(){
   if(df.cat)    els=els.filter(el=>_demElMatchesCat(el,df.cat));
   if(df.prodId) els=els.filter(el=>_demElMatchesProd(el,df.prodId));
   if(df.custType!=='all') els=els.filter(el=>_demElType(el)===df.custType);
+  // A selected demand-point row overrides the dropdown filters — chart shows just it.
+  if(df.elId){ const one=getFacElements().filter(e=>e.type==='demand_point'&&e.id===df.elId); if(one.length) els=one; }
   const elIds=new Set(els.map(e=>e.id));
+  const selName=df.elId?((getFacElements().find(e=>e.id===df.elId)||{}).name||''):'';
 
   // Aggregate demand_values per element|date (ship-to rows override the dp-level row,
   // mirroring the grid's map), then per date split by source: actual vs forecast.
@@ -6683,8 +6689,9 @@ function renderDemandChart(){
   const leg=document.getElementById('dem-chart-legend');
   if(leg){
     let lh=`<span style="color:var(--green)">■ Actual</span><span style="color:#ff8c32">■ Forecast</span>`;
-    if(hasLY) lh+=`<span style="color:rgba(77,166,255,.8)">▨ Last Year</span>`;
+    if(hasLY) lh+=`<span style="color:rgba(255,255,255,.85)">● Last Year</span>`;
     guides.forEach(gd=>{ lh+=`<span style="color:${gd.color}">╌ ${gd.n}WD ${gd.q>=1000?(gd.q/1000).toFixed(1)+'k':gd.q} t</span>`; });
+    if(selName) lh=`<span onclick="_demClearElSel()" title="Clear selection — show all demand points" style="cursor:pointer;color:var(--amber);border:1px solid var(--amber);border-radius:3px;padding:0 5px;margin-right:4px">▸ ${selName} ✕</span>`+lh;
     leg.innerHTML=lh;
   }
 
@@ -6706,9 +6713,12 @@ function renderDemandChart(){
   const capF=document.getElementById('dem-side-cap-fy');  if(capF) capF.innerHTML=_demMiniCaption(fy);
 
   const datasets=[];
-  if(hasLY) datasets.push({ type:'line', label:'Last Year', data:lyData, stack:'ly', fill:'origin',
-    backgroundColor:'rgba(77,166,255,0.13)', borderColor:'rgba(77,166,255,0.45)', borderWidth:1,
-    pointRadius:0, tension:.25, spanGaps:true, order:10 });
+  // Last year: a small unobtrusive white dot in front of each day's bar (was a
+  // filled area) — just enough to read the prior-year value at a glance / on hover.
+  if(hasLY) datasets.push({ type:'line', label:'Last Year', data:lyData,
+    showLine:false, pointRadius:2, pointHoverRadius:4,
+    pointBackgroundColor:'rgba(255,255,255,0.85)', pointBorderColor:'rgba(255,255,255,0.85)',
+    spanGaps:true, order:0 });
   datasets.push(
     { label:'Actual',   data:actData, backgroundColor:'rgba(0,200,120,0.75)', stack:'v', order:3 },
     { label:'Forecast', data:fcData,  backgroundColor:'rgba(255,140,50,0.78)', stack:'v', order:3 },
@@ -6758,11 +6768,20 @@ function _demToggleGrp(id){
   renderDemandView();
 }
 function _demEnsureFilter(){
-  if(!window._demFilter) window._demFilter={facId:'',prodId:'',cat:'',custType:'all'};
+  if(!window._demFilter) window._demFilter={facId:'',prodId:'',cat:'',custType:'all',elId:''};
   if(window._demFilter.cat===undefined) window._demFilter.cat='';
   if(window._demFilter.custType===undefined) window._demFilter.custType='all';
+  if(window._demFilter.elId===undefined) window._demFilter.elId='';
   return window._demFilter;
 }
+// Clicking a demand-point row selects it — the chart filters to just that point
+// (click again, or the ✕ chip on the chart, to clear). Mirrors Avila Sales.
+function _demSelectEl(elId){
+  const f=_demEnsureFilter();
+  f.elId = (f.elId===elId) ? '' : elId;
+  renderDemandView();
+}
+function _demClearElSel(){ _demEnsureFilter().elId=''; renderDemandView(); }
 function _demOnFacChange(){
   _demEnsureFilter().facId=document.getElementById('dem-fac-filter')?.value||'';
   renderDemandView();
@@ -6783,7 +6802,7 @@ function _demOnTypeChange(t){
   renderDemandView();
 }
 function _demClearFilters(){
-  window._demFilter={facId:'',prodId:'',cat:'',custType:'all'};
+  window._demFilter={facId:'',prodId:'',cat:'',custType:'all',elId:''};
   renderDemandView();
 }
 
