@@ -276,8 +276,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
 
         <!-- TOP TABS: External Sales · Internal Sales · Rep Forecasting Progress -->
         <div id="sp-tabs" style="display:flex;gap:2px;border-bottom:1px solid var(--border2);margin-bottom:10px;align-items:flex-end">
-          <div class="sp-tab active" id="sp-tab-EXT" onclick="spSetTab('EXT')">External Sales</div>
-          <div class="sp-tab"        id="sp-tab-INT" onclick="spSetTab('INT')">Internal Sales</div>
+          <div class="sp-tab active" id="sp-tab-SALES" onclick="spSetTab('SALES')">Sales</div>
           <div class="sp-tab"        id="sp-tab-REP" onclick="spSetTab('REP')">Forecasting Progress</div>
           <div class="tblfs-ctl" style="margin-left:auto;margin-bottom:5px" title="Table text size — scales the data grids">
             <span class="tblfs-btn" onclick="_setTblZoom(-1)">A−</span>
@@ -295,6 +294,9 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
           <input class="sp-fi" type="date" id="sp-date-to" style="width:110px"
             onchange="spDispatch({dateTo:this.value})">
           <div style="width:1px;height:20px;background:var(--border2)"></div>
+          <div class="sp-filter-label">Type</div>
+          <div id="sp-type-chips" style="display:flex;gap:3px;flex-wrap:wrap"></div>
+          <div style="width:1px;height:20px;background:var(--border2)"></div>
           <div class="sp-filter-label">Origin</div>
           <div id="sp-origin-chips" style="display:flex;gap:3px;flex-wrap:wrap"></div>
           <div style="width:1px;height:20px;background:var(--border2)"></div>
@@ -310,10 +312,19 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
             <option value="ALL">All Customers</option>
           </select>
           <div style="width:1px;height:20px;background:var(--border2)"></div>
+          <div class="sp-filter-label">Product Type</div>
+          <div id="sp-prodtype-chips" style="display:flex;gap:3px;flex-wrap:wrap"></div>
+          <div style="width:1px;height:20px;background:var(--border2)"></div>
           <div class="sp-filter-label">Product</div>
-          <select class="sp-fi" id="sp-prod-sel" style="width:190px;height:26px"
+          <select class="sp-fi" id="sp-prod-sel" style="width:170px;height:26px"
             onchange="spDispatch({product:decodeURIComponent(this.value)})">
             <option value="ALL">All Products</option>
+          </select>
+          <div style="width:1px;height:20px;background:var(--border2)"></div>
+          <div class="sp-filter-label">Demand Point</div>
+          <select class="sp-fi" id="sp-dp-sel" style="width:200px;height:26px"
+            onchange="spDispatch({demandPoint:decodeURIComponent(this.value)})">
+            <option value="ALL">All Demand Points</option>
           </select>
           <div style="width:1px;height:20px;background:var(--border2)"></div>
           <div class="sp-filter-label">Quick</div>
@@ -491,7 +502,11 @@ function openSpForecastBuilder(dpElIds, label) { statMsg('Forecast Builder requi
 
 // ── STATE — single source of truth ──────────────────
 const SP = {
-  f: { dateFrom:'', dateTo:'', origin:'ALL', rep:'ALL', customer:'ALL', custType:'all', product:'ALL' },
+  // custType = Internal/External/Industry (was tab-driven, now a filter)
+  // prodType = Cement/Ash/Slag (derived from the product code)
+  // product  = the actual product e.g. BRS_IL(12)/BLK (extracted from the demand point)
+  // demandPoint = the full demand-point string e.g. JAX/DEM/BRS_IL(12)/BLK/INT (was mislabelled "Product")
+  f: { dateFrom:'', dateTo:'', origin:'ALL', rep:'ALL', customer:'ALL', custType:'all', prodType:'ALL', product:'ALL', demandPoint:'ALL' },
   filteredRows:  [],
   scopedRows:    [],
   chartRange:   '90',
@@ -502,7 +517,10 @@ const SP = {
   fpEntries:    [],
   _repOptions:  [],
   _custOptions: [],
+  _typeOptions:  [],
+  _prodTypeOptions: [],
   _prodOptions: [],
+  _dpOptions:   [],
   _userExpanded: {},  // tracks keys the user has explicitly expanded
   fcRepSel:{}, fcCustSel:{}, fcCustomVal:{}, fcShowInp:{},
   basisByRow: {},
@@ -545,6 +563,52 @@ function spInitForecastBasis(){
   // Currently a placeholder - buttons are styled inline in spRenderTable()
 }
 
+// ══════════════════════════════════════════════════════
+// DERIVED DIMENSIONS — the raw shipment row carries the full demand-point
+// string in r.product (e.g. "JAX/DEM/BRS_IL(12)/BLK/INT"). From it we derive:
+//   • the demand point   → the whole string  (JAX/DEM/BRS_IL(12)/BLK/INT)
+//   • the product        → code + packaging   (BRS_IL(12)/BLK)
+//   • the product type   → Cement / Ash / Slag
+// customer_type (Internal/External/Industry) is a separate field on the row.
+// Formats vary a lot in real data: 3–6 segments, embedded slashes (IMP_I/II),
+// spaces around slashes (PEV / DEM / MED), a trailing INT/EXT/IND type or none.
+// ══════════════════════════════════════════════════════
+const SP_TYPE_TOKENS = ['INT','EXT','IND','INDUSTRY','INTERNAL','EXTERNAL','(PROJ)','PROJ'];
+// Product = everything between the "DEM" marker (or the origin) and a trailing
+// customer-type token. Keeps embedded slashes (IMP_I/II/BLK).
+function spProductOf(dp){
+  const parts = String(dp||'').split('/').map(s=>s.trim()).filter(Boolean);
+  if(!parts.length) return String(dp||'').trim();
+  let start = parts.findIndex(p=>p.toUpperCase()==='DEM');
+  start = start>=0 ? start+1 : (parts.length>1?1:0);   // skip origin if no DEM marker
+  let end = parts.length;
+  if(end-start>1 && SP_TYPE_TOKENS.includes(parts[end-1].toUpperCase())) end--; // drop trailing type
+  const prod = parts.slice(start,end).join('/');
+  return prod || String(dp||'').trim();
+}
+// Product type from the code: Ash / Slag / Cement (default).
+function spProdTypeOf(dp){
+  const u = String(dp||'').toUpperCase();
+  if(/\bASH\b|ASH/.test(u)) return 'Ash';
+  if(/SLAG|SLG/.test(u))    return 'Slag';
+  return 'Cement';
+}
+// Friendly label for a raw customer_type code.
+function spCustTypeLabel(ct){
+  const u=String(ct||'').toUpperCase();
+  if(u==='INT'||u==='INTERNAL') return 'Internal';
+  if(u==='EXT'||u==='EXTERNAL') return 'External';
+  if(u==='IND'||u==='INDUSTRY'||u==='INDUSTRIAL') return 'Industry';
+  return ct||'—';
+}
+// Stamp derived fields onto every row once, so filters/labels don't re-parse.
+function spDecorateRows(){
+  (DB.real_shipments_daily||[]).forEach(r=>{
+    if(r.__product===undefined) r.__product  = spProductOf(r.product);
+    if(r.__prodType===undefined) r.__prodType = spProdTypeOf(r.product);
+  });
+}
+
 // ── ENTRY POINT ──────────────────────────────────────
 function renderSalesPerfView(){
   const hasData = DB.real_shipments_daily.length > 0;
@@ -555,6 +619,7 @@ function renderSalesPerfView(){
   content.style.gap = '14px';
   if(!hasData) return;
   spMigrateSoldToKeys(); // one-time: rewrite any rules/commits stored under the old Sold-To guess
+  spDecorateRows();      // stamp derived product / product-type onto each row
 
   const m = DB.real_shipments_meta;
   document.getElementById('sp-meta-lbl').textContent =
@@ -568,8 +633,7 @@ function renderSalesPerfView(){
   const candidates=[SP.f.dateTo, m.date_max, simEnd].filter(Boolean);
   SP.f.dateTo = candidates.reduce((a,b)=>a>b?a:b);
 
-  if(!SP.tab) SP.tab='EXT';
-  if(SP.f.custType==='all' && SP.tab!=='REP') SP.f.custType=SP.tab;   // tabs own the INT/EXT split
+  if(!SP.tab || SP.tab==='EXT' || SP.tab==='INT') SP.tab='SALES';  // merged Internal+External into one tab
   spRebuildCascade();   // build all dropdowns from current state
   spSyncFilterUI();     // push state → UI elements
   spInitForecastBasis(); // init forecast basis button styling
@@ -586,11 +650,15 @@ function renderSalesPerfView(){
 function spDispatch(changes){
   Object.assign(SP.f, changes);
 
-  // Cascade: narrower selections reset when a broader filter changes
-  if('origin'   in changes){ SP.f.rep='ALL'; SP.f.customer='ALL'; SP.f.product='ALL'; }
-  if('rep'      in changes && !('origin' in changes)){ SP.f.customer='ALL'; SP.f.product='ALL'; }
-  if('customer' in changes && !('rep' in changes) && !('origin' in changes)){ SP.f.product='ALL'; }
-  if('custType' in changes){ SP.f.product='ALL'; }
+  // Cascade: narrower selections reset when a broader filter changes.
+  // Hierarchy: origin → rep → customer → product → demandPoint.
+  // custType and prodType are independent, but reset the product/DP selection.
+  if('origin'   in changes){ SP.f.rep='ALL'; SP.f.customer='ALL'; SP.f.product='ALL'; SP.f.demandPoint='ALL'; }
+  if('rep'      in changes && !('origin' in changes)){ SP.f.customer='ALL'; SP.f.product='ALL'; SP.f.demandPoint='ALL'; }
+  if('customer' in changes && !('rep' in changes) && !('origin' in changes)){ SP.f.product='ALL'; SP.f.demandPoint='ALL'; }
+  if('custType' in changes){ SP.f.product='ALL'; SP.f.demandPoint='ALL'; }
+  if('prodType' in changes){ SP.f.product='ALL'; SP.f.demandPoint='ALL'; }
+  if('product'  in changes){ SP.f.demandPoint='ALL'; }
 
   // Clear table scope and user expansion state when filters change
   SP.selScope = null;
@@ -609,6 +677,12 @@ function spDispatch(changes){
 function spRebuildCascade(){
   const all = DB.real_shipments_daily;
 
+  // Type (Internal/External/Industry) + Product-type (Cement/Ash/Slag) are
+  // independent top-level filters — their option lists come from the whole set.
+  SP._typeOptions     = [...new Set(all.map(r=>r.customer_type||'').filter(Boolean))]
+                          .sort((a,b)=>spCustTypeLabel(a).localeCompare(spCustTypeLabel(b)));
+  SP._prodTypeOptions = [...new Set(all.map(r=>r.__prodType||spProdTypeOf(r.product)))].filter(Boolean).sort();
+
   // Level 2: reps available given current origin
   const repPool = SP.f.origin === 'ALL' ? all : all.filter(r=>r.origin===SP.f.origin);
   SP._repOptions = ['ALL', ...[...new Set(repPool.map(r=>r.sales_manager||'—'))].sort()];
@@ -617,19 +691,29 @@ function spRebuildCascade(){
   const custPool = repPool.filter(r=>(SP.f.rep==='ALL'||r.sales_manager===SP.f.rep)&&(SP.f.custType==='all'||r.customer_type===SP.f.custType));
   SP._custOptions = ['ALL', ...[...new Set(custPool.map(r=>r.ship_to_name||String(r.ship_to||'')))].sort()];
 
-  // Level 4: products available given origin+rep+customer+custType
-  const prodPool = custPool.filter(r=>SP.f.customer==='ALL'||r.ship_to_name===SP.f.customer);
-  SP._prodOptions = ['ALL', ...[...new Set(prodPool.map(r=>r.product||''))].filter(Boolean).sort()];
+  // Level 4: products (extracted) available given origin+rep+customer+custType+prodType
+  const prodPool = custPool.filter(r=>(SP.f.customer==='ALL'||r.ship_to_name===SP.f.customer)&&(SP.f.prodType==='ALL'||(r.__prodType||spProdTypeOf(r.product))===SP.f.prodType));
+  SP._prodOptions = ['ALL', ...[...new Set(prodPool.map(r=>r.__product||spProductOf(r.product)))].filter(Boolean).sort()];
+
+  // Level 5: demand points available given all the above + selected product
+  const dpPool = prodPool.filter(r=>SP.f.product==='ALL'||(r.__product||spProductOf(r.product))===SP.f.product);
+  SP._dpOptions = ['ALL', ...[...new Set(dpPool.map(r=>r.product||''))].filter(Boolean).sort()];
 
   // If current selections are no longer valid, reset them
-  if(!SP._repOptions.includes(SP.f.rep))     SP.f.rep='ALL';
+  if(SP.f.custType!=='all' && !SP._typeOptions.includes(SP.f.custType)) SP.f.custType='all';
+  if(SP.f.prodType!=='ALL' && !SP._prodTypeOptions.includes(SP.f.prodType)) SP.f.prodType='ALL';
+  if(!SP._repOptions.includes(SP.f.rep))       SP.f.rep='ALL';
   if(!SP._custOptions.includes(SP.f.customer)) SP.f.customer='ALL';
   if(!SP._prodOptions.includes(SP.f.product))  SP.f.product='ALL';
+  if(!SP._dpOptions.includes(SP.f.demandPoint)) SP.f.demandPoint='ALL';
 
+  spRenderTypeChips();
+  spRenderProdTypeChips();
   spRenderOriginChips();
   spRenderRepDropdown();
   spRenderCustDropdown();
   spRenderProdDropdown();
+  spRenderDpDropdown();
 }
 
 // Push current SP.f state into the DOM filter elements
@@ -639,11 +723,7 @@ function spSyncFilterUI(){
   if(df && !df.value) df.value = SP.f.dateFrom;
   if(dt && !dt.value) dt.value = SP.f.dateTo;
 
-  // Customer type chips
-  ['all','EXT','INT'].forEach(t=>{
-    const el=document.getElementById(`sp-type-${t==='all'?'all':t.toLowerCase()}`);
-    if(el) el.classList.toggle('active', SP.f.custType===t);
-  });
+  // Type + Product-type chips are re-rendered (with active state) by spRebuildCascade.
   // Reset date inputs if SP.f has values
   const df2=document.getElementById('sp-date-from');
   const dt2=document.getElementById('sp-date-to');
@@ -651,17 +731,28 @@ function spSyncFilterUI(){
   if(dt2 && SP.f.dateTo)   dt2.value=SP.f.dateTo;
 }
 
+// ── TYPE CHIPS — Internal / External / Industry (from customer_type) ─────
+function spRenderTypeChips(){
+  const wrap=document.getElementById('sp-type-chips'); if(!wrap) return;
+  const opts=[['all','All'], ...SP._typeOptions.map(t=>[t, spCustTypeLabel(t)])];
+  wrap.innerHTML=opts.map(([v,lbl])=>
+    '<div class="sp-chip'+(SP.f.custType===v?' active':'')+'" data-type="'+v+'">'+lbl+'</div>').join('');
+  wrap.onclick=function(e){ const chip=e.target.closest('[data-type]'); if(!chip) return; spDispatch({custType:chip.dataset.type}); };
+}
+// ── PRODUCT-TYPE CHIPS — Cement / Ash / Slag (derived from the code) ─────
+function spRenderProdTypeChips(){
+  const wrap=document.getElementById('sp-prodtype-chips'); if(!wrap) return;
+  const opts=['ALL', ...SP._prodTypeOptions];
+  wrap.innerHTML=opts.map(v=>
+    '<div class="sp-chip'+(SP.f.prodType===v?' active':'')+'" data-prodtype="'+v+'">'+(v==='ALL'?'All':v)+'</div>').join('');
+  wrap.onclick=function(e){ const chip=e.target.closest('[data-prodtype]'); if(!chip) return; spDispatch({prodType:chip.dataset.prodtype}); };
+}
+
 // ── ORIGIN CHIPS — only show origins present in current data ─────────────
 function spRenderOriginChips(){
   const wrap = document.getElementById('sp-origin-chips'); if(!wrap) return;
   // Compute which origins are reachable given other active filters
-  const pool = DB.real_shipments_daily.filter(r=>{
-    if(SP.f.rep     !=='ALL' && (r.sales_manager||'—') !==SP.f.rep)     return false;
-    if(SP.f.customer!=='ALL' && r.ship_to_name         !==SP.f.customer)return false;
-    if(SP.f.custType!=='all' && r.customer_type        !==SP.f.custType)return false;
-    if(SP.f.product !=='ALL' && (r.product||'')        !==SP.f.product) return false;
-    return true;
-  });
+  const pool = DB.real_shipments_daily.filter(r=>spPassesBaseFilters(r,'origin'));
   const available = new Set(pool.map(r=>r.origin));
   const allOrigins = DB.real_shipments_meta.origins||[];
   // Build chips using data attributes — no inline JS quoting issues
@@ -698,12 +789,21 @@ function spRenderCustDropdown(){
   }).join('');
 }
 
-// ── PRODUCT DROPDOWN ──────────────────────────────────
+// ── PRODUCT DROPDOWN — the actual product e.g. BRS_IL(12)/BLK ────────────
 function spRenderProdDropdown(){
   const sel = document.getElementById('sp-prod-sel'); if(!sel) return;
   sel.innerHTML = SP._prodOptions.map(p=>{
-    const disp = p==='ALL'?'All Products':spShortProd(p);
+    const disp = p==='ALL'?'All Products':p;
     return `<option value="${encodeURIComponent(p)}" title="${p}" ${SP.f.product===p?'selected':''}>${disp}</option>`;
+  }).join('');
+}
+
+// ── DEMAND-POINT DROPDOWN — the full demand-point string ─────────────────
+function spRenderDpDropdown(){
+  const sel = document.getElementById('sp-dp-sel'); if(!sel) return;
+  sel.innerHTML = SP._dpOptions.map(p=>{
+    const disp = p==='ALL'?'All Demand Points':spShortProd(p);
+    return `<option value="${encodeURIComponent(p)}" title="${p}" ${SP.f.demandPoint===p?'selected':''}>${disp}</option>`;
   }).join('');
 }
 
@@ -718,12 +818,7 @@ function spApplyFilters(){
   SP.filteredRows = DB.real_shipments_daily.filter(r=>{
     if(df && r.date < df) return false;
     if(dt && r.date > dt) return false;
-    if(SP.f.origin  !== 'ALL' && r.origin                !== SP.f.origin)   return false;
-    if(SP.f.rep     !== 'ALL' && (r.sales_manager||'—')  !== SP.f.rep)      return false;
-    if(SP.f.customer!== 'ALL' && r.ship_to_name          !== SP.f.customer) return false;
-    if(SP.f.custType!== 'all' && r.customer_type         !== SP.f.custType) return false;
-    if(SP.f.product !== 'ALL' && (r.product||'')         !== SP.f.product)  return false;
-    return true;
+    return spPassesBaseFilters(r);
   });
 
   // Filters changed — invalidate tree (depends on filteredRows) and spine (date range may differ)
@@ -936,12 +1031,16 @@ function spRenderChart(){
 // ── Base (non-date) filters mirrored from spApplyFilters, so the chart/panels can
 // aggregate straight off DB.real_shipments_daily — including prior-year rows outside
 // the table's date window — with the same origin/rep/customer/type/product filters. ──
-function spPassesBaseFilters(r){
-  if(SP.f.origin  !== 'ALL' && r.origin               !== SP.f.origin)    return false;
-  if(SP.f.rep     !== 'ALL' && (r.sales_manager||'—') !== SP.f.rep)       return false;
-  if(SP.f.customer!== 'ALL' && r.ship_to_name          !== SP.f.customer) return false;
-  if(SP.f.custType!== 'all' && r.customer_type         !== SP.f.custType) return false;
-  if(SP.f.product !== 'ALL' && (r.product||'')         !== SP.f.product)  return false;
+// Single source of truth for every non-date filter. `except` names one
+// dimension to ignore (used to compute reachable options for that dimension).
+function spPassesBaseFilters(r, except){
+  if(except!=='origin'   && SP.f.origin  !== 'ALL' && r.origin               !== SP.f.origin)    return false;
+  if(except!=='rep'      && SP.f.rep     !== 'ALL' && (r.sales_manager||'—') !== SP.f.rep)       return false;
+  if(except!=='customer' && SP.f.customer!== 'ALL' && r.ship_to_name          !== SP.f.customer) return false;
+  if(except!=='custType' && SP.f.custType!== 'all' && r.customer_type         !== SP.f.custType) return false;
+  if(except!=='prodType' && SP.f.prodType!== 'ALL' && (r.__prodType||spProdTypeOf(r.product)) !== SP.f.prodType) return false;
+  if(except!=='product'  && SP.f.product !== 'ALL' && (r.__product||spProductOf(r.product))   !== SP.f.product)  return false;
+  if(except!=='demandPoint' && SP.f.demandPoint!=='ALL' && (r.product||'')    !== SP.f.demandPoint) return false;
   return true;
 }
 
@@ -1394,7 +1493,7 @@ function _spMonthDiff(a,b){ return (+b.slice(0,4)-+a.slice(0,4))*12+(+b.slice(5,
 function _spWd(ym){ const y=+ym.slice(0,4), m=+ym.slice(5,7); const days=new Date(y,m,0).getDate(); let nWk=0,nSat=0; for(let d=1;d<=days;d++){ const dw=new Date(y,m-1,d).getDay(); if(dw>=1&&dw<=5)nWk++; else if(dw===6)nSat++; } return {nWk,nSat}; }
 
 // Cache key — the auto model depends on the data + the base (non-date) filters, not on rules.
-function spAutoKey(){ const m=DB.real_shipments_meta||{}; return [m.loaded_at,m.date_max,SP.f?.origin,SP.f?.rep,SP.f?.customer,SP.f?.custType,SP.f?.product].join('|'); }
+function spAutoKey(){ const m=DB.real_shipments_meta||{}; return [m.loaded_at,m.date_max,SP.f?.origin,SP.f?.rep,SP.f?.customer,SP.f?.custType,SP.f?.prodType,SP.f?.product,SP.f?.demandPoint].join('|'); }
 function spAutoEnsure(){ const k=spAutoKey(); if(SP._auto&&SP._auto.key===k) return SP._auto; SP._auto=spAutoBuild(k); return SP._auto; }
 
 // Build per-leaf monthly history (full, base-filtered) + the model + the backtest.
@@ -1671,8 +1770,9 @@ function spFcInfo(){
 // Three tabs: External Sales / Internal Sales (the forecast table+chart scoped to
 // that customer type) and Sales Rep Forecasting Progress (per-rep review tracking).
 function spSetTab(tab){
+  if(tab==='EXT'||tab==='INT') tab='SALES';   // legacy → merged tab
   SP.tab=tab;
-  ['EXT','INT','REP'].forEach(t=>{ const el=document.getElementById('sp-tab-'+t); if(el) el.classList.toggle('active', t===tab); });
+  ['SALES','REP'].forEach(t=>{ const el=document.getElementById('sp-tab-'+t); if(el) el.classList.toggle('active', t===tab); });
   const content=document.getElementById('sp-content');
   const repv=document.getElementById('sp-rep-view');
   const fbar=document.querySelector('.sp-filter-bar');
@@ -1685,8 +1785,7 @@ function spSetTab(tab){
   } else {
     if(repv) repv.style.display='none';
     if(fbar) fbar.style.display='';
-    SP.f.custType=tab;                  // EXT or INT scopes the whole table+chart
-    SP.chartScope=null; SP._tree=null;
+    SP.chartScope=null; SP._tree=null;   // Internal/External/Industry is now a filter, not the tab
     if(content) content.style.display=hasData?'flex':'none';
     if(hasData) spApplyFilters();
   }
@@ -1796,9 +1895,10 @@ function spRepCommitAll(erep){ const rep=decodeURIComponent(erep); const m=spBui
   spRenderRepView();
 }
 function spRepReview(erep){ const rep=decodeURIComponent(erep);
-  SP.f.rep=rep; SP.f.customer='ALL'; SP.f.product='ALL'; SP.f.origin='ALL';
+  SP.f.rep=rep; SP.f.customer='ALL'; SP.f.product='ALL'; SP.f.demandPoint='ALL'; SP.f.origin='ALL';
+  SP.f.custType=(SP.repScope==='INT'?'INT':SP.repScope==='EXT'?'EXT':'all');  // Type filter follows the rep book
   SP.groupBy=['soldTo','shipTo','demandPoint']; try{localStorage.setItem('avila_sales_groupby',JSON.stringify(SP.groupBy));}catch(e){}
-  spSetTab(SP.repScope==='INT'?'INT':'EXT');
+  spSetTab('SALES');
   spRebuildCascade(); spSyncFilterUI(); spRenderGroupControls();
   const sel=document.getElementById('sp-rep-sel'); if(sel) sel.value=rep;
   statMsg(`Reviewing ${rep}'s book — set rules on the fuchsia cells, then commit on the Progress tab`);
@@ -1985,12 +2085,14 @@ function spBuildDateSpine(){
 const SP_DIMS = {
   rep:         { label:'Sales Rep',     key:r=>r.sales_manager||'—' },
   origin:      { label:'Origin',        key:r=>r.origin||'—' },
-  custType:    { label:'Customer Type', key:r=>r.customer_type||'—' },
+  custType:    { label:'Customer Type', key:r=>spCustTypeLabel(r.customer_type) },
+  prodType:    { label:'Product Type',  key:r=>r.__prodType||spProdTypeOf(r.product) },
+  product:     { label:'Product',       key:r=>r.__product||spProductOf(r.product) },
   soldTo:      { label:'Sold-To',       key:spSoldToKey, display:spSoldToName },
   shipTo:      { label:'Ship-To',       key:r=>r.ship_to_name||'—' },
   demandPoint: { label:'Demand Point',  key:r=>r.__dpName||r.product||'Unknown DP' },
 };
-const SP_DIM_ORDER = ['rep','origin','custType','soldTo','shipTo','demandPoint'];
+const SP_DIM_ORDER = ['rep','origin','custType','prodType','product','soldTo','shipTo','demandPoint'];
 const SP_GROUPBY_DEFAULT = ['soldTo','shipTo','demandPoint'];
 const SP_GROUPBY_MAX = 4;
 
@@ -3239,12 +3341,7 @@ function spSelectScope(type, key, label, custType, custName, repName){
       const df=SP.f.dateFrom, dt=SP.f.dateTo;
       if(df && r.date < df) return false;
       if(dt && r.date > dt) return false;
-      if(SP.f.origin  !=='ALL' && r.origin               !==SP.f.origin)  return false;
-      if(SP.f.rep     !=='ALL' && (r.sales_manager||'—') !==SP.f.rep)     return false;
-      if(SP.f.customer!=='ALL' && r.ship_to_name         !==SP.f.customer)return false;
-      if(SP.f.custType!=='all' && r.customer_type        !==SP.f.custType)return false;
-      if(SP.f.product !=='ALL' && (r.product||'')        !==SP.f.product) return false;
-      return true;
+      return spPassesBaseFilters(r);
     });
   }
 
@@ -3258,7 +3355,7 @@ function spSelectScope(type, key, label, custType, custName, repName){
 function spClearScope(){
   SP.selScope=null;
   SP.scopedRows=SP.filteredRows;
-  SP.f.rep='ALL'; SP.f.customer='ALL'; SP.f.product='ALL';
+  SP.f.rep='ALL'; SP.f.customer='ALL'; SP.f.product='ALL'; SP.f.demandPoint='ALL';
   SP.collapsed={}; SP._userExpanded={};
   spRebuildCascade(); spSyncFilterUI();
   const badge=document.getElementById('sp-scope-badge'); if(badge) badge.style.display='none';
