@@ -248,6 +248,33 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
 /* ── Write-blocked banner ── */
 #ds-write-blocked-banner{position:fixed;top:52px;left:50%;transform:translateX(-50%);z-index:99992;display:none;align-items:center;gap:12px;background:#2a0d14;border:1px solid var(--red);color:var(--text-bright);font-family:var(--mono);font-size:10px;padding:8px 14px;border-radius:7px;box-shadow:0 8px 30px rgba(0,0,0,.6);}
 #ds-write-blocked-banner button{font-family:var(--mono);font-size:9px;padding:4px 10px;border-radius:4px;cursor:pointer;background:var(--red);color:var(--bg);border:none;font-weight:700;}
+/* ── Forecast Distribution tool ── */
+.fd-overlay{position:fixed;inset:0;background:rgba(4,6,10,.72);z-index:99993;display:flex;align-items:center;justify-content:center;font-family:var(--mono);}
+.fd-box{width:min(1120px,95vw);max-height:90vh;display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 16px 50px rgba(0,0,0,.7);overflow:hidden;}
+.fd-hdr{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border);}
+.fd-hdr .fd-title{font-size:13px;letter-spacing:1px;color:var(--text-bright);font-weight:700;}
+.fd-hdr .fd-sub{font-size:9px;color:var(--text-dim);margin-top:2px;}
+.fd-close{cursor:pointer;color:var(--text-dim);font-size:16px;}
+.fd-close:hover{color:var(--text);}
+.fd-ctrls{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 18px;border-bottom:1px solid var(--border);background:var(--surface2);}
+.fd-ctrls label{font-size:9px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase;}
+.fd-ctrls input[type=number]{width:64px;background:var(--surface);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:11px;padding:5px 7px;outline:none;}
+.fd-ctrls input[type=number]:focus{border-color:var(--green);}
+.fd-file-name{font-size:10px;color:var(--text);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.fd-body{padding:14px 18px;overflow:auto;flex:1;}
+.fd-stat-strip{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px;}
+.fd-stat{background:var(--surface2);border:1px solid var(--border);padding:8px 12px;border-radius:6px;min-width:100px;}
+.fd-stat-lbl{font-size:8px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase;}
+.fd-stat-val{font-size:15px;color:var(--text-bright);font-weight:700;margin-top:2px;}
+.fd-warn{background:rgba(255,184,48,.07);border:1px solid rgba(255,184,48,.4);color:var(--amber);font-size:9px;padding:8px 12px;border-radius:6px;margin-bottom:12px;line-height:1.6;max-height:120px;overflow:auto;}
+.fd-tbl-wrap{overflow:auto;border:1px solid var(--border);border-radius:6px;max-height:46vh;}
+.fd-tbl{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:9px;white-space:nowrap;}
+.fd-tbl th{position:sticky;top:0;background:var(--surface3);color:var(--text-dim);font-size:8px;letter-spacing:.5px;text-transform:uppercase;padding:6px 9px;border-bottom:2px solid var(--border2);text-align:right;z-index:1;}
+.fd-tbl th.l,.fd-tbl td.l{text-align:left;}
+.fd-tbl td{padding:4px 9px;border-bottom:1px solid var(--border);color:var(--text);text-align:right;}
+.fd-tbl tr.fd-nohist td{color:var(--amber);}
+.fd-foot{display:flex;gap:10px;align-items:center;padding:12px 18px;border-top:1px solid var(--border);}
+.fd-msg{font-size:9px;color:var(--text-dim);}
 </style>
 </head>
 <body>
@@ -256,6 +283,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
   <div style="width:1px;height:24px;background:var(--border2)"></div>
   <a class="back-link" href="AVILA_Roll.html">← Main App</a>
   <button class="tb-btn amber" id="btn-push-forecast" onclick="pushForecastToMain()" style="margin-left:8px">↑ Push Forecast to Main</button>
+  <button class="tb-btn blue" id="btn-fc-distribute" onclick="fdOpen()" title="Distribute a monthly Sold-To forecast down to Ship-To / Demand Point using historical shipping shares">📊 Distribute Forecast</button>
   <div id="stat-msg"></div>
   <button class="tb-btn sec" id="sc-save-btn" onclick="scManualSave()" title="Save this scenario to its file now" style="padding:5px 9px">💾 Save</button>
   <div class="sc-pill" id="sc-switcher" onclick="scToggleDropdown(event)" title="No scenario — click to create or open one">
@@ -3723,7 +3751,7 @@ async function spHandleFile(input){
     if(progBar) progBar.style.width='100%';
     const m=DB.real_shipments_meta;
     if(msg) msg.innerHTML=`<div class="sp-val-ok">✓ ${Number(m.row_count||0).toLocaleString()} rows → ${Number(m.agg_count||0).toLocaleString()} daily records · ${m.date_min} → ${m.date_max}</div>`;
-    SP.f={dateFrom:m.date_min,dateTo:m.date_max,origin:'ALL',rep:'ALL',customer:'ALL',custType:'all',product:'ALL'};
+    SP.f={dateFrom:m.date_min,dateTo:m.date_max,origin:'ALL',rep:'ALL',customer:'ALL',custType:'all',prodType:'ALL',product:'ALL',demandPoint:'ALL'};
     SP.selScope=null; SP.scopedRows=[]; SP.collapsed={};
     setTimeout(()=>{
       document.getElementById('sp-upload-zone').style.display='none';
@@ -4045,6 +4073,282 @@ document.addEventListener('DOMContentLoaded', () => {
   // Bring up the persistent data source (re-reads the pinned file / auto-refresh)
   sdsInit();
 });
+</script>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════
+// FORECAST DISTRIBUTION
+// Take a monthly forecast given at the Sold-To level (one row per Prod +
+// Sold-To, one column per future month) and disaggregate it down to
+// Ship-To / Demand-Point rows, using each Sold-To's *historical* shipping
+// mix over a configurable look-back window. Products (Cement / Fly Ash /
+// Slag) are always kept separate — a Sold-To's cement mix never influences
+// its ash or slag allocation, and vice-versa.
+//
+// Nothing is hardcoded to a filename: the source workbook is parsed purely
+// by structure — the header row is located by its "Prod" + "Sold-To" cells,
+// and every remaining column whose header reads as a month becomes a
+// dynamic forecast-month column.
+// ═══════════════════════════════════════════════════════════════════════
+const FD = { lookback:6, parsed:null, result:null, fileName:'' };
+
+// Map a source product-family code to the historical product-type bucket
+// (spProdTypeOf → 'Cement' | 'Ash' | 'Slag'). Content-based, not filename-based.
+function fdFamilyOfProd(code){
+  const u=String(code||'').toUpperCase().trim();
+  if(u.startsWith('CEM')||u==='C'||u.includes('CEMENT')) return 'Cement';
+  if(u.startsWith('ASH')||u.includes('FLY')||u.includes('ASH')) return 'Ash';
+  if(u.startsWith('SLG')||u.includes('SLAG')||u.includes('SLG')) return 'Slag';
+  return u||'—';   // unknown family kept distinct so it never merges with another
+}
+// Parse a column header into a month, or null if it isn't one. Accepts a plain
+// month number (1–12), a month name (Jan/January…), or YYYY-MM / MM-YYYY.
+function fdParseMonthHeader(h){
+  if(h===null||h===undefined) return null;
+  const s=String(h).trim(); if(!s) return null;
+  if(/^\d{1,2}$/.test(s)){ const n=+s; return (n>=1&&n<=12)?{month:n}:null; }
+  const names=['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+  const idx=names.indexOf(s.toLowerCase().slice(0,3));
+  if(idx>=0) return {month:idx+1};
+  let m=s.match(/^(\d{4})[-/](\d{1,2})$/); if(m) return {month:+m[2]};
+  m=s.match(/^(\d{1,2})[-/](\d{4})$/);     if(m) return {month:+m[1]};
+  return null;
+}
+
+// ── Parse the source workbook by structure ──
+async function fdParseWorkbook(buf){
+  if(typeof XLSX==='undefined'){
+    await new Promise((res,rej)=>{ const s=document.createElement('script'); s.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js'; s.onload=res; s.onerror=rej; document.head.appendChild(s); });
+  }
+  const names=XLSX.read(buf,{type:'array',bookSheets:true}).SheetNames;
+  const sheetName=names[0];
+  const wb=XLSX.read(buf,{type:'array',sheets:[sheetName],raw:true});
+  const ws=wb.Sheets[sheetName];
+  const aoa=XLSX.utils.sheet_to_json(ws,{header:1,raw:false,defval:null});
+  if(!aoa.length) throw new Error('The forecast sheet is empty');
+
+  // Locate the header row: the first row that carries both a "Prod" cell and a "Sold-To" cell.
+  let hr=-1;
+  for(let i=0;i<Math.min(aoa.length,25);i++){
+    const cells=(aoa[i]||[]).map(c=>String(c==null?'':c).toLowerCase());
+    if(cells.some(c=>/\bprod/.test(c)) && cells.some(c=>/sold\s*to/.test(c))){ hr=i; break; }
+  }
+  if(hr<0) throw new Error('Could not find a header row containing "Prod" and "Sold-To" columns');
+  const header=(aoa[hr]||[]).map(c=>c==null?'':String(c).trim());
+
+  const findCol=re=>header.findIndex(h=>re.test(h.toLowerCase()));
+  const prodCol=findCol(/\bprod/);
+  let idCol=findCol(/sold\s*to\s*id/); if(idCol<0) idCol=findCol(/sold.*to.*(id|#|no)/);
+  const nameCol=header.findIndex(h=>/sold\s*to\s*name/i.test(h));
+  if(prodCol<0) throw new Error('No "Prod" column found');
+  if(idCol<0)   throw new Error('No "Sold-To Id" column found');
+
+  // Every other column whose header reads as a month is a forecast-month column.
+  const monthCols=[];
+  header.forEach((h,ci)=>{ if(ci===prodCol||ci===idCol||ci===nameCol) return; if(fdParseMonthHeader(h)) monthCols.push({ci, key:h, label:h}); });
+  if(!monthCols.length) throw new Error('No forecast-month columns detected in the header');
+
+  const rows=[];
+  for(let i=hr+1;i<aoa.length;i++){
+    const row=aoa[i]||[];
+    const prod=row[prodCol], id=row[idCol];
+    if((prod==null||String(prod).trim()==='') && (id==null||String(id).trim()==='')) continue; // skip blanks/spacers
+    const months={};
+    monthCols.forEach(mc=>{ months[mc.key]=parseFloat(String(row[mc.ci]==null?'':row[mc.ci]).replace(/[, ]/g,''))||0; });
+    rows.push({ prod:String(prod||'').trim(), soldToId:String(id==null?'':id).trim(),
+      soldToName:String((nameCol>=0?row[nameCol]:'')||'').trim(), months });
+  }
+  if(!rows.length) throw new Error('No data rows found under the header');
+  return { sheetName, header, prodCol, idCol, nameCol, monthCols, rows };
+}
+
+// ── Build the historical Ship-To/Demand-Point distribution index ──
+// index[family][soldToDigits][shipTo␟demandPoint] = {shipTo, shipToName, dp, vol}
+// Window = [anchor − lookbackMonths, anchor], anchor = latest history date.
+function fdBuildHistoryIndex(lookbackMonths){
+  const hist=DB.real_shipments_daily||[];
+  let anchor=''; hist.forEach(r=>{ if(r.date && r.date>anchor) anchor=r.date; });
+  if(!anchor) return {index:{}, anchor:null, start:null};
+  const a=new Date(anchor+'T00:00:00'); const s=new Date(a); s.setMonth(s.getMonth()-lookbackMonths);
+  const start=s.toISOString().slice(0,10);
+  const index={};
+  hist.forEach(r=>{
+    if(!r.date || r.date<start || r.date>anchor) return;
+    const fam=r.__prodType||spProdTypeOf(r.product);
+    const st=String(r.sold_to||'').replace(/\D/g,'');
+    if(!st) return;                       // no Sold-To on the row → can't attribute
+    const dp=r.product||''; const ck=String(r.ship_to||'')+'␟'+dp;
+    (index[fam]=index[fam]||{}); (index[fam][st]=index[fam][st]||{});
+    const e=index[fam][st][ck] || (index[fam][st][ck]={shipTo:r.ship_to||'', shipToName:r.ship_to_name||'', dp, vol:0});
+    e.vol += (+r.volume||0);
+  });
+  return {index, anchor, start};
+}
+
+// ── Largest-remainder integer allocation: splits `total` across `shares`
+// so the parts are whole numbers that sum EXACTLY to `total`. ──
+function fdLargestRemainder(total, shares){
+  const n=shares.length; if(!n) return [];
+  if(total<=0) return shares.map(()=>0);
+  const raw=shares.map(sh=>sh*total);
+  const out=raw.map(x=>Math.floor(x));
+  let rem=total-out.reduce((a,b)=>a+b,0);
+  const order=raw.map((x,i)=>({i,frac:x-Math.floor(x)})).sort((p,q)=>q.frac-p.frac);
+  for(let k=0;k<rem;k++) out[order[k%n].i]++;
+  return out;
+}
+
+// ── Core transformation ──
+function fdDistribute(parsed, lookbackMonths){
+  const {monthCols, rows}=parsed;
+  const {index, anchor, start}=fdBuildHistoryIndex(lookbackMonths);
+  const output=[]; const noHist=[]; const stats={rows:0, matched:0, noHistory:0, outRows:0};
+  const totalsIn={}, totalsOut={}; monthCols.forEach(mc=>{ totalsIn[mc.key]=0; totalsOut[mc.key]=0; });
+
+  rows.forEach(src=>{
+    stats.rows++;
+    const fam=fdFamilyOfProd(src.prod);
+    const st=String(src.soldToId||'').replace(/\D/g,'');
+    const combos=(index[fam]&&index[fam][st])?Object.values(index[fam][st]):[];
+    const total=combos.reduce((s,c)=>s+c.vol,0);
+    monthCols.forEach(mc=>{ totalsIn[mc.key]+=Math.round(+src.months[mc.key]||0); });
+
+    if(!combos.length || total<=0){
+      stats.noHistory++;
+      noHist.push(`${src.prod} · ${src.soldToId}${src.soldToName?' '+src.soldToName:''}`);
+      const months={}; monthCols.forEach(mc=>{ const v=Math.round(+src.months[mc.key]||0); months[mc.key]=v; totalsOut[mc.key]+=v; });
+      output.push({prod:src.prod, family:fam, soldToId:src.soldToId, soldToName:src.soldToName,
+        shipTo:'', shipToName:'(no history — unallocated)', demandPoint:'(unallocated)', months, noHistory:true});
+      stats.outRows++;
+      return;
+    }
+    stats.matched++;
+    const shares=combos.map(c=>c.vol/total);
+    const perCombo=combos.map(()=>({}));
+    monthCols.forEach(mc=>{
+      const T=Math.round(+src.months[mc.key]||0);
+      const alloc=fdLargestRemainder(T, shares);
+      combos.forEach((c,i)=>{ perCombo[i][mc.key]=alloc[i]; totalsOut[mc.key]+=alloc[i]; });
+    });
+    combos.forEach((c,i)=>{
+      output.push({prod:src.prod, family:fam, soldToId:src.soldToId, soldToName:src.soldToName,
+        shipTo:c.shipTo, shipToName:c.shipToName, demandPoint:c.dp, months:perCombo[i], noHistory:false});
+      stats.outRows++;
+    });
+  });
+
+  // Mass-balance check: out must equal (rounded) in for every month.
+  const balanced=monthCols.every(mc=>totalsIn[mc.key]===totalsOut[mc.key]);
+  return {output, monthCols, warnings:noHist, stats, anchor, start, balanced, totalsIn, totalsOut};
+}
+
+// ══════════════════════════════════════════════════════
+// FORECAST DISTRIBUTION — UI
+// ══════════════════════════════════════════════════════
+function fdOpen(){
+  fdClose();
+  const ov=document.createElement('div'); ov.className='fd-overlay'; ov.id='fd-overlay';
+  ov.innerHTML=`<div class="fd-box" onclick="event.stopPropagation()">
+    <div class="fd-hdr">
+      <div><div class="fd-title">📊 Distribute Forecast — Sold-To → Ship-To / Demand Point</div>
+        <div class="fd-sub">Splits each monthly Sold-To forecast by that customer's historical shipping mix, per product (Cement / Ash / Slag kept separate).</div></div>
+      <div class="fd-close" onclick="fdClose()">✕</div>
+    </div>
+    <div class="fd-ctrls">
+      <button class="tb-btn sec" onclick="document.getElementById('fd-file-input').click()">📁 Choose forecast file…</button>
+      <span class="fd-file-name" id="fd-file-name">${FD.fileName?_scEsc(FD.fileName):'No file selected'}</span>
+      <input type="file" id="fd-file-input" accept=".xlsx,.xls,.csv" style="display:none" onchange="fdPickFile(this)">
+      <div style="width:1px;height:20px;background:var(--border2)"></div>
+      <label>Look-back</label>
+      <input type="number" id="fd-lookback" min="1" max="36" step="1" value="${FD.lookback}" onchange="FD.lookback=Math.max(1,Math.min(36,parseInt(this.value)||6));this.value=FD.lookback;if(FD.parsed)fdRun();">
+      <label style="text-transform:none;letter-spacing:0">months of history</label>
+      <div style="flex:1"></div>
+      <button class="tb-btn" id="fd-run-btn" onclick="fdRun()" ${FD.parsed?'':'disabled style="opacity:.4;cursor:default"'}>⚡ Run distribution</button>
+    </div>
+    <div class="fd-body" id="fd-body">
+      <div style="padding:30px;text-align:center;color:var(--text-dim);font-size:11px;line-height:1.8">
+        Choose a monthly Sold-To forecast file to begin.<br>
+        <span style="font-size:9px">Expected columns: <b style="color:var(--text)">Prod</b>, <b style="color:var(--text)">Sold-To Id</b>, <b style="color:var(--text)">Sold-To Name</b>, then one column per forecast month. Month columns are detected automatically.</span>
+      </div>
+    </div>
+    <div class="fd-foot">
+      <span class="fd-msg" id="fd-msg">${(DB.real_shipments_daily||[]).length?((DB.real_shipments_daily.length).toLocaleString()+' historical shipment records loaded'):'⚠ No historical shipments loaded — load actuals first, or every Sold-To will be unallocated.'}</span>
+      <div style="flex:1"></div>
+      <button class="tb-btn amber" id="fd-export-btn" onclick="fdExport()" ${FD.result?'':'disabled style="opacity:.4;cursor:default"'}>↓ Export Excel</button>
+    </div>
+  </div>`;
+  ov.addEventListener('click', fdClose);
+  document.body.appendChild(ov);
+  if(FD.result) fdRenderResults();
+}
+function fdClose(){ const ov=document.getElementById('fd-overlay'); if(ov) ov.remove(); }
+async function fdPickFile(input){
+  const file=input.files?.[0]; if(!file) return;
+  FD.fileName=file.name; const nm=document.getElementById('fd-file-name'); if(nm) nm.textContent=file.name;
+  const msg=document.getElementById('fd-msg'); if(msg) msg.textContent='Reading '+file.name+'…';
+  try{
+    const buf=await file.arrayBuffer();
+    FD.parsed=await fdParseWorkbook(buf);
+    const rb=document.getElementById('fd-run-btn'); if(rb){ rb.disabled=false; rb.style.opacity=''; rb.style.cursor=''; }
+    if(msg) msg.textContent=`Parsed ${FD.parsed.rows.length} Sold-To rows · ${FD.parsed.monthCols.length} month column${FD.parsed.monthCols.length>1?'s':''} (${FD.parsed.monthCols.map(m=>m.label).join(', ')})`;
+    fdRun();
+  }catch(err){
+    FD.parsed=null;
+    if(msg){ msg.textContent='✗ '+err.message; msg.style.color='var(--red)'; }
+    console.error('fdParseWorkbook',err);
+  }
+}
+function fdRun(){
+  if(!FD.parsed){ statMsg('Choose a forecast file first'); return; }
+  FD.result=fdDistribute(FD.parsed, FD.lookback);
+  const eb=document.getElementById('fd-export-btn'); if(eb){ eb.disabled=false; eb.style.opacity=''; eb.style.cursor=''; }
+  fdRenderResults();
+}
+function fdRenderResults(){
+  const body=document.getElementById('fd-body'); if(!body||!FD.result) return;
+  const R=FD.result; const mc=R.monthCols;
+  const fmt=n=>Number(n||0).toLocaleString();
+  const windowTxt = R.start ? `${R.start} → ${R.anchor}` : 'no history available';
+  let h=`<div class="fd-stat-strip">
+    <div class="fd-stat"><div class="fd-stat-lbl">Sold-To rows</div><div class="fd-stat-val">${fmt(R.stats.rows)}</div></div>
+    <div class="fd-stat"><div class="fd-stat-lbl">Allocated</div><div class="fd-stat-val" style="color:var(--green)">${fmt(R.stats.matched)}</div></div>
+    <div class="fd-stat"><div class="fd-stat-lbl">No history</div><div class="fd-stat-val" style="color:${R.stats.noHistory?'var(--amber)':'var(--text-bright)'}">${fmt(R.stats.noHistory)}</div></div>
+    <div class="fd-stat"><div class="fd-stat-lbl">Output rows</div><div class="fd-stat-val">${fmt(R.stats.outRows)}</div></div>
+    <div class="fd-stat"><div class="fd-stat-lbl">History window</div><div class="fd-stat-val" style="font-size:10px">${windowTxt}</div></div>
+    <div class="fd-stat"><div class="fd-stat-lbl">Mass balance</div><div class="fd-stat-val" style="font-size:11px;color:${R.balanced?'var(--green)':'var(--red)'}">${R.balanced?'✓ exact':'✗ mismatch'}</div></div>
+  </div>`;
+  if(R.warnings.length){
+    const show=R.warnings.slice(0,40);
+    h+=`<div class="fd-warn"><b>${R.warnings.length} Sold-To/product line${R.warnings.length>1?'s':''} had no history in the window</b> — their forecast is kept whole on an "(unallocated)" row so no volume is lost:<br>${show.map(_scEsc).join(' · ')}${R.warnings.length>show.length?` … (+${R.warnings.length-show.length} more)`:''}</div>`;
+  }
+  const rows=R.output.slice(0,400);
+  h+=`<div class="fd-tbl-wrap"><table class="fd-tbl"><thead><tr>
+    <th class="l">Prod</th><th class="l">Sold-To</th><th class="l">Ship-To</th><th class="l">Demand Point</th>
+    ${mc.map(m=>`<th>${_scEsc(m.label)}</th>`).join('')}</tr></thead><tbody>
+    ${rows.map(o=>`<tr class="${o.noHistory?'fd-nohist':''}">
+      <td class="l">${_scEsc(o.prod)}</td>
+      <td class="l">${_scEsc(o.soldToId)}${o.soldToName?' · '+_scEsc(o.soldToName):''}</td>
+      <td class="l">${_scEsc(String(o.shipTo||''))}${o.shipToName?' · '+_scEsc(o.shipToName):''}</td>
+      <td class="l">${_scEsc(o.demandPoint)}</td>
+      ${mc.map(m=>`<td>${fmt(o.months[m.key])}</td>`).join('')}
+    </tr>`).join('')}
+  </tbody></table></div>
+  ${R.output.length>rows.length?`<div style="font-size:9px;color:var(--text-dim);margin-top:8px">Showing first ${rows.length} of ${R.output.length} rows — the full set is in the export.</div>`:''}`;
+  body.innerHTML=h;
+}
+function fdExport(){
+  if(!FD.result){ statMsg('Run a distribution first'); return; }
+  if(typeof XLSX==='undefined'){ statMsg('Excel library still loading — try again'); return; }
+  const R=FD.result; const mc=R.monthCols;
+  const head=['Prod','Sold-To Id','Sold-To Name','Ship-To','Ship-To Name','Demand Point', ...mc.map(m=>m.label)];
+  const aoa=[head];
+  R.output.forEach(o=> aoa.push([o.prod,o.soldToId,o.soldToName,o.shipTo,o.shipToName,o.demandPoint, ...mc.map(m=>o.months[m.key]||0)]));
+  const ws=XLSX.utils.aoa_to_sheet(aoa); const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,'Distributed');
+  const stamp=new Date().toISOString().slice(0,10);
+  XLSX.writeFile(wb, `Forecast_Distributed_${stamp}.xlsx`);
+  statMsg('Exported '+R.output.length+' rows ✓','green');
+}
 </script>
 
 <script>
