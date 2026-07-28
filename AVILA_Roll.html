@@ -14514,7 +14514,16 @@ function simulate(elements, connections, horizon, includeProposed=false){
         _millReal.forEach(rp=>{
           const vol=parseFloat(rp.volume_t)||0; if(!vol) return;
           if(!_recorded){ r.millProductHistory[mill.id].push(rp.product_id); _recorded=true; }
-          const prodSilos=(millProductSiloMap[mill.id]||{})[rp.product_id]||[];
+          let prodSilos=(millProductSiloMap[mill.id]||{})[rp.product_id]||[];
+          // Fallback: millProductSiloMap is keyed off element_product_capacities. A real-data
+          // scenario may have NO capacity rows for mills, leaving the map empty — then the mill's
+          // actual production was never credited to any cement silo. Rebuild the candidate list
+          // straight from topology (downstream cement silos accepting this product) so real
+          // production still lands in inventory.
+          if(!prodSilos.length){
+            prodSilos=(dn[mill.id]||[]).map(id=>elMap[id])
+              .filter(e=>e&&isCementSilo(e)&&getSiloProducts(e).includes(rp.product_id)&&!railTransferSiloIds.has(e.id));
+          }
           let bestSilo=null, bestU=-1;
           prodSilos.forEach(si=>{
             if(state[si.id]?.inventory>=(state[si.id]?.maxCap||0)*0.98) return;
@@ -14530,19 +14539,25 @@ function simulate(elements, connections, horizon, includeProposed=false){
           // Draw clinker for this ACTUAL production. Was missing here (unlike the rail /
           // campaign / urgency paths), so on real-data days clinker was consumed by the mill
           // but never debited from the clinker silo — inventory rolled forward as
-          // BOD + kiln production with no consumption. Clinker is consumed because the mill
+          // BOD + kiln production with no consumption. Resolve the upstream clinker silo from
+          // TOPOLOGY (up-connections), NOT millProductClinkerMap: that map is keyed off
+          // element_product_capacities, which is empty for mills in a real-data scenario, so it
+          // held no entry and the draw was skipped. Clinker is consumed because the mill
           // physically ran, regardless of where the cement was routed, so key off vol.
-          const clkSiloR=(millProductClinkerMap[mill.id]||{})[rp.product_id]||null;
           const recipeR=recipeMap[rp.product_id]||[];
           const clkIngR=recipeR.find(ri=>prodMap[ri.material_id]?.category==='clinker'||ri.material_id==='clinker');
           const clkPctR=clkIngR?clkIngR.pct/100:0;
-          if(clkSiloR&&clkPctR>0){
-            const consumed=vol*clkPctR;
-            siloOutflow[clkSiloR.id]=(siloOutflow[clkSiloR.id]||0)+consumed;
-            const clkProdId=getSiloProducts(clkSiloR)[0]||'';
-            const cs=state[clkSiloR.id];
-            if(clkProdId&&cs.composition[clkProdId]!==undefined)
-              cs.composition[clkProdId]=Math.max(0,(cs.composition[clkProdId]||0)-consumed);
+          if(clkPctR>0){
+            const _upClkR=(up[mill.id]||[]).map(id=>elMap[id]).filter(e=>e&&isClinkerSilo(e));
+            const clkSiloR=_upClkR.find(si=>getSiloProducts(si).includes(clkIngR.material_id))||_upClkR[0]||null;
+            if(clkSiloR){
+              const consumed=vol*clkPctR;
+              siloOutflow[clkSiloR.id]=(siloOutflow[clkSiloR.id]||0)+consumed;
+              const clkProdId=getSiloProducts(clkSiloR)[0]||'';
+              const cs=state[clkSiloR.id];
+              if(clkProdId&&cs.composition[clkProdId]!==undefined)
+                cs.composition[clkProdId]=Math.max(0,(cs.composition[clkProdId]||0)-consumed);
+            }
           }
         });
         if(!_recorded) r.millProductHistory[mill.id].push(null);
