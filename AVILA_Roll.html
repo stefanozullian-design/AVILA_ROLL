@@ -8321,14 +8321,23 @@ function _renderSupplyViewInner(wrap){
         // ══════════════════════════════════════════════════════════════
         const _clkFinishMills=facEls.filter(e=>e.type==='finish_mill');
         {
+          // Products each mill can produce. Discover them from configured capacities AND from
+          // actual production / campaigns / focus — a real-data scenario often has NO
+          // element_product_capacities rows (production comes from real_production_daily + sim),
+          // and keying only off capacities made this whole CLINKER REQUIREMENTS section vanish.
+          const _clkMillProductIds=new Set();
+          _clkFinishMills.forEach(m=>{
+            DB.element_product_capacities.filter(c=>c.element_id===m.id).forEach(c=>_clkMillProductIds.add(c.product_id));
+            (DB.real_production_daily||[]).filter(r=>r.element_id===m.id&&r.product_id).forEach(r=>_clkMillProductIds.add(r.product_id));
+            (DB.production_campaigns||[]).filter(c=>c.element_id===m.id&&c.product_id).forEach(c=>_clkMillProductIds.add(c.product_id));
+            (DB.mill_product_focus||[]).filter(c=>c.element_id===m.id&&c.product_id).forEach(c=>_clkMillProductIds.add(c.product_id));
+          });
           // Clinker materials used by any product these mills can produce
           const clinkerProdsSet=new Set();
-          _clkFinishMills.forEach(m=>{
-            DB.element_product_capacities.filter(c=>c.element_id===m.id).forEach(c=>{
-              DB.recipes.filter(rc=>rc.product_id===c.product_id).forEach(rec=>{
-                const mat=DB.products.find(pm=>pm.id===rec.material_id);
-                if(mat&&mat.category==='clinker') clinkerProdsSet.add(rec.material_id);
-              });
+          _clkMillProductIds.forEach(pid=>{
+            DB.recipes.filter(rc=>rc.product_id===pid).forEach(rec=>{
+              const mat=DB.products.find(pm=>pm.id===rec.material_id);
+              if(mat&&mat.category==='clinker') clinkerProdsSet.add(rec.material_id);
             });
           });
 
@@ -14517,6 +14526,23 @@ function simulate(elements, connections, horizon, includeProposed=false){
             if(!siloSourceTracker[bestSilo.id]) siloSourceTracker[bestSilo.id]=new Set();
             siloSourceTracker[bestSilo.id].add(mill.id);
             state[bestSilo.id].composition[rp.product_id]=(state[bestSilo.id].composition[rp.product_id]||0)+vol;
+          }
+          // Draw clinker for this ACTUAL production. Was missing here (unlike the rail /
+          // campaign / urgency paths), so on real-data days clinker was consumed by the mill
+          // but never debited from the clinker silo — inventory rolled forward as
+          // BOD + kiln production with no consumption. Clinker is consumed because the mill
+          // physically ran, regardless of where the cement was routed, so key off vol.
+          const clkSiloR=(millProductClinkerMap[mill.id]||{})[rp.product_id]||null;
+          const recipeR=recipeMap[rp.product_id]||[];
+          const clkIngR=recipeR.find(ri=>prodMap[ri.material_id]?.category==='clinker'||ri.material_id==='clinker');
+          const clkPctR=clkIngR?clkIngR.pct/100:0;
+          if(clkSiloR&&clkPctR>0){
+            const consumed=vol*clkPctR;
+            siloOutflow[clkSiloR.id]=(siloOutflow[clkSiloR.id]||0)+consumed;
+            const clkProdId=getSiloProducts(clkSiloR)[0]||'';
+            const cs=state[clkSiloR.id];
+            if(clkProdId&&cs.composition[clkProdId]!==undefined)
+              cs.composition[clkProdId]=Math.max(0,(cs.composition[clkProdId]||0)-consumed);
           }
         });
         if(!_recorded) r.millProductHistory[mill.id].push(null);
