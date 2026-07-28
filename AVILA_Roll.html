@@ -14500,9 +14500,6 @@ function simulate(elements, connections, horizon, includeProposed=false){
       // every later day, making campaign/product edits appear on the wrong day).
       if(s.status==='maintenance'){ r.millProductHistory[mill.id].push(null); return; }
 
-      const caps=capMap[mill.id]||[];
-      if(!caps.length){ s.status='idle'; r.millProductHistory[mill.id].push(null); return; }
-
       // ── REAL PRODUCTION ANCHOR (finish mills) ────────────
       // _campDateRail is computed just below — reuse by computing once here.
       const _millDate=new Date(simStartDate.getTime()+(day-1)*864e5)._ymd();
@@ -14563,6 +14560,15 @@ function simulate(elements, connections, horizon, includeProposed=false){
         if(!_recorded) r.millProductHistory[mill.id].push(null);
         return;
       }
+
+      // Beyond here we need configured product capacities for FORECAST routing. A mill with no
+      // capacities can still post ACTUAL production (handled by the real anchor above) but has
+      // nothing to simulate forward — mark it idle. This check MUST come AFTER the real anchor:
+      // when it ran before, real-data days were skipped entirely, so mill clinker consumption was
+      // never drawn and clinker inventory rolled forward with no consumption. (Kilns already order
+      // it this way — their real anchor precedes the same caps guard.)
+      const caps=capMap[mill.id]||[];
+      if(!caps.length){ s.status='idle'; r.millProductHistory[mill.id].push(null); return; }
 
       // ── RAIL FILL HARD OVERRIDE ──────────────────────────
       // If a planned shipment requires this mill to fill the RAIL silo today,
