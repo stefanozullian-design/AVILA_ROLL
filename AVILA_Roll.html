@@ -6299,7 +6299,10 @@ function renderDemandView(){
 
   const getVal=(elId,ds)=>{
     const rec=demandMap[`${elId}|${ds}`];
-    return rec?parseFloat(rec.value_t)||0:0;
+    if(!rec) return 0;
+    // On a non-working day only a manual override counts; everything else reads as 0.
+    if(nwdSet.has(ds)&&!rec.nwd_manual) return 0;
+    return parseFloat(rec.value_t)||0;
   };
   const getSource=(elId,ds)=>{
     const rec=demandMap[`${elId}|${ds}`];
@@ -6481,9 +6484,9 @@ function renderDemandView(){
               h+=`<td class="dem-day-${mon.ym}" ondblclick="openDemandBuilder('${el.id}','${ds}')" title="Double-click to open the Forecast Builder for ${el.name.replace(/"/g,'&quot;')} starting ${ds}" style="cursor:cell;padding:1px 2px;border-bottom:1px solid var(--border);border-right:1px solid rgba(255,255,255,.03);${tdSty(ds)}">
                 ${isActual
                   ? `<div style="width:50px;font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;color:${cellColor};background:${cellBg}" title="Actual shipment data — double-click for Forecast Builder">${v?Math.round(v*10)/10:''}</div>`
-                  : `<input class="dem-cell" data-el="${el.id}" data-date="${ds}" value="${v||''}" onchange="saveDemandCell(this)"
-                      ${isNwd?'disabled title="Non-working day"':''}
-                      style="width:50px;background:${cellBg};border:none;color:${cellColor};font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;outline:none">`
+                  : `<input class="dem-cell" data-el="${el.id}" data-date="${ds}"${isNwd?' data-nwd="1"':''} value="${v||''}" onchange="saveDemandCell(this)"
+                      ${isNwd?'title="Non-working day — 0 by default; type a value to force a manual override"':''}
+                      style="width:50px;background:${cellBg};border:${isNwd?'1px dashed rgba(255,61,90,.5)':'none'};color:${cellColor};font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;outline:none">`
                 }
               </td>`;
             });
@@ -6830,10 +6833,14 @@ function saveDemandCell(inp){
   if(!DB.demand_values) DB.demand_values=[];
   const elId=inp.dataset.el, ds=inp.dataset.date;
   const v=parseFloat(inp.value)||0;
+  const isNwd=_isNWD(ds);
   DB.demand_values=DB.demand_values.filter(r=>!(r.element_id===elId&&r.date===ds));
-  if(v>0) DB.demand_values.push({element_id:elId, date:ds, value_t:v});
+  // On a non-working day a typed value becomes a MANUAL override (flagged), which is the only
+  // way demand counts on that date. 0 clears it back to the default (no demand).
+  if(v>0) DB.demand_values.push(isNwd?{element_id:elId, date:ds, value_t:v, nwd_manual:true}:{element_id:elId, date:ds, value_t:v});
   autoSave();
   _demandCacheInvalidate();
+  if(typeof scheduleSimulation==='function') scheduleSimulation();
 }
 
 function saveDemandValues(){
@@ -6844,8 +6851,9 @@ function saveDemandValues(){
   inputs.forEach(inp=>{
     const elId=inp.dataset.el, ds=inp.dataset.date;
     const v=parseFloat(inp.value)||0;
+    const isNwd=_isNWD(ds);
     DB.demand_values=DB.demand_values.filter(r=>!(r.element_id===elId&&r.date===ds));
-    if(v>0) DB.demand_values.push({element_id:elId, date:ds, value_t:v});
+    if(v>0) DB.demand_values.push(isNwd?{element_id:elId, date:ds, value_t:v, nwd_manual:true}:{element_id:elId, date:ds, value_t:v});
   });
   autoSave();
   _demandCacheInvalidate();
@@ -10387,12 +10395,24 @@ function _addNWD(){
   if(!date) return;
   if(DB.non_working_days.find(n=>n.date===date)) return;
   DB.non_working_days.push({id:`nwd_${Date.now()}`,date,reason});
+  // Marking a day non-working clears any forecast demand already stored for it (a NWD has
+  // zero expected demand). Manual NWD overrides (nwd_manual) are kept — they don't exist yet
+  // at this point, but the guard makes the rule explicit.
+  DB.demand_values=(DB.demand_values||[]).filter(v=>!(v.date===date&&!v.nwd_manual));
+  _demandCacheInvalidate();
   autoSave(); openNonWorkingDaysPanel();
+  if(typeof renderDemandView==='function') renderDemandView();
+  if(typeof renderSupplyView==='function') renderSupplyView();
+  if(typeof scheduleSimulation==='function') scheduleSimulation();
 }
 
 function _removeNWD(id){
   DB.non_working_days=DB.non_working_days.filter(n=>n.id!==id);
+  _demandCacheInvalidate();
   autoSave(); openNonWorkingDaysPanel();
+  if(typeof renderDemandView==='function') renderDemandView();
+  if(typeof renderSupplyView==='function') renderSupplyView();
+  if(typeof scheduleSimulation==='function') scheduleSimulation();
 }
 
 function getFullPath(fac){
@@ -12746,12 +12766,24 @@ function removeMaintEventFromCalendar(id){
 // Used throughout simulation to prevent letters like "MAINT" or "—" from corrupting calculations
 
 
+// Non-working-day set (global holidays/shutdowns). Cached; invalidated together with the
+// demand cache whenever DB.non_working_days or DB.demand_values changes.
+function _nwdSet(){ return _nwdSet._c || (_nwdSet._c = new Set((DB.non_working_days||[]).map(n=>n.date))); }
+function _isNWD(ds){ return _nwdSet().has(ds); }
+
 function _demandRate(elId, dateStr){
   // PHASE 4: Check REAL DATA first (actual production inputs)
   const realProduction=_dedupRealProd(elId, dateStr);
   if(realProduction.length>0){
     const realTotal=realProduction.reduce((sum,r)=>sum+(parseFloat(r.volume_t)||0),0);
     return realTotal;
+  }
+
+  // Non-working day: expected demand is 0 unless the user entered a MANUAL override
+  // (a demand_values row flagged nwd_manual). Actual shipments above still count.
+  if(_isNWD(dateStr)){
+    const ov=(DB.demand_values||[]).find(v=>v.element_id===elId&&v.date===dateStr&&v.nwd_manual);
+    return ov?(parseFloat(ov.value_t)||0):0;
   }
 
   // Fallback to FORECAST data
@@ -12771,7 +12803,7 @@ function _demandRate(elId, dateStr){
   return 0;
 }
 // Invalidate cache whenever demand_values changes
-function _demandCacheInvalidate(){ _demandRate._cache={}; if(typeof _demGridVal==='function') _demGridVal._cache=null; if(typeof SP!=='undefined') SP._demIdx=null; }
+function _demandCacheInvalidate(){ _demandRate._cache={}; _nwdSet._c=null; if(typeof _demGridVal==='function') _demGridVal._cache=null; if(typeof SP!=='undefined') SP._demIdx=null; }
 
 // ── Monthly demand total for an element (for dashboard summaries) ──
 
