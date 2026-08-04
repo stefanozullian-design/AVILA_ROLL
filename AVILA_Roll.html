@@ -6179,7 +6179,8 @@ function renderDemandView(){
   const simEnd = new Date(simStart.getTime() + horizon*864e5);
 
   const allDates=[];
-  for(let dt=new Date(gridStart); dt<simEnd; dt=new Date(dt.getTime()+864e5)){
+  // Advance by CALENDAR day, not +24h in ms — otherwise a DST fall-back day (25h) repeats.
+  for(let dt=new Date(gridStart); dt<simEnd; dt.setDate(dt.getDate()+1)){
     allDates.push(dt._ymd());
   }
   // Group by month
@@ -7112,10 +7113,16 @@ function _renderSupplyViewInner(wrap){
   // Date spine — filtered by active view range
   const {from:filterFrom, to:filterTo}=supGetDateRange();
   const allDates=[];
-  for(let d=0;d<horizon;d++){
-    const dt=new Date(simStart.getTime()+d*864e5);
-    const ds=dt._ymd();
-    if(ds>=filterFrom&&ds<=filterTo) allDates.push(ds);
+  // Advance by CALENDAR day (setDate), not by +24h in ms. On a DST fall-back day (e.g.
+  // Nov 1) the local day has 25h, so adding 864e5 ms lands back on the same date and the
+  // column appears twice. setDate keeps local midnight and always moves to the next date.
+  {
+    const dt=new Date(simStart.getFullYear(),simStart.getMonth(),simStart.getDate());
+    for(let d=0;d<horizon;d++){
+      const ds=dt._ymd();
+      if(ds>=filterFrom&&ds<=filterTo) allDates.push(ds);
+      dt.setDate(dt.getDate()+1);
+    }
   }
 
   // Group by month
@@ -8781,7 +8788,7 @@ function _renderSupplyViewInner(wrap){
         // Per-product arrival map (rail movements + vessel calls → tonnes/day).
         const _termArr={};
         const _addArr=(pid,ds,t)=>{ pid=_canon(pid); if(!pid||!ds||!(t>0))return; (_termArr[pid]=_termArr[pid]||{}); _termArr[pid][ds]=(_termArr[pid][ds]||0)+t; };
-        const _dayToDs=day=>new Date(simStart.getTime()+(day-1)*864e5)._ymd();
+        const _dayToDs=day=>{const d=new Date(simStart.getFullYear(),simStart.getMonth(),simStart.getDate());d.setDate(d.getDate()+(day-1));return d._ymd();}; // calendar increment — DST-safe (no duplicate day)
         (DB.rail_movements||[]).filter(rm=>rm.to_facility_id===fac.id).forEach(rm=>{
           let depDay=null;
           if(rm.departure_date&&S.simCfg.start_date) depDay=Math.round((new Date(rm.departure_date)-simStart)/864e5)+1;
@@ -13857,7 +13864,12 @@ function simulate(elements, connections, horizon, includeProposed=false){
 
 
 
-  const simStartDate=new Date(S.simCfg.start_date+'T00:00:00');
+  // Anchor at NOON, not midnight: every per-day date below is derived as
+  // simStartDate + (day-1)*864e5 ms. On a DST fall-back day (25h) that arithmetic from
+  // midnight lands back on the same calendar date, duplicating a day and shifting every
+  // date after it. From noon the ±1h DST shift never crosses midnight, so _ymd()/getDay()
+  // stay correct for every day. (Day-index diffs elsewhere use Math.round and are unaffected.)
+  const simStartDate=new Date(S.simCfg.start_date+'T12:00:00');
 
   // Build demandSiloMap FIRST so we can use it for product fallback.
   // Walks upstream from each demand_point to the silos that FEED it — stopping at the first
@@ -14160,7 +14172,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
   let totProd=0;
 
   // ── PRE-PROCESS ACTIVE SIMULATION RULES ─────────────
-  const ruleSimStart=new Date(S.simCfg.start_date+'T00:00:00');
+  const ruleSimStart=new Date(S.simCfg.start_date+'T12:00:00'); // noon-anchored, DST-safe (see simStartDate)
   const activeRulesByEl={};
   (DB.simulation_rules||[]).filter(r=>r.status==='active'&&r.structured).forEach(rule=>{
     (rule.element_ids||[]).forEach(eid=>{
