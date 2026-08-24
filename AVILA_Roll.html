@@ -22990,9 +22990,24 @@ function autoSave(){
   clearTimeout(_autoSaveTimer);
   _autoSaveTimer=setTimeout(()=>{_autoSaveTimer=null;autoSaveNow();},500);
 }
-window.addEventListener('beforeunload',()=>{
+// Flush BOTH pending saves: the localStorage debounce AND the scenario file's
+// own write debounce (SC._writeTimer, ~500ms — see scScheduleWrite). Without
+// this, closing/backgrounding the tab right after an edit could flush the
+// localStorage copy but drop the disk write entirely, leaving the saved .json
+// file one edit behind (e.g. an old topology) even though "Saved" showed.
+function _flushPendingSaves(){
   if(_autoSaveTimer){clearTimeout(_autoSaveTimer);_autoSaveTimer=null;autoSaveNow();}
-});
+  if(typeof SC!=='undefined' && SC.activeId && SC.handles[SC.activeId]){
+    clearTimeout(SC._writeTimer);SC._writeTimer=null;
+    scWriteActive();
+  }
+}
+window.addEventListener('beforeunload',_flushPendingSaves);
+// visibilitychange/pagehide fire reliably (unlike beforeunload) when a tab is
+// closed, switched away from, or backgrounded on mobile — the recommended
+// point to flush pending writes since async work can still run briefly here.
+document.addEventListener('visibilitychange',()=>{ if(document.hidden) _flushPendingSaves(); });
+window.addEventListener('pagehide',_flushPendingSaves);
 
 function autoSaveNow(){
   // Trim real data to last 90 days to prevent localStorage overflow
@@ -23255,10 +23270,23 @@ document.addEventListener('DOMContentLoaded',async()=>{
   // await it directly (the old fixed 100ms sleep raced on slow disks).
   await dsInit();
 
-  // Seed from the bundled server JSON only when localStorage is empty
-  // AND no data source is configured (data sources take priority).
-  // Never overwrite an existing saved state or configured data source.
-  if(!hasSavedState && !DB.demand_points.length){
+  // Seed from the bundled server JSON only when localStorage is empty,
+  // no data source is configured, AND no scenario file is already linked
+  // in this browser. Without that last check, a browser whose localStorage
+  // cache got cleared (or the save-loss bug above) would load this OLD
+  // bundled snapshot onto the canvas BEFORE scInit() gets a chance to
+  // reconnect to the real scenario file — and if that reconnect then fails
+  // for any reason (permission not yet re-granted, stale handle), the user
+  // is left looking at this old topology with nothing marking it as stale.
+  // Worse, hitting "New scenario" at that point bakes the old data into a
+  // brand-new file. So: if a scenario is already known, stay blank and let
+  // scInit()'s own load/prompt flow resolve it instead of guessing.
+  const hasKnownScenario = (()=>{
+    try{ const raw=localStorage.getItem('avila_scenarios'); if(!raw) return false;
+      const o=JSON.parse(raw); return !!(o && o.meta && Object.keys(o.meta).length);
+    }catch(e){ return false; }
+  })();
+  if(!hasSavedState && !hasKnownScenario && !DB.demand_points.length){
     try{
       // Stable name first; dated legacy name as fallback for old deployments
       let resp=await fetch('./seed.json');
