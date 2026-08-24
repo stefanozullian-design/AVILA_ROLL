@@ -23270,10 +23270,23 @@ document.addEventListener('DOMContentLoaded',async()=>{
   // await it directly (the old fixed 100ms sleep raced on slow disks).
   await dsInit();
 
-  // Seed from the bundled server JSON only when localStorage is empty
-  // AND no data source is configured (data sources take priority).
-  // Never overwrite an existing saved state or configured data source.
-  if(!hasSavedState && !DB.demand_points.length){
+  // Seed from the bundled server JSON only when localStorage is empty,
+  // no data source is configured, AND no scenario file is already linked
+  // in this browser. Without that last check, a browser whose localStorage
+  // cache got cleared (or the save-loss bug above) would load this OLD
+  // bundled snapshot onto the canvas BEFORE scInit() gets a chance to
+  // reconnect to the real scenario file — and if that reconnect then fails
+  // for any reason (permission not yet re-granted, stale handle), the user
+  // is left looking at this old topology with nothing marking it as stale.
+  // Worse, hitting "New scenario" at that point bakes the old data into a
+  // brand-new file. So: if a scenario is already known, stay blank and let
+  // scInit()'s own load/prompt flow resolve it instead of guessing.
+  const hasKnownScenario = (()=>{
+    try{ const raw=localStorage.getItem('avila_scenarios'); if(!raw) return false;
+      const o=JSON.parse(raw); return !!(o && o.meta && Object.keys(o.meta).length);
+    }catch(e){ return false; }
+  })();
+  if(!hasSavedState && !hasKnownScenario && !DB.demand_points.length){
     try{
       // Stable name first; dated legacy name as fallback for old deployments
       let resp=await fetch('./seed.json');
