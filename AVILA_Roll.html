@@ -22990,9 +22990,24 @@ function autoSave(){
   clearTimeout(_autoSaveTimer);
   _autoSaveTimer=setTimeout(()=>{_autoSaveTimer=null;autoSaveNow();},500);
 }
-window.addEventListener('beforeunload',()=>{
+// Flush BOTH pending saves: the localStorage debounce AND the scenario file's
+// own write debounce (SC._writeTimer, ~500ms — see scScheduleWrite). Without
+// this, closing/backgrounding the tab right after an edit could flush the
+// localStorage copy but drop the disk write entirely, leaving the saved .json
+// file one edit behind (e.g. an old topology) even though "Saved" showed.
+function _flushPendingSaves(){
   if(_autoSaveTimer){clearTimeout(_autoSaveTimer);_autoSaveTimer=null;autoSaveNow();}
-});
+  if(typeof SC!=='undefined' && SC.activeId && SC.handles[SC.activeId]){
+    clearTimeout(SC._writeTimer);SC._writeTimer=null;
+    scWriteActive();
+  }
+}
+window.addEventListener('beforeunload',_flushPendingSaves);
+// visibilitychange/pagehide fire reliably (unlike beforeunload) when a tab is
+// closed, switched away from, or backgrounded on mobile — the recommended
+// point to flush pending writes since async work can still run briefly here.
+document.addEventListener('visibilitychange',()=>{ if(document.hidden) _flushPendingSaves(); });
+window.addEventListener('pagehide',_flushPendingSaves);
 
 function autoSaveNow(){
   // Trim real data to last 90 days to prevent localStorage overflow
