@@ -1144,6 +1144,11 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
           <option value="">All Facilities</option>
         </select>
         <div style="width:1px;height:20px;background:var(--border2)"></div>
+        <span class="sp-filter-label">Family</span>
+        <select class="sp-fi" id="dem-fam-filter" style="width:130px" onchange="_demOnFamChange()">
+          <option value="">All Families</option>
+        </select>
+        <div style="width:1px;height:20px;background:var(--border2)"></div>
         <span class="sp-filter-label">Category</span>
         <select class="sp-fi" id="dem-cat-filter" style="width:150px" onchange="_demOnCatChange()">
           <option value="">All Categories</option>
@@ -2509,6 +2514,14 @@ function getProductCategory(productId){
   const p=DB.products.find(x=>x.id===productId);
   return p?.category||'';
 }
+
+// Family groups several product categories under one umbrella — Cement covers
+// both cement_bulk and cement_packed, SCM covers additive (ash + slag are both
+// stored as category:'additive'; scm_type just distinguishes which within SCM).
+// Clinker and Raw Meal each have exactly one category so family===category for them.
+const PRODUCT_FAMILY_OF={cement_bulk:'cement',cement_packed:'cement',additive:'scm',clinker:'clinker',raw_meal:'raw_meal'};
+const PRODUCT_FAMILY_LABELS={cement:'Cement',scm:'SCM',clinker:'Clinker',raw_meal:'Raw Meal'};
+function getProductFamily(productId){ return PRODUCT_FAMILY_OF[getProductCategory(productId)]||''; }
 
 function getBulkSiloColor(el){
   // Use first product in the products array for color
@@ -5969,7 +5982,7 @@ function renderProductsCat(){
     const catColors2={cement_bulk:'var(--green)',cement_packed:'var(--blue)',clinker:'#ff8c42',raw_meal:'#f5c542',additive:'#f472b6'};
     const catLabels2={cement_bulk:'Cement Bulk',cement_packed:'Cement Packed',clinker:'Clinker',raw_meal:'Raw Material',additive:'SCM'};
     const catColor=catColors2[cat]||'var(--text-dim)';
-    const catLabel=catLabels2[cat]||cat.replace(/_/g,' ');
+    const catLabel=(catLabels2[cat]||cat.replace(/_/g,' '))+(cat==='additive'&&p.scm_type?` — ${p.scm_type[0].toUpperCase()}${p.scm_type.slice(1)}`:'');
     const recipe=DB.recipes.filter(r=>r.product_id===p.id).map(r=>{
       // Show ingredient name — could be raw material or another product
       const mat=DB.raw_materials.find(m=>m.id===r.material_id);
@@ -6026,6 +6039,56 @@ function deleteProduct(i){ if(confirm('Delete?')){ DB.products.splice(i,1); auto
 function deleteRawMat(i){ if(confirm('Delete?')){ DB.raw_materials.splice(i,1); autoSave(); renderCatalogView(); } }
 function deleteFuel(i){ if(confirm('Delete?')){ DB.fuels.splice(i,1); autoSave(); renderCatalogView(); } }
 
+// Family → Category picker for the New/Edit Product form. Family is the coarse
+// grouping (matches PRODUCT_FAMILY_OF); each family offers the specific
+// categories a product can be saved as. SCM's two options both save
+// category:'additive' (unchanged — see getProductFamily) plus a scm_type of
+// 'slag'/'ash' so existing category==='additive' checks keep working untouched.
+const FAM_DEFS={
+  cement:  {label:'Cement',   color:'var(--green)', cats:[{cat:'cement_bulk',  sub:'', label:'Bulk'},{cat:'cement_packed', sub:'', label:'Bagged'}]},
+  scm:     {label:'SCM',      color:'#f472b6',       cats:[{cat:'additive',    sub:'slag', label:'Slag'},{cat:'additive', sub:'ash', label:'Ash'}]},
+  clinker: {label:'Clinker',  color:'#ff8c42',       cats:[{cat:'clinker',     sub:'', label:'Clinker'}]},
+  raw_meal:{label:'Raw Meal', color:'#f5c542',       cats:[{cat:'raw_meal',    sub:'', label:'Raw Meal'}]}
+};
+function _pmCatChipsHtml(fam, curCat, curSub){
+  const def=FAM_DEFS[fam]; if(!def) return '';
+  return def.cats.map(c=>{
+    const active=curCat===c.cat && (curSub||'')===(c.sub||'');
+    return `<div onclick="_pmSelectCat('${fam}','${c.cat}','${c.sub||''}')"
+      class="cat-chip${active?' active':''}"
+      style="padding:4px 10px;font-family:var(--mono);font-size:9px;cursor:pointer;border:1px solid ${active?def.color:'var(--border2)'};color:${active?def.color:'var(--text-dim)'};background:${active?'rgba(0,0,0,.3)':'var(--surface2)'};transition:all .15s">
+      ${c.label}
+    </div>`;
+  }).join('');
+}
+function _pmSelectFamily(fam){
+  const def=FAM_DEFS[fam]; if(!def) return;
+  document.getElementById('pm-fam').value=fam;
+  document.querySelectorAll('.fam-chip').forEach(x=>x.classList.remove('active'));
+  const btn=document.getElementById('fam-chip-'+fam); if(btn) btn.classList.add('active');
+  document.querySelectorAll('.fam-chip').forEach(x=>{
+    const f=x.id.replace('fam-chip-','');
+    x.style.border='1px solid '+(f===fam?FAM_DEFS[f].color:'var(--border2)');
+    x.style.color=f===fam?FAM_DEFS[f].color:'var(--text-dim)';
+    x.style.background=f===fam?'rgba(0,0,0,.3)':'var(--surface2)';
+  });
+  // Keep the current category if it already belongs to the new family, else default to its first
+  const curCat=document.getElementById('pm-cat').value, curSub=document.getElementById('pm-scmtype').value;
+  const stillValid=def.cats.some(c=>c.cat===curCat && (c.sub||'')===(curSub||''));
+  const first=def.cats[0];
+  const useCat=stillValid?curCat:first.cat, useSub=stillValid?curSub:(first.sub||'');
+  document.getElementById('pm-cat').value=useCat;
+  document.getElementById('pm-scmtype').value=useSub;
+  const wrap=document.getElementById('pm-cat-chips-wrap');
+  if(wrap) wrap.innerHTML=_pmCatChipsHtml(fam,useCat,useSub);
+}
+function _pmSelectCat(fam,cat,sub){
+  document.getElementById('pm-cat').value=cat;
+  document.getElementById('pm-scmtype').value=sub||'';
+  const wrap=document.getElementById('pm-cat-chips-wrap');
+  if(wrap) wrap.innerHTML=_pmCatChipsHtml(fam,cat,sub);
+}
+
 function openProductModal(p){
   const recipe=p?DB.recipes.filter(r=>r.product_id===p.id):[];
   S._ingCount=recipe.length||1;
@@ -6051,10 +6114,9 @@ function openProductModal(p){
     </div>`;
   });
 
-  const cats=['cement_bulk','cement_packed','clinker','raw_meal','additive'];
   const curCat=p?.category||'cement_bulk';
-  const catColors={cement_bulk:'var(--green)',cement_packed:'var(--blue)',clinker:'#ff8c42',raw_meal:'#f5c542',additive:'#f472b6'};
-  const catLabels={cement_bulk:'Cement Bulk',cement_packed:'Cement Packed',clinker:'Clinker',raw_meal:'Raw Material',additive:'SCM'};
+  const curSub=(curCat==='additive'?(p?.scm_type||'slag'):'');
+  const curFam=PRODUCT_FAMILY_OF[curCat]||'cement';
 
   showModalContent(`
     <div class="modal-hdr"><span class="modal-title">${p?'Edit':'New'} Product</span><span class="modal-close" onclick="closeModal()">✕</span></div>
@@ -6066,16 +6128,21 @@ function openProductModal(p){
       <div class="fr">
         <div class="ff"><div class="fl">Description</div><input class="fi" id="pm-desc" value="${p?.description||''}"></div>
       </div>
-      <div class="fr s1"><div class="ff"><div class="fl">Category</div>
+      <div class="fr s1"><div class="ff"><div class="fl">Family</div>
         <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px">
-          ${cats.map(c=>`
-            <div onclick="document.getElementById('pm-cat').value='${c}';document.querySelectorAll('.cat-chip').forEach(x=>x.classList.remove('active'));this.classList.add('active')"
-              class="cat-chip${curCat===c?' active':''}"
-              style="padding:4px 10px;font-family:var(--mono);font-size:9px;cursor:pointer;border:1px solid ${curCat===c?catColors[c]||'var(--green)':'var(--border2)'};color:${curCat===c?catColors[c]||'var(--green)':'var(--text-dim)'};background:${curCat===c?'rgba(0,0,0,.3)':'var(--surface2)'};transition:all .15s">
-              ${catLabels[c]||c.replace(/_/g,' ')}
+          ${Object.keys(FAM_DEFS).map(f=>`
+            <div id="fam-chip-${f}" onclick="_pmSelectFamily('${f}')"
+              class="cat-chip fam-chip${curFam===f?' active':''}"
+              style="padding:4px 10px;font-family:var(--mono);font-size:9px;cursor:pointer;border:1px solid ${curFam===f?FAM_DEFS[f].color:'var(--border2)'};color:${curFam===f?FAM_DEFS[f].color:'var(--text-dim)'};background:${curFam===f?'rgba(0,0,0,.3)':'var(--surface2)'};transition:all .15s">
+              ${FAM_DEFS[f].label}
             </div>`).join('')}
-          <input type="hidden" id="pm-cat" value="${curCat}">
+          <input type="hidden" id="pm-fam" value="${curFam}">
         </div>
+      </div></div>
+      <div class="fr s1"><div class="ff"><div class="fl">Category</div>
+        <div id="pm-cat-chips-wrap" style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px">${_pmCatChipsHtml(curFam,curCat,curSub)}</div>
+        <input type="hidden" id="pm-cat" value="${curCat}">
+        <input type="hidden" id="pm-scmtype" value="${curSub}">
         <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-top:4px">
           Category determines silo color and which production element creates this product
         </div>
@@ -6115,9 +6182,11 @@ function saveProduct(){
   const material_code=document.getElementById('pm-code')?.value?.trim()||'';
   const desc=document.getElementById('pm-desc')?.value||'';
   const category=document.getElementById('pm-cat')?.value||'cement_bulk';
+  const scm_type=document.getElementById('pm-scmtype')?.value||'';
   // Generate stable id from name
   const pid=name.toLowerCase().replace(/[\s\/\(\)\-]+/g,'_').replace(/__+/g,'_').replace(/^_|_$/g,'');
   const prod={id:pid, name, description:desc, material_code, category};
+  if(category==='additive' && scm_type) prod.scm_type=scm_type;
 
   if(S._editProductIdx!=null){
     DB.products[S._editProductIdx]=prod;
@@ -6205,10 +6274,11 @@ function renderDemandView(){
   const collapsed=window._demColapsed;
   const grpCol=window._demGrpCol;
 
-  // ── Facility + category + product + cust-type filter (bidirectional) ──
-  if(!window._demFilter) window._demFilter={facId:'',prodId:'',cat:'',custType:'all'};
+  // ── Facility + family + category + product + cust-type filter (bidirectional) ──
+  if(!window._demFilter) window._demFilter={facId:'',prodId:'',cat:'',family:'',custType:'all'};
   const _df=window._demFilter;
   if(_df.cat===undefined) _df.cat='';
+  if(_df.family===undefined) _df.family='';
   if(_df.custType===undefined) _df.custType='all';
   if(_df.elId===undefined) _df.elId='';
 
@@ -6229,6 +6299,7 @@ function renderDemandView(){
     }
   });
   const _demProdCat=pid=>DB.products.find(p=>p.id===pid)?.category||'';
+  const _demProdFam=pid=>getProductFamily(pid);
 
   // Facility dropdown — narrows to facilities carrying the selected product (if any)
   const _demFacSel=document.getElementById('dem-fac-filter');
@@ -6243,19 +6314,33 @@ function renderDemandView(){
       _dfFacs.map(f=>`<option value="${f.id}"${f.id===_df.facId?' selected':''}>${f.name}</option>`).join('');
   }
 
-  // Category dropdown — categories present among demand-point products
+  // Family dropdown — families present among demand-point products (Cement groups
+  // bulk+packed, SCM groups ash+slag — see PRODUCT_FAMILY_OF/getProductFamily).
+  const _demFamSel=document.getElementById('dem-fam-filter');
+  if(_demFamSel){
+    const famIds=[...new Set([..._dfAllProdIds].map(_demProdFam).filter(Boolean))]
+      .sort((a,b)=>(PRODUCT_FAMILY_LABELS[a]||a).localeCompare(PRODUCT_FAMILY_LABELS[b]||b));
+    _demFamSel.innerHTML=`<option value="">All Families</option>`+
+      famIds.map(f=>`<option value="${f}"${f===_df.family?' selected':''}>${PRODUCT_FAMILY_LABELS[f]||f}</option>`).join('');
+  }
+
+  // Category dropdown — categories present among demand-point products, narrowed
+  // to the selected family (if any)
   const _demCatSel=document.getElementById('dem-cat-filter');
   if(_demCatSel){
-    const catIds=[...new Set([..._dfAllProdIds].map(_demProdCat).filter(Boolean))]
+    let catProdIds=[..._dfAllProdIds];
+    if(_df.family) catProdIds=catProdIds.filter(id=>_demProdFam(id)===_df.family);
+    const catIds=[...new Set(catProdIds.map(_demProdCat).filter(Boolean))]
       .sort((a,b)=>(_demCatLabels[a]||a).localeCompare(_demCatLabels[b]||b));
     _demCatSel.innerHTML=`<option value="">All Categories</option>`+
       catIds.map(c=>`<option value="${c}"${c===_df.cat?' selected':''}>${_demCatLabels[c]||c}</option>`).join('');
   }
 
-  // Product dropdown — narrows to products at the selected facility and/or category
+  // Product dropdown — narrows to products at the selected facility and/or family/category
   const _demProdSel=document.getElementById('dem-prod-filter');
   if(_demProdSel){
     let prodIds=_df.facId ? [...(_dfFacProdMap[_df.facId]||[])] : [..._dfAllProdIds];
+    if(_df.family) prodIds=prodIds.filter(id=>_demProdFam(id)===_df.family);
     if(_df.cat) prodIds=prodIds.filter(id=>_demProdCat(id)===_df.cat);
     const _dfProds=prodIds.map(id=>DB.products.find(p=>p.id===id)).filter(Boolean)
       .sort((a,b)=>(a.name||a.id).localeCompare(b.name||b.id));
@@ -6272,6 +6357,7 @@ function renderDemandView(){
 
   // Apply filters — reassign allDpEls to filtered subset for all table rendering below
   if(_df.facId)  allDpEls=allDpEls.filter(el=>_facForEl(el)===_df.facId);
+  if(_df.family) allDpEls=allDpEls.filter(el=>_demElMatchesFam(el,_df.family));
   if(_df.cat)    allDpEls=allDpEls.filter(el=>_demElMatchesCat(el,_df.cat));
   if(_df.prodId) allDpEls=allDpEls.filter(el=>_demElMatchesProd(el,_df.prodId));
   if(_df.custType!=='all') allDpEls=allDpEls.filter(el=>_demElType(el)===_df.custType);
@@ -6772,8 +6858,9 @@ function _demToggleGrp(id){
   renderDemandView();
 }
 function _demEnsureFilter(){
-  if(!window._demFilter) window._demFilter={facId:'',prodId:'',cat:'',custType:'all',elId:''};
+  if(!window._demFilter) window._demFilter={facId:'',prodId:'',cat:'',family:'',custType:'all',elId:''};
   if(window._demFilter.cat===undefined) window._demFilter.cat='';
+  if(window._demFilter.family===undefined) window._demFilter.family='';
   if(window._demFilter.custType===undefined) window._demFilter.custType='all';
   if(window._demFilter.elId===undefined) window._demFilter.elId='';
   return window._demFilter;
@@ -6788,6 +6875,14 @@ function _demSelectEl(elId){
 function _demClearElSel(){ _demEnsureFilter().elId=''; renderDemandView(); }
 function _demOnFacChange(){
   _demEnsureFilter().facId=document.getElementById('dem-fac-filter')?.value||'';
+  renderDemandView();
+}
+function _demOnFamChange(){
+  const f=_demEnsureFilter();
+  f.family=document.getElementById('dem-fam-filter')?.value||'';
+  // Drop a category/product selection that no longer fits the chosen family
+  if(f.family && f.cat && PRODUCT_FAMILY_OF[f.cat]!==f.family) f.cat='';
+  if(f.family && f.prodId && getProductFamily(f.prodId)!==f.family) f.prodId='';
   renderDemandView();
 }
 function _demOnCatChange(){
@@ -6806,7 +6901,7 @@ function _demOnTypeChange(t){
   renderDemandView();
 }
 function _demClearFilters(){
-  window._demFilter={facId:'',prodId:'',cat:'',custType:'all',elId:''};
+  window._demFilter={facId:'',prodId:'',cat:'',family:'',custType:'all',elId:''};
   renderDemandView();
 }
 
@@ -10839,6 +10934,11 @@ function _demElProdIds(el){
 function _demElMatchesCat(el, cat){
   if(!cat) return true;
   return _demElProdIds(el).some(pid=>(DB.products.find(p=>p.id===pid)?.category||'')===cat);
+}
+// True if the demand point carries any product of the given family (Cement/SCM/Clinker/Raw Meal)
+function _demElMatchesFam(el, fam){
+  if(!fam) return true;
+  return _demElProdIds(el).some(pid=>getProductFamily(pid)===fam);
 }
 // INT / EXT — embedded in the product name (falls back to the demand-point name)
 function _demElType(el){
