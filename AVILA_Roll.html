@@ -16927,13 +16927,40 @@ function _addDays(ymd,n){
   return d._ymd();
 }
 
+// Flattens the simulation's per-silo inventory projection into per-date,
+// per-product rows — same shape as DB.real_inventory_daily (which holds the
+// actual/historical side) so the two line up for anyone consuming the file.
+// A silo's simulated inventory is attributed to its primary (first) product,
+// matching how the inventory bar charts group silos by product (_invChartRow).
+function _buildForecastInventoryDaily(){
+  const r=S.simResults; if(!r||!r.inventoryHistory) return [];
+  const startStr=S.simCfg.start_date; if(!startStr) return [];
+  const rows=[];
+  DB.elements.forEach(el=>{
+    if(el.type!=='bulk_silo'&&el.type!=='packed_silo') return;
+    const hist=r.inventoryHistory[el.id]; if(!hist||!hist.length) return;
+    const prodIds=getSiloProducts(el); if(!prodIds.length) return;
+    const facId=el.assigned_facility_id||el.facility_id||null;
+    hist.forEach((invVal,dayIdx)=>{
+      rows.push({date:_addDays(startStr,dayIdx), facility_id:facId, silo_id:el.id, product_id:prodIds[0], inventory_t:invVal});
+    });
+  });
+  return rows;
+}
+
 function exportJSON(){
   const payload={
-    _version:'0.3',
+    _version:'0.4',
     _exported:new Date().toISOString(),
     _facility:getFacility()?.name||'unknown',
     DB,
-    simCfg:S.simCfg
+    simCfg:S.simCfg,
+    // Forecasted/future inventory — simResults is the full simulation output (raw,
+    // per-silo inventoryHistory + everything else runSimulation produces);
+    // forecast_inventory_daily is the same inventory projection flattened to
+    // per-product daily rows for easy consumption without cross-referencing DB.elements.
+    simResults:S.simResults||null,
+    forecast_inventory_daily:_buildForecastInventoryDaily()
   };
   const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
   const url=URL.createObjectURL(blob);
@@ -16961,8 +16988,10 @@ function importJSON(input){
       if(saved.counter) S.elCounter=saved.counter;
       syncElCounter();
       autoSave();
-      // Reset canvas and re-render everything
-      S.simResults=null;
+      // Reset canvas and re-render everything. Restore the forecasted inventory
+      // (simResults) if the file carried one — otherwise fall back to null so the
+      // page schedules a fresh simulation run (see the DOMContentLoaded handler).
+      S.simResults=saved.simResults||null;
       S.selectedEl=null;
       if(DB.facilities.length) selectFacility(DB.facilities[0].id);
       updateStatusBar();
