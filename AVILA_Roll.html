@@ -23131,7 +23131,16 @@ function _flushPendingSaves(){
     scWriteActive();
   }
 }
-window.addEventListener('beforeunload',_flushPendingSaves);
+window.addEventListener('beforeunload',(e)=>{
+  _flushPendingSaves();
+  // If the scenario file's last write attempt failed (e.g. a stale cloud-sync
+  // handle that survived the retries in scWriteActive), the only copy of the
+  // latest edits is this tab's memory/localStorage — warn before it's gone.
+  if(typeof SC!=='undefined' && SC._lastStatus==='error'){
+    e.preventDefault();
+    e.returnValue='Your latest changes failed to save to the scenario file — closing now may lose them.';
+  }
+});
 // visibilitychange/pagehide fire reliably (unlike beforeunload) when a tab is
 // closed, switched away from, or backgrounded on mobile — the recommended
 // point to flush pending writes since async work can still run briefly here.
@@ -23735,44 +23744,73 @@ function scBuildPayload(){
 }
 
 // ── Save-status dot ──
-function scSetSaveStatus(state){ const d=document.getElementById('sc-dot'); if(!d) return; d.className='sc-dot'+(state==='saving'?' saving':state==='error'?' error':state==='none'?' none':''); }
+function scSetSaveStatus(state){ SC._lastStatus=state; const d=document.getElementById('sc-dot'); if(!d) return; d.className='sc-dot'+(state==='saving'?' saving':state==='error'?' error':state==='none'?' none':''); }
 
 // ── Write active scenario to disk ──
 // Merge-aware: before writing, re-reads the file — if a teammate saved a
 // different version since our last sync (shared SharePoint/OneDrive folder),
 // their rows are three-way-merged with ours instead of being overwritten.
+// Cloud-synced folders (OneDrive/SharePoint/Dropbox) routinely touch a file's
+// on-disk state out from under an already-open handle — Chromium then refuses
+// the write with "state had changed since it was read from disk"
+// (InvalidStateError). That's almost always transient (the sync client settles
+// within a second or two), so scWriteActive retries a couple of times before
+// treating it as a real failure.
+function _isStaleHandleErr(err){
+  const s=((err&&err.name)||'')+' '+((err&&err.message)||'');
+  return /InvalidStateError|NotReadableError|state had changed since it was read from disk/i.test(s);
+}
+// Returns true if the scenario's file is confirmed up to date (or there was
+// nothing to write), false if the write ultimately failed — callers that are
+// about to discard in-memory state (e.g. switching scenarios) MUST check this
+// before proceeding, or a failed save gets silently lost.
 async function scWriteActive(id, opts){
   opts=opts||{};
   id=id||SC.activeId; const m=SC.meta[id]; const handle=SC.handles[id];
-  if(!m||!handle){ scSetSaveStatus('none'); return; }
-  if(SC._writeBusy){ SC._writeQueued=true; return; }  // a sync is already running — coalesce
+  if(!m||!handle){ scSetSaveStatus('none'); return true; }
+  if(SC._writeBusy){ SC._writeQueued=true; return true; }  // a sync is already running — coalesce
   SC._writeBusy=true;
   try{
     const granted=await _dsEnsureWritePermission(handle);
-    if(!granted){ scSetSaveStatus('error'); _dsWriteBlockedBanner('scenario:'+id, m.fileName, 'file-edit permission was declined'); return; }
-    const ours=scBuildPayload();
-    const prep=await _mgPrepareWrite(handle, ours, await scLoadBaseline(id));
-    if(prep.mode==='pull'){
-      // Teammate updated the file and we have nothing new — adopt their copy, skip the write.
-      _mgApplyPayloadToApp(prep.theirs);
-      scSaveBaseline(id, prep.diskText, prep.theirs.savedAt||null, prep.fileMod);
-      scSetSaveStatus('saved'); _dsHideWriteBlockedBanner(); scRenderDropdown();
-      if(prep.mergeInfo.remoteApplied) _mgShowMergeBanner(m.fileName, prep.mergeInfo);
-      scMaybeSnapshot(id, prep.diskText, {forced:opts.forceSnapshot});
-      return;
+    if(!granted){ scSetSaveStatus('error'); _dsWriteBlockedBanner('scenario:'+id, m.fileName, 'file-edit permission was declined'); return false; }
+    const MAX_ATTEMPTS=3;
+    for(let attempt=1; attempt<=MAX_ATTEMPTS; attempt++){
+      try{
+        const ours=scBuildPayload();
+        const prep=await _mgPrepareWrite(handle, ours, await scLoadBaseline(id));
+        if(prep.mode==='pull'){
+          // Teammate updated the file and we have nothing new — adopt their copy, skip the write.
+          _mgApplyPayloadToApp(prep.theirs);
+          scSaveBaseline(id, prep.diskText, prep.theirs.savedAt||null, prep.fileMod);
+          scSetSaveStatus('saved'); _dsHideWriteBlockedBanner(); scRenderDropdown();
+          if(prep.mergeInfo.remoteApplied) _mgShowMergeBanner(m.fileName, prep.mergeInfo);
+          scMaybeSnapshot(id, prep.diskText, {forced:opts.forceSnapshot});
+          return true;
+        }
+        let out=ours;
+        if(prep.mode==='merge'){ out=prep.mergeInfo.payload; _mgApplyPayloadToApp(out); }
+        const outText=JSON.stringify(out,null,2);
+        const w=await handle.createWritable(); await w.write(new Blob([outText],{type:'application/json'})); await w.close();
+        let mod=null; try{ mod=(await handle.getFile()).lastModified; }catch(e){}
+        scSaveBaseline(id, outText, out.savedAt||null, mod);
+        m.lastSaved=new Date().toISOString(); scSaveMeta();
+        scSetSaveStatus('saved'); _dsHideWriteBlockedBanner(); scRenderDropdown();
+        if(prep.mode==='merge') _mgShowMergeBanner(m.fileName, prep.mergeInfo);
+        scMaybeSnapshot(id, outText, {forced:opts.forceSnapshot, conflict:prep.mode==='merge'&&prep.mergeInfo.conflicts.length>0});
+        return true;
+      }catch(err){
+        if(attempt<MAX_ATTEMPTS && _isStaleHandleErr(err)){
+          await new Promise(res=>setTimeout(res, 500*attempt)); // brief backoff, let cloud-sync settle
+          continue;
+        }
+        throw err; // exhausted retries, or a non-transient error — report it below
+      }
     }
-    let out=ours;
-    if(prep.mode==='merge'){ out=prep.mergeInfo.payload; _mgApplyPayloadToApp(out); }
-    const outText=JSON.stringify(out,null,2);
-    const w=await handle.createWritable(); await w.write(new Blob([outText],{type:'application/json'})); await w.close();
-    let mod=null; try{ mod=(await handle.getFile()).lastModified; }catch(e){}
-    scSaveBaseline(id, outText, out.savedAt||null, mod);
-    m.lastSaved=new Date().toISOString(); scSaveMeta();
-    scSetSaveStatus('saved'); _dsHideWriteBlockedBanner(); scRenderDropdown();
-    if(prep.mode==='merge') _mgShowMergeBanner(m.fileName, prep.mergeInfo);
-    scMaybeSnapshot(id, outText, {forced:opts.forceSnapshot, conflict:prep.mode==='merge'&&prep.mergeInfo.conflicts.length>0});
-  }catch(err){ scSetSaveStatus('error'); _dsWriteBlockedBanner('scenario:'+id, m.fileName, 'write failed — '+err.message); console.warn('SC write',err); }
-  finally{ SC._writeBusy=false; if(SC._writeQueued){ SC._writeQueued=false; scScheduleWrite(); } }
+  }catch(err){
+    scSetSaveStatus('error'); _dsWriteBlockedBanner('scenario:'+id, m.fileName, 'write failed — '+err.message); console.warn('SC write',err);
+    return false;
+  }finally{ SC._writeBusy=false; if(SC._writeQueued){ SC._writeQueued=false; scScheduleWrite(); } }
+  return false;
 }
 function scScheduleWrite(){
   if(!scActive()||!SC.handles[SC.activeId]) return; // no active scenario → localStorage only
@@ -23786,8 +23824,8 @@ async function scManualSave(){
   autoSave();                        // refresh localStorage cache
   clearTimeout(SC._writeTimer);      // cancel the debounce; write now
   if(scActive() && SC.handles[SC.activeId]){
-    await scWriteActive(SC.activeId, {forceSnapshot:true});
-    statMsg('Scenario saved ✓ — '+(SC.meta[SC.activeId]?.fileName||''));
+    const ok=await scWriteActive(SC.activeId, {forceSnapshot:true});
+    statMsg(ok?('Scenario saved ✓ — '+(SC.meta[SC.activeId]?.fileName||'')):'⚠ Save failed — see the banner above for details');
   } else {
     statMsg('Saved to browser (no scenario file linked — use the scenario menu to pick one)');
   }
@@ -24040,7 +24078,13 @@ async function scDelete(id){
 async function scSwitch(id){
   if(id===SC.activeId){ scCloseDropdown(); return; }
   clearTimeout(SC._writeTimer);
-  if(scActive() && SC.handles[SC.activeId]) await scWriteActive(); // flush current
+  if(scActive() && SC.handles[SC.activeId]){
+    const flushed=await scWriteActive(); // flush current — MUST confirm before discarding it below
+    if(!flushed){
+      const proceed=confirm(`"${scActive().name}" has changes that failed to save to its file (see the red banner for why).\n\nSwitching scenarios now will DISCARD those unsaved changes from this browser.\n\nOK = switch anyway and lose them.\nCancel = stay here and retry saving first.`);
+      if(!proceed) return;
+    }
+  }
   scCloseDropdown(); scCloseStartup();
   await scLoadScenario(id);
   localStorage.setItem('avila_sc_autoopen',id);  // Remember this scenario for next load
