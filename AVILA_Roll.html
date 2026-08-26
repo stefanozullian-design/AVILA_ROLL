@@ -7143,13 +7143,20 @@ function _supDpnArrow(base, count){
     if(!window._supSecCol) window._supSecCol=new Set();
     window._supSecCol.add(key); // start collapsed
   }
-  return `<span class="sup-arrow" onclick="event.stopPropagation();_supToggleSec('${key}')" style="cursor:pointer;margin-left:6px;opacity:.55;font-size:8px" title="${count} demand point${count===1?'':'s'} — click to show/hide">${_supSecArrow(key)} ${count}</span>`;
+  const nExtra=arguments.length>2?(arguments[2]||0):0;
+  const tip=`${count} demand point${count===1?'':'s'}`+(nExtra?` + ${nExtra} other requirement component${nExtra===1?'':'s'} (e.g. rail loading)`:'')+' — click to show/hide';
+  return `<span class="sup-arrow" onclick="event.stopPropagation();_supToggleSec('${key}')" style="cursor:pointer;margin-left:6px;opacity:.55;font-size:8px" title="${tip}">${_supSecArrow(key)} ${count+nExtra}</span>`;
 }
-function _supDpnRows(dpts, months, collapsedMonths, tdSty, depth, base, stickyLeft){
-  if(!dpts||!dpts.length) return '';
+// `extra` — optional non-demand-point components of the parent's requirement, as
+// [{label, color, valFn(ds)}]. The plant CEMENT block's total is "direct demand +
+// rail loading" (see SECTION 1), so without a row for the rail part the children
+// visibly fail to add up to the parent on any day cars were loaded. These render
+// read-only (they're derived from the rail plan/simulation, not typed here).
+function _supDpnRows(dpts, months, collapsedMonths, tdSty, depth, base, stickyLeft, extra){
+  if((!dpts||!dpts.length)&&(!extra||!extra.length)) return '';
   const key=_supDpnKey(base);
   let hh='';
-  dpts.forEach(dp=>{
+  (dpts||[]).forEach(dp=>{
     const el=DB.elements.find(e=>e.id===dp.element_id); if(!el) return;
     hh+=`<tr class="supsec-${key}" style="background:rgba(255,255,255,.02)">
       <td style="${stickyLeft('var(--surface)',depth,'border-bottom:1px solid var(--border),')}color:var(--text-dim);font-size:8px;font-style:italic">
@@ -7163,6 +7170,18 @@ function _supDpnRows(dpts, months, collapsedMonths, tdSty, depth, base, stickyLe
       // prefix _monthTotalsToEnd(wrap,'sup-day-',false) looks for, or the month-total cell is
       // left at the front of the row and every value shifts one column right (off-by-one date).
       if(!isCol) mon.dates.forEach(ds=>{ hh+=_demCellHtml(el, ds, mon.ym, tdSty(ds), 'sup-day-'); });
+    });
+    hh+=`</tr>`;
+  });
+  (extra||[]).forEach(ex=>{
+    hh+=`<tr class="supsec-${key}" style="background:rgba(255,255,255,.02)">
+      <td title="${ex.title||''}" style="${stickyLeft('var(--surface)',depth,'border-bottom:1px solid var(--border),')}color:${ex.color};font-size:8px;font-style:italic">↳ ${ex.label}</td>`;
+    months.forEach(mon=>{
+      const isCol=collapsedMonths.has(mon.ym);
+      const mt=mon.dates.reduce((s,ds)=>s+(ex.valFn(ds)||0),0);
+      hh+=`<td style="border-left:2px solid rgba(255,255,255,.05);font-size:8px;color:${ex.color};text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+      if(!isCol) mon.dates.forEach(ds=>{ const v=ex.valFn(ds)||0;
+        hh+=`<td class="sup-day-${mon.ym}" style="font-size:8px;color:${ex.color};text-align:right;padding:3px 4px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
     });
     hh+=`</tr>`;
   });
@@ -7827,6 +7846,20 @@ function _renderSupplyViewInner(wrap){
             });
           });
 
+          // Tonnes of this product loaded onto rail cars on a date (cars × car capacity).
+          // Split out of totalNeed so the per-product breakdown rows can show it as its own
+          // line — it's part of the requirement but is NOT demand-point demand, so without
+          // it the nested INT/EXT/IND rows don't add up to the product total on loading days.
+          const _railLoadT=(prodId, ds)=>{
+            const dayIdx=allDates.indexOf(ds);
+            if(dayIdx<0) return 0;
+            return dispEls.reduce((sum,dispEl)=>{
+              const rh=r?.railHistory?.[dispEl.id]||[];
+              const cars=rh[dayIdx]?.carsLoadedByProduct?.[prodId]||0;
+              const carCap=parseFloat(dispEl.props?.car_capacity_t)||112;
+              return sum+cars*carCap;
+            },0);
+          };
           // Helper: total need for a product on a given date
           // = local direct demand + (rail cars loaded × car_capacity_t)
           const totalNeed=(prodId, ds)=>{
@@ -7835,15 +7868,7 @@ function _renderSupplyViewInner(wrap){
               const el=demandEls.find(e=>e.id===dp.element_id);
               return sum+(_demandRate(el.id,ds)||0);
             },0);
-            const dayIdx=allDates.indexOf(ds);
-            const railLoad=dispEls.reduce((sum,dispEl)=>{
-              if(dayIdx<0) return sum;
-              const rh=r?.railHistory?.[dispEl.id]||[];
-              const cars=rh[dayIdx]?.carsLoadedByProduct?.[prodId]||0;
-              const carCap=parseFloat(dispEl.props?.car_capacity_t)||112;
-              return sum+cars*carCap;
-            },0);
-            return directDemand+railLoad;
+            return directDemand+_railLoadT(prodId,ds);
           };
 
           // ── Demand-swap split (so the need line reflects substitutions) ──
@@ -7908,8 +7933,16 @@ function _renderSupplyViewInner(wrap){
               const prodName=prod?.name||prodId;
               const _dpnDpts=demandPoints.filter(dp=>dp.products?.some(p=>p.product_id===prodId));
               const _dpnBase=node.id+'_cementNeed_'+prodId;
+              // Rail loading is part of this product's requirement but isn't demand-point
+              // demand — show it as its own breakdown line so the children reconcile to the
+              // parent. Only emitted when cars are actually loaded for this product.
+              const _dpnExtra=allDates.some(ds=>_railLoadT(prodId,ds)>0)
+                ? [{label:'🚂 rail loading (to terminals)', color:'#b388ff',
+                    title:'Tonnes of this product loaded onto rail cars for shipment to terminals — counted in the requirement above, but not local demand-point demand.',
+                    valFn:ds=>_railLoadT(prodId,ds)}]
+                : [];
               h+=`<tr class="supsec-cementNeed">
-                <td ondblclick="_openSwapForProduct('${prodId}','')" title="Double-click to cover part of this material's demand with a substitute" style="cursor:pointer;${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${prodReqColor};font-size:9px">${prodName}${_dpnDpts.length?_supDpnArrow(_dpnBase,_dpnDpts.length):''}</td>`;
+                <td ondblclick="_openSwapForProduct('${prodId}','')" title="Double-click to cover part of this material's demand with a substitute" style="cursor:pointer;${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${prodReqColor};font-size:9px">${prodName}${(_dpnDpts.length||_dpnExtra.length)?_supDpnArrow(_dpnBase,_dpnDpts.length,_dpnExtra.length):''}</td>`;
               months.forEach(mon=>{
                 const isCol=collapsed.has(mon.ym);
                 const mt=mon.dates.reduce((s,ds)=>s+totalNeed(prodId,ds),0);
@@ -7920,7 +7953,7 @@ function _renderSupplyViewInner(wrap){
                 });
               });
               h+=`</tr>`;
-              h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, node.depth+3, _dpnBase, stickyLeft);
+              h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, node.depth+3, _dpnBase, stickyLeft, _dpnExtra);
 
               // ── Swap breakdown child rows (only when a swap touches this product) ──
               const outArr=allDates.map(ds=>swappedOut(prodId,ds));
