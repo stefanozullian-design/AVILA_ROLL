@@ -6943,14 +6943,20 @@ function saveDemandCell(inp){
 // read-only coloured div, forecast/future days as an input wired to saveDemandCell, and
 // either double-click opens the Forecast Builder. Pulled out of the Demand page's own grid
 // (renderDemandView) so the Supply page's nested demand-point rows can look/behave identically.
-function _demCellHtml(el, ds, monYm, tdStyStr){
+//
+// dayCls MUST match the prefix the host page passes to _monthTotalsToEnd — 'dem-day-' on the
+// Demand page, 'sup-day-' on Supply. That pass finds each row's DAY cells by this class and
+// moves the month-total cell from the front of the run to the end; a row whose day cells carry
+// the wrong prefix is skipped, keeps its total at the front, and ends up rendering every value
+// one column to the right of its true date.
+function _demCellHtml(el, ds, monYm, tdStyStr, dayCls){
   const isActual=_dedupRealProd(el.id, ds).length>0;
   const v=_demandRate(el.id, ds);
   const isNwd=_isNWD(ds);
   const cellBg=isNwd?'rgba(255,61,90,.08)':isActual?'rgba(0,255,157,.06)':'transparent';
   const cellColor=isNwd?'rgba(255,61,90,.4)':isActual?'var(--real)':'var(--simulated)';
   const nm=(el.name||'').replace(/"/g,'&quot;');
-  return `<td class="dem-day-${monYm}" ondblclick="openDemandBuilder('${el.id}','${ds}')" title="Double-click to open the Forecast Builder for ${nm} starting ${ds}" style="cursor:cell;padding:1px 2px;border-bottom:1px solid var(--border);border-right:1px solid rgba(255,255,255,.03);${tdStyStr}">
+  return `<td class="${dayCls||'dem-day-'}${monYm}" ondblclick="openDemandBuilder('${el.id}','${ds}')" title="Double-click to open the Forecast Builder for ${nm} starting ${ds}" style="cursor:cell;padding:1px 2px;border-bottom:1px solid var(--border);border-right:1px solid rgba(255,255,255,.03);${tdStyStr}">
     ${isActual
       ? `<div style="width:50px;font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;color:${cellColor};background:${cellBg}" title="Actual shipment data — double-click for Forecast Builder">${v?Math.round(v*10)/10:''}</div>`
       : `<input class="dem-cell" data-el="${el.id}" data-date="${ds}"${isNwd?' data-nwd="1"':''} value="${v||''}" onchange="saveDemandCell(this)"
@@ -7153,7 +7159,10 @@ function _supDpnRows(dpts, months, collapsedMonths, tdSty, depth, base, stickyLe
       const isCol=collapsedMonths.has(mon.ym);
       const mt=mon.dates.reduce((s,ds)=>s+(_demandRate(el.id,ds)||0),0);
       hh+=`<td style="border-left:2px solid rgba(255,255,255,.05);font-size:8px;color:var(--text-dim);text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
-      if(!isCol) mon.dates.forEach(ds=>{ hh+=_demCellHtml(el, ds, mon.ym, tdSty(ds)); });
+      // 'sup-day-' — these rows live in the Supply table, so their day cells must carry the
+      // prefix _monthTotalsToEnd(wrap,'sup-day-',false) looks for, or the month-total cell is
+      // left at the front of the row and every value shifts one column right (off-by-one date).
+      if(!isCol) mon.dates.forEach(ds=>{ hh+=_demCellHtml(el, ds, mon.ym, tdSty(ds), 'sup-day-'); });
     });
     hh+=`</tr>`;
   });
