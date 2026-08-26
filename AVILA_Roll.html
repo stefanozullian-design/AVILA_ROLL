@@ -6939,6 +6939,27 @@ function saveDemandCell(inp){
   if(typeof scheduleSimulation==='function') scheduleSimulation();
 }
 
+// One editable demand cell for element `el` on date `ds` — actual shipments render as a
+// read-only coloured div, forecast/future days as an input wired to saveDemandCell, and
+// either double-click opens the Forecast Builder. Pulled out of the Demand page's own grid
+// (renderDemandView) so the Supply page's nested demand-point rows can look/behave identically.
+function _demCellHtml(el, ds, monYm, tdStyStr){
+  const isActual=_dedupRealProd(el.id, ds).length>0;
+  const v=_demandRate(el.id, ds);
+  const isNwd=_isNWD(ds);
+  const cellBg=isNwd?'rgba(255,61,90,.08)':isActual?'rgba(0,255,157,.06)':'transparent';
+  const cellColor=isNwd?'rgba(255,61,90,.4)':isActual?'var(--real)':'var(--simulated)';
+  const nm=(el.name||'').replace(/"/g,'&quot;');
+  return `<td class="dem-day-${monYm}" ondblclick="openDemandBuilder('${el.id}','${ds}')" title="Double-click to open the Forecast Builder for ${nm} starting ${ds}" style="cursor:cell;padding:1px 2px;border-bottom:1px solid var(--border);border-right:1px solid rgba(255,255,255,.03);${tdStyStr}">
+    ${isActual
+      ? `<div style="width:50px;font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;color:${cellColor};background:${cellBg}" title="Actual shipment data — double-click for Forecast Builder">${v?Math.round(v*10)/10:''}</div>`
+      : `<input class="dem-cell" data-el="${el.id}" data-date="${ds}"${isNwd?' data-nwd="1"':''} value="${v||''}" onchange="saveDemandCell(this)"
+          ${isNwd?'title="Non-working day — 0 by default; type a value to force a manual override"':''}
+          style="width:50px;background:${cellBg};border:${isNwd?'1px dashed rgba(255,61,90,.5)':'none'};color:${cellColor};font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;outline:none">`
+    }
+  </td>`;
+}
+
 function saveDemandValues(){
   if(!DB.demand_values) DB.demand_values=[];
   // Note: actual cells (source='actual') are rendered as divs not inputs, so they
@@ -7098,6 +7119,46 @@ function _supToggleSec(key){
   document.querySelectorAll(`.sup-sec-hdr[data-seckey="${key}"] .sup-arrow`).forEach(a=>a.textContent=collapsed?'▶':'▼');
 }
 function _supSecArrow(key){ return (window._supSecCol&&window._supSecCol.has(key))?'▶':'▼'; }
+
+// ── Nested demand-point rows under a Supply-page product-requirement row ──────────
+// The same demand points (e.g. .../INT, /EXT, /IND) that feed a product row's
+// totalNeed()/pkDemand() aggregate, exposed directly beneath it with the Demand
+// page's own editable cells + Forecast Builder (_demCellHtml/openSpForecastBuilder)
+// so a user forecasting demand never has to leave Supply. Reuses the generic
+// _supSecCol/_supToggleSec/_supSecArrow collapse mechanism every other Supply
+// section already uses; seeded collapsed the first time each key is seen (mirrors
+// _supSecDefaultApplied), so a user's later toggle sticks across re-renders.
+function _supDpnKey(base){ return 'dpn_'+String(base).replace(/\W/g,'_'); }
+function _supDpnArrow(base, count){
+  const key=_supDpnKey(base);
+  if(!window._supDpnSeeded) window._supDpnSeeded=new Set();
+  if(!window._supDpnSeeded.has(key)){
+    window._supDpnSeeded.add(key);
+    if(!window._supSecCol) window._supSecCol=new Set();
+    window._supSecCol.add(key); // start collapsed
+  }
+  return `<span class="sup-arrow" onclick="event.stopPropagation();_supToggleSec('${key}')" style="cursor:pointer;margin-left:6px;opacity:.55;font-size:8px" title="${count} demand point${count===1?'':'s'} — click to show/hide">${_supSecArrow(key)} ${count}</span>`;
+}
+function _supDpnRows(dpts, months, collapsedMonths, tdSty, depth, base, stickyLeft){
+  if(!dpts||!dpts.length) return '';
+  const key=_supDpnKey(base);
+  let hh='';
+  dpts.forEach(dp=>{
+    const el=DB.elements.find(e=>e.id===dp.element_id); if(!el) return;
+    hh+=`<tr class="supsec-${key}" style="background:rgba(255,255,255,.02)">
+      <td style="${stickyLeft('var(--surface)',depth,'border-bottom:1px solid var(--border),')}color:var(--text-dim);font-size:8px;font-style:italic">
+        ↳ ${el.name}<button class="sp-fb-btn" onclick="event.stopPropagation();openSpForecastBuilder(${JSON.stringify([el.id]).replaceAll('"','&quot;')},${JSON.stringify(el.name).replaceAll('"','&quot;')})" title="⚙ Forecast Builder">⚙</button>
+      </td>`;
+    months.forEach(mon=>{
+      const isCol=collapsedMonths.has(mon.ym);
+      const mt=mon.dates.reduce((s,ds)=>s+(_demandRate(el.id,ds)||0),0);
+      hh+=`<td style="border-left:2px solid rgba(255,255,255,.05);font-size:8px;color:var(--text-dim);text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+      if(!isCol) mon.dates.forEach(ds=>{ hh+=_demCellHtml(el, ds, mon.ym, tdSty(ds)); });
+    });
+    hh+=`</tr>`;
+  });
+  return hh;
+}
 
 // ── PACKING helpers ──────────────────────────────────────────────────────
 // Packing machines reuse element_product_capacities, one row per PACKING LINE with extra
@@ -7836,8 +7897,10 @@ function _renderSupplyViewInner(wrap){
             Array.from(productsSet).sort().forEach(prodId=>{
               const prod=DB.products.find(p=>p.id===prodId);
               const prodName=prod?.name||prodId;
+              const _dpnDpts=demandPoints.filter(dp=>dp.products?.some(p=>p.product_id===prodId));
+              const _dpnBase=node.id+'_cementNeed_'+prodId;
               h+=`<tr class="supsec-cementNeed">
-                <td ondblclick="_openSwapForProduct('${prodId}','')" title="Double-click to cover part of this material's demand with a substitute" style="cursor:pointer;${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${prodReqColor};font-size:9px">${prodName}</td>`;
+                <td ondblclick="_openSwapForProduct('${prodId}','')" title="Double-click to cover part of this material's demand with a substitute" style="cursor:pointer;${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${prodReqColor};font-size:9px">${prodName}${_dpnDpts.length?_supDpnArrow(_dpnBase,_dpnDpts.length):''}</td>`;
               months.forEach(mon=>{
                 const isCol=collapsed.has(mon.ym);
                 const mt=mon.dates.reduce((s,ds)=>s+totalNeed(prodId,ds),0);
@@ -7848,6 +7911,7 @@ function _renderSupplyViewInner(wrap){
                 });
               });
               h+=`</tr>`;
+              h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, node.depth+3, _dpnBase, stickyLeft);
 
               // ── Swap breakdown child rows (only when a swap touches this product) ──
               const outArr=allDates.map(ds=>swappedOut(prodId,ds));
@@ -8197,8 +8261,10 @@ function _renderSupplyViewInner(wrap){
               h+=`</tr>`;
               pkProds.forEach(pid=>{
                 const prodName=DB.products.find(p=>p.id===pid)?.name||pid;
+                const _dpnDpts=demandPoints.filter(dp=>dp.products?.some(p=>p.product_id===pid));
+                const _dpnBase=node.id+'_packedNeed_'+pid;
                 h+=`<tr class="supsec-packedNeed">
-                  <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${pkColor};font-size:9px">${prodName}</td>`;
+                  <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${pkColor};font-size:9px">${prodName}${_dpnDpts.length?_supDpnArrow(_dpnBase,_dpnDpts.length):''}</td>`;
                 months.forEach(mon=>{
                   const isCol=collapsed.has(mon.ym);
                   const mt=mon.dates.reduce((s,ds)=>s+pkDemand(pid,ds),0);
@@ -8207,6 +8273,7 @@ function _renderSupplyViewInner(wrap){
                     h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${v>0?pkColor:'rgba(77,166,255,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
                 });
                 h+=`</tr>`;
+                h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, node.depth+3, _dpnBase, stickyLeft);
               });
             }
           }
@@ -9048,7 +9115,9 @@ function _renderSupplyViewInner(wrap){
             });
             h+=`</tr>`;
             _reqPids.forEach(pid=>{
-              h+=`<tr class="supsec-${reqSeckey}"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${reqColor};font-size:9px">${_pChip(pid)}${_pNameOf(pid)}</td>`;
+              const _dpnDpts=demandPoints.filter(dp=>dp.products?.some(p=>_canon(p.product_id)===pid));
+              const _dpnBase=fac.id+'_'+reqSeckey+'_'+pid;
+              h+=`<tr class="supsec-${reqSeckey}"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${reqColor};font-size:9px">${_pChip(pid)}${_pNameOf(pid)}${_dpnDpts.length?_supDpnArrow(_dpnBase,_dpnDpts.length):''}</td>`;
               months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
                 const mt=mon.dates.reduce((a,ds)=>a+totalNeed(pid,ds),0);
                 h+=`<td style="border-left:2px solid rgba(77,166,255,.1);font-size:9px;color:${reqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
@@ -9056,6 +9125,7 @@ function _renderSupplyViewInner(wrap){
                   h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${v>0?reqColor:'rgba(77,166,255,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
               });
               h+=`</tr>`;
+              h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, depth+4, _dpnBase, stickyLeft);
             });
           }
 
