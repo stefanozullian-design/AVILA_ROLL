@@ -1614,7 +1614,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;font-size:10px;line-height:1.7">
             <div>
               <div style="color:var(--blue);margin-bottom:4px">DIMENSIONS</div>
-              <div style="color:var(--text-dim)">dim_date · dim_facility · dim_element · dim_product</div>
+              <div style="color:var(--text-dim)">dim_date <span style="opacity:.6">(contiguous calendar)</span> · dim_facility · dim_element · dim_product</div>
             </div>
             <div>
               <div style="color:var(--green);margin-bottom:4px">FACTS</div>
@@ -16716,13 +16716,38 @@ function _pushBIBuildTables(){
   const stamp=(row)=>({as_of_date:asOf, scenario_run_id:runId, ...row});
 
   // ── DIMENSIONS ─────────────────────────────────────────
-  // dim_date — every date that appears anywhere in the facts (forecast + actual)
+  // dim_date — a CONTIGUOUS calendar spanning every date any fact can reference.
+  // Two things matter here and both used to be wrong:
+  //  1) COVERAGE — the seed set must include every table a fact_* row draws a date
+  //     from, or Power BI gets fact rows with no matching dim row (broken
+  //     relationship / blank date bucket). demand_values feeds fact_demand and
+  //     rail_movements feeds fact_rail_movement (departure AND the computed
+  //     arrival, which can land past the sim horizon), so both belong here.
+  //  2) CONTIGUITY — DAX time intelligence needs an unbroken date table. Emitting
+  //     only dates observed in the data leaves holes on any day with no activity,
+  //     which silently breaks MTD/YTD/rolling measures. So we take min→max of the
+  //     observed set and fill every day in between.
   const dateSet=new Set();
   if(r) for(let d=0;d<horizon;d++) dateSet.add(offsetToDate(d));
   ['real_production_daily','real_inventory_daily','real_shipping_daily',
-   'real_unloading_daily','real_rail_daily','real_transfers_daily','real_shipments_daily']
+   'real_unloading_daily','real_rail_daily','real_transfers_daily','real_shipments_daily',
+   'demand_values']
    .forEach(k=>(DB[k]||[]).forEach(row=>row.date&&dateSet.add(row.date)));
-  const dim_date=[...dateSet].sort().map(ds=>{
+  (DB.rail_movements||[]).forEach(rm=>{
+    const dep=rm.departure_date||rm.date;
+    if(!dep) return;
+    dateSet.add(dep);
+    dateSet.add(_addDays(dep,parseInt(rm.transit_days)||1)); // arrival can exceed the horizon
+  });
+  // Fill the range so the calendar has no gaps
+  const _dsSorted=[...dateSet].sort();
+  const _allDateStrs=[];
+  if(_dsSorted.length){
+    let cur=_dsSorted[0]; const last=_dsSorted[_dsSorted.length-1];
+    // Guard against a malformed date producing a runaway loop
+    for(let i=0;cur<=last&&i<20000;i++){ _allDateStrs.push(cur); cur=_addDays(cur,1); }
+  }
+  const dim_date=_allDateStrs.map(ds=>{
     const d=new Date(ds+'T00:00:00');
     const dow=d.getDay();
     return {
@@ -16777,10 +16802,17 @@ function _pushBIBuildTables(){
   });
 
   // dim_product
+  // scm_type splits the 'additive' category into Slag vs Ash — both are stored as
+  // category:'additive' (see PRODUCT_FAMILY_OF), so without this column the two are
+  // indistinguishable downstream even though they're commercially separate materials.
+  // product_family mirrors the app's own Family grouping so BI can roll up the way
+  // the UI does (Cement = bulk + packed, SCM = additive).
   const dim_product=DB.products.map(p=>({
     product_id:p.id,
     product_name:p.name,
     category:p.category||'',
+    product_family:(typeof PRODUCT_FAMILY_OF!=='undefined'?PRODUCT_FAMILY_OF[p.category]:'')||'',
+    scm_type:p.category==='additive'?(p.scm_type||''):'',
     material_code:p.material_code||''
   }));
 
@@ -16972,7 +17004,9 @@ function _pushBIBuildTables(){
     {key:'simulation_active_facility',value:getFacility()?.name||''},
     {key:'note_forecast_scope',value:'Forecast rows cover only the simulation\'s active facility. Actuals span every facility present in real_* tables.'},
     {key:'note_inventory_breakdown',value:'Forecast inventory is total per silo (product breakdown is not retained after the run). Actual inventory carries product_id.'},
-    {key:'note_mill_tonnes',value:'Forecast mill tonnes are estimated as rated_tpd for the chosen product on running days. Kiln tonnes are actual simulation outputs.'}
+    {key:'note_mill_tonnes',value:'Forecast mill tonnes are estimated as rated_tpd for the chosen product on running days. Kiln tonnes are actual simulation outputs.'},
+    {key:'note_dim_date',value:'dim_date is a contiguous day-by-day calendar covering every date referenced by any fact (including rail departure/arrival and forecast demand). Safe to mark as the Power BI date table.'},
+    {key:'note_scm_type',value:'dim_product.scm_type splits category=additive into slag/ash. Blank means the product has not been tagged yet in the product editor.'}
   ];
 
   return {
