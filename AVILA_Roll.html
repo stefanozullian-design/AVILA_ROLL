@@ -6453,7 +6453,16 @@ function renderDemandView(){
     const rec=demandMap[`${elId}|${ds}`];
     return rec?.source||'forecast';
   };
-  const grpTotal=(els,ds)=>els.reduce((s,el)=>s+getVal(el.id,ds),0);
+  // EFFECTIVE value per element = own − swapped-out + swapped-in (point-to-point),
+  // so facility/group totals and TOTAL ALL include demand swaps — matching the
+  // "↳ = demand here (own ± swap)" child rows and the logistics planner (rpDemandEff).
+  const getEffVal=(elId,ds)=>{
+    let v=getVal(elId,ds);
+    if(typeof _resolveDemandSwap==='function'){ const sw=_resolveDemandSwap(elId,v,ds); if(sw&&sw.qty) v-=Math.min(sw.qty,v); }
+    if(typeof _resolveDemandSwapIn==='function') v+=_resolveDemandSwapIn(elId,ds,(id)=>getVal(id,ds))||0;
+    return v;
+  };
+  const grpTotal=(els,ds)=>els.reduce((s,el)=>s+getEffVal(el.id,ds),0);
   const grpMonTotal=(els,mon)=>mon.dates.reduce((s,ds)=>s+grpTotal(els,ds),0);
 
   // Build org hierarchy relevant to the current canvas elements
@@ -7976,6 +7985,10 @@ function _renderSupplyViewInner(wrap){
           // this facility — when one of this facility's demand points switched to
           // it (swappedIn>0) — so the "swapped in" breakdown has a row to hang on.
           (DB.demand_substitutions||[]).forEach(s=>{ if(allDates.some(ds=>swappedIn(s.to_product_id,ds)>0)) productsSet.add(s.to_product_id); });
+          // EFFECTIVE need = raw need − swapped-out + swapped-in, so the product rows
+          // and the CEMENT REQUIREMENTS total reflect active demand swaps (the swap
+          // breakdown child rows below reconcile to this: own + in = effective).
+          const effNeed=(prodId,ds)=>Math.max(0,totalNeed(prodId,ds)-swappedOut(prodId,ds)+swappedIn(prodId,ds));
           // Packed products belong to the packing block — drop them from CEMENT REQUIREMENTS.
           packedProductIds.forEach(pid=>productsSet.delete(pid));
 
@@ -7985,10 +7998,10 @@ function _renderSupplyViewInner(wrap){
               <td title="Direct + Transfer Demand" style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${prodReqColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('cementNeed')}</span> CEMENT REQUIREMENTS <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>`;
             months.forEach(mon=>{
               const isCol=collapsed.has(mon.ym);
-              const mt=[...productsSet].reduce((s,pid)=>s+mon.dates.reduce((a,ds)=>a+totalNeed(pid,ds),0),0);
+              const mt=[...productsSet].reduce((s,pid)=>s+mon.dates.reduce((a,ds)=>a+effNeed(pid,ds),0),0);
               h+=`<td style="border-left:2px solid rgba(77,166,255,.2);font-size:9px;font-weight:700;color:${prodReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
               if(!isCol) mon.dates.forEach(ds=>{
-                const v=[...productsSet].reduce((s,pid)=>s+totalNeed(pid,ds),0);
+                const v=[...productsSet].reduce((s,pid)=>s+effNeed(pid,ds),0);
                 h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${prodReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`;
               });
             });
@@ -8012,10 +8025,10 @@ function _renderSupplyViewInner(wrap){
                 <td ondblclick="_openSwapForProduct('${prodId}','')" title="Double-click to cover part of this material's demand with a substitute" style="cursor:pointer;${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${prodReqColor};font-size:9px">${esc(prodName)}${(_dpnDpts.length||_dpnExtra.length)?_supDpnArrow(_dpnBase,_dpnDpts.length,_dpnExtra.length):''}</td>`;
               months.forEach(mon=>{
                 const isCol=collapsed.has(mon.ym);
-                const mt=mon.dates.reduce((s,ds)=>s+totalNeed(prodId,ds),0);
+                const mt=mon.dates.reduce((s,ds)=>s+effNeed(prodId,ds),0);
                 h+=`<td ondblclick="_openSwapForProduct('${prodId}','${mon.dates[0]||''}')" title="Double-click to swap part of this demand to another material" style="cursor:pointer;border-left:2px solid rgba(77,166,255,.1);font-size:9px;color:${prodReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
                 if(!isCol) mon.dates.forEach(ds=>{
-                  const v=totalNeed(prodId,ds);
+                  const v=effNeed(prodId,ds);
                   h+=`<td class="sup-day-${mon.ym}" ondblclick="_openSwapForProduct('${prodId}','${ds}')" title="Double-click to swap part of this demand to another material" style="cursor:pointer;font-size:9px;color:${v>0?prodReqColor:'rgba(77,166,255,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
                 });
               });
@@ -9093,8 +9106,17 @@ function _renderSupplyViewInner(wrap){
           return rows.reduce((s,u)=>s+(u.cars!=null?(parseFloat(u.cars)||0)
             :u.unit==='cars'?(parseFloat(u.value)||0):((parseFloat(u.value)||0)/_railCarCap)),0);
         };
+        // EFFECTIVE need per demand point = own − swapped-out + swapped-in, so an
+        // active demand swap relocating volume to/from this terminal moves the
+        // PRODUCT REQUIREMENT totals too — not just the per-point breakdown rows.
         const totalNeed=(pid,ds)=>demandPoints.filter(dp=>dp.products?.some(p=>_canon(p.product_id)===pid))
-          .reduce((s,dp)=>s+(_demandRate(dp.element_id,ds)||0),0);
+          .reduce((s,dp)=>{
+            let t=_demandRate(dp.element_id,ds)||0;
+            const sw=(typeof _resolveDemandSwap==='function')?_resolveDemandSwap(dp.element_id,t,ds):null;
+            if(sw) t-=Math.min(sw.qty,t);
+            t+=(typeof _resolveDemandSwapIn==='function')?(_resolveDemandSwapIn(dp.element_id,ds,(id)=>_demandRate(id,ds))||0):0;
+            return s+t;
+          },0);
 
         // ── CATEGORY-FIRST LAYOUT ──────────────────────────────────────────
         // Products are grouped by how they are STORED, not one block each:
@@ -9234,7 +9256,23 @@ function _renderSupplyViewInner(wrap){
                   h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${v>0?reqColor:'rgba(77,166,255,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
               });
               h+=`</tr>`;
-              h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, depth+4, _dpnBase, stickyLeft);
+              // Swap breakdown extras: the per-point rows below show OWN demand, so when a
+              // demand swap touches this product surface the ± lines that reconcile them
+              // to the effective requirement in the parent row above.
+              const _swOut=ds=>_dpnDpts.reduce((q,dp)=>{ const t=_demandRate(dp.element_id,ds)||0;
+                const sw=(typeof _resolveDemandSwap==='function')?_resolveDemandSwap(dp.element_id,t,ds):null;
+                return q+(sw?Math.min(sw.qty,t):0); },0);
+              const _swIn=ds=>_dpnDpts.reduce((q,dp)=>q+((typeof _resolveDemandSwapIn==='function')?(_resolveDemandSwapIn(dp.element_id,ds,(id)=>_demandRate(id,ds))||0):0),0);
+              const _dpDispT=id=>DB.elements.find(e=>e.id===id)?.name||id;
+              const _swNames=key=>[...new Set((DB.demand_substitutions||[]).filter(s=>_dpnDpts.some(dp=>dp.element_id===s[key==='out'?'from_element_id':'to_element_id']))
+                .map(s=>_dpDispT(key==='out'?s.to_element_id:s.from_element_id)))].join(', ');
+              const _swExtra=[];
+              const _anyDs=fn=>months.some(mon=>mon.dates.some(ds=>fn(ds)>0));
+              if(_anyDs(_swOut)) _swExtra.push({label:'⇄ swapped out → '+(_swNames('out')||'substitute'), color:'var(--amber)',
+                title:'Demand relocated from this facility to another demand point by an active demand swap — already deducted from the requirement above.', valFn:_swOut});
+              if(_anyDs(_swIn)) _swExtra.push({label:'⇄ swapped in ← '+(_swNames('in')||'other demand'), color:'#4dd0e1',
+                title:'Demand relocated to this facility from another demand point by an active demand swap — included in the requirement above.', valFn:_swIn});
+              h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, depth+4, _dpnBase, stickyLeft, _swExtra);
             });
           }
 
