@@ -23293,19 +23293,28 @@ window.addEventListener('beforeunload',(e)=>{
 document.addEventListener('visibilitychange',()=>{ if(document.hidden) _flushPendingSaves(); });
 window.addEventListener('pagehide',_flushPendingSaves);
 
+// localStorage is a CRASH-RECOVERY MIRROR, not the source of truth — the active
+// scenario's .json file is. It is capped near 5MB in real Chrome, and on live data
+// real_shipments_daily alone runs past 11MB, so the mirror cannot hold everything.
+// Tables it has to leave out are listed in the saved payload as _partialTables, and
+// loadSaved republishes that list as window._dbPartialTables. Everything downstream
+// MUST consult that list rather than assuming "absent from memory" means "deleted" —
+// that inference is what silently wiped element_product_capacities from users' files.
+const LS_SKIP_ALWAYS = new Set(['real_shipments_daily']);
+// Bulky per-day data dropped only when the full mirror won't fit. This is a DENY-list
+// on purpose: the previous compact mode was an allow-list of 24 tables and silently
+// dropped the other 28 — including element_product_capacities, production_campaigns,
+// mill_policies and demand_substitutions — and every table added later inherited the
+// bug. Structural/config tables are now kept by default; only volume data is shed.
+const LS_SKIP_COMPACT = new Set([...LS_SKIP_ALWAYS,
+  'real_shipments_meta','forecast_commitments',
+  'real_production_daily','real_inventory_daily','real_transfers_daily',
+  'real_rail_daily','real_shipping_daily','real_unloading_daily']);
+// Rolling window for the high-volume daily tables, applied to the SAVED COPY only.
+const LS_TRIM_90D = new Set(['real_production_daily','real_inventory_daily','real_transfers_daily',
+  'real_rail_daily','real_shipping_daily','real_unloading_daily']);
+
 function autoSaveNow(){
-  // Trim real data to last 90 days to prevent localStorage overflow
-  const cutoffDate = new Date();
-  cutoffDate.setDate(cutoffDate.getDate() - 90);
-  const cutoffStr = cutoffDate._ymd();
-
-  if(DB.real_production_daily) DB.real_production_daily = DB.real_production_daily.filter(r => r.date >= cutoffStr);
-  if(DB.real_inventory_daily) DB.real_inventory_daily = DB.real_inventory_daily.filter(r => r.date >= cutoffStr);
-  if(DB.real_transfers_daily) DB.real_transfers_daily = DB.real_transfers_daily.filter(r => r.date >= cutoffStr);
-  if(DB.real_rail_daily) DB.real_rail_daily = DB.real_rail_daily.filter(r => r.date >= cutoffStr);
-  if(DB.real_shipping_daily) DB.real_shipping_daily = DB.real_shipping_daily.filter(r => r.date >= cutoffStr);
-  if(DB.real_unloading_daily) DB.real_unloading_daily = DB.real_unloading_daily.filter(r => r.date >= cutoffStr);
-
   // Only regenerated-on-run tables are transient. Real data (production,
   // shipments, etc.) belongs to the app once imported — it is persisted so the
   // app stands alone without re-reading the external files.
@@ -23317,81 +23326,93 @@ function autoSaveNow(){
     'in_transit_inventory',   // computed from schedules
   ]);
 
-  const dbToSave = Object.fromEntries(
-    Object.entries(DB).filter(([k]) => !TRANSIENT_TABLES.has(k))
-  );
-  // Actual demand_values are kept — once imported/entered they belong to the app.
+  const cutoffDate = new Date();
+  cutoffDate.setDate(cutoffDate.getDate() - 90);
+  const cutoffStr = cutoffDate._ymd();
 
   // Stamp every save so startup can tell whether localStorage or the topology
   // file is the newer copy (used by the stale-file safety net in dsIngestTopology).
   const _saveStamp = new Date().toISOString();
   window._lastSaveStamp = _saveStamp;
 
-  try{
-    // Clear any old oversized entry first to make room
-    localStorage.removeItem('prodcast_v3');
-    localStorage.setItem('prodcast_v3', JSON.stringify({
-      DB: dbToSave,
+  // Build the mirror WITHOUT touching DB. The previous version filtered
+  // DB.real_*_daily in place, so every autosave permanently deleted >90-day rows
+  // from memory and the next scenario write pushed that truncation to disk.
+  const build=(skip)=>{
+    const out={}, dropped=[];
+    Object.keys(DB).forEach(k=>{
+      if(TRANSIENT_TABLES.has(k)) return;
+      if(skip.has(k)){ if(Array.isArray(DB[k]) && DB[k].length) dropped.push(k); return; }
+      const v=DB[k];
+      out[k]=(LS_TRIM_90D.has(k) && Array.isArray(v)) ? v.filter(r=>r.date>=cutoffStr) : v;
+    });
+    return {out, dropped};
+  };
+  // Write without destroying the existing cache on failure. The old code called
+  // removeItem() up front, so if the write then threw, localStorage was left EMPTY
+  // and a crash at that moment lost everything not yet in the scenario file. Now the
+  // previous entry is only dropped to make room, and is put back if the retry fails.
+  const put=(b)=>{
+    const text=JSON.stringify({
+      DB: b.out,
       counter: S.elCounter,
       simCfg: S.simCfg,
       // simResults intentionally NOT persisted to localStorage (large, regenerated
       // on load; the active scenario file still carries a copy — see scWriteActive)
-      savedAt: _saveStamp
-    }));
-  }catch(e){
-    console.error('Save error — data too large even without transient tables:', e);
-    // Last resort: save only user-created structural data
+      savedAt: _saveStamp,
+      _partialTables: b.dropped
+    });
     try{
-      const minimalDB = {
-        macro_regions:  DB.macro_regions,
-        countries:      DB.countries,
-        regions:        DB.regions,
-        sub_regions:    DB.sub_regions,
-        facilities:     DB.facilities,
-        elements:       DB.elements,
-        connections:    DB.connections,
-        products:       DB.products,
-        recipes:        DB.recipes,
-        raw_materials:  DB.raw_materials,
-        demand_points:  DB.demand_points,
-        demand_values:  DB.demand_values,
-        non_working_days: DB.non_working_days,
-        simulation_rules: DB.simulation_rules,
-        vessel_calls:   DB.vessel_calls,
-        rail_movements: DB.rail_movements,
-        rail_loading_plan: DB.rail_loading_plan,
-        forecast_commitments: DB.forecast_commitments,
-        real_production_daily: DB.real_production_daily,
-        real_inventory_daily:  DB.real_inventory_daily,
-        real_transfers_daily:  DB.real_transfers_daily,
-        real_rail_daily:       DB.real_rail_daily,
-        real_shipping_daily:   DB.real_shipping_daily,
-        real_unloading_daily:  DB.real_unloading_daily,
-      };
-      localStorage.removeItem('prodcast_v3');
-      localStorage.setItem('prodcast_v3', JSON.stringify({
-        DB: minimalDB,
-        counter: S.elCounter,
-        simCfg: S.simCfg,
-        savedAt: _saveStamp
-      }));
-      statMsg('Saved (compact mode)');
-      return;
+      localStorage.setItem('prodcast_v3', text);
+    }catch(e){
+      const prev=localStorage.getItem('prodcast_v3');   // keep a copy to roll back to
+      localStorage.removeItem('prodcast_v3');           // the old entry may BE the blocker
+      try{
+        localStorage.setItem('prodcast_v3', text);
+      }catch(e2){
+        if(prev!=null){ try{ localStorage.setItem('prodcast_v3', prev); }catch(e3){} }
+        throw e2;
+      }
+    }
+  };
+
+  try{
+    put(build(LS_SKIP_ALWAYS));
+    statMsg('Saved');
+  }catch(e){
+    console.warn('autoSave: full mirror exceeded quota — retrying compact', e);
+    try{
+      const b=build(LS_SKIP_COMPACT);
+      put(b);
+      statMsg('Saved (compact — '+b.dropped.length+' data table'+(b.dropped.length===1?'':'s')+' live in the scenario file only)');
     }catch(e2){
       console.error('Minimal save also failed:', e2);
       statMsg('⚠ Save failed — localStorage full');
-      return;
+      return; // nothing cached; do NOT push this state at the file either
     }
   }
-  statMsg('Saved');
   // Fire-and-forget: if any writable Data Source slot is connected, schedule
   // a debounced write so the picked file mirrors localStorage.
   if(typeof dsScheduleAllWrites === 'function') dsScheduleAllWrites();
   // Mirror the in-memory state into the ACTIVE scenario's file (debounced).
+  // Reached on the compact path too — the old code returned early here, leaving
+  // the file stale while still advancing _lastSaveStamp, which then made the
+  // startup guard believe the truncated cache was newer than the good file.
   if(typeof scScheduleWrite === 'function') scScheduleWrite();
 }
 
 function loadSaved(){
+  // Defensive table initialisers. These used to sit at the bottom of this
+  // function, after an unconditional `return`, so they had never actually run;
+  // hoisted here so they do. (The legacy element-type / daily_tonnage migrations
+  // that shared that dead block were deliberately NOT revived — they have never
+  // executed against this data and switching them on now would be a silent
+  // behaviour change, not a cleanup.)
+  if(!DB.real_shipments_daily) DB.real_shipments_daily=[];
+  if(!DB.real_shipments_meta)  DB.real_shipments_meta={};
+  if(!DB.forecast_commitments) DB.forecast_commitments=[];
+  if(!DB.demand_values)        DB.demand_values=[];
+
   // ── Clear only truly-oversized legacy entries ───────────────────────────
   // Real data (shipments, production, actual demand_values) now belongs to the
   // app and is intentionally persisted, so we no longer strip it on load. Only
@@ -23405,6 +23426,7 @@ function loadSaved(){
     }
   }catch(e){ localStorage.removeItem('prodcast_v3'); }
 
+  window._dbPartialTables = [];   // nothing restored yet ⇒ nothing known-missing
   try{
     const raw=localStorage.getItem('prodcast_v3');
     if(raw){
@@ -23419,6 +23441,14 @@ function loadSaved(){
       if(saved.simCfg) Object.assign(S.simCfg,saved.simCfg);
       if(saved.simResults) S.simResults = saved.simResults;  // Restore forecast results so all data visible on load
 
+      // Which tables this cache could not hold. They are NOT gone — they live in
+      // the scenario file — but memory is now incomplete, so the file must not be
+      // overwritten from this state until scLoadScenario has healed it.
+      // Older caches have no _partialTables key; infer the ones we always skip.
+      window._dbPartialTables = Array.isArray(saved._partialTables)
+        ? saved._partialTables.slice()
+        : [...LS_SKIP_ALWAYS].filter(t=>saved.DB && saved.DB[t]===undefined);
+
       // Remember when this localStorage copy was saved, so the topology data
       // source can refuse to overwrite it with an OLDER file (stale-file guard).
       window._lsSavedAt = saved.savedAt || null;
@@ -23432,111 +23462,6 @@ function loadSaved(){
     }
   }catch(e){console.error('Load error',e);}
   return false;  // no localStorage data — caller may seed from server file
-
-  // ── MIGRATION: convert legacy element types ────────────
-  const legacyTypeMap={
-    'clinker_silo':'bulk_silo',
-    'cement_silo':'bulk_silo',
-    'homo_silo':'bulk_silo',
-    'packed_storage':'packed_silo'
-  };
-  DB.elements.forEach(el=>{
-    if(legacyTypeMap[el.type]) el.type=legacyTypeMap[el.type];
-    // Migrate single product_id to products array on bulk_silo
-    if(el.type==='bulk_silo'&&el.props.product_id&&!el.props.products){
-      el.props.products=[el.props.product_id];
-    }
-    // Clean corrupted product IDs — strip legacy '=category' suffix
-    // e.g. 'brs_clk_k01=clinker' → 'brs_clk_k01'
-    if(el.props.products){
-      el.props.products=el.props.products
-        .map(pid=>{ const i=pid.indexOf('='); return i>0?pid.slice(0,i):pid; })
-        .filter(Boolean);
-    }
-    if(el.props.product_id&&el.props.product_id.includes('=')){
-      el.props.product_id=el.props.product_id.split('=')[0];
-    }
-    // Default inventory_objective on bulk_silo
-    if(el.type==='bulk_silo'&&!el.props.inventory_objective){
-      el.props.inventory_objective='maximize';
-    }
-    // Remove legacy days-of-cover fields — thresholds are now derived from max_capacity
-    if(el.type==='bulk_silo'){
-      delete el.props.min_level_days;
-      delete el.props.critical_min_days;
-      delete el.props.target_level_days;
-      delete el.props.min_level; // old tonnes field
-      delete el.props.critical_min; // old tonnes field
-    }
-    // Remove objective from demand_point — moved to silo
-    if(el.type==='demand_point'&&el.props.objective) delete el.props.objective;
-    // Migration: add dispatch_schedule and demand_mode defaults
-    if(el.type==='demand_point'){
-      if(!el.props.dispatch_schedule) el.props.dispatch_schedule='weekdays';
-      if(!el.props.demand_mode) el.props.demand_mode=
-        el.props.daily_tonnage>0?'Fixed Daily':'Monthly Volume';
-    }
-    // Migration: ensure demand_forecasts table exists
-    if(!DB.demand_forecasts) DB.demand_forecasts=[];
-    // Sync demand_point facility_id from assigned_facility_id
-    if(el.type==='demand_point'&&el.assigned_facility_id){
-      const dp=DB.demand_points.find(d=>d.element_id===el.id||d.id===`dp_el_${el.id}`);
-      if(dp) dp.facility_id=el.assigned_facility_id;
-    }
-    // Ensure assigned_facility_id exists
-    if(el.assigned_facility_id===undefined) el.assigned_facility_id=null;
-    // Migrate packed_silo: bags_per_pallet + bag_size_kg → tonnes_per_pallet
-    if(el.type==='packed_silo'&&el.props.bags_per_pallet&&el.props.bag_size_kg&&!el.props.tonnes_per_pallet){
-      el.props.tonnes_per_pallet=(el.props.bags_per_pallet*el.props.bag_size_kg)/1000;
-    }
-  });
-  // Migrate new tables if missing
-  if(!DB.real_shipments_daily) DB.real_shipments_daily=[];
-  if(!DB.real_shipments_meta) DB.real_shipments_meta={};
-  if(!DB.forecast_commitments) DB.forecast_commitments=[];
-  // Migrate products — add category field if missing
-  DB.products.forEach(p=>{
-    if(!p.category){
-      // Best-guess category from name
-      const n=(p.name||'').toLowerCase();
-      if(n.includes('clk')||n.includes('clinker')) p.category='clinker';
-      else if(n.includes('raw')||n.includes('meal')) p.category='raw_meal';
-      else if(n.includes('pack')||n.includes('bag')) p.category='cement_packed';
-      else p.category='cement_bulk';
-    }
-  });
-  const dpByEl={};
-  DB.demand_points.forEach(dp=>{
-    if(!dp.element_id) return; // keep records without element_id
-    const existing=dpByEl[dp.element_id];
-    if(!existing||(dp.products||[]).length>(existing.products||[]).length){
-      dpByEl[dp.element_id]=dp;
-    }
-  });
-  // Rebuild: keep all without element_id + one winner per element_id
-  const withoutElId=DB.demand_points.filter(d=>!d.element_id);
-  DB.demand_points=[...withoutElId,...Object.values(dpByEl)];
-
-  // ── MIGRATION: legacy daily_tonnage → demand_values ─────
-  // Per-element: if an element has daily_tonnage but no demand_values yet, bootstrap it.
-  if(!DB.demand_values) DB.demand_values=[];
-  const legacyStart=S.simCfg?.start_date;
-  const legacyHorizon=S.simCfg?.horizon||365;
-  if(legacyStart){
-    const hasValuesFor=new Set((DB.demand_values||[]).map(v=>v.element_id));
-    DB.demand_points.forEach(dp=>{
-      const daily=parseFloat(dp.daily_tonnage)||0;
-      if(!daily||!dp.element_id||hasValuesFor.has(dp.element_id)) return;
-      for(let d=0;d<legacyHorizon;d++){
-        const dt=new Date(legacyStart+'T00:00:00');
-        dt.setDate(dt.getDate()+d);
-        const dow=dt.getDay();
-        if(dow===0) continue; // skip Sundays
-        DB.demand_values.push({element_id:dp.element_id,date:dt._ymd(),value_t:daily});
-      }
-    });
-  }
-  _demandCacheInvalidate();
 }
 
 // ═══════════════════════════════════════════════════════
@@ -23735,6 +23660,13 @@ function _mgMergePayload(base, ours, theirs){
   const tables=new Set([...Object.keys(ours.DB||{}), ...Object.keys(theirs.DB||{})]);
   for(const t of tables){
     const o=ours.DB?ours.DB[t]:undefined, th=theirs.DB?theirs.DB[t]:undefined, b=base.DB?base.DB[t]:undefined;
+    // A table entirely ABSENT from one side is not a deletion — it means that side
+    // never had the table loaded (e.g. a compact localStorage cache that had to drop
+    // it). Coercing absent→[] and merging made every one of the other side's rows
+    // look like "we deleted an untouched row", which then got written to disk. Only
+    // a table that is PRESENT and empty can express a real delete-all.
+    if(!Array.isArray(o) && Array.isArray(th)){ mergedDB[t]=th; remoteApplied+=th.length?1:0; continue; }
+    if(!Array.isArray(th) && Array.isArray(o)){ mergedDB[t]=o;  localApplied +=o.length?1:0;  continue; }
     if(Array.isArray(o)||Array.isArray(th)){
       const r=_mgMergeTable(t, Array.isArray(b)?b:[], Array.isArray(o)?o:[], Array.isArray(th)?th:[]);
       mergedDB[t]=r.rows; remoteApplied+=r.remoteApplied; localApplied+=r.localApplied;
@@ -23792,6 +23724,9 @@ function _mgApplyPayloadToApp(payload){
   if(payload.simCfg) Object.assign(S.simCfg, payload.simCfg);
   if(payload.counter) S.elCounter=payload.counter;
   if(typeof syncElCounter==='function') syncElCounter();
+  // demand_values may have just been replaced wholesale — drop the memoised demand
+  // lookups or the grids keep rendering the pre-merge numbers.
+  if(typeof _demandCacheInvalidate==='function') _demandCacheInvalidate();
   if(payload.simResults) S.simResults=payload.simResults;
   try{
     if(S.view==='demand' && typeof renderDemandView==='function') renderDemandView();
@@ -23885,8 +23820,40 @@ function scRelTime(iso){ if(!iso) return 'never saved'; const d=new Date(iso),no
 // ── State payload (mirrors autoSave's trimming) ──
 function scBuildPayload(){
   const dbOut=Object.fromEntries(Object.entries(DB).filter(([k])=>!SC_TRANSIENT.has(k)));
+  // Tables the localStorage cache could not hold are OMITTED rather than written
+  // as empty: memory doesn't have them, the file does. Omitting lets the merge
+  // keep the file's copy (see the absent-vs-empty rule in _mgMergePayload); writing
+  // an empty array instead would read as "the user deleted all these rows".
+  // Normally _scHealPartial has already refilled them and this list is empty.
+  const miss=window._dbPartialTables;
+  if(Array.isArray(miss)) miss.forEach(t=>{ delete dbOut[t]; });
   // Keep actual demand_values too — once imported they belong to the app.
   return { DB:dbOut, counter:S.elCounter, simCfg:S.simCfg, simResults:S.simResults||null, savedAt:(window._lastSaveStamp||new Date().toISOString()) };
+}
+
+// Restore tables that the localStorage cache had to drop, reading them back from
+// the scenario file BEFORE we write anything to it. This is the guard that makes
+// the whole data-loss class unreachable: an incomplete in-memory copy can never
+// overwrite a complete file, because we always refill it from that file first.
+// Returns false if the file could not be read — callers must then refuse to write.
+async function _scHealPartial(handle){
+  const miss=window._dbPartialTables;
+  if(!Array.isArray(miss) || !miss.length) return true;
+  try{
+    const f=await handle.getFile();
+    const saved=JSON.parse(new TextDecoder().decode(await f.arrayBuffer()));
+    if(saved && saved.DB){
+      let healed=0;
+      miss.forEach(t=>{ if(saved.DB[t]!==undefined){ DB[t]=saved.DB[t]; healed++; } });
+      if(healed && typeof _demandCacheInvalidate==='function') _demandCacheInvalidate();
+      console.info('scenario: restored '+healed+' table(s) from file that localStorage could not cache');
+    }
+    window._dbPartialTables=[];
+    return true;
+  }catch(e){
+    console.warn('scenario: could not restore partial tables from file — refusing to write', e);
+    return false;
+  }
 }
 
 // ── Save-status dot ──
@@ -23919,6 +23886,13 @@ async function scWriteActive(id, opts){
   try{
     const granted=await _dsEnsureWritePermission(handle);
     if(!granted){ scSetSaveStatus('error'); _dsWriteBlockedBanner('scenario:'+id, m.fileName, 'file-edit permission was declined'); return false; }
+    // Never write a partial in-memory copy over a complete file.
+    if(!await _scHealPartial(handle)){
+      scSetSaveStatus('error');
+      _dsWriteBlockedBanner('scenario:'+id, m.fileName,
+        'your local copy is missing data that only the file has, and the file could not be read to restore it — not saving, to avoid overwriting it');
+      return false;
+    }
     const MAX_ATTEMPTS=3;
     for(let attempt=1; attempt<=MAX_ATTEMPTS; attempt++){
       try{
@@ -23996,20 +23970,35 @@ const SC_HIST_THROTTLE_MS = 20*60*1000; // autosave-driven snapshots: at most on
 const SC_HIST_KEEP = 60;                 // retention cap per scenario folder
 
 function _scSanitize(s){ return String(s||'').replace(/[\\/:*?"<>|]/g,'').trim()||'Scenario'; }
-function _scHistPrefix(m){ return _scSanitize(m.name)+'__'; }
+// Snapshots are identified by the scenario's stable ID, embedded as a `__<id>__`
+// token, with the display name kept in front purely so the folder is readable in
+// Explorer. Keying on the NAME (as this used to) meant renaming a scenario orphaned
+// its whole history — the prefix changed, so old snapshots vanished from the list and
+// were never pruned — and two scenarios sharing a name and folder could restore each
+// other's snapshots. The id never changes, so neither can happen.
+function _scHistToken(m){ return '__'+m.id+'__'; }
 function _scHistFileName(m, tag){
   const d=new Date(); const p=n=>String(n).padStart(2,'0');
   const stamp=`${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
   const rand=Math.random().toString(16).slice(2,6); // guards against same-second collisions
-  return `${_scHistPrefix(m)}${stamp}_${rand}${tag?'_'+tag:''}.json`;
+  return `${_scSanitize(m.name)}${_scHistToken(m)}${stamp}_${rand}${tag?'_'+tag:''}.json`;
 }
-// Parse a snapshot's timestamp (+ optional tag) back out of its filename.
-function _scHistParse(name, prefix){
-  if(!name.startsWith(prefix)||!name.endsWith('.json')) return null;
-  const rest=name.slice(prefix.length, -5);
-  const m=rest.match(/^(\d{4})-(\d{2})-(\d{2})_(\d{2})(\d{2})(\d{2})_[0-9a-f]{4}(?:_(.+))?$/);
-  if(!m) return null;
-  return { name, date:new Date(+m[1],+m[2]-1,+m[3],+m[4],+m[5],+m[6]), tag:m[7]||null };
+const _SC_HIST_STAMP=/^(\d{4})-(\d{2})-(\d{2})_(\d{2})(\d{2})(\d{2})_[0-9a-f]{4}(?:_(.+))?$/;
+// Does this filename belong to scenario `m`, and if so when was it taken?
+// Accepts BOTH the id-keyed form and the older name-prefixed form, so history
+// written before this change stays visible without touching the files on disk.
+// Legacy files are matched against the scenario's current name and any earlier
+// names recorded at rename time (m.prevNames), so a rename doesn't hide them.
+function _scHistParse(name, m){
+  if(!name.endsWith('.json')) return null;
+  const mk=(rest)=>{ const g=rest.match(_SC_HIST_STAMP); return g?{name, date:new Date(+g[1],+g[2]-1,+g[3],+g[4],+g[5],+g[6]), tag:g[7]||null}:null; };
+  const tok=_scHistToken(m), i=name.indexOf(tok);
+  if(i>=0) return mk(name.slice(i+tok.length, -5));
+  for(const cand of [m.name, ...(m.prevNames||[])]){
+    const pfx=_scSanitize(cand)+'__';
+    if(name.startsWith(pfx)){ const r=mk(name.slice(pfx.length,-5)); if(r) return r; }
+  }
+  return null;
 }
 
 // Get (or, if `promptIfMissing`, ask the user to pick) the folder this
@@ -24042,17 +24031,23 @@ async function scWriteSnapshot(id, payloadText, tag){
     const fh=await dir.getFileHandle(_scHistFileName(m,tag), {create:true});
     const w=await fh.createWritable(); await w.write(new Blob([payloadText],{type:'application/json'})); await w.close();
     m.lastSnapshot=new Date().toISOString(); scSaveMeta();
-    await scPruneHistory(dir, _scHistPrefix(m));
+    await scPruneHistory(dir, m);
     return true;
   }catch(e){ console.warn('SC snapshot write',e); return false; }
 }
-async function scPruneHistory(dir, prefix){
+// Prune to SC_HIST_KEEP for THIS scenario only. Takes the meta record (not a name
+// prefix) so it prunes exactly the set the history panel lists — sharing a folder
+// with another scenario can no longer make one delete the other's snapshots.
+async function scPruneHistory(dir, m){
   try{
-    const names=[];
-    for await (const [name,h] of dir.entries()){ if(h.kind==='file'&&name.startsWith(prefix)&&name.endsWith('.json')) names.push(name); }
-    names.sort(); // the timestamp embedded in the name sorts chronologically
-    const excess=names.length-SC_HIST_KEEP;
-    if(excess>0) for(const name of names.slice(0,excess)){ try{ await dir.removeEntry(name); }catch(e){} }
+    const found=[];
+    for await (const [name,h] of dir.entries()){
+      if(h.kind!=='file') continue;
+      const p=_scHistParse(name, m); if(p) found.push(p);
+    }
+    found.sort((a,b)=>a.date-b.date); // oldest first
+    const excess=found.length-SC_HIST_KEEP;
+    if(excess>0) for(const f of found.slice(0,excess)){ try{ await dir.removeEntry(f.name); }catch(e){} }
   }catch(e){ /* permission lapsed or folder unavailable — skip pruning this round */ }
 }
 // Decide whether this write should also drop a snapshot (see header comment
@@ -24097,6 +24092,24 @@ async function scLoadScenario(id, opts){
   catch(e){ statMsg('Could not read "'+m.name+'": '+e.message); return false; }
   if(!saved.DB){ statMsg('"'+m.name+'" is not a valid scenario file'); return false; }
 
+  // Repair memory from the file FIRST, before any branch below decides who wins.
+  // Tables the localStorage cache had to drop aren't "local deletions" — they were
+  // never loaded. Restoring them here means the user sees complete data immediately
+  // (rather than only after the next write) and that every comparison below is made
+  // against a whole in-memory copy.
+  {
+    const miss=window._dbPartialTables;
+    if(Array.isArray(miss) && miss.length){
+      let healed=0;
+      miss.forEach(t=>{ if(saved.DB[t]!==undefined){ DB[t]=saved.DB[t]; healed++; } });
+      window._dbPartialTables=[];
+      if(healed){
+        if(typeof _demandCacheInvalidate==='function') _demandCacheInvalidate();
+        console.info('scenario: restored '+healed+' table(s) the local cache could not hold');
+      }
+    }
+  }
+
   // Startup safety net: when auto-opening the SAME scenario that's cached in
   // localStorage, don't let one copy silently erase the other. With a merge
   // baseline available we can tell WHO moved since the last sync:
@@ -24115,6 +24128,13 @@ async function scLoadScenario(id, opts){
       if(base && base.DB){
         const res=_mgMergePayload(base, scBuildPayload(), saved);
         _mgApplyPayloadToApp(res.payload);
+        // The merge result came from the file, so anything the cache had dropped
+        // is back in memory — and the tables it still lacks were taken from
+        // `saved` by the absent-vs-empty rule. Memory is whole again.
+        window._dbPartialTables=[];
+        // Snapshot the file as it was BEFORE we overwrite it with the merge, so a
+        // bad merge is recoverable from Version History.
+        try{ if(typeof scMaybeSnapshot==='function') await scMaybeSnapshot(id, text, {forced:true, conflict:res.conflicts.length>0}); }catch(e){}
         m.lastOpened=new Date().toISOString(); scSaveMeta();
         const outText=JSON.stringify(res.payload,null,2);
         let wrote=false;
@@ -24146,6 +24166,8 @@ async function scLoadScenario(id, opts){
   if(saved.counter) S.elCounter=saved.counter;
   syncElCounter();
   if(saved.simResults) S.simResults=saved.simResults;  // Restore forecast results
+  window._dbPartialTables=[];                          // adopted the file wholesale — memory is complete
+  if(typeof _demandCacheInvalidate==='function') _demandCacheInvalidate();
   SC.activeId=id; m.lastOpened=new Date().toISOString();
   window._lsSavedAt=saved.savedAt||null;
   scSaveBaseline(id, text, saved.savedAt||null, fileMod);
@@ -24182,13 +24204,65 @@ async function scCheckRemoteChange(){
 }
 
 // ── Create / duplicate / open / switch / rename / delete ──
+// ── Scenario ↔ file identity ────────────────────────────────────────────────
+// One scenario owns exactly one .json, and the scenario's NAME is always the
+// file's basename. Deriving the name from the handle (rather than from what the
+// user typed) is the only way the invariant survives, because the OS save dialog
+// lets them type a filename that differs from the name they asked for.
+function scNameFromHandle(handle){ return String(handle.name||'').replace(/\.json$/i,'').trim()||'Scenario'; }
+
+// Which scenario (if any) already owns `handle`. isSameEntry is the authoritative
+// check; it only sees SC.handles, so entries whose handle failed to rehydrate from
+// IndexedDB fall back to a basename comparison — weaker (a basename carries no
+// path) but better than silently allowing a second owner.
+async function scFindOwner(handle, exceptId){
+  for(const k of Object.keys(SC.meta)){
+    if(k===exceptId) continue;
+    const h=SC.handles[k];
+    if(h){ try{ if(await h.isSameEntry?.(handle)) return {id:k, certain:true}; }catch(e){} }
+    else if(SC.meta[k].fileName && SC.meta[k].fileName===handle.name) return {id:k, certain:false};
+  }
+  return null;
+}
+// A different scenario already using this name. Since name ≡ filename, this means
+// two same-named files in different folders — indistinguishable in the pill, the
+// dropdown and the startup cards, which all show the basename only.
+function scFindNameClash(name, exceptId){
+  const n=String(name||'').toLowerCase();
+  return Object.keys(SC.meta).find(k=>k!==exceptId && String(SC.meta[k].name||'').toLowerCase()===n)||null;
+}
+
+// Shared gate for every path that binds a scenario to a newly-picked file.
+// Returns true when `handle` may be used; otherwise explains why and returns false.
+async function scCheckFileFree(handle, exceptId){
+  const owner=await scFindOwner(handle, exceptId);
+  if(owner){
+    const om=SC.meta[owner.id];
+    alert(`That file is already used by the scenario "${om.name}".\n\n`+
+      (owner.certain?'':'(Matched on filename — its file handle isn\'t loaded in this browser.)\n\n')+
+      `Each scenario must have its own .json, or saving one would overwrite the other.\n\nPick a different file or name.`);
+    return false;
+  }
+  const clash=scFindNameClash(scNameFromHandle(handle), exceptId);
+  if(clash){
+    alert(`A scenario named "${SC.meta[clash].name}" already exists.\n\n`+
+      `Scenario names come from the filename, so two files with the same name can't be told apart.\n\nChoose a different filename.`);
+    return false;
+  }
+  return true;
+}
+
 async function scCreateFromCurrent(suggestedName){
   if(!window.showSaveFilePicker){ statMsg('This browser cannot save files directly — use ↓ Export JSON. (Chrome/Edge required.)'); return; }
   let handle;
   try{ handle=await window.showSaveFilePicker({suggestedName:(suggestedName||'Scenario').replace(/[\\/:*?"<>|]/g,'')+'.json', types:[{description:'AVILA scenario',accept:{'application/json':['.json']}}]}); }
   catch(e){ return; } // user cancelled
+  // Refuse to bind a file another scenario already owns. Without this, picking an
+  // existing scenario's file here registered a SECOND meta entry against it and the
+  // scWriteActive below immediately overwrote that scenario's data.
+  if(!await scCheckFileFree(handle, null)) return;
   const id='sc_'+Date.now().toString(36);
-  const name=(suggestedName||handle.name.replace(/\.json$/i,'')).trim();
+  const name=scNameFromHandle(handle);   // name ≡ filename, whatever was typed in the dialog
   SC.meta[id]={ id, name, color:scPickColor(), fileName:handle.name, lastSaved:null, lastOpened:new Date().toISOString() };
   SC.handles[id]=handle; await scSaveHandle(id,handle);
   SC.activeId=id; scSaveMeta();
@@ -24204,14 +24278,51 @@ async function scOpenFile(){
   try{ [handle]=await window.showOpenFilePicker({types:[{description:'AVILA scenario',accept:{'application/json':['.json']}}]}); }
   catch(e){ return; }
   // Reuse an existing entry if it points at the same file, else register new.
-  let id=null;
-  for(const k of Object.keys(SC.handles)){ try{ if(await SC.handles[k].isSameEntry?.(handle)){ id=k; break; } }catch(e){} }
-  if(!id){ id='sc_'+Date.now().toString(36); SC.meta[id]={ id, name:handle.name.replace(/\.json$/i,''), color:scPickColor(), fileName:handle.name, lastSaved:null, lastOpened:new Date().toISOString() }; SC.handles[id]=handle; await scSaveHandle(id,handle); }
+  const owner=await scFindOwner(handle, null);
+  let id=owner?owner.id:null;
+  if(id){
+    // Opening a file we already track: refresh the name in case it was renamed on
+    // disk outside the app — the file is the source of truth for identity.
+    SC.meta[id].name=scNameFromHandle(handle);
+    SC.meta[id].fileName=handle.name;
+    if(!SC.handles[id]){ SC.handles[id]=handle; await scSaveHandle(id,handle); } // re-bind a lost handle
+  } else {
+    id='sc_'+Date.now().toString(36);
+    SC.meta[id]={ id, name:scNameFromHandle(handle), color:scPickColor(), fileName:handle.name, lastSaved:null, lastOpened:new Date().toISOString() };
+    SC.handles[id]=handle; await scSaveHandle(id,handle);
+  }
   scSaveMeta();
   await scLoadScenario(id);
-  scCloseDropdown(); scCloseStartup();
+  scCloseDropdown(); scCloseStartup(); scUpdatePill(); scRenderDropdown();
 }
-function scRename(id){ const m=SC.meta[id]; if(!m) return; const nn=prompt('Rename scenario:', m.name); if(nn==null) return; const t=nn.trim(); if(t) m.name=t; scSaveMeta(); scUpdatePill(); scRenderDropdown(); }
+// Rename = Save As. The scenario's name IS its filename, so renaming has to produce
+// a newly-named file; there is no rename-in-place in the File System Access API that
+// works reliably across the folders these files live in. The old .json is left on
+// disk untouched — stated up front so it isn't a surprise.
+async function scRename(id){
+  const m=SC.meta[id]; if(!m) return;
+  if(!window.showSaveFilePicker){ statMsg('This browser cannot save files directly — renaming needs Chrome/Edge.'); return; }
+  const nn=prompt('Rename scenario.\n\nThis saves it to a NEW .json with that name; the current file "'+m.fileName+'" is left on disk.', m.name);
+  if(nn==null) return;
+  const want=nn.trim(); if(!want || want===m.name) return;
+  let handle;
+  try{ handle=await window.showSaveFilePicker({suggestedName:want.replace(/[\\/:*?"<>|]/g,'')+'.json', types:[{description:'AVILA scenario',accept:{'application/json':['.json']}}]}); }
+  catch(e){ return; } // cancelled
+  if(!await scCheckFileFree(handle, id)) return;
+  const wasActive=(SC.activeId===id);
+  const oldFile=m.fileName, oldName=m.name;
+  SC.handles[id]=handle; await scSaveHandle(id,handle);
+  m.fileName=handle.name;
+  // Remember the old name so snapshots written under the pre-id naming scheme
+  // (which used the scenario name as their filename prefix) stay listed.
+  m.prevNames=[...new Set([...(m.prevNames||[]), oldName])].slice(-10);
+  m.name=scNameFromHandle(handle);   // name follows the file, not the prompt
+  await scDeleteBaseline(id);        // the new file has no shared history with the old one
+  scSaveMeta();
+  if(wasActive) await scWriteActive(id, {forceSnapshot:true});
+  scUpdatePill(); scRenderDropdown();
+  statMsg('Renamed to "'+m.name+'" → '+m.fileName+' (previous file '+oldFile+' left on disk)');
+}
 async function scDelete(id){
   const m=SC.meta[id]; if(!m) return;
   if(!confirm('Remove scenario "'+m.name+'" from the list?\n\nThe .json file on disk is NOT deleted — you can re-open it later.')) return;
@@ -24221,10 +24332,23 @@ async function scDelete(id){
   scSaveMeta(); scUpdatePill(); scRenderDropdown();
   if(wasActive){ const rest=Object.keys(SC.meta); if(rest.length) await scLoadScenario(rest[0]); else scOpenStartup(true); }
 }
-async function scSwitch(id){
-  if(id===SC.activeId){ scCloseDropdown(); return; }
+// opts.force — load the file even when `id` is already SC.activeId. The startup
+// picker MUST pass this: scInit restores SC.activeId from localStorage before the
+// picker is shown, so without it, choosing the last-used scenario hit the
+// early-return below and the .json was never read. The app then kept running on
+// whatever loadSaved() had restored — and if that cache was compact (missing
+// element_product_capacities & co.) the first later edit wrote the truncated state
+// straight over the good file. The plain dropdown switcher still no-ops, since
+// re-picking the scenario you are already in should do nothing.
+async function scSwitch(id, opts){
+  const reopen = (id===SC.activeId);
+  if(reopen && !(opts&&opts.force)){ scCloseDropdown(); return; }
   clearTimeout(SC._writeTimer);
-  if(scActive() && SC.handles[SC.activeId]){
+  // Only flush when actually LEAVING a scenario for a different one. On a forced
+  // reopen there is nothing to preserve by writing, and pushing first would be
+  // actively harmful: this path exists precisely for the case where memory is an
+  // incomplete cache, so writing it out would destroy the file we came to read.
+  if(!reopen && scActive() && SC.handles[SC.activeId]){
     const flushed=await scWriteActive(); // flush current — MUST confirm before discarding it below
     if(!flushed){
       const proceed=confirm(`"${scActive().name}" has changes that failed to save to its file (see the red banner for why).\n\nSwitching scenarios now will DISCARD those unsaved changes from this browser.\n\nOK = switch anyway and lose them.\nCancel = stay here and retry saving first.`);
@@ -24232,7 +24356,7 @@ async function scSwitch(id){
     }
   }
   scCloseDropdown(); scCloseStartup();
-  await scLoadScenario(id);
+  await scLoadScenario(id, reopen?{guard:true}:undefined);
   localStorage.setItem('avila_sc_autoopen',id);  // Remember this scenario for next load
 }
 
@@ -24326,12 +24450,11 @@ async function scRenderHistoryList(id){
     return;
   }
   if(folderEl) folderEl.textContent='📁 '+(dir.name||'linked folder');
-  const prefix=_scHistPrefix(m);
   const items=[];
   try{
     for await (const [name,h] of dir.entries()){
       if(h.kind!=='file') continue;
-      const p=_scHistParse(name,prefix); if(p) items.push(p);
+      const p=_scHistParse(name,m); if(p) items.push(p);
     }
   }catch(e){ body.innerHTML=`<div style="padding:16px 4px;color:var(--red);font-family:var(--mono);font-size:10px">Couldn't read the folder — permission may have lapsed. Try "Change folder…".</div>`; return; }
   items.sort((a,b)=>b.date-a.date);
@@ -24402,7 +24525,10 @@ async function scStartupOpen(id){
   const chk=document.getElementById('sc-autoopen-chk');
   if(chk&&chk.checked) localStorage.setItem('avila_sc_autoopen',id); else if(chk) localStorage.removeItem('avila_sc_autoopen');
   scCloseStartup();
-  await scSwitch(id);
+  // force: the picked scenario is usually ALREADY SC.activeId (scInit restores it
+  // from localStorage before showing this picker), and without force scSwitch
+  // would no-op and never read the file.
+  await scSwitch(id, {force:true});
 }
 
 // ── Init (called from DOMContentLoaded, after dsInit) ──
