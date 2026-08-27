@@ -24252,11 +24252,36 @@ async function scCheckFileFree(handle, exceptId){
   return true;
 }
 
+// Open a save dialog, distinguishing "user cancelled" from a real failure.
+// The file picker needs TRANSIENT USER ACTIVATION, which expires a few seconds
+// after the click that started the action — so it must not sit behind a blocking
+// prompt()/confirm() while the user types. Swallowing every error here (as this
+// used to) turned an expired activation into a silent no-op: creating a scenario
+// appeared to do nothing if you paused to type a name.
+async function scPickSaveFile(suggestedName){
+  const safe=String(suggestedName||'Scenario').replace(/[\\/:*?"<>|]/g,'').trim()||'Scenario';
+  try{
+    return await window.showSaveFilePicker({
+      suggestedName: safe+'.json',
+      types:[{description:'AVILA scenario',accept:{'application/json':['.json']}}]
+    });
+  }catch(e){
+    const n=(e&&e.name)||'';
+    if(n==='AbortError') return null;                       // user closed the dialog — fine
+    if(n==='SecurityError'||n==='NotAllowedError'){
+      statMsg('⚠ The save dialog needs a fresh click — press ＋ New again and name the file in the dialog itself.');
+    }else{
+      statMsg('⚠ Could not open the save dialog — '+(e&&e.message||n||'unknown error'));
+    }
+    console.warn('scenario save picker failed', e);
+    return null;
+  }
+}
+
 async function scCreateFromCurrent(suggestedName){
   if(!window.showSaveFilePicker){ statMsg('This browser cannot save files directly — use ↓ Export JSON. (Chrome/Edge required.)'); return; }
-  let handle;
-  try{ handle=await window.showSaveFilePicker({suggestedName:(suggestedName||'Scenario').replace(/[\\/:*?"<>|]/g,'')+'.json', types:[{description:'AVILA scenario',accept:{'application/json':['.json']}}]}); }
-  catch(e){ return; } // user cancelled
+  const handle=await scPickSaveFile(suggestedName);
+  if(!handle) return;
   // Refuse to bind a file another scenario already owns. Without this, picking an
   // existing scenario's file here registered a SECOND meta entry against it and the
   // scWriteActive below immediately overwrote that scenario's data.
@@ -24270,13 +24295,23 @@ async function scCreateFromCurrent(suggestedName){
   scCloseDropdown(); scCloseStartup(); scUpdatePill(); scRenderDropdown();
   statMsg('Scenario "'+name+'" created');
 }
-async function scNew(){ const n=prompt('Name the new scenario (it captures the current model):','New scenario'); if(n==null) return; await scCreateFromCurrent(n||'New scenario'); }
+// No name prompt: the scenario's name IS its filename now, so the save dialog is
+// where you name it. The old prompt asked for a name that was then discarded in
+// favour of the filename — and, being a blocking modal, it consumed the user
+// activation the file picker needs, so typing into it made the picker fail silently.
+async function scNew(){ await scCreateFromCurrent('New scenario'); }
 async function scDuplicate(){ const m=scActive(); if(!m){ statMsg('No active scenario to duplicate'); return; } await scCreateFromCurrent(m.name+' copy'); }
 async function scOpenFile(){
   if(!window.showOpenFilePicker){ statMsg('This browser cannot open files directly — use ↑ Import JSON. (Chrome/Edge required.)'); return; }
   let handle;
   try{ [handle]=await window.showOpenFilePicker({types:[{description:'AVILA scenario',accept:{'application/json':['.json']}}]}); }
-  catch(e){ return; }
+  catch(e){
+    // Same reasoning as scPickSaveFile: only AbortError means "user cancelled";
+    // anything else must be reported rather than silently doing nothing.
+    const n=(e&&e.name)||'';
+    if(n!=='AbortError'){ console.warn('scenario open picker failed', e); statMsg('⚠ Could not open the file dialog — '+(e&&e.message||n||'unknown error')); }
+    return;
+  }
   // Reuse an existing entry if it points at the same file, else register new.
   const owner=await scFindOwner(handle, null);
   let id=owner?owner.id:null;
@@ -24302,12 +24337,12 @@ async function scOpenFile(){
 async function scRename(id){
   const m=SC.meta[id]; if(!m) return;
   if(!window.showSaveFilePicker){ statMsg('This browser cannot save files directly — renaming needs Chrome/Edge.'); return; }
-  const nn=prompt('Rename scenario.\n\nThis saves it to a NEW .json with that name; the current file "'+m.fileName+'" is left on disk.', m.name);
-  if(nn==null) return;
-  const want=nn.trim(); if(!want || want===m.name) return;
-  let handle;
-  try{ handle=await window.showSaveFilePicker({suggestedName:want.replace(/[\\/:*?"<>|]/g,'')+'.json', types:[{description:'AVILA scenario',accept:{'application/json':['.json']}}]}); }
-  catch(e){ return; } // cancelled
+  // Straight to the save dialog — type the new name there. No prompt() first: it
+  // would eat the user activation the picker needs (see scPickSaveFile), and the
+  // name is taken from the file anyway. The dialog opens on the current name.
+  const handle=await scPickSaveFile(m.name);
+  if(!handle) return;
+  if(handle.name===m.fileName){ statMsg('Same file — nothing renamed'); return; }
   if(!await scCheckFileFree(handle, id)) return;
   const wasActive=(SC.activeId===id);
   const oldFile=m.fileName, oldName=m.name;
@@ -24385,7 +24420,7 @@ function scRenderDropdown(){
     </div>`;
   });
   h+=`<div class="sc-dd-foot">
-    <div class="sc-item" onclick="scNew()"><span style="color:var(--green)">＋</span> New scenario…</div>
+    <div class="sc-item" onclick="scNew()" title="Captures the current model into a new .json — you name it in the save dialog"><span style="color:var(--green)">＋</span> New scenario…</div>
     <div class="sc-item" onclick="scDuplicate()">⧉ Duplicate current</div>
     <div class="sc-item" onclick="scOpenFile()">📂 Open from file…</div>
   </div>`;
@@ -24394,7 +24429,7 @@ function scRenderDropdown(){
 function scRowMenu(ev,id){
   ev.stopPropagation(); document.querySelectorAll('.sc-rowmenu').forEach(e=>e.remove());
   const menu=document.createElement('div'); menu.className='sc-rowmenu';
-  menu.innerHTML=`<div onclick="scRename('${id}');this.parentNode.remove()">✎ Rename</div>
+  menu.innerHTML=`<div onclick="scRename('${id}');this.parentNode.remove()" title="Saves the scenario to a new .json under the new name; the current file is left on disk">✎ Rename (save as…)</div>
     <div onclick="(scSwitch('${id}').then(()=>scDuplicate()));this.parentNode.remove()">⧉ Duplicate</div>
     <div onclick="(scSwitch('${id}').then(()=>scOpenHistoryPanel()));this.parentNode.remove()">🕒 Version History</div>
     <div style="color:var(--red);border-top:1px solid var(--border2)" onclick="scDelete('${id}');this.parentNode.remove()">🗑 Delete</div>`;
