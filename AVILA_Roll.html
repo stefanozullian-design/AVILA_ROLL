@@ -394,6 +394,7 @@ select.pi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
 .rp-push-inp.rp-committed{background:rgba(56,189,248,.12);border-color:rgba(56,189,248,.6);color:#38bdf8;}
 .rp-push-inp.rp-dirty{background:rgba(255,184,48,.16);border-color:rgba(255,184,48,.65);color:var(--amber);}
 .rp-push-inp.rp-real{background:rgba(0,217,163,.14);border-color:rgba(0,217,163,.6);color:#00d9a3;font-weight:700;}
+.rp-push-inp.rp-blank{background:transparent;border-color:var(--border2);color:var(--text-dim);}
 .rp-push-inp.rp-over{border-color:#ff3d5a !important;background:rgba(255,61,90,.18) !important;color:#ff3d5a !important;}
 .rp-sw-icon{cursor:pointer;font-size:11px;padding:0 3px;opacity:.7;user-select:none;}
 .rp-lg{display:inline-block;width:14px;height:9px;vertical-align:-1px;margin-right:3px;border-radius:1px;}
@@ -1831,6 +1832,11 @@ const DB = {
                           //   entries (real_unloading_daily) still win per day over either.
   rail_movements:     [], // { id, from_facility_id, to_facility_id, from_dispatch_id, to_berth_id, reference, departure_date, wagon_count, wagon_capacity_t, total_capacity_t, product_id, loading_rate_tph, min_load_pct, transit_days, switch_day, status, notes } — also used for manager "push" allocations (status Confirmed)
   rail_loading_plan:  [], // { id, dispatch_id, product_id, cars_per_day, date_from?, date_to? } — ops loading plan: cars/day to load per product at a rail dispatch point. No dates = base rate; dated rows override that range.
+  rail_push_confirmed:[], // { dispatch_id, date:'YYYY-MM-DD' } — the manager pressed ✓ on this origin switch in the rail planner.
+                          //   A confirmed switch shows ONLY the terminals actually pushed to; every other cell renders empty
+                          //   instead of falling back to the simulation's proposal. Usually a rail_movements row already proves
+                          //   the switch was confirmed — this table exists for the switch confirmed with every cell at zero,
+                          //   where no row survives. ⟳ (reset) deletes the rows AND this marker, restoring the proposals.
   truck_movements:    [], // { id, from_facility_id, to_facility_id, from_dispatch_id (LOAD node = Truck dispatch point), to_element_id (UNLOAD node = Truck Receiving berth), reference, date (start), end_date, daily_rate_t, truck_capacity_t, trips_per_day, product_id, days_of_week:[0=Mon..6=Sun] (empty=every day), transit_days (default 0=same day), status, notes } — inter-facility truck transfer "campaign" between a LOAD node and an UNLOAD node: drains the silos feeding the LOAD point, credits the silos fed by the UNLOAD point (after transit) with only what the origin could supply. from/to_facility_id are derived from the nodes. Actuals in real_transfers_daily (mode 'truck') override the plan.
   transport_links:    [], // { id, from_facility_id, to_facility_id, mode:'truck'|'rail'|'vessel', transit_days, notes } — network level links
   in_transit_inventory:[], // { id, mode, reference_id, product_id, quantity_t, departure_date, arrival_date, to_facility_id, to_element_id, status:'in_transit'|'arrived'|'unloading'|'complete' }
@@ -11732,6 +11738,26 @@ function _rpSetPush(dpId, destFacId, pid, dayNum, ds, value, skipRun){
   else DB.rail_movements.push({id:'push_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),from_facility_id:S.facility_id,to_facility_id:destFacId,from_dispatch_id:dpId,to_berth_id:berthId,product_id:pid,wagon_count:cars,wagon_capacity_t:carCap,total_capacity_t:cars*carCap,switch_day:dayNum,departure_date:ds,transit_days:transit,status:'Confirmed',notes:'Operator push'});
   if(!skipRun){ autoSave(); scheduleSimulation(); }
 }
+// ── Switch confirmation ──────────────────────────────────────────────────────
+// A switch is CONFIRMED once the manager presses ✓ on it. A confirmed switch shows only the
+// terminals actually pushed to — every other cell renders empty instead of falling back to
+// the simulation's proposal. Normally a rail_movements row is proof enough (that fallback
+// also keeps scenarios saved before this existed behaving the new way); the explicit marker
+// only carries the case where every cell was confirmed at zero and no row survives.
+function _rpSwitchConfirmed(dpId, ds, dayNum){
+  if((DB.rail_push_confirmed||[]).some(c=>c.dispatch_id===dpId&&c.date===ds)) return true;
+  return (DB.rail_movements||[]).some(rm=>rm.from_dispatch_id===dpId
+    &&(rm.departure_date?rm.departure_date===ds:rm.switch_day===dayNum));
+}
+function _rpMarkConfirmed(dpId, ds){
+  if(!DB.rail_push_confirmed) DB.rail_push_confirmed=[];
+  if(!DB.rail_push_confirmed.some(c=>c.dispatch_id===dpId&&c.date===ds))
+    DB.rail_push_confirmed.push({dispatch_id:dpId,date:ds});
+}
+function _rpUnmarkConfirmed(dpId, ds){
+  DB.rail_push_confirmed=(DB.rail_push_confirmed||[]).filter(c=>!(c.dispatch_id===dpId&&c.date===ds));
+}
+
 // Record the REAL cars dispatched from a rail dp to one terminal on a (past) switch date.
 // Stored in real_rail_daily as type 'dispatched' (dest-tagged); coexists with the planned
 // movement so plan vs real stays comparable. A 0 is a valid record ("nothing went there").
@@ -11790,21 +11816,38 @@ function _rpConfirmSwitch(dpId, sw){
     else _rpSetPush(dpId, inp.dataset.dest, inp.dataset.pid, parseInt(sw,10), inp.dataset.ds, inp.value, true);
     delete window._rpDrafts[_rpDraftKey(inp)];
   });
+  // Remember that this switch was confirmed, so its un-pushed terminals render empty rather
+  // than falling back to the proposal — including when every cell was confirmed at zero.
+  _rpMarkConfirmed(dpId, ds);
   autoSave();
   statMsg(isPast?'Real dispatch saved — running simulation…':'Pushes confirmed — running simulation…');
   scheduleSimulation();
 }
-// Reset one switch's push inputs (drops drafts, no commit, no re-run): future switches go
-// back to the suggested distribution, past switches back to the planned (committed) values.
+// Reset one switch. A FUTURE switch is un-confirmed: its Confirmed pushes are deleted, the
+// confirmation marker is dropped, and the re-run redraws the column with the simulation's
+// proposals restored. A PAST switch only resets the input boxes to the planned values —
+// real dispatch records (real_rail_daily) are never deleted by a reset.
 function _rpResetSwitch(dpId, sw){
-  const inps=document.querySelectorAll(`input.rp-push-inp[data-dp="${dpId}"][data-sw="${sw}"]`);
+  const inps=[...document.querySelectorAll(`input.rp-push-inp[data-dp="${dpId}"][data-sw="${sw}"]`)];
   if(!inps.length) return;
-  const isPast=inps[0].dataset.ds<new Date()._ymd();
+  const ds=inps[0].dataset.ds;
+  if(ds<new Date()._ymd()){
+    inps.forEach(inp=>{
+      delete window._rpDrafts[_rpDraftKey(inp)];
+      inp.value=inp.dataset.committed||0;
+      _rpPushEdit(inp);
+    });
+    return;
+  }
   inps.forEach(inp=>{
     delete window._rpDrafts[_rpDraftKey(inp)];
-    inp.value=isPast?(inp.dataset.committed||0):(inp.dataset.suggest||0);
-    _rpPushEdit(inp);
+    // 0 removes the movement row (see _rpSetPush) — that IS the un-confirm for this cell.
+    _rpSetPush(dpId, inp.dataset.dest, inp.dataset.pid, parseInt(sw,10), ds, 0, true);
   });
+  _rpUnmarkConfirmed(dpId, ds);
+  autoSave();
+  statMsg('Switch reset — proposals restored, running simulation…');
+  scheduleSimulation();
 }
 // Products a rail dispatch point can load — the products held by its upstream bulk silos.
 function railDpProducts(dp, connections){
@@ -12116,14 +12159,21 @@ function rpRender(){
         });
 
         // 3) Editable push row per terminal (only on switch-day columns).
-        // Cell value precedence: unsaved draft > real (actual) > planned (confirmed) > suggested.
+        // Cell value precedence: unsaved draft > real (actual) > planned (confirmed) >
+        // nothing-pushed-on-a-confirmed-switch > suggested.
         // Colour code: amber = draft, green = real, blue = planned, purple dashed = suggested.
+        // A zero is ALWAYS drawn as an empty cell — never as "0" — so a confirmed switch shows
+        // only the terminals that actually got cars.
         myDests.forEach(fid=>{
           const destFac=DB.facilities.find(f=>f.id===fid);
           const pushCells=months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
             const mc=mon.days.reduce((s,d)=>{ if(!rpIsSwitch(d,switchDays))return s;
-              const rl=realPush(pid,fid,rpDayDate(d)); if(rl) return s+(parseInt(rl.cars)||0);
-              const ex=existingPush(pid,fid,d); return s+(ex?(parseInt(ex.wagon_count)||0):(suggest[d]?.[fid]||0)); },0);
+              const _mds=rpDayDate(d);
+              const rl=realPush(pid,fid,_mds); if(rl) return s+(parseInt(rl.cars)||0);
+              const ex=existingPush(pid,fid,d); if(ex) return s+(parseInt(ex.wagon_count)||0);
+              // Confirmed switch with nothing pushed here contributes 0, so the month total
+              // agrees with the empty cells below it instead of counting the proposal.
+              return s+(_rpSwitchConfirmed(dp.id,_mds,d)?0:(suggest[d]?.[fid]||0)); },0);
             const mTd=`<td class="logi-mcol" style="${_mTdSty}">${mc>0?mc+' cars':'—'}</td>`;
             return mTd+(isCol?[]:mon.days).map(d=>{ const tSty=_tpTdSty(d); const sw=rpIsSwitch(d,switchDays);
               if(!sw) return `<td${tSty?` style="${tSty}"`:''}></td>`;
@@ -12138,12 +12188,17 @@ function rpRender(){
               let base, cls, ttl;
               if(realVal!==null){ base=realVal; cls='rp-real'; ttl=`REAL: ${realVal} cars dispatched`+(ex?` · planned ${committed}`:'')+(sg?` · suggested ${sg}`:''); }
               else if(ex){ base=committed; cls='rp-committed'; ttl='Planned (confirmed) — edit & ✓ to update'+(isPast?'. Past switch: ✓ records the number as REAL':''); }
+              else if(_rpSwitchConfirmed(dp.id,ds,d)){ base=0; cls='rp-blank';
+                ttl='This switch is confirmed and nothing was pushed to this terminal'+(sg?` (the simulation had suggested ${sg})`:'')+'. Type a number & ✓ to add cars, or ⟳ under this switch to restore the proposals'; }
               else { base=sg; cls='rp-proposed'; ttl='Proposed by the simulation — adjust, then ✓ under this switch to '+(isPast?'record as REAL':'confirm as the plan'); }
               const draft=window._rpDrafts[`${dp.id}|${d}|${fid}|${pid}`];
               const val=draft!==undefined?draft:base;
-              const shown=draft!==undefined&&draft!==base?'rp-dirty':cls;
+              // Zero shows as an empty box; data-base stays numeric so _rpPushEdit's dirty
+              // check still works (an empty box reads back as 0).
+              const shownVal=val>0?val:'';
+              const shown=draft!==undefined&&draft!==base?'rp-dirty':(val>0?cls:'rp-blank');
               const avail=availAtSwitch(pid,d);
-              return `<td class="tp-col-switch"${tSty?` style="${tSty}"`:''}><input type="number" min="0" step="1" value="${val}" data-dp="${dp.id}" data-sw="${d}" data-dest="${fid}" data-pid="${pid}" data-ds="${ds}" data-committed="${committed}" data-suggest="${sg}" data-real="${realVal!==null?realVal:''}" data-base="${base}" data-cls="${cls}" data-avail="${avail}" title="${ttl}" onchange="_rpPushEdit(this)" class="rp-push-inp ${shown}"></td>`; }).join('');
+              return `<td class="tp-col-switch"${tSty?` style="${tSty}"`:''}><input type="number" min="0" step="1" value="${shownVal}" data-dp="${dp.id}" data-sw="${d}" data-dest="${fid}" data-pid="${pid}" data-ds="${ds}" data-committed="${committed}" data-suggest="${sg}" data-real="${realVal!==null?realVal:''}" data-base="${base}" data-cls="${cls}" data-avail="${avail}" title="${ttl}" onchange="_rpPushEdit(this)" class="rp-push-inp ${shown}"></td>`; }).join('');
           }).join('');
           origRows.push(`<tr class="tp-row-push"><td style="color:#ff9433">    → push ${destFac?.name||fid}</td>${pushCells}</tr>`);
         });
@@ -12151,13 +12206,21 @@ function rpRender(){
 
       // Per-switch CONFIRM (✓) / RESET (⟳) controls — one row for this dispatch point.
       // The manager adjusts the push numbers above (cells turn amber), then clicks ✓ under a
-      // switch to commit ALL that switch's pushes at once (they turn green); ⟳ restores suggestions.
+      // switch to commit ALL that switch's pushes at once. From then on the column shows only
+      // the terminals that got cars; the rest go empty. A lit ⟳ marks a confirmed switch and
+      // undoes it — discarding that switch's plan and bringing the proposals back.
       const confirmCells=months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
         const mTd=`<td class="logi-mcol" style="${_mTdSty}"></td>`;
         return mTd+(isCol?[]:mon.days).map(d=>{ const tSty=_tpTdSty(d); const sw=rpIsSwitch(d,switchDays);
           if(!sw) return `<td${tSty?` style="${tSty}"`:''}></td>`;
-          const _cPast=rpDayDate(d)<_rpToday;
-          return `<td class="tp-col-switch" style="text-align:center;${tSty||''}"><span class="rp-sw-icon" style="color:#00d9a3" title="${_cPast?'Record this switch\'s numbers as REAL dispatches':'Confirm all pushes for this switch as the plan'}" onclick="_rpConfirmSwitch('${dp.id}',${d})">✓</span><span class="rp-sw-icon" style="color:#8e9ab8" title="${_cPast?'Reset this switch to the planned values':'Reset this switch to the suggested distribution'}" onclick="_rpResetSwitch('${dp.id}',${d})">⟳</span></td>`; }).join('');
+          const _cDs=rpDayDate(d);
+          const _cPast=_cDs<_rpToday;
+          const _cConf=_rpSwitchConfirmed(dp.id,_cDs,d);
+          const _cRstCol=_cConf?'#b388ff':'#8e9ab8';
+          const _cRstTtl=_cPast?'Reset this switch to the planned values (real dispatches are kept)'
+            :_cConf?'Confirmed — click to discard this switch\'s plan and restore the proposals'
+            :'Reset this switch to the suggested distribution';
+          return `<td class="tp-col-switch" style="text-align:center;${tSty||''}"><span class="rp-sw-icon" style="color:#00d9a3" title="${_cPast?'Record this switch\'s numbers as REAL dispatches':'Confirm all pushes for this switch as the plan — terminals left empty get no cars'}" onclick="_rpConfirmSwitch('${dp.id}',${d})">✓</span><span class="rp-sw-icon" style="color:${_cRstCol};${_cConf?'font-weight:700':''}" title="${_cRstTtl}" onclick="_rpResetSwitch('${dp.id}',${d})">⟳</span></td>`; }).join('');
       }).join('');
       origRows.push(`<tr class="tp-row-confirm"><td style="color:#8e9ab8;font-size:8px;letter-spacing:.04em">    ✓ confirm · ⟳ reset</td>${confirmCells}</tr>`);
     });
@@ -12178,7 +12241,8 @@ function rpRender(){
     <span><span class="rp-lg" style="background:rgba(255,184,48,.25);border:1px solid rgba(255,184,48,.7)"></span> Edited (unsaved — click ✓)</span>
     <span><span class="rp-lg" style="background:rgba(56,189,248,.2);border:1px solid rgba(56,189,248,.7)"></span> Planned (confirmed)</span>
     <span><span class="rp-lg" style="background:rgba(0,217,163,.22);border:1px solid rgba(0,217,163,.7)"></span> Real (actual dispatch)</span>
-    <span><span class="rp-lg" style="background:rgba(255,61,90,.25);border:1px solid #ff3d5a"></span> Exceeds available cars</span>`;
+    <span><span class="rp-lg" style="background:rgba(255,61,90,.25);border:1px solid #ff3d5a"></span> Exceeds available cars</span>
+    <span style="opacity:.7">A confirmed switch (lit ⟳) shows only the terminals you pushed to — the rest stay empty until ⟳ restores the proposals.</span>`;
 }
 
 // ── Rail exception banner ──────────────────────────────────────────
