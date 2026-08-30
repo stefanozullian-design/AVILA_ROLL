@@ -394,7 +394,6 @@ select.pi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
 .rp-push-inp.rp-committed{background:rgba(56,189,248,.12);border-color:rgba(56,189,248,.6);color:#38bdf8;}
 .rp-push-inp.rp-dirty{background:rgba(255,184,48,.16);border-color:rgba(255,184,48,.65);color:var(--amber);}
 .rp-push-inp.rp-real{background:rgba(0,217,163,.14);border-color:rgba(0,217,163,.6);color:#00d9a3;font-weight:700;}
-.rp-push-inp.rp-blank{background:transparent;border-color:var(--border2);color:var(--text-dim);}
 .rp-push-inp.rp-over{border-color:#ff3d5a !important;background:rgba(255,61,90,.18) !important;color:#ff3d5a !important;}
 .rp-sw-icon{cursor:pointer;font-size:11px;padding:0 3px;opacity:.7;user-select:none;}
 .rp-lg{display:inline-block;width:14px;height:9px;vertical-align:-1px;margin-right:3px;border-radius:1px;}
@@ -1236,10 +1235,21 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
         <!-- Facility filter (chips, like the date presets) -->
         <span style="font-family:var(--mono);font-size:8px;color:var(--text-dim);letter-spacing:1px;text-transform:uppercase">Facility</span>
         <div id="sup-fac-chips" style="display:flex;gap:3px;flex-wrap:wrap"></div>
-        <!-- Product filter -->
-        <select id="sup-prod-filter" style="padding:3px 8px;background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:9px" onchange="if(!window._supView)window._supView={};window._supView.prodId=this.value;renderSupplyView()">
+        <div class="tb-div"></div>
+        <!-- Family / Category / Product — cascading, each narrows the next -->
+        <span style="font-family:var(--mono);font-size:8px;color:var(--text-dim);letter-spacing:1px;text-transform:uppercase">Family</span>
+        <select id="sup-fam-filter" style="padding:3px 8px;background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:9px" onchange="supOnFamChange()">
+          <option value="">All Families</option>
+        </select>
+        <span style="font-family:var(--mono);font-size:8px;color:var(--text-dim);letter-spacing:1px;text-transform:uppercase">Category</span>
+        <select id="sup-cat-filter" style="padding:3px 8px;background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:9px" onchange="supOnCatChange()">
+          <option value="">All Categories</option>
+        </select>
+        <span style="font-family:var(--mono);font-size:8px;color:var(--text-dim);letter-spacing:1px;text-transform:uppercase">Product</span>
+        <select id="sup-prod-filter" style="padding:3px 8px;background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:9px" onchange="supOnProdChange()">
           <option value="">All Products</option>
         </select>
+        <button class="tb-btn sec" style="font-size:9px;padding:3px 10px" onclick="supClearProdFilters()">✕ Clear</button>
         <!-- Today button -->
         <button class="tb-btn sec" style="margin-left:auto;font-size:9px;padding:3px 10px" onclick="supplyScrollToday()">Today</button>
       </div>
@@ -1792,15 +1802,6 @@ function loadLib(name){
 // scattered across 15 sites.
 const RAIL_CAR_T_DEFAULT=112;
 
-// RAIL RECEIPT v2 — arriving cars are credited to the destination silo IN FULL on the
-// terminal's switch day (capped only by silo space). No spotting lag, no unload rate:
-// dispatch on the origin switch day → travel transit_days → wait at the rail yard →
-// next terminal switch day the whole volume becomes available inventory in the silo.
-// A berth with no switch_days configured receives on the arrival day itself.
-// Set to false to fall back to the v1 pipeline (rail yard → local yard → rate-limited
-// unloading), which is still present below but is dead code while this is true.
-const RAIL_DIRECT_TO_SILO = true;
-
 const DB = {
   // Location hierarchy
   macro_regions:    [],  // { id, name, notes }
@@ -1814,7 +1815,10 @@ const DB = {
   connections:      [],  // { id, facility_id, from_element_id, to_element_id }
 
   // System catalogs
-  products:         [],  // { id, name, description, material_code, category:'raw_meal'|'clinker'|'cement_bulk'|'cement_packed'|'additive' }
+  products:         [],  // { id, name, description, material_code, category:'raw_meal'|'clinker'|'cement_bulk'|'cement_packed'|'additive', facility_id? }
+                         //   facility_id — WHERE the product is made (optional, set in the product form). Descriptive metadata:
+                         //   the simulation still derives production from element_product_capacities. It seeds the Supply-page
+                         //   Facility→Product filter so a product shows up there before it is wired into the topology.
   recipes:          [],  // { id, product_id, material_id, pct }  — for cement products: ingredient product_ids; for clinker: raw material ids
   raw_materials:    [],  // { id, name, unit, notes }
   fuels:            [],  // { id, name, unit, calorific_value, co2_factor, notes }
@@ -1832,11 +1836,6 @@ const DB = {
                           //   entries (real_unloading_daily) still win per day over either.
   rail_movements:     [], // { id, from_facility_id, to_facility_id, from_dispatch_id, to_berth_id, reference, departure_date, wagon_count, wagon_capacity_t, total_capacity_t, product_id, loading_rate_tph, min_load_pct, transit_days, switch_day, status, notes } — also used for manager "push" allocations (status Confirmed)
   rail_loading_plan:  [], // { id, dispatch_id, product_id, cars_per_day, date_from?, date_to? } — ops loading plan: cars/day to load per product at a rail dispatch point. No dates = base rate; dated rows override that range.
-  rail_push_confirmed:[], // { dispatch_id, date:'YYYY-MM-DD' } — the manager pressed ✓ on this origin switch in the rail planner.
-                          //   A confirmed switch shows ONLY the terminals actually pushed to; every other cell renders empty
-                          //   instead of falling back to the simulation's proposal. Usually a rail_movements row already proves
-                          //   the switch was confirmed — this table exists for the switch confirmed with every cell at zero,
-                          //   where no row survives. ⟳ (reset) deletes the rows AND this marker, restoring the proposals.
   truck_movements:    [], // { id, from_facility_id, to_facility_id, from_dispatch_id (LOAD node = Truck dispatch point), to_element_id (UNLOAD node = Truck Receiving berth), reference, date (start), end_date, daily_rate_t, truck_capacity_t, trips_per_day, product_id, days_of_week:[0=Mon..6=Sun] (empty=every day), transit_days (default 0=same day), status, notes } — inter-facility truck transfer "campaign" between a LOAD node and an UNLOAD node: drains the silos feeding the LOAD point, credits the silos fed by the UNLOAD point (after transit) with only what the origin could supply. from/to_facility_id are derived from the nodes. Actuals in real_transfers_daily (mode 'truck') override the plan.
   transport_links:    [], // { id, from_facility_id, to_facility_id, mode:'truck'|'rail'|'vessel', transit_days, notes } — network level links
   in_transit_inventory:[], // { id, mode, reference_id, product_id, quantity_t, departure_date, arrival_date, to_facility_id, to_element_id, status:'in_transit'|'arrived'|'unloading'|'complete' }
@@ -1905,10 +1904,7 @@ const DB = {
   real_production_daily: [], // { date:'YYYY-MM-DD', facility_id, element_id, product_id, volume_t, source:'actual', created_at, updated_at }
   real_inventory_daily:  [], // { date:'YYYY-MM-DD', facility_id, silo_id, product_id, eod_volume_t, source:'actual', created_at, updated_at }
   real_transfers_daily:  [], // { date:'YYYY-MM-DD', origin_facility_id, dest_facility_id, mode:'rail'|'truck', product_id, volume_t, created_at, updated_at }
-  real_rail_daily:       [], // { date:'YYYY-MM-DD', facility_id, dest_facility_id?, product_id, type, cars:N, source:'actual', created_at, updated_at }
-                             //   type: 'loading' (cars loaded at the origin) | 'dispatched' (cars pushed to a destination on a
-                             //   switch day) | 'railyard_count' / 'localyard_count' (absolute physical stage counts) |
-                             //   'placed' (RAIL RECEIPT v1 only — spotting rail yard → local yard; ignored under v2) | 'delivered'.
+  real_rail_daily:       [], // { date:'YYYY-MM-DD', facility_id, product_id, type:'loading'|'delivered', cars:N, source:'actual', created_at, updated_at }
   real_shipping_daily:   [], // { date:'YYYY-MM-DD', facility_id, product_id, volume_t, source:'actual', created_at, updated_at }
   real_unloading_daily:  []  // { date:'YYYY-MM-DD', facility_id, berth_id, product_id, mode:'ship'|'rail'|'truck', value, unit:'t'|'cars', cars?:N (rail: entered car count for display; value stays tonnes for the sim), source:'actual', created_at, updated_at }
 };
@@ -3155,25 +3151,19 @@ function renderProps(id){
   }
 
   // ── RAIL RECEIVING BERTH — terminal switch days ─────────
-  // Mirrors the Dispatch/Rail switch-day picker. Under RAIL RECEIPT v2 a switch day is the
-  // day the terminal RECEIVES: every railcar waiting at the rail yard is credited to the
-  // silo that day, in full, limited only by silo space. (v1 pulled them to a LOCAL YARD and
-  // unloaded from the next morning's count at the berth rate — see RAIL_DIRECT_TO_SILO.)
+  // Mirrors the Dispatch/Rail switch-day picker. On a switch day the terminal asks the
+  // railroad to pull the cars available at the RAIL YARD; they are placed at the LOCAL
+  // YARD the next day and unload from that morning's count.
   if(el.type==='berth'&&(el.props.berth_type||'')==='Rail Receiving'){
     const DAYS=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
     const swDays=el.props.switch_days||[];
     h+=`<div class="pg"><div class="pg-title">Terminal Rail Switch</div>
       <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-bottom:8px">
-        ${RAIL_DIRECT_TO_SILO
-          ?`On a switch day the terminal receives <b>every railcar waiting at the rail yard</b> —
-            the full volume is added to the silo that same day, limited only by silo space
-            (whatever does not fit stays at the rail yard for a later day). There is no
-            unloading rate. With no switch days selected, cars are received on their arrival day.`
-          :`On a switch day the terminal pulls the railcars available at the rail yard; they are
-            placed at the local yard <b>the day after</b> and unload from that morning. With no
-            switch days selected, cars are spotted daily (no switch constraint).`}
+        On a switch day the terminal pulls the railcars available at the rail yard; they are
+        placed at the local yard <b>the day after</b> and unload from that morning. With no
+        switch days selected, cars are spotted daily (no switch constraint).
       </div>
-      <div class="pf"><div class="pl">Switch Days — when cars ${RAIL_DIRECT_TO_SILO?'are received into the silo':'are pulled from the rail yard'}</div>
+      <div class="pf"><div class="pl">Switch Days — when cars are pulled from the rail yard</div>
         <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
           ${DAYS.map((d,i)=>`
             <label style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer">
@@ -5778,7 +5768,7 @@ function exportElementsCSV(){
 // ═══════════════════════════════════════════════════════════════
 
 // State for supply view filters
-if(!window._supView) window._supView={preset:'rom', fromDate:'', toDate:'', facId:'', prodId:''};
+if(!window._supView) window._supView={preset:'rom', fromDate:'', toDate:'', facId:'', family:'', cat:'', prodId:''};
 
 function supSetView(preset, btn){
   window._supView.preset=preset;
@@ -5791,8 +5781,15 @@ function supSetView(preset, btn){
 
 
 
-function supPopulateProductFilter(facId){
-  const sel=document.getElementById('sup-prod-filter'); if(!sel) return;
+// Product ids in scope for the Supply page at a given facility ('' = all facilities).
+// Two sources, unioned:
+//   1. TOPOLOGY - what the wiring says is produced/stored/demanded there (mills' and
+//      packers' element_product_capacities, terminal bulk silos, terminal demand points).
+//   2. CATALOG - products whose own facility_id ("Made At", set in the product form)
+//      names this facility. This is what makes the list grow on its own: a product the
+//      user creates and assigns to a plant is filterable immediately, before anyone has
+//      wired it into a mill's capacity table.
+function supScopeProductIds(facId){
   const prodIds=new Set();
   const inFac=e=>!facId||(e.assigned_facility_id===facId||e.facility_id===facId);
   // Plant production products (kilns / finish mills / packing plants).
@@ -5809,17 +5806,112 @@ function supPopulateProductFilter(facId){
   DB.elements.filter(e=>e.type==='demand_point').filter(inFac).filter(isTermEl)
     .forEach(el=>{ const dp=DB.demand_points.find(d=>d.element_id===el.id);
       (dp?.products||[]).forEach(p=>{ if(p.product_id) prodIds.add(p.product_id); }); });
-  const cur=sel.value;
-  sel.innerHTML='<option value="">All Products</option>'+
-    [...prodIds].map(pid=>({pid,name:DB.products.find(pr=>pr.id===pid)?.name||pid}))
-      .sort((a,b)=>a.name.localeCompare(b.name))
-      .map(o=>`<option value="${o.pid}" ${o.pid===cur?'selected':''}>${o.name}</option>`).join('');
+  // Catalog-declared "Made At" products.
+  (DB.products||[]).forEach(p=>{ if(p.facility_id && (!facId||p.facility_id===facId)) prodIds.add(p.id); });
+  return prodIds;
+}
+
+const SUP_CAT_LABELS={cement_bulk:'Cement Bulk',cement_packed:'Cement Packed',clinker:'Clinker',raw_meal:'Raw Material',additive:'SCM'};
+
+// Fill the Family / Category / Product dropdowns. Each is built from the products in
+// scope for the selected facility and narrowed by the selections above it, so the user
+// can only pick combinations that actually exist. A stale selection (one that no longer
+// appears after a change upstream) is dropped by supNormalizeProdFilters() first.
+function supPopulateProductFilter(facId){
+  const v=window._supView||{};
+  const scope=supScopeProductIds(facId);
+  const catOf=pid=>DB.products.find(p=>p.id===pid)?.category||'';
+  const famOf=pid=>PRODUCT_FAMILY_OF[catOf(pid)]||'';
+
+  const famSel=document.getElementById('sup-fam-filter');
+  if(famSel){
+    const fams=[...new Set([...scope].map(famOf).filter(Boolean))]
+      .sort((a,b)=>(PRODUCT_FAMILY_LABELS[a]||a).localeCompare(PRODUCT_FAMILY_LABELS[b]||b));
+    famSel.innerHTML='<option value="">All Families</option>'+fams.map(f=>
+      `<option value="${f}"${f===v.family?' selected':''}>${PRODUCT_FAMILY_LABELS[f]||f}</option>`).join('');
+  }
+
+  const catSel=document.getElementById('sup-cat-filter');
+  if(catSel){
+    let ids=[...scope];
+    if(v.family) ids=ids.filter(id=>famOf(id)===v.family);
+    const cats=[...new Set(ids.map(catOf).filter(Boolean))]
+      .sort((a,b)=>(SUP_CAT_LABELS[a]||a).localeCompare(SUP_CAT_LABELS[b]||b));
+    catSel.innerHTML='<option value="">All Categories</option>'+cats.map(c=>
+      `<option value="${c}"${c===v.cat?' selected':''}>${SUP_CAT_LABELS[c]||c}</option>`).join('');
+  }
+
+  const sel=document.getElementById('sup-prod-filter');
+  if(sel){
+    let ids=[...scope];
+    if(v.family) ids=ids.filter(id=>famOf(id)===v.family);
+    if(v.cat)    ids=ids.filter(id=>catOf(id)===v.cat);
+    sel.innerHTML='<option value="">All Products</option>'+
+      ids.map(pid=>({pid,name:DB.products.find(pr=>pr.id===pid)?.name||pid}))
+        .sort((a,b)=>a.name.localeCompare(b.name))
+        .map(o=>`<option value="${o.pid}"${o.pid===v.prodId?' selected':''}>${esc(o.name)}</option>`).join('');
+  }
+}
+
+// Drop selections the current facility/family/category no longer allows, so the page
+// never filters on a combination that isn't offered in the dropdowns.
+function supNormalizeProdFilters(){
+  const v=window._supView; if(!v) return;
+  const scope=supScopeProductIds(v.facId||'');
+  const catOf=pid=>DB.products.find(p=>p.id===pid)?.category||'';
+  const famOf=pid=>PRODUCT_FAMILY_OF[catOf(pid)]||'';
+  if(v.prodId && !scope.has(v.prodId)) v.prodId='';
+  if(v.family && ![...scope].some(id=>famOf(id)===v.family)) v.family='';
+  if(v.cat && v.family && PRODUCT_FAMILY_OF[v.cat]!==v.family) v.cat='';
+  if(v.cat && ![...scope].some(id=>catOf(id)===v.cat)) v.cat='';
+  if(v.prodId && v.family && famOf(v.prodId)!==v.family) v.prodId='';
+  if(v.prodId && v.cat && catOf(v.prodId)!==v.cat) v.prodId='';
+}
+
+// The set of product ids the page may currently show, or null for "no product
+// restriction" (all three dropdowns on All). Callers use supProdOk(pid) rather than
+// comparing against one selected product, so Family / Category / Product all narrow
+// the page through the same path.
+function supAllowedProdIds(){
+  const v=window._supView||{};
+  if(!v.family && !v.cat && !v.prodId) return null;
+  if(v.prodId) return new Set([v.prodId]);
+  return new Set((DB.products||[]).filter(p=>
+    v.cat ? (p.category||'')===v.cat : (PRODUCT_FAMILY_OF[p.category]||'')===v.family
+  ).map(p=>p.id));
+}
+function supProdOk(pid, allowed){
+  const a=(allowed===undefined)?supAllowedProdIds():allowed;
+  return !a || a.has(pid);
+}
+
+function supOnFamChange(){
+  if(!window._supView) window._supView={};
+  window._supView.family=document.getElementById('sup-fam-filter')?.value||'';
+  renderSupplyView();
+}
+function supOnCatChange(){
+  if(!window._supView) window._supView={};
+  window._supView.cat=document.getElementById('sup-cat-filter')?.value||'';
+  renderSupplyView();
+}
+function supOnProdChange(){
+  if(!window._supView) window._supView={};
+  window._supView.prodId=document.getElementById('sup-prod-filter')?.value||'';
+  renderSupplyView();
+}
+// Clears the product-side filters only — the facility chips and the date preset are
+// separate controls with their own "All" option.
+function supClearProdFilters(){
+  if(!window._supView) window._supView={};
+  window._supView.family=''; window._supView.cat=''; window._supView.prodId='';
+  renderSupplyView();
 }
 
 function supInitFilters(){
   // Facility filter rendered as toggle chips (same style as the ROM/ROY date presets).
   const wrap=document.getElementById('sup-fac-chips'); if(!wrap) return;
-  if(!window._supView) window._supView={preset:'rom',fromDate:'',toDate:'',facId:'',prodId:''};
+  if(!window._supView) window._supView={preset:'rom',fromDate:'',toDate:'',facId:'',family:'',cat:'',prodId:''};
   const qualFacIds=new Set(
     DB.elements
       .filter(e=>['kiln','finish_mill','packing_plant'].includes(e.type))
@@ -5842,14 +5934,17 @@ function supInitFilters(){
       .filter(f=>qualFacIds.has(f.id))
       .map(f=>`<button class="vw-btn ${f.id===cur?'active':''}" onclick="supSelectFac('${f.id}')">${f.name}</button>`)
       .join('');
-  supPopulateProductFilter(cur);
+  supNormalizeProdFilters();
+  supPopulateProductFilter(window._supView.facId||'');
 }
 
 // Click handler for the facility filter chips.
 function supSelectFac(facId){
-  if(!window._supView) window._supView={preset:'rom',fromDate:'',toDate:'',facId:'',prodId:''};
+  if(!window._supView) window._supView={preset:'rom',fromDate:'',toDate:'',facId:'',family:'',cat:'',prodId:''};
   window._supView.facId=facId;
-  window._supView.prodId='';
+  // Family/Category/Product are scoped to the facility — a selection made for the
+  // previous one may not exist here, so reset the chain and let the user re-pick.
+  window._supView.family=''; window._supView.cat=''; window._supView.prodId='';
   renderSupplyView(); // re-renders chips (active state) + product list + table
 }
 
@@ -5890,7 +5985,10 @@ function renderSupplyKPIs(){
   const todayStr=today._ymd();
   const simStart=new Date(S.simCfg.start_date+'T00:00:00');
   const facId=window._supView?.facId||'';
-  const prodId=window._supView?.prodId||'';
+  // Same allowed-product set the table uses, so the KPI cards agree with what is
+  // rendered below them under a Family or Category filter (not just a single product).
+  const _kpiPids=supAllowedProdIds();
+  const pidOk=pid=>!_kpiPids||_kpiPids.has(pid);
 
   // Elements in scope
   const millEls=DB.elements.filter(e=>
@@ -5906,11 +6004,11 @@ function renderSupplyKPIs(){
     mtdDates.push(d._ymd());
 
   millEls.forEach(el=>{
-    const caps=DB.element_product_capacities.filter(c=>c.element_id===el.id&&(!prodId||c.product_id===prodId));
+    const caps=DB.element_product_capacities.filter(c=>c.element_id===el.id&&pidOk(c.product_id));
     const ratedMax=caps.reduce((s,c)=>s+(parseFloat(c.capacity_tpd)||0),0);
     mtdDates.forEach(ds=>{
       // Actual data
-      const actual=DB.real_production_daily.filter(rp=>rp.date===ds&&rp.element_id===el.id&&(!prodId||rp.product_id===prodId));
+      const actual=DB.real_production_daily.filter(rp=>rp.date===ds&&rp.element_id===el.id&&pidOk(rp.product_id));
       if(actual.length) mtdActual+=actual.reduce((s,rp)=>s+(parseFloat(rp.volume_t)||0),0);
       // Rated (skip maintenance days)
       const isMaint=DB.element_maintenance_events.some(m=>{
@@ -5933,7 +6031,7 @@ function renderSupplyKPIs(){
       const dayIdx=Math.round((d-simStart)/864e5);
       millEls.forEach(el=>{
         const pid=r.millProductHistory[el.id]?.[dayIdx]||null;
-        if(pid&&(!prodId||pid===prodId)){
+        if(pid&&pidOk(pid)){
           const cap=DB.element_product_capacities.find(c=>c.element_id===el.id&&c.product_id===pid);
           forecastRem+=parseFloat(cap?.capacity_tpd)||0;
         }
@@ -5952,9 +6050,9 @@ function renderSupplyKPIs(){
     e.type==='bulk_silo'&&
     (!facId||(e.facility_id===facId||e.assigned_facility_id===facId))
   );
-  const prodIds=prodId?[prodId]:[...new Set(
+  const prodIds=[...new Set(
     millEls.flatMap(el=>DB.element_product_capacities.filter(c=>c.element_id===el.id).map(c=>c.product_id))
-  )];
+  )].filter(pidOk);
 
   prodIds.forEach(pid=>{
     const prod=DB.products.find(p=>p.id===pid); if(!prod) return;
@@ -6057,7 +6155,7 @@ function renderProductsCat(){
     <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">tables: products, recipes</div>
     <button class="tb-btn sec" onclick="showModal('product-modal')">+ New Product</button></div>
   <table class="cat-table"><thead><tr>
-    <th>Name</th><th>Material Code</th><th>Category</th><th>Recipe (ingredients)</th><th></th>
+    <th>Name</th><th>Material Code</th><th>Facility</th><th>Category</th><th>Recipe (ingredients)</th><th></th>
   </tr></thead><tbody>`;
   DB.products.forEach((p,i)=>{
     const cat=p.category||'cement_bulk';
@@ -6075,6 +6173,7 @@ function renderProductsCat(){
     h+=`<tr>
       <td style="color:var(--green);font-weight:700">${p.name}</td>
       <td style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">${p.material_code||'—'}</td>
+      <td style="font-family:var(--mono);font-size:9px;color:${p.facility_id?'var(--text)':'var(--text-dim)'}">${p.facility_id?esc(DB.facilities.find(f=>f.id===p.facility_id)?.name||p.facility_id):'—'}</td>
       <td><span style="font-family:var(--mono);font-size:8px;padding:2px 7px;border:1px solid ${catColor};color:${catColor}">${catLabel}</span></td>
       <td><div class="recipe-list">${recipe||'<span style="color:var(--text-dim);font-size:9px">no recipe — kiln product</span>'}</div></td>
       <td>
@@ -6171,6 +6270,18 @@ function _pmSelectCat(fam,cat,sub){
   if(wrap) wrap.innerHTML=_pmCatChipsHtml(fam,cat,sub);
 }
 
+// Facility <option>s for the product form. Plants first, then terminals (a terminal
+// can pack/blend), each group labelled so the two are distinguishable in one list.
+function _pmFacOpts(sel){
+  const grp=(type,label)=>{
+    const fs=(DB.facilities||[]).filter(f=>f.type===type).sort((a,b)=>a.name.localeCompare(b.name));
+    if(!fs.length) return '';
+    return `<optgroup label="${label}">`+fs.map(f=>
+      `<option value="${f.id}"${f.id===sel?' selected':''}>${esc(f.name)}</option>`).join('')+`</optgroup>`;
+  };
+  return `<option value="">-- Not assigned --</option>`+grp('plant','Plants')+grp('terminal','Terminals');
+}
+
 function openProductModal(p){
   const recipe=p?DB.recipes.filter(r=>r.product_id===p.id):[];
   S._ingCount=recipe.length||1;
@@ -6209,6 +6320,12 @@ function openProductModal(p){
       </div>
       <div class="fr">
         <div class="ff"><div class="fl">Description</div><input class="fi" id="pm-desc" value="${p?.description||''}"></div>
+        <div class="ff"><div class="fl">Made At (Facility)</div>
+          <select class="fi" id="pm-fac">${_pmFacOpts(p?.facility_id||'')}</select>
+          <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-top:3px">
+            Where this product is produced. Feeds the Supply page Facility filter.
+          </div>
+        </div>
       </div>
       <div class="fr s1"><div class="ff"><div class="fl">Family</div>
         <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px">
@@ -6267,7 +6384,9 @@ function saveProduct(){
   const scm_type=document.getElementById('pm-scmtype')?.value||'';
   // Generate stable id from name
   const pid=name.toLowerCase().replace(/[\s\/\(\)\-]+/g,'_').replace(/__+/g,'_').replace(/^_|_$/g,'');
+  const facility_id=document.getElementById('pm-fac')?.value||'';
   const prod={id:pid, name, description:desc, material_code, category};
+  if(facility_id) prod.facility_id=facility_id;
   if(category==='additive' && scm_type) prod.scm_type=scm_type;
 
   if(S._editProductIdx!=null){
@@ -6477,16 +6596,7 @@ function renderDemandView(){
     const rec=demandMap[`${elId}|${ds}`];
     return rec?.source||'forecast';
   };
-  // EFFECTIVE value per element = own − swapped-out + swapped-in (point-to-point),
-  // so facility/group totals and TOTAL ALL include demand swaps — matching the
-  // "↳ = demand here (own ± swap)" child rows and the logistics planner (rpDemandEff).
-  const getEffVal=(elId,ds)=>{
-    let v=getVal(elId,ds);
-    if(typeof _resolveDemandSwap==='function'){ const sw=_resolveDemandSwap(elId,v,ds); if(sw&&sw.qty) v-=Math.min(sw.qty,v); }
-    if(typeof _resolveDemandSwapIn==='function') v+=_resolveDemandSwapIn(elId,ds,(id)=>getVal(id,ds))||0;
-    return v;
-  };
-  const grpTotal=(els,ds)=>els.reduce((s,el)=>s+getEffVal(el.id,ds),0);
+  const grpTotal=(els,ds)=>els.reduce((s,el)=>s+getVal(el.id,ds),0);
   const grpMonTotal=(els,mon)=>mon.dates.reduce((s,ds)=>s+grpTotal(els,ds),0);
 
   // Build org hierarchy relevant to the current canvas elements
@@ -7590,7 +7700,12 @@ function _renderSupplyViewInner(wrap){
   // Collect all production elements (kilns + finish mills + packing plants) from current canvas
   // Apply facility and product filters from filter bar
   const _supFacFilter=window._supView?.facId||document.getElementById('sup-fac-filter')?.value||'';
-  const _supProdFilter=window._supView?.prodId||document.getElementById('sup-prod-filter')?.value||'';
+  // Family / Category / Product collapse into ONE set of allowed product ids
+  // (null = unrestricted). Everything product-scoped on the page tests against
+  // _supProdAllows() so all three dropdowns narrow the view identically — a
+  // Family or Category pick behaves like picking each of its products at once.
+  const _supAllowedPids=(typeof supAllowedProdIds==='function')?supAllowedProdIds():null;
+  const _supProdAllows=pid=>!_supAllowedPids||_supAllowedPids.has(pid);
   const allEls=getFacElements();
   // Terminal-type facilities ALWAYS render via the terminal (category-first) path,
   // even when they own production elements (e.g. a packing plant at PEV). Without
@@ -7603,10 +7718,11 @@ function _renderSupplyViewInner(wrap){
   if(_supFacFilter){
     prodEls=prodEls.filter(e=>(e.assigned_facility_id||e.facility_id)===_supFacFilter);
   }
-  // Filter by selected product (only show elements that produce the selected product)
-  if(_supProdFilter){
+  // Filter by product selection (only show elements that produce a product the
+  // Family/Category/Product filters allow)
+  if(_supAllowedPids){
     prodEls=prodEls.filter(e=>
-      DB.element_product_capacities.some(c=>c.element_id===e.id&&c.product_id===_supProdFilter)
+      DB.element_product_capacities.some(c=>c.element_id===e.id&&_supProdAllows(c.product_id))
     );
   }
 
@@ -7616,12 +7732,12 @@ function _renderSupplyViewInner(wrap){
   const _termHasEls=f=>allEls.some(e=>(e.assigned_facility_id||e.facility_id)===f.id&&(e.type==='bulk_silo'||e.type==='packed_silo'||e.type==='demand_point'||e.type==='berth'||e.type==='packing_plant'));
   let _termFacs=DB.facilities.filter(f=>f.type==='terminal').filter(_termHasEls);
   if(_supFacFilter) _termFacs=_termFacs.filter(f=>f.id===_supFacFilter);
-  if(_supProdFilter) _termFacs=_termFacs.filter(f=>{
+  if(_supAllowedPids) _termFacs=_termFacs.filter(f=>{
     const fe=allEls.filter(e=>(e.assigned_facility_id||e.facility_id)===f.id);
     return fe.some(e=>{
-      if(e.type==='bulk_silo'||e.type==='packed_silo') return getSiloProducts(e).includes(_supProdFilter);
-      if(e.type==='demand_point') return (DB.demand_points.find(dp=>dp.element_id===e.id)?.products||[]).some(p=>p.product_id===_supProdFilter);
-      if(e.type==='packing_plant') return DB.element_product_capacities.some(c=>c.element_id===e.id&&c.product_id===_supProdFilter);
+      if(e.type==='bulk_silo'||e.type==='packed_silo') return getSiloProducts(e).some(_supProdAllows);
+      if(e.type==='demand_point') return (DB.demand_points.find(dp=>dp.element_id===e.id)?.products||[]).some(p=>_supProdAllows(p.product_id));
+      if(e.type==='packing_plant') return DB.element_product_capacities.some(c=>c.element_id===e.id&&_supProdAllows(c.product_id));
       return false; // a berth alone doesn't mean the terminal handles this product
     });
   });
@@ -7791,14 +7907,13 @@ function _renderSupplyViewInner(wrap){
     let prodIds=Object.keys(prodMap); if(!prodIds.length) return '';
     // onlyPid → chart a single product, or an ARRAY of products (terminal category
     // blocks chart all their products side-by-side). Otherwise respect the page
-    // product filter — narrow to the selected product when it belongs to this chart's
-    // category (so a cement-product filter doesn't blank the clinker chart, and vice-versa).
-    if(Array.isArray(onlyPid)){
-      prodIds=prodIds.filter(p=>onlyPid.includes(p));
-      if(_supProdFilter && prodIds.includes(_supProdFilter)) prodIds=[_supProdFilter];
-    }
-    else if(onlyPid) prodIds=prodIds.filter(p=>p===onlyPid);
-    else if(_supProdFilter && prodIds.includes(_supProdFilter)) prodIds=[_supProdFilter];
+    // product filter — narrow to the allowed products when at least one of them belongs
+    // to this chart's category (so a cement filter doesn't blank the clinker chart, and
+    // vice-versa; a Family/Category pick can keep several products on the chart).
+    const _narrow=ids=>{ const k=ids.filter(_supProdAllows); return (_supAllowedPids&&k.length)?k:ids; };
+    if(Array.isArray(onlyPid))   prodIds=_narrow(prodIds.filter(p=>onlyPid.includes(p)));
+    else if(onlyPid)             prodIds=prodIds.filter(p=>p===onlyPid);
+    else                         prodIds=_narrow(prodIds);
     if(!prodIds.length) return '';
     const colorFor=pid=>{ const nm=_prodById.get(pid)?.name||pid; return (typeof spProdColor==='function')?spProdColor(nm,false):accent; };
     const nameOf=pid=>_prodById.get(pid)?.name||pid;
@@ -7839,7 +7954,7 @@ function _renderSupplyViewInner(wrap){
     const _fwdRate=(pid,di)=>{ const arr=_dailyUse[pid]||[]; let sum=0,n=0; for(let k=di;k<Math.min(arr.length,di+14);k++){ sum+=arr[k]; n++; } return n?sum/n:0; };
     const _coverDays=(pid,di,v)=>{ const rt=_fwdRate(pid,di); if(!rt||rt<=0||v<=0) return ''; const d=v/rt; return d>=10?Math.round(d):Math.round(d*10)/10; };
     const legend=prodIds.map(pid=>`<span style="display:inline-flex;align-items:center;gap:3px;margin:0 5px 1px 0;white-space:nowrap"><span style="width:7px;height:7px;background:${colorFor(pid)};border-radius:1px;flex-shrink:0"></span>${nameOf(pid)}</span>`).join('');
-    const chartHint=`scale max ${Math.round(gmax).toLocaleString()} t · # on bar = days of cover (next-14-day demand)${extraFn?(RAIL_DIRECT_TO_SILO?' · lighter top = on rail (in transit + at the rail yard)':' · lighter top = on rail (transit + rail yard + local yard)'):''}`;
+    const chartHint=`scale max ${Math.round(gmax).toLocaleString()} t · # on bar = days of cover (next-14-day demand)${extraFn?' · lighter top = on rail (transit + rail yard + local yard)':''}`;
     let row=`<tr class="sup-chart-row${secKey?' supsec-'+secKey:''}" data-chart="${cat}"><td title="${chartHint}" style="${stickyLeft('var(--surface)',depth!=null?depth:1,'border-bottom:2px solid var(--border2),')}vertical-align:bottom;padding:5px 10px">
       <div style="color:${accent};font-size:8px;font-weight:700;letter-spacing:1px;text-transform:uppercase">${label} <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></div>
       <div style="display:flex;flex-wrap:wrap;font-size:7px;color:var(--text-dim);line-height:1.5;margin-top:3px;max-width:${leftW-24}px">${legend}</div>
@@ -8009,12 +8124,10 @@ function _renderSupplyViewInner(wrap){
           // this facility — when one of this facility's demand points switched to
           // it (swappedIn>0) — so the "swapped in" breakdown has a row to hang on.
           (DB.demand_substitutions||[]).forEach(s=>{ if(allDates.some(ds=>swappedIn(s.to_product_id,ds)>0)) productsSet.add(s.to_product_id); });
-          // EFFECTIVE need = raw need − swapped-out + swapped-in, so the product rows
-          // and the CEMENT REQUIREMENTS total reflect active demand swaps (the swap
-          // breakdown child rows below reconcile to this: own + in = effective).
-          const effNeed=(prodId,ds)=>Math.max(0,totalNeed(prodId,ds)-swappedOut(prodId,ds)+swappedIn(prodId,ds));
           // Packed products belong to the packing block — drop them from CEMENT REQUIREMENTS.
           packedProductIds.forEach(pid=>productsSet.delete(pid));
+          // Drop products the Family/Category/Product filters exclude.
+          [...productsSet].forEach(pid=>{ if(!_supProdAllows(pid)) productsSet.delete(pid); });
 
           if(productsSet.size>0){
             // Section header row
@@ -8022,10 +8135,10 @@ function _renderSupplyViewInner(wrap){
               <td title="Direct + Transfer Demand" style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${prodReqColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('cementNeed')}</span> CEMENT REQUIREMENTS <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>`;
             months.forEach(mon=>{
               const isCol=collapsed.has(mon.ym);
-              const mt=[...productsSet].reduce((s,pid)=>s+mon.dates.reduce((a,ds)=>a+effNeed(pid,ds),0),0);
+              const mt=[...productsSet].reduce((s,pid)=>s+mon.dates.reduce((a,ds)=>a+totalNeed(pid,ds),0),0);
               h+=`<td style="border-left:2px solid rgba(77,166,255,.2);font-size:9px;font-weight:700;color:${prodReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
               if(!isCol) mon.dates.forEach(ds=>{
-                const v=[...productsSet].reduce((s,pid)=>s+effNeed(pid,ds),0);
+                const v=[...productsSet].reduce((s,pid)=>s+totalNeed(pid,ds),0);
                 h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${prodReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`;
               });
             });
@@ -8049,10 +8162,10 @@ function _renderSupplyViewInner(wrap){
                 <td ondblclick="_openSwapForProduct('${prodId}','')" title="Double-click to cover part of this material's demand with a substitute" style="cursor:pointer;${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${prodReqColor};font-size:9px">${esc(prodName)}${(_dpnDpts.length||_dpnExtra.length)?_supDpnArrow(_dpnBase,_dpnDpts.length,_dpnExtra.length):''}</td>`;
               months.forEach(mon=>{
                 const isCol=collapsed.has(mon.ym);
-                const mt=mon.dates.reduce((s,ds)=>s+effNeed(prodId,ds),0);
+                const mt=mon.dates.reduce((s,ds)=>s+totalNeed(prodId,ds),0);
                 h+=`<td ondblclick="_openSwapForProduct('${prodId}','${mon.dates[0]||''}')" title="Double-click to swap part of this demand to another material" style="cursor:pointer;border-left:2px solid rgba(77,166,255,.1);font-size:9px;color:${prodReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
                 if(!isCol) mon.dates.forEach(ds=>{
-                  const v=effNeed(prodId,ds);
+                  const v=totalNeed(prodId,ds);
                   h+=`<td class="sup-day-${mon.ym}" ondblclick="_openSwapForProduct('${prodId}','${ds}')" title="Double-click to swap part of this demand to another material" style="cursor:pointer;font-size:9px;color:${v>0?prodReqColor:'rgba(77,166,255,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
                 });
               });
@@ -8102,7 +8215,10 @@ function _renderSupplyViewInner(wrap){
             const prod=_prodById.get(p);
             return prod&&(prod.category==='cement_bulk'||prod.category==='cement_packed');
           });
-        });
+        // Hide a silo whose contents the Family/Category/Product filters exclude, so
+        // the section lists only the products the user asked to see (empty → the whole
+        // STARTING INVENTORY block is skipped by the length guard below).
+        }).filter(s=>getSiloProducts(s).some(_supProdAllows));
 
         if(cementSilos.length>0){
           const invColor='#00d9a3';
@@ -8295,7 +8411,7 @@ function _renderSupplyViewInner(wrap){
                 });
               });
             });
-            const _cbpPids=Object.keys(_cbp).sort((a,b)=>
+            const _cbpPids=Object.keys(_cbp).filter(_supProdAllows).sort((a,b)=>
               (_prodById.get(a)?.name||a).localeCompare(_prodById.get(b)?.name||b));
             if(_cbpPids.length){
               h+=`<tr class="sup-sec-hdr" data-seckey="cementByProd" onclick="_supToggleSec('cementByProd')" style="cursor:pointer;background:rgba(0,255,157,.04);border-top:1px solid rgba(0,255,157,.25)">
@@ -8336,14 +8452,18 @@ function _renderSupplyViewInner(wrap){
         // ║ requirements, mirroring the CEMENT / CLINKER blocks. Order:    ║
         // ║ [chart] → [starting inventory] → [requirements] → [production] ║
         // ╚══════════════════════════════════════════════════════════════╝
-        if(_packedSilos.length||_packEls.length){
+        // Packed silos the Family/Category/Product filters allow — what the rows below
+        // render. _packedSilos itself stays unfiltered: packedProductIds is derived from
+        // it and CEMENT REQUIREMENTS relies on that full set to exclude packed products.
+        const _packedSilosShown=_packedSilos.filter(si=>getSiloProducts(si).some(_supProdAllows));
+        if(_packedSilosShown.length||_packEls.length){
           const pkColor='#4da6ff';
 
           // ── Packed inventory bar chart ──
           h+=_invChartRow('Packed inventory','packed',pkColor,facEls,node.depth+1,null,null,'packedInv');
 
           // ── STARTING INVENTORY (packed silos, per silo · tonnes) ──
-          if(_packedSilos.length){
+          if(_packedSilosShown.length){
             const _packInvVal=(siloId,ds,startT)=>{
               const prev=new Date(ds+'T00:00:00'); prev.setDate(prev.getDate()-1);
               const realInv=DB.real_inventory_daily.find(ri=>ri.date===prev._ymd()&&ri.silo_id===siloId);
@@ -8353,7 +8473,7 @@ function _renderSupplyViewInner(wrap){
               const v=dayIdx<=0?startT:(hist[dayIdx-1]??0);
               return {value:v,isActual:false};
             };
-            const _pkInvDay=ds=>_packedSilos.reduce((s,si)=>s+_packInvVal(si.id,ds,_siloStartT(si)).value,0);
+            const _pkInvDay=ds=>_packedSilosShown.reduce((s,si)=>s+_packInvVal(si.id,ds,_siloStartT(si)).value,0);
             h+=`<tr class="sup-sec-hdr" data-seckey="packedInv" onclick="_supToggleSec('packedInv')" style="cursor:pointer;background:rgba(77,166,255,.05);border-top:2px solid rgba(77,166,255,.3)">
               <td style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${pkColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('packedInv')}</span> STARTING INVENTORY (packed)</td>`;
             months.forEach(mon=>{
@@ -8364,7 +8484,7 @@ function _renderSupplyViewInner(wrap){
                 h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${pkColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
             });
             h+=`</tr>`;
-            _packedSilos.forEach(silo=>{
+            _packedSilosShown.forEach(silo=>{
               const siloMax=_siloMaxT(silo);
               const siloStart=_siloStartT(silo);
               h+=`<tr class="supsec-packedInv">
@@ -8390,7 +8510,7 @@ function _renderSupplyViewInner(wrap){
 
           // ── PACKED REQUIREMENTS (demand for packed products) ──
           {
-            const pkProds=[...packedProductIds].filter(pid=>_prodById.get(pid))
+            const pkProds=[...packedProductIds].filter(pid=>_prodById.get(pid)).filter(_supProdAllows)
               .sort((a,b)=>(_prodById.get(a)?.name||a).localeCompare(_prodById.get(b)?.name||b));
             const pkDemand=(pid,ds)=>demandPoints.filter(dp=>dp.products?.some(p=>p.product_id===pid))
               .reduce((s,dp)=>s+(_demandRate(dp.element_id,ds)||0),0);
@@ -8663,6 +8783,9 @@ function _renderSupplyViewInner(wrap){
               if(mat&&mat.category==='clinker') clinkerProdsSet.add(rec.material_id);
             });
           });
+          // Every row here is a clinker product, so the page filters apply the same way
+          // they do elsewhere — filtering to Cement hides the section, Clinker keeps it.
+          [...clinkerProdsSet].forEach(pid=>{ if(!_supProdAllows(pid)) clinkerProdsSet.delete(pid); });
 
           if(_clkFinishMills.length>0&&clinkerProdsSet.size>0){
             const clinkerReqColor='#ff9d5c';
@@ -8730,7 +8853,8 @@ function _renderSupplyViewInner(wrap){
             const prod=_prodById.get(p);
             return prod&&prod.category==='clinker';
           });
-        }).sort((a,b)=>(a.name||'').localeCompare(b.name||'')); // order silos by name (CLKL_01 before CLKL_02)
+        }).filter(s=>getSiloProducts(s).some(_supProdAllows))
+          .sort((a,b)=>(a.name||'').localeCompare(b.name||'')); // order silos by name (CLKL_01 before CLKL_02)
 
         if(clinkerSilos.length>0){
           const clinkerInvColor='#ff8c42';
@@ -9064,7 +9188,7 @@ function _renderSupplyViewInner(wrap){
 
         // Rail-receiving berths → rail pipeline stages (sim histories, tonnes by product
         // per day; cars = tonnes / berth car capacity): In Transit → At Rail Yard →
-        // Received (v1 adds an At Local Yard stage). Any facility with a Rail Receiving berth
+        // At Local Yard → Unloading. Generic: any facility with a Rail Receiving berth
         // gets these rows, the Total-inventory line and the stacked chart segment.
         const _railBerths=berths.filter(b=>(b.props?.berth_type||'')==='Rail Receiving');
         const _railCarCap=parseFloat(_railBerths[0]?.props?.car_capacity_t)||RAIL_CAR_T_DEFAULT;
@@ -9130,17 +9254,8 @@ function _renderSupplyViewInner(wrap){
           return rows.reduce((s,u)=>s+(u.cars!=null?(parseFloat(u.cars)||0)
             :u.unit==='cars'?(parseFloat(u.value)||0):((parseFloat(u.value)||0)/_railCarCap)),0);
         };
-        // EFFECTIVE need per demand point = own − swapped-out + swapped-in, so an
-        // active demand swap relocating volume to/from this terminal moves the
-        // PRODUCT REQUIREMENT totals too — not just the per-point breakdown rows.
         const totalNeed=(pid,ds)=>demandPoints.filter(dp=>dp.products?.some(p=>_canon(p.product_id)===pid))
-          .reduce((s,dp)=>{
-            let t=_demandRate(dp.element_id,ds)||0;
-            const sw=(typeof _resolveDemandSwap==='function')?_resolveDemandSwap(dp.element_id,t,ds):null;
-            if(sw) t-=Math.min(sw.qty,t);
-            t+=(typeof _resolveDemandSwapIn==='function')?(_resolveDemandSwapIn(dp.element_id,ds,(id)=>_demandRate(id,ds))||0):0;
-            return s+t;
-          },0);
+          .reduce((s,dp)=>s+(_demandRate(dp.element_id,ds)||0),0);
 
         // ── CATEGORY-FIRST LAYOUT ──────────────────────────────────────────
         // Products are grouped by how they are STORED, not one block each:
@@ -9151,7 +9266,8 @@ function _renderSupplyViewInner(wrap){
         // (⚓ VESSEL ARRIVALS · 🚂 RAIL ARRIVALS · 🚚 TRUCK ARRIVALS) →
         // TRUCK TRANSFERS (origin). Holistic: driven purely by topology, so
         // any current or future terminal picks this up automatically.
-        const packedSilos=facEls.filter(e=>e.type==='packed_silo');
+        const packedSilos=facEls.filter(e=>e.type==='packed_silo')
+          .filter(s=>getSiloProducts(s).some(_supProdAllows));
         const _facPackers=facEls.filter(e=>e.type==='packing_plant');
         const _demProdIds=new Set(); demandPoints.forEach(dp=>(dp.products||[]).forEach(p=>_demProdIds.add(_canon(p.product_id))));
         const _catRank=pid=>{ const c=_prodById.get(pid)?.category; return (c==='cement_bulk'||c==='cement_packed')?0:c==='additive'?1:c==='clinker'?2:3; };
@@ -9169,7 +9285,7 @@ function _renderSupplyViewInner(wrap){
           return _prodById.get(pid)?.category==='cement_packed'; };
         let _prodsAll=[...new Set([...allSilos.flatMap(getSiloProducts),..._packedPids,..._demProdIds,...Object.keys(_termArr),..._truckNodeProds])]
           .filter(Boolean).sort((a,b)=>_catRank(a)-_catRank(b)||_pNameOf(a).localeCompare(_pNameOf(b)));
-        if(_supProdFilter) _prodsAll=_prodsAll.filter(p=>p===_supProdFilter);
+        if(_supAllowedPids) _prodsAll=_prodsAll.filter(_supProdAllows);
 
         // Mode classification (topology-driven): which berth type feeds each product.
         const _railFedPids=new Set();
@@ -9280,23 +9396,7 @@ function _renderSupplyViewInner(wrap){
                   h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${v>0?reqColor:'rgba(77,166,255,.3)'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
               });
               h+=`</tr>`;
-              // Swap breakdown extras: the per-point rows below show OWN demand, so when a
-              // demand swap touches this product surface the ± lines that reconcile them
-              // to the effective requirement in the parent row above.
-              const _swOut=ds=>_dpnDpts.reduce((q,dp)=>{ const t=_demandRate(dp.element_id,ds)||0;
-                const sw=(typeof _resolveDemandSwap==='function')?_resolveDemandSwap(dp.element_id,t,ds):null;
-                return q+(sw?Math.min(sw.qty,t):0); },0);
-              const _swIn=ds=>_dpnDpts.reduce((q,dp)=>q+((typeof _resolveDemandSwapIn==='function')?(_resolveDemandSwapIn(dp.element_id,ds,(id)=>_demandRate(id,ds))||0):0),0);
-              const _dpDispT=id=>DB.elements.find(e=>e.id===id)?.name||id;
-              const _swNames=key=>[...new Set((DB.demand_substitutions||[]).filter(s=>_dpnDpts.some(dp=>dp.element_id===s[key==='out'?'from_element_id':'to_element_id']))
-                .map(s=>_dpDispT(key==='out'?s.to_element_id:s.from_element_id)))].join(', ');
-              const _swExtra=[];
-              const _anyDs=fn=>months.some(mon=>mon.dates.some(ds=>fn(ds)>0));
-              if(_anyDs(_swOut)) _swExtra.push({label:'⇄ swapped out → '+(_swNames('out')||'substitute'), color:'var(--amber)',
-                title:'Demand relocated from this facility to another demand point by an active demand swap — already deducted from the requirement above.', valFn:_swOut});
-              if(_anyDs(_swIn)) _swExtra.push({label:'⇄ swapped in ← '+(_swNames('in')||'other demand'), color:'#4dd0e1',
-                title:'Demand relocated to this facility from another demand point by an active demand swap — included in the requirement above.', valFn:_swIn});
-              h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, depth+4, _dpnBase, stickyLeft, _swExtra);
+              h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, depth+4, _dpnBase, stickyLeft);
             });
           }
 
@@ -9460,14 +9560,13 @@ function _renderSupplyViewInner(wrap){
           }
 
           // 🚂 RAIL ARRIVALS — per rail-fed product, the full pipeline IN ORDER:
-          //   ⇢ In Transit → ▤ At Rail Yard → Received (cars). Under RAIL RECEIPT v1
-          //   there is an extra ▣ At Local Yard stage between the two.
+          //   ⇢ In Transit → ▤ At Rail Yard → ▣ At Local Yard → Unloading (cars).
           // Click a pipeline cell to reconcile physical yard counts; dbl-click
-          // Received to set the actual.
+          // Unloading to set the actual.
           const _railPids=gr.pids.filter(pid=>_railBerths.length&&_railFedPids.has(pid));
           if(_railPids.length){
             h+=`<tr class="sup-sec-hdr" data-seckey="termRail" onclick="_supToggleSec('termRail')" style="cursor:pointer;background:rgba(179,136,255,.06);border-top:1px solid rgba(179,136,255,.4)">
-              <td title="Rail pipeline per product — ${RAIL_DIRECT_TO_SILO?'In Transit → At Rail Yard → Received':'In Transit → At Rail Yard → At Local Yard → Unloading'} · cells are RAIL CARS · click to reconcile physical counts" style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${rc};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('termRail')}</span> RAIL ARRIVALS ${suffix} <span style="opacity:.55;font-weight:400;font-size:7px;margin-left:3px;text-transform:none">cars @ ${Math.round(_railCarCap)}t</span> <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>${_blankCells()}</tr>`;
+              <td title="Rail pipeline per product — In Transit → At Rail Yard → At Local Yard → Unloading · cells are RAIL CARS · click to reconcile physical counts" style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${rc};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('termRail')}</span> RAIL ARRIVALS ${suffix} <span style="opacity:.55;font-weight:400;font-size:7px;margin-left:3px;text-transform:none">cars @ ${Math.round(_railCarCap)}t</span> <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>${_blankCells()}</tr>`;
             _railPids.forEach(pid=>{
               const pname=_pNameOf(pid);
               // Product sub-header inside the rail section
@@ -9489,14 +9588,11 @@ function _renderSupplyViewInner(wrap){
                 h+=rr2+`</tr>`;
               };
               _rowRail('⇢ In Transit',_railTransT,rc,'in transit (on rail)',null);
-              _rowRail('▤ At Rail Yard',_railAtYardT,'#ff9433',RAIL_DIRECT_TO_SILO?'at the rail yard, waiting for the terminal switch day':'at the rail yard, awaiting spotting','railyard_count');
-              // v1 only: with RAIL RECEIPT v2 there is no local-yard stage — cars go from the
-              // rail yard straight into the silo on the switch day, so the row is always 0.
-              if(!RAIL_DIRECT_TO_SILO) _rowRail('▣ At Local Yard',_railYardT,'#38bdf8','at the local yard, unloading at the berth spec','localyard_count');
-              // Received into the silo (cars; tonnes in the tooltip) — dbl-click to set actual.
+              _rowRail('▤ At Rail Yard',_railAtYardT,'#ff9433','at the rail yard, awaiting spotting','railyard_count');
+              _rowRail('▣ At Local Yard',_railYardT,'#38bdf8','at the local yard, unloading at the berth spec','localyard_count');
+              // Unloading (cars; tonnes in the tooltip) — dbl-click to set actual.
               const _uCars=(ds)=>{ const rv=_unlReal(pid,ds); if(rv>0){ const rc2=_unlRealCars(pid,ds); return rc2!=null?rc2:rv/_railCarCap; } return _unlPlan(pid,ds)/_railCarCap; };
-              const _uLbl=RAIL_DIRECT_TO_SILO?'Received':'Unloading';
-              h+=`<tr class="supsec-termRail"><td title="${RAIL_DIRECT_TO_SILO?'Cars received into the silo on the terminal switch day — the full volume waiting at the rail yard, limited only by silo space':'Tonnage unloaded into the silo at the berth rate'}" style="${stickyLeft('var(--surface)',depth+4,'border-bottom:1px solid var(--border),')}color:${rc};font-size:9px">${_uLbl} <span style="font-size:7px;opacity:.55">RAIL CARS</span></td>`;
+              h+=`<tr class="supsec-termRail"><td style="${stickyLeft('var(--surface)',depth+4,'border-bottom:1px solid var(--border),')}color:${rc};font-size:9px">Unloading <span style="font-size:7px;opacity:.55">RAIL CARS</span></td>`;
               months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
                 const mtT=mon.dates.reduce((s,ds)=>{ const rv=_unlReal(pid,ds); return s+(rv>0?rv:_unlPlan(pid,ds)); },0);
                 const mDisp=Math.round(mon.dates.reduce((s,ds)=>s+_uCars(ds),0));
@@ -9505,7 +9601,7 @@ function _renderSupplyViewInner(wrap){
                   const rv=_unlReal(pid,ds); const isReal=rv>0; const vT=isReal?rv:_unlPlan(pid,ds);
                   const col=isReal?rcReal:(vT>0?rc:'rgba(179,136,255,.25)');
                   const disp=vT>0?Math.round(_uCars(ds)):0;
-                  const ttl=`${pname} ${RAIL_DIRECT_TO_SILO?'received':'unloading'} · ${disp} cars (${Math.round(vT).toLocaleString()} t)${isReal?' · actual':' · planned'} — dbl-click to set actual`;
+                  const ttl=`${pname} unloading · ${disp} cars (${Math.round(vT).toLocaleString()} t)${isReal?' · actual':' · planned'} — dbl-click to set actual`;
                   h+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''}" ondblclick="event.stopPropagation();showTermRealPopup('unload','${fac.id}','${pid}','${ds}')" title="${ttl}" style="cursor:pointer;font-size:9px;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${isReal?'700':'400'};${tdSty(ds)}">${disp}</td>`; });
               });
               h+=`</tr>`;
@@ -11645,7 +11741,7 @@ function showRailPlacementPopup(facId, pid, ds){
     <div style="display:flex;gap:12px;margin-bottom:10px;color:var(--text-dim);flex-wrap:wrap">
       <span>⇢ In transit: <b style="color:#b388ff">${transCars}</b></span>
       <span>▤ Rail yard: <b style="color:#ff9433">${atYardCars}</b></span>
-      ${RAIL_DIRECT_TO_SILO?'':`<span>▣ Local yard: <b style="color:#38bdf8">${yardCars}</b></span>`}
+      <span>▣ Local yard: <b style="color:#38bdf8">${yardCars}</b></span>
       <span style="opacity:.6">(cars now, simulated)</span>
     </div>
     <div style="font-size:8px;color:var(--text-dim);margin-bottom:8px;line-height:1.5;border-left:2px solid #38bdf8;padding-left:8px">
@@ -11658,7 +11754,6 @@ function showRailPlacementPopup(facId, pid, ds){
         <div class="fl" style="flex:1">▤ Physical count — rail yard</div>
         ${_inp('railpl-ryc',ryRec)}<span style="opacity:.5;margin-left:4px">cars</span>
       </div>
-      ${RAIL_DIRECT_TO_SILO?'':`
       <div class="fr s2" style="align-items:center">
         <div class="fl" style="flex:1">▣ Physical count — local yard</div>
         ${_inp('railpl-lyc',lyRec)}<span style="opacity:.5;margin-left:4px">cars</span>
@@ -11666,7 +11761,7 @@ function showRailPlacementPopup(facId, pid, ds){
       <div class="fr s2" style="align-items:center;border-top:1px solid var(--border2);padding-top:8px">
         <div class="fl" style="flex:1">↳ spotted rail→local today <span style="opacity:.5">(optional flow)</span></div>
         ${_inp('railpl-spot',spotRec)}<span style="opacity:.5;margin-left:4px">cars</span>
-      </div>`}
+      </div>
     </div>
     <div style="margin-top:12px;display:flex;gap:8px;justify-content:space-between;align-items:center">
       <span>${(ryRec||lyRec||spotRec)?`<button onclick="_railClearPlacement('${facId}','${pid}','${ds}')"
@@ -11697,12 +11792,8 @@ function _railUpsertRec(type, facId, pid, ds, val){
 }
 function _railSavePlacement(facId, pid, ds){
   _railUpsertRec('railyard_count',facId,pid,ds,document.getElementById('railpl-ryc')?.value);
-  // v1 only — under RAIL RECEIPT v2 these inputs aren't rendered, and upserting an
-  // undefined value would silently delete any record the scenario already carries.
-  if(!RAIL_DIRECT_TO_SILO){
-    _railUpsertRec('localyard_count',facId,pid,ds,document.getElementById('railpl-lyc')?.value);
-    _railUpsertRec('placed',facId,pid,ds,document.getElementById('railpl-spot')?.value);
-  }
+  _railUpsertRec('localyard_count',facId,pid,ds,document.getElementById('railpl-lyc')?.value);
+  _railUpsertRec('placed',facId,pid,ds,document.getElementById('railpl-spot')?.value);
   closeCampaignPopup();
   autoSave();
   renderSupplyView();
@@ -11738,26 +11829,6 @@ function _rpSetPush(dpId, destFacId, pid, dayNum, ds, value, skipRun){
   else DB.rail_movements.push({id:'push_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),from_facility_id:S.facility_id,to_facility_id:destFacId,from_dispatch_id:dpId,to_berth_id:berthId,product_id:pid,wagon_count:cars,wagon_capacity_t:carCap,total_capacity_t:cars*carCap,switch_day:dayNum,departure_date:ds,transit_days:transit,status:'Confirmed',notes:'Operator push'});
   if(!skipRun){ autoSave(); scheduleSimulation(); }
 }
-// ── Switch confirmation ──────────────────────────────────────────────────────
-// A switch is CONFIRMED once the manager presses ✓ on it. A confirmed switch shows only the
-// terminals actually pushed to — every other cell renders empty instead of falling back to
-// the simulation's proposal. Normally a rail_movements row is proof enough (that fallback
-// also keeps scenarios saved before this existed behaving the new way); the explicit marker
-// only carries the case where every cell was confirmed at zero and no row survives.
-function _rpSwitchConfirmed(dpId, ds, dayNum){
-  if((DB.rail_push_confirmed||[]).some(c=>c.dispatch_id===dpId&&c.date===ds)) return true;
-  return (DB.rail_movements||[]).some(rm=>rm.from_dispatch_id===dpId
-    &&(rm.departure_date?rm.departure_date===ds:rm.switch_day===dayNum));
-}
-function _rpMarkConfirmed(dpId, ds){
-  if(!DB.rail_push_confirmed) DB.rail_push_confirmed=[];
-  if(!DB.rail_push_confirmed.some(c=>c.dispatch_id===dpId&&c.date===ds))
-    DB.rail_push_confirmed.push({dispatch_id:dpId,date:ds});
-}
-function _rpUnmarkConfirmed(dpId, ds){
-  DB.rail_push_confirmed=(DB.rail_push_confirmed||[]).filter(c=>!(c.dispatch_id===dpId&&c.date===ds));
-}
-
 // Record the REAL cars dispatched from a rail dp to one terminal on a (past) switch date.
 // Stored in real_rail_daily as type 'dispatched' (dest-tagged); coexists with the planned
 // movement so plan vs real stays comparable. A 0 is a valid record ("nothing went there").
@@ -11816,38 +11887,21 @@ function _rpConfirmSwitch(dpId, sw){
     else _rpSetPush(dpId, inp.dataset.dest, inp.dataset.pid, parseInt(sw,10), inp.dataset.ds, inp.value, true);
     delete window._rpDrafts[_rpDraftKey(inp)];
   });
-  // Remember that this switch was confirmed, so its un-pushed terminals render empty rather
-  // than falling back to the proposal — including when every cell was confirmed at zero.
-  _rpMarkConfirmed(dpId, ds);
   autoSave();
   statMsg(isPast?'Real dispatch saved — running simulation…':'Pushes confirmed — running simulation…');
   scheduleSimulation();
 }
-// Reset one switch. A FUTURE switch is un-confirmed: its Confirmed pushes are deleted, the
-// confirmation marker is dropped, and the re-run redraws the column with the simulation's
-// proposals restored. A PAST switch only resets the input boxes to the planned values —
-// real dispatch records (real_rail_daily) are never deleted by a reset.
+// Reset one switch's push inputs (drops drafts, no commit, no re-run): future switches go
+// back to the suggested distribution, past switches back to the planned (committed) values.
 function _rpResetSwitch(dpId, sw){
-  const inps=[...document.querySelectorAll(`input.rp-push-inp[data-dp="${dpId}"][data-sw="${sw}"]`)];
+  const inps=document.querySelectorAll(`input.rp-push-inp[data-dp="${dpId}"][data-sw="${sw}"]`);
   if(!inps.length) return;
-  const ds=inps[0].dataset.ds;
-  if(ds<new Date()._ymd()){
-    inps.forEach(inp=>{
-      delete window._rpDrafts[_rpDraftKey(inp)];
-      inp.value=inp.dataset.committed||0;
-      _rpPushEdit(inp);
-    });
-    return;
-  }
+  const isPast=inps[0].dataset.ds<new Date()._ymd();
   inps.forEach(inp=>{
     delete window._rpDrafts[_rpDraftKey(inp)];
-    // 0 removes the movement row (see _rpSetPush) — that IS the un-confirm for this cell.
-    _rpSetPush(dpId, inp.dataset.dest, inp.dataset.pid, parseInt(sw,10), ds, 0, true);
+    inp.value=isPast?(inp.dataset.committed||0):(inp.dataset.suggest||0);
+    _rpPushEdit(inp);
   });
-  _rpUnmarkConfirmed(dpId, ds);
-  autoSave();
-  statMsg('Switch reset — proposals restored, running simulation…');
-  scheduleSimulation();
 }
 // Products a rail dispatch point can load — the products held by its upstream bulk silos.
 function railDpProducts(dp, connections){
@@ -12006,10 +12060,7 @@ function rpRender(){
     }).join('');
     destRows.push(`<tr class="tp-row-arrival"><td style="padding-left:14px">TRANSF/ARRIVAL</td>${arrCells}</tr>`);
 
-    // 3) RECEIVED — volume credited from the rail berth into the terminal silo. Under
-    //    RAIL RECEIPT v2 this is the whole volume waiting at the rail yard, credited on
-    //    the terminal's switch day (see RAIL_DIRECT_TO_SILO); under v1 it was the daily
-    //    tonnage unloaded at the berth rate.
+    // 3) UNLOADING — daily volume unloaded from the rail berth into the terminal silo
     if(berth&&S.simResults?.berthUnloadHistory?.[berth.id]){
       const unldHist=S.simResults.berthUnloadHistory[berth.id];
       const unldCells=months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
@@ -12021,11 +12072,7 @@ function rpRender(){
           return `<td style="color:var(--real);font-size:10px;${tSty}">${v>0?Number(v).toLocaleString()+'t':'—'}</td>`;
         }).join('');
       }).join('');
-      const _unldLbl=RAIL_DIRECT_TO_SILO?'Received':'Unloading';
-      const _unldTtl=RAIL_DIRECT_TO_SILO
-        ?'Credited to the terminal silo on the switch day — the full volume waiting at the rail yard, limited only by silo space'
-        :'Tonnage unloaded into the terminal silo at the berth unloading rate';
-      destRows.push(`<tr class="tp-row-unload"><td title="${_unldTtl}" style="padding-left:14px;color:var(--real);font-size:10px">${_unldLbl}</td>${unldCells}</tr>`);
+      destRows.push(`<tr class="tp-row-unload"><td style="padding-left:14px;color:var(--real);font-size:10px">Unloading</td>${unldCells}</tr>`);
     }
 
     // 4) DEMAND — consolidated to ONE row per product (EFFECTIVE: own − swapped-out + swapped-in)
@@ -12159,21 +12206,14 @@ function rpRender(){
         });
 
         // 3) Editable push row per terminal (only on switch-day columns).
-        // Cell value precedence: unsaved draft > real (actual) > planned (confirmed) >
-        // nothing-pushed-on-a-confirmed-switch > suggested.
+        // Cell value precedence: unsaved draft > real (actual) > planned (confirmed) > suggested.
         // Colour code: amber = draft, green = real, blue = planned, purple dashed = suggested.
-        // A zero is ALWAYS drawn as an empty cell — never as "0" — so a confirmed switch shows
-        // only the terminals that actually got cars.
         myDests.forEach(fid=>{
           const destFac=DB.facilities.find(f=>f.id===fid);
           const pushCells=months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
             const mc=mon.days.reduce((s,d)=>{ if(!rpIsSwitch(d,switchDays))return s;
-              const _mds=rpDayDate(d);
-              const rl=realPush(pid,fid,_mds); if(rl) return s+(parseInt(rl.cars)||0);
-              const ex=existingPush(pid,fid,d); if(ex) return s+(parseInt(ex.wagon_count)||0);
-              // Confirmed switch with nothing pushed here contributes 0, so the month total
-              // agrees with the empty cells below it instead of counting the proposal.
-              return s+(_rpSwitchConfirmed(dp.id,_mds,d)?0:(suggest[d]?.[fid]||0)); },0);
+              const rl=realPush(pid,fid,rpDayDate(d)); if(rl) return s+(parseInt(rl.cars)||0);
+              const ex=existingPush(pid,fid,d); return s+(ex?(parseInt(ex.wagon_count)||0):(suggest[d]?.[fid]||0)); },0);
             const mTd=`<td class="logi-mcol" style="${_mTdSty}">${mc>0?mc+' cars':'—'}</td>`;
             return mTd+(isCol?[]:mon.days).map(d=>{ const tSty=_tpTdSty(d); const sw=rpIsSwitch(d,switchDays);
               if(!sw) return `<td${tSty?` style="${tSty}"`:''}></td>`;
@@ -12188,17 +12228,12 @@ function rpRender(){
               let base, cls, ttl;
               if(realVal!==null){ base=realVal; cls='rp-real'; ttl=`REAL: ${realVal} cars dispatched`+(ex?` · planned ${committed}`:'')+(sg?` · suggested ${sg}`:''); }
               else if(ex){ base=committed; cls='rp-committed'; ttl='Planned (confirmed) — edit & ✓ to update'+(isPast?'. Past switch: ✓ records the number as REAL':''); }
-              else if(_rpSwitchConfirmed(dp.id,ds,d)){ base=0; cls='rp-blank';
-                ttl='This switch is confirmed and nothing was pushed to this terminal'+(sg?` (the simulation had suggested ${sg})`:'')+'. Type a number & ✓ to add cars, or ⟳ under this switch to restore the proposals'; }
               else { base=sg; cls='rp-proposed'; ttl='Proposed by the simulation — adjust, then ✓ under this switch to '+(isPast?'record as REAL':'confirm as the plan'); }
               const draft=window._rpDrafts[`${dp.id}|${d}|${fid}|${pid}`];
               const val=draft!==undefined?draft:base;
-              // Zero shows as an empty box; data-base stays numeric so _rpPushEdit's dirty
-              // check still works (an empty box reads back as 0).
-              const shownVal=val>0?val:'';
-              const shown=draft!==undefined&&draft!==base?'rp-dirty':(val>0?cls:'rp-blank');
+              const shown=draft!==undefined&&draft!==base?'rp-dirty':cls;
               const avail=availAtSwitch(pid,d);
-              return `<td class="tp-col-switch"${tSty?` style="${tSty}"`:''}><input type="number" min="0" step="1" value="${shownVal}" data-dp="${dp.id}" data-sw="${d}" data-dest="${fid}" data-pid="${pid}" data-ds="${ds}" data-committed="${committed}" data-suggest="${sg}" data-real="${realVal!==null?realVal:''}" data-base="${base}" data-cls="${cls}" data-avail="${avail}" title="${ttl}" onchange="_rpPushEdit(this)" class="rp-push-inp ${shown}"></td>`; }).join('');
+              return `<td class="tp-col-switch"${tSty?` style="${tSty}"`:''}><input type="number" min="0" step="1" value="${val}" data-dp="${dp.id}" data-sw="${d}" data-dest="${fid}" data-pid="${pid}" data-ds="${ds}" data-committed="${committed}" data-suggest="${sg}" data-real="${realVal!==null?realVal:''}" data-base="${base}" data-cls="${cls}" data-avail="${avail}" title="${ttl}" onchange="_rpPushEdit(this)" class="rp-push-inp ${shown}"></td>`; }).join('');
           }).join('');
           origRows.push(`<tr class="tp-row-push"><td style="color:#ff9433">    → push ${destFac?.name||fid}</td>${pushCells}</tr>`);
         });
@@ -12206,21 +12241,13 @@ function rpRender(){
 
       // Per-switch CONFIRM (✓) / RESET (⟳) controls — one row for this dispatch point.
       // The manager adjusts the push numbers above (cells turn amber), then clicks ✓ under a
-      // switch to commit ALL that switch's pushes at once. From then on the column shows only
-      // the terminals that got cars; the rest go empty. A lit ⟳ marks a confirmed switch and
-      // undoes it — discarding that switch's plan and bringing the proposals back.
+      // switch to commit ALL that switch's pushes at once (they turn green); ⟳ restores suggestions.
       const confirmCells=months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
         const mTd=`<td class="logi-mcol" style="${_mTdSty}"></td>`;
         return mTd+(isCol?[]:mon.days).map(d=>{ const tSty=_tpTdSty(d); const sw=rpIsSwitch(d,switchDays);
           if(!sw) return `<td${tSty?` style="${tSty}"`:''}></td>`;
-          const _cDs=rpDayDate(d);
-          const _cPast=_cDs<_rpToday;
-          const _cConf=_rpSwitchConfirmed(dp.id,_cDs,d);
-          const _cRstCol=_cConf?'#b388ff':'#8e9ab8';
-          const _cRstTtl=_cPast?'Reset this switch to the planned values (real dispatches are kept)'
-            :_cConf?'Confirmed — click to discard this switch\'s plan and restore the proposals'
-            :'Reset this switch to the suggested distribution';
-          return `<td class="tp-col-switch" style="text-align:center;${tSty||''}"><span class="rp-sw-icon" style="color:#00d9a3" title="${_cPast?'Record this switch\'s numbers as REAL dispatches':'Confirm all pushes for this switch as the plan — terminals left empty get no cars'}" onclick="_rpConfirmSwitch('${dp.id}',${d})">✓</span><span class="rp-sw-icon" style="color:${_cRstCol};${_cConf?'font-weight:700':''}" title="${_cRstTtl}" onclick="_rpResetSwitch('${dp.id}',${d})">⟳</span></td>`; }).join('');
+          const _cPast=rpDayDate(d)<_rpToday;
+          return `<td class="tp-col-switch" style="text-align:center;${tSty||''}"><span class="rp-sw-icon" style="color:#00d9a3" title="${_cPast?'Record this switch\'s numbers as REAL dispatches':'Confirm all pushes for this switch as the plan'}" onclick="_rpConfirmSwitch('${dp.id}',${d})">✓</span><span class="rp-sw-icon" style="color:#8e9ab8" title="${_cPast?'Reset this switch to the planned values':'Reset this switch to the suggested distribution'}" onclick="_rpResetSwitch('${dp.id}',${d})">⟳</span></td>`; }).join('');
       }).join('');
       origRows.push(`<tr class="tp-row-confirm"><td style="color:#8e9ab8;font-size:8px;letter-spacing:.04em">    ✓ confirm · ⟳ reset</td>${confirmCells}</tr>`);
     });
@@ -12241,8 +12268,7 @@ function rpRender(){
     <span><span class="rp-lg" style="background:rgba(255,184,48,.25);border:1px solid rgba(255,184,48,.7)"></span> Edited (unsaved — click ✓)</span>
     <span><span class="rp-lg" style="background:rgba(56,189,248,.2);border:1px solid rgba(56,189,248,.7)"></span> Planned (confirmed)</span>
     <span><span class="rp-lg" style="background:rgba(0,217,163,.22);border:1px solid rgba(0,217,163,.7)"></span> Real (actual dispatch)</span>
-    <span><span class="rp-lg" style="background:rgba(255,61,90,.25);border:1px solid #ff3d5a"></span> Exceeds available cars</span>
-    <span style="opacity:.7">A confirmed switch (lit ⟳) shows only the terminals you pushed to — the rest stay empty until ⟳ restores the proposals.</span>`;
+    <span><span class="rp-lg" style="background:rgba(255,61,90,.25);border:1px solid #ff3d5a"></span> Exceeds available cars</span>`;
 }
 
 // ── Rail exception banner ──────────────────────────────────────────
@@ -13971,8 +13997,8 @@ function simulate(elements, connections, horizon, includeProposed=false){
       r.berthVesselHistory[el.id]=[];
       if((el.props?.berth_type||'')==='Rail Receiving'){
         state[el.id].railTransitT={}; // {pid:tonnes} dispatched, not yet at the terminal's rail yard
-        state[el.id].railArrived={};  // {pid:tonnes} AT RAIL YARD — arrived, waiting for the terminal's switch day (v1: awaiting spotting)
-        state[el.id].railPulled={};   // {pid:tonnes} RAIL RECEIPT v1 only — pulled on the SWITCH day, placed at the local yard the NEXT morning
+        state[el.id].railArrived={};  // {pid:tonnes} AT RAIL YARD — arrived, awaiting spotting to the local yard
+        state[el.id].railPulled={};   // {pid:tonnes} pulled on the terminal's SWITCH day — placed at the local yard the NEXT morning
         r.railTransitHistory[el.id]=[];
         r.railAtRailyardHistory[el.id]=[];
         r.railYardHistory[el.id]=[];
@@ -15862,77 +15888,14 @@ function simulate(elements, connections, horizon, includeProposed=false){
             if(r.siloUnloadHistory[sil.id]!==undefined){ const li=r.siloUnloadHistory[sil.id].length-1; if(li>=0) r.siloUnloadHistory[sil.id][li]=(r.siloUnloadHistory[sil.id][li]||0)+Math.round(amt); }
             totUL+=amt;
           });
-          // Consume the forecast pool by the real unloaded amount (so it isn't re-unloaded
-          // later). Under RAIL RECEIPT v2 a rail berth's volume waits at the RAIL YARD
-          // (bs.railArrived), not in the local yard, so drain the local yard first and then
-          // the rail yard — otherwise the actual would be credited twice, once here and
-          // again on the next switch day.
-          let _left=totUL;
-          [bs.berthQueue, (RAIL_DIRECT_TO_SILO?bs.railArrived:null)].forEach(pool=>{
-            if(!pool||_left<=0.001) return;
-            const _q=Object.values(pool).reduce((a,b)=>a+b,0);
-            if(_q<=0) return;
-            const _ratio=Math.min(1,_left/_q);
-            Object.keys(pool).forEach(p=>{ pool[p]=Math.max(0,(pool[p]||0)*(1-_ratio)); });
-            _left-=_q*_ratio;
-          });
+          // Consume forecast berth queue by the real unloaded amount (so it isn't re-unloaded later).
+          const _q=Object.values(bs.berthQueue||{}).reduce((a,b)=>a+b,0);
+          if(_q>0&&totUL>0){ const _ratio=Math.min(1,totUL/_q); Object.keys(bs.berthQueue).forEach(p=>{ bs.berthQueue[p]=Math.max(0,(bs.berthQueue[p]||0)*(1-_ratio)); }); }
           r.berthUnloadHistory[berth.id].push(Math.round(totUL));
           bs.status=totUL>0?'running':'idle';
           bs.runDays=(bs.runDays||0)+(totUL>0?1:0);
           return;
         }
-      }
-
-      // ── RAIL RECEIPT v2 — switch-day receipt straight into the silo ──────────────
-      // The whole railcar volume waiting at this terminal becomes available inventory on
-      // the terminal's switch day. No unloading rate and no spotting lag: the only thing
-      // that can hold volume back is silo space, and whatever doesn't fit stays at the
-      // rail yard for a later day. With no switch_days configured the berth receives every
-      // day, i.e. on each car's arrival day. Everything below this branch (the v1 spotting
-      // + rate-limited unload pipeline) is unreachable for rail while the flag is on.
-      if(RAIL_DIRECT_TO_SILO&&(berth.props.berth_type||'')==='Rail Receiving'){
-        const _rcvSw=berth.props.switch_days||[];
-        const _rcvDow=(new Date(simStartDate.getTime()+(day-1)*864e5).getDay()+6)%7; // Mon=0..Sun=6
-        if(_rcvSw.length&&!_rcvSw.includes(_rcvDow)){
-          if(bs.status!=='maintenance') bs.status='idle';
-          r.berthUnloadHistory[berth.id].push(0);
-          return;
-        }
-        // Waiting pool: the rail yard, plus anything a 'localyard_count' physical count
-        // parked in berthQueue (v1 leftovers / reconciliation entries).
-        const _rcvSilos=(dn[berth.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='bulk_silo');
-        const _rcvPids=[...new Set([...Object.keys(bs.railArrived||{}),...Object.keys(bs.berthQueue||{})])];
-        let _rcvTot=0;
-        _rcvPids.forEach(pid=>{
-          let waiting=(bs.railArrived?.[pid]||0)+(bs.berthQueue?.[pid]||0);
-          if(waiting<=0.001) return;
-          // Same per-product silo pick the real-unload override uses above.
-          const sil=_rcvSilos.find(s=>getSiloProducts(s).includes(pid))
-                 ||_rcvSilos.find(s=>(state[s.id]?.inventory||0)<(state[s.id]?.maxCap||Infinity)*0.99)
-                 ||_rcvSilos[0];
-          if(!sil) return;
-          // Space, read fresh per product so it shrinks as each one is credited. Credits
-          // today's expected demand pull, exactly like the v1 unload space calc below.
-          const space=Math.max(0,(state[sil.id]?.maxCap||Infinity)-(state[sil.id]?.inventory||0)
-                                 -(siloInflow[sil.id]||0)+(todayDemandPull[sil.id]||0));
-          const take=Math.min(waiting,space);
-          if(take<=0.001) return;
-          siloInflow[sil.id]=(siloInflow[sil.id]||0)+take;
-          state[sil.id].composition[pid]=(state[sil.id].composition[pid]||0)+take;
-          if(r.siloUnloadHistory[sil.id]!==undefined){ const li=r.siloUnloadHistory[sil.id].length-1;
-            if(li>=0) r.siloUnloadHistory[sil.id][li]=(r.siloUnloadHistory[sil.id][li]||0)+Math.round(take); }
-          // Drain the local yard first, then the rail yard.
-          let rem=take;
-          const fromYard=Math.min(rem,bs.berthQueue?.[pid]||0);
-          if(fromYard>0){ bs.berthQueue[pid]=Math.max(0,(bs.berthQueue[pid]||0)-fromYard); rem-=fromYard; }
-          if(rem>0&&bs.railArrived) bs.railArrived[pid]=Math.max(0,(bs.railArrived[pid]||0)-rem);
-          _rcvTot+=take;
-        });
-        r.berthUnloadHistory[berth.id].push(Math.round(_rcvTot));
-        if(_rcvTot>0) bs.status='running';
-        else if(bs.status!=='maintenance') bs.status='idle';
-        bs.runDays=(bs.runDays||0)+(_rcvTot>0?1:0);
-        return;
       }
 
       // ── CAMPAIGN: forced Anchorage — vessel vacates the berth entirely for the window ──
@@ -16009,8 +15972,6 @@ function simulate(elements, connections, horizon, includeProposed=false){
       const berthType=berth.props.berth_type||'Ship Berth';
       let dailyCap;
       if(berthType==='Rail Receiving'){
-        // RAIL RECEIPT v1 only — unreachable while RAIL_DIRECT_TO_SILO is true (the v2
-        // branch above returns first). v2 has no unloading rate at all.
         const carsPerShift=parseFloat(berth.props.max_unload_cars_shift||berth.props.max_unload_cars_day)||99999;
         const unldShifts=parseFloat(berth.props.shifts_per_day)||1;
         const carCap=parseFloat(berth.props.car_capacity_t)||50;
@@ -16111,11 +16072,6 @@ function simulate(elements, connections, horizon, includeProposed=false){
       }
     });
 
-    // ── RAIL RECEIPT v1 — DEAD CODE while RAIL_DIRECT_TO_SILO is true ──────────
-    // Kept for reference / quick revert, same as _planRailShipments (rail v1) above.
-    // v2 receives straight from the rail yard into the silo on the switch day, so there
-    // is no local yard to spot into and no 'placed' record to honour.
-    if(!RAIL_DIRECT_TO_SILO){
     // ── SPOTTING (rail berths): RAIL YARD → LOCAL YARD — runs AFTER unloading ───
     // Today's unloading has already drawn from the local yard as it stood this MORNING.
     // WITH TERMINAL SWITCH DAYS configured (berth.props.switch_days, Mon=0..Sun=6): the
@@ -16164,7 +16120,6 @@ function simulate(elements, connections, horizon, includeProposed=false){
         }
       });
     }
-    } // end RAIL RECEIPT v1
 
     // ── Record per-berth vessel state for the Gantt ──────────────────────
     // Only two vessel states: 'unloading' (docked, actively discharging) and 'anchorage'
@@ -17104,7 +17059,9 @@ function _pushBIBuildTables(){
     category:p.category||'',
     product_family:(typeof PRODUCT_FAMILY_OF!=='undefined'?PRODUCT_FAMILY_OF[p.category]:'')||'',
     scm_type:p.category==='additive'?(p.scm_type||''):'',
-    material_code:p.material_code||''
+    material_code:p.material_code||'',
+    facility_id:p.facility_id||'',
+    facility_name:(DB.facilities.find(f=>f.id===p.facility_id)?.name)||''
   }));
 
   // Lookup map: element_id → facility_id (assigned takes priority — that's what UIs trust)
@@ -23413,7 +23370,7 @@ You have tools to look up real simulation results and to try sandboxed "what if"
 For capacity / bottleneck questions ("where's the constraint", "which mill limits X", "how much headroom"), call get_production_model first — it hands you every mill's per-product rate, which mills can make each product (a single-mill product is usually the bottleneck), clinker factors, and demand by product, so you can reason about it. For "how much of product X can we supply before we stock out of something else" questions, call find_max_demand with that demand point — it binary-searches real sandbox sims and returns the max annual tonnage plus which product breaks first; report those, and note it holds production & maintenance as-is and saved nothing. When the user asks for a document/report/write-up, do the analysis, then call create_report with clear sections (and tables where useful) to download it for them.
 
 What you're working with:
-Database tables: macro_regions, countries, regions, sub_regions, facilities, elements, connections, products, recipes, raw_materials, fuels, element_maintenance_events, element_product_capacities, vessel_calls, rail_movements, truck_movements, transport_links, in_transit_inventory, demand_points, simulation_runs, simulation_stop_events. Element types: raw_material_storage, fuel_storage, bulk_silo (replaces clinker_silo/cement_silo/homo_silo — color by product category), packed_silo, raw_meal_mill, kiln, finish_mill, packing_plant, berth, dispatch_point (truck=no constraint same-day; rail=car accumulation with switch days and transit lag), demand_point, supply_source. Products have category: clinker, raw_meal, cement_bulk, cement_packed, additive. Kiln product capacities include capacity_tpd, specific_heat_kcal_kg, raw_meal_ratio per clinker product. Rail dispatch points have: car_capacity_t, std_loading_cars_day, max_loading_cars_day, working_days, switch_days (array of 0-6 Mon-Sun), transit_days. Rail transfer flow: cars load at the origin on working days and accumulate; they are dispatched on the origin's switch days; they travel transit_days; they then wait at the destination terminal's rail yard until the terminal's next switch day (Rail Receiving berth switch_days), and on that day the WHOLE waiting volume is added to the destination silo's available inventory — there is no unloading rate. The only limit is silo space; whatever does not fit stays at the rail yard for a later day. A Rail Receiving berth with no switch_days receives on the arrival day itself.
+Database tables: macro_regions, countries, regions, sub_regions, facilities, elements, connections, products, recipes, raw_materials, fuels, element_maintenance_events, element_product_capacities, vessel_calls, rail_movements, truck_movements, transport_links, in_transit_inventory, demand_points, simulation_runs, simulation_stop_events. Element types: raw_material_storage, fuel_storage, bulk_silo (replaces clinker_silo/cement_silo/homo_silo — color by product category), packed_silo, raw_meal_mill, kiln, finish_mill, packing_plant, berth, dispatch_point (truck=no constraint same-day; rail=car accumulation with switch days and transit lag), demand_point, supply_source. Products have category: clinker, raw_meal, cement_bulk, cement_packed, additive. Kiln product capacities include capacity_tpd, specific_heat_kcal_kg, raw_meal_ratio per clinker product. Rail dispatch points have: car_capacity_t, std_loading_cars_day, max_loading_cars_day, working_days, switch_days (array of 0-6 Mon-Sun), transit_days.
 
 Current state: ${ctx}
 
