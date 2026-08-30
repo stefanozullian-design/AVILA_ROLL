@@ -1815,10 +1815,13 @@ const DB = {
   connections:      [],  // { id, facility_id, from_element_id, to_element_id }
 
   // System catalogs
-  products:         [],  // { id, name, description, material_code, category:'raw_meal'|'clinker'|'cement_bulk'|'cement_packed'|'additive', facility_id? }
+  products:         [],  // { id, name, description, material_code, category:'raw_meal'|'clinker'|'cement_bulk'|'cement_packed'|'additive', facility_id?, facility_label? }
                          //   facility_id — WHERE the product is made (optional, set in the product form). Descriptive metadata:
                          //   the simulation still derives production from element_product_capacities. It seeds the Supply-page
                          //   Facility→Product filter so a product shows up there before it is wired into the topology.
+                         //   facility_label — a facility the user typed that is NOT in the topology. Mutually exclusive with
+                         //   facility_id (a typed name matching an existing facility resolves to its id on save). It is a plain
+                         //   label: it never becomes a DB.facilities row, so it cannot break the org tree or the topology.
   recipes:          [],  // { id, product_id, material_id, pct }  — for cement products: ingredient product_ids; for clinker: raw material ids
   raw_materials:    [],  // { id, name, unit, notes }
   fuels:            [],  // { id, name, unit, calorific_value, co2_factor, notes }
@@ -6146,34 +6149,154 @@ function renderCatalogView(){
   else if(S.activeCatalog==='fuels') cont.innerHTML=renderFuelsCat();
 }
 
+// ── Products catalog: filter + sort state ────────────────────────────────────
+// Filters mirror the Supply page vocabulary (Facility / Family / Category) so the two
+// pages read the same way, plus a free-text search over name / code / description.
+function _pcEnsureFilter(){
+  if(!window._prodCatFilter) window._prodCatFilter={facKey:'',family:'',cat:'',q:''};
+  return window._prodCatFilter;
+}
+function _pcOnChange(){
+  const f=_pcEnsureFilter();
+  f.facKey=document.getElementById('pc-fac-filter')?.value||'';
+  f.family=document.getElementById('pc-fam-filter')?.value||'';
+  f.cat=document.getElementById('pc-cat-filter')?.value||'';
+  // Drop a category that no longer belongs to the chosen family.
+  if(f.family&&f.cat&&PRODUCT_FAMILY_OF[f.cat]!==f.family) f.cat='';
+  renderCatalogView();
+}
+// The whole table is re-rendered on each keystroke, so put the caret back where it was.
+function _pcOnSearch(inp){
+  _pcEnsureFilter().q=inp.value;
+  renderCatalogView();
+  const el=document.getElementById('pc-search');
+  if(el){ el.focus(); el.setSelectionRange(el.value.length,el.value.length); }
+}
+function _pcClear(){ window._prodCatFilter={facKey:'',family:'',cat:'',q:''}; renderCatalogView(); }
+
 function renderProductsCat(){
-  const catColors={
-    cement_bulk:'var(--green)', cement_packed:'var(--blue)',
-    clinker:'#ff8c42', raw_meal:'#6b7a96', additive:'var(--amber)'
-  };
+  const f=_pcEnsureFilter();
+  const catColors2={cement_bulk:'var(--green)',cement_packed:'var(--blue)',clinker:'#ff8c42',raw_meal:'#f5c542',additive:'#f472b6'};
+  const catLabels2={cement_bulk:'Cement Bulk',cement_packed:'Cement Packed',clinker:'Clinker',raw_meal:'Raw Material',additive:'SCM'};
+  const famOrder=Object.keys(FAM_DEFS);            // cement, scm, clinker, raw_meal — same order as the product form's chips
+  const famOf=p=>PRODUCT_FAMILY_OF[p.category||'']||'';
+  const catLabelOf=p=>catLabels2[p.category||'']||(p.category||'').replace(/_/g,' ');
+
+  // Carry the ORIGINAL index — editProduct/deleteProduct address DB.products by position,
+  // and this list is filtered and re-sorted.
+  const all=DB.products.map((p,i)=>({p,i}));
+
+  // ── Option lists — each narrowed by the pickers above it, so only combinations that
+  //    actually exist can be picked.
+  const facSeen=new Map(); let nUnassigned=0;
+  all.forEach(({p})=>{ const k=prodFacKey(p); if(!k){ nUnassigned++; return; } if(!facSeen.has(k)) facSeen.set(k,prodFacName(p)); });
+  const facList=[...facSeen.entries()].sort((a,b)=>a[1].localeCompare(b[1]));
+
+  let famPool=all;
+  if(f.facKey==='__none__') famPool=famPool.filter(({p})=>!prodFacKey(p));
+  else if(f.facKey) famPool=famPool.filter(({p})=>prodFacKey(p)===f.facKey);
+  const famList=[...new Set(famPool.map(({p})=>famOf(p)).filter(Boolean))]
+    .sort((a,b)=>famOrder.indexOf(a)-famOrder.indexOf(b));
+
+  let catPool=famPool;
+  if(f.family) catPool=catPool.filter(({p})=>famOf(p)===f.family);
+  const catList=[...new Set(catPool.map(({p})=>p.category||'').filter(Boolean))]
+    .sort((a,b)=>(catLabels2[a]||a).localeCompare(catLabels2[b]||b));
+
+  // ── Apply the filters ──
+  const q=(f.q||'').trim().toLowerCase();
+  const shown=all.filter(({p})=>{
+    if(f.facKey==='__none__'){ if(prodFacKey(p)) return false; }
+    else if(f.facKey && prodFacKey(p)!==f.facKey) return false;
+    if(f.family && famOf(p)!==f.family) return false;
+    if(f.cat && (p.category||'')!==f.cat) return false;
+    if(q){
+      const hay=`${p.name||''} ${p.material_code||''} ${p.description||''}`.toLowerCase();
+      if(!hay.includes(q)) return false;
+    }
+    return true;
+  });
+
+  // ── Sort: facility → family → category → name. Unassigned facilities sort last.
+  //    Family uses the form's chip order (not alphabetical) so the two agree.
+  const facSort=p=>{ const n=prodFacName(p); return n?n.toLowerCase():'￿'; };
+  const famRank=p=>{ const r=famOrder.indexOf(famOf(p)); return r<0?99:r; };
+  shown.sort((a,b)=>
+       facSort(a.p).localeCompare(facSort(b.p))
+    || famRank(a.p)-famRank(b.p)
+    || catLabelOf(a.p).localeCompare(catLabelOf(b.p))
+    || (a.p.name||'').localeCompare(b.p.name||''));
+
+  const selStyle='padding:3px 8px;background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:9px';
+  const lblStyle='font-family:var(--mono);font-size:8px;color:var(--text-dim);letter-spacing:1px;text-transform:uppercase';
+  const isFiltered=!!(f.facKey||f.family||f.cat||q);
+
   let h=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
     <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">tables: products, recipes</div>
     <button class="tb-btn sec" onclick="showModal('product-modal')">+ New Product</button></div>
+
+  <div style="background:var(--surface);border:1px solid var(--border);padding:6px 10px;margin-bottom:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+    <span style="${lblStyle}">Facility</span>
+    <select id="pc-fac-filter" style="${selStyle}" onchange="_pcOnChange()">
+      <option value="">All Facilities</option>
+      ${facList.map(([k,n])=>`<option value="${esc(k)}"${k===f.facKey?' selected':''}>${esc(n)}</option>`).join('')}
+      ${nUnassigned?`<option value="__none__"${f.facKey==='__none__'?' selected':''}>— Unassigned (${nUnassigned}) —</option>`:''}
+    </select>
+    <span style="${lblStyle}">Family</span>
+    <select id="pc-fam-filter" style="${selStyle}" onchange="_pcOnChange()">
+      <option value="">All Families</option>
+      ${famList.map(x=>`<option value="${x}"${x===f.family?' selected':''}>${PRODUCT_FAMILY_LABELS[x]||x}</option>`).join('')}
+    </select>
+    <span style="${lblStyle}">Category</span>
+    <select id="pc-cat-filter" style="${selStyle}" onchange="_pcOnChange()">
+      <option value="">All Categories</option>
+      ${catList.map(x=>`<option value="${x}"${x===f.cat?' selected':''}>${catLabels2[x]||x}</option>`).join('')}
+    </select>
+    <input id="pc-search" type="text" placeholder="Search name / code..." value="${esc(f.q||'')}"
+      oninput="_pcOnSearch(this)" style="${selStyle};width:190px">
+    <span style="font-family:var(--mono);font-size:9px;color:${isFiltered?'var(--green)':'var(--text-dim)'};margin-left:auto">
+      ${shown.length}${shown.length!==all.length?` of ${all.length}`:''} product${all.length===1?'':'s'}
+    </span>
+    ${isFiltered?`<button class="tb-btn sec" style="font-size:9px;padding:3px 10px" onclick="_pcClear()">✕ Clear</button>`:''}
+  </div>
+
   <table class="cat-table"><thead><tr>
-    <th>Name</th><th>Material Code</th><th>Facility</th><th>Category</th><th>Recipe (ingredients)</th><th></th>
+    <th>Name</th><th>Material Code</th><th>Facility</th><th>Family</th><th>Category</th><th>Recipe (ingredients)</th><th></th>
   </tr></thead><tbody>`;
-  DB.products.forEach((p,i)=>{
+
+  if(!shown.length){
+    h+=`<tr><td colspan="7" style="text-align:center;color:var(--text-dim);font-size:9px;padding:22px">
+      ${all.length?'No products match these filters.':'No products yet — use + New Product to add one.'}
+    </td></tr>`;
+    return h+`</tbody></table>`;
+  }
+
+  let prevFac=null;
+  shown.forEach(({p,i})=>{
     const cat=p.category||'cement_bulk';
-    const catColors2={cement_bulk:'var(--green)',cement_packed:'var(--blue)',clinker:'#ff8c42',raw_meal:'#f5c542',additive:'#f472b6'};
-    const catLabels2={cement_bulk:'Cement Bulk',cement_packed:'Cement Packed',clinker:'Clinker',raw_meal:'Raw Material',additive:'SCM'};
     const catColor=catColors2[cat]||'var(--text-dim)';
     const catLabel=(catLabels2[cat]||cat.replace(/_/g,' '))+(cat==='additive'&&p.scm_type?` — ${p.scm_type[0].toUpperCase()}${p.scm_type.slice(1)}`:'');
+    const fam=famOf(p), famDef=FAM_DEFS[fam];
+    const facName=prodFacName(p);
+    // A typed facility isn't in the topology — mark it so the distinction stays visible here.
+    const isLabel=!p.facility_id&&!!p.facility_label;
     const recipe=DB.recipes.filter(r=>r.product_id===p.id).map(r=>{
       // Show ingredient name — could be raw material or another product
       const mat=DB.raw_materials.find(m=>m.id===r.material_id);
       const prod=DB.products.find(x=>x.id===r.material_id);
       const name=mat?.name||prod?.name||r.material_id;
-      return `<span class="recipe-chip">${name} ${r.pct}%</span>`;
+      return `<span class="recipe-chip">${esc(name)} ${r.pct}%</span>`;
     }).join('');
-    h+=`<tr>
-      <td style="color:var(--green);font-weight:700">${p.name}</td>
-      <td style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">${p.material_code||'—'}</td>
-      <td style="font-family:var(--mono);font-size:9px;color:${p.facility_id?'var(--text)':'var(--text-dim)'}">${p.facility_id?esc(DB.facilities.find(f=>f.id===p.facility_id)?.name||p.facility_id):'—'}</td>
+    // Thicker rule where the facility changes — makes the facility sort visible without
+    // spending a whole row on a group header.
+    const facKey=prodFacKey(p);
+    const newGrp=prevFac!==null&&facKey!==prevFac;
+    prevFac=facKey;
+    h+=`<tr${newGrp?' style="border-top:2px solid var(--border2)"':''}>
+      <td style="color:var(--green);font-weight:700">${esc(p.name)}</td>
+      <td style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">${esc(p.material_code||'—')}</td>
+      <td style="font-family:var(--mono);font-size:9px;color:${facName?'var(--text)':'var(--text-dim)'}">${facName?esc(facName):'—'}${isLabel?`<span title="Typed by hand — not a facility in the topology" style="color:var(--amber);font-size:8px;margin-left:4px">○</span>`:''}</td>
+      <td>${famDef?`<span style="font-family:var(--mono);font-size:8px;padding:2px 7px;border:1px solid ${famDef.color};color:${famDef.color}">${famDef.label}</span>`:'<span style="color:var(--text-dim);font-size:9px">—</span>'}</td>
       <td><span style="font-family:var(--mono);font-size:8px;padding:2px 7px;border:1px solid ${catColor};color:${catColor}">${catLabel}</span></td>
       <td><div class="recipe-list">${recipe||'<span style="color:var(--text-dim);font-size:9px">no recipe — kiln product</span>'}</div></td>
       <td>
@@ -6270,16 +6393,50 @@ function _pmSelectCat(fam,cat,sub){
   if(wrap) wrap.innerHTML=_pmCatChipsHtml(fam,cat,sub);
 }
 
-// Facility <option>s for the product form. Plants first, then terminals (a terminal
-// can pack/blend), each group labelled so the two are distinguishable in one list.
-function _pmFacOpts(sel){
+// Display name for a product's facility — the topology facility it points at, else the
+// free-text label the user typed, else ''. Everything that shows/filters/sorts products by
+// facility goes through this pair so the two kinds of assignment behave identically.
+function prodFacName(p){
+  if(p&&p.facility_id){ const f=(DB.facilities||[]).find(x=>x.id===p.facility_id); if(f) return f.name; return p.facility_id; }
+  return (p&&p.facility_label)||'';
+}
+// Stable key for grouping/filtering. Typed labels are prefixed '~' so they can never
+// collide with a real facility id.
+function prodFacKey(p){ return (p&&p.facility_id)||((p&&p.facility_label)?'~'+p.facility_label:''); }
+
+// Facility <option>s for the product form. Plants first, then terminals (a terminal can
+// pack/blend), then any facility names typed on OTHER products — so a name typed once is
+// reusable from the dropdown instead of being retyped — then the "new facility" escape hatch.
+function _pmFacOpts(sel, selLabel){
   const grp=(type,label)=>{
     const fs=(DB.facilities||[]).filter(f=>f.type===type).sort((a,b)=>a.name.localeCompare(b.name));
     if(!fs.length) return '';
     return `<optgroup label="${label}">`+fs.map(f=>
       `<option value="${f.id}"${f.id===sel?' selected':''}>${esc(f.name)}</option>`).join('')+`</optgroup>`;
   };
-  return `<option value="">-- Not assigned --</option>`+grp('plant','Plants')+grp('terminal','Terminals');
+  const labels=[...new Set((DB.products||[]).map(p=>p.facility_label).filter(Boolean))];
+  if(selLabel&&!labels.includes(selLabel)) labels.push(selLabel);
+  labels.sort((a,b)=>a.localeCompare(b));
+  const custom=labels.length
+    ? `<optgroup label="Not in topology">`+labels.map(n=>
+        `<option value="~${esc(n)}"${n===selLabel?' selected':''}>${esc(n)}</option>`).join('')+`</optgroup>`
+    : '';
+  return `<option value=""${(!sel&&!selLabel)?' selected':''}>-- Not assigned --</option>`
+    +grp('plant','Plants')+grp('terminal','Terminals')+custom
+    +`<option value="__new__">+ New facility\u2026</option>`;
+}
+// "+ New facility" swaps the select for a text box; picking anything else puts it back.
+function _pmFacOnChange(){
+  const sel=document.getElementById('pm-fac'), wrap=document.getElementById('pm-fac-new-wrap');
+  if(!sel||!wrap) return;
+  const isNew=sel.value==='__new__';
+  wrap.style.display=isNew?'flex':'none';
+  if(isNew){ const inp=document.getElementById('pm-fac-new'); if(inp){ inp.focus(); inp.select(); } }
+}
+function _pmFacCancelNew(){
+  const sel=document.getElementById('pm-fac'); if(sel) sel.value='';
+  const inp=document.getElementById('pm-fac-new'); if(inp) inp.value='';
+  _pmFacOnChange();
 }
 
 function openProductModal(p){
@@ -6321,9 +6478,16 @@ function openProductModal(p){
       <div class="fr">
         <div class="ff"><div class="fl">Description</div><input class="fi" id="pm-desc" value="${p?.description||''}"></div>
         <div class="ff"><div class="fl">Made At (Facility)</div>
-          <select class="fi" id="pm-fac">${_pmFacOpts(p?.facility_id||'')}</select>
+          <select class="fi" id="pm-fac" onchange="_pmFacOnChange()">${_pmFacOpts(p?.facility_id||'', p?.facility_label||'')}</select>
+          <div id="pm-fac-new-wrap" style="display:none;gap:4px;align-items:center;margin-top:4px">
+            <input class="fi" id="pm-fac-new" style="flex:1" placeholder="Type the facility name"
+              value="${esc(p?.facility_label||'')}">
+            <span onclick="_pmFacCancelNew()" title="Back to the list"
+              style="color:var(--red);cursor:pointer;font-size:12px;padding:0 4px">\u2715</span>
+          </div>
           <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-top:3px">
             Where this product is produced. Feeds the Supply page Facility filter.
+            Not in the topology yet? Pick <span style="color:var(--text)">+ New facility</span> and type it.
           </div>
         </div>
       </div>
@@ -6384,9 +6548,23 @@ function saveProduct(){
   const scm_type=document.getElementById('pm-scmtype')?.value||'';
   // Generate stable id from name
   const pid=name.toLowerCase().replace(/[\s\/\(\)\-]+/g,'_').replace(/__+/g,'_').replace(/^_|_$/g,'');
-  const facility_id=document.getElementById('pm-fac')?.value||'';
+  // Facility: a topology facility id, a reused typed label ('~name'), or a freshly typed
+  // name. A typed name that matches an existing facility resolves to that facility rather
+  // than becoming a duplicate label.
+  const facSel=document.getElementById('pm-fac')?.value||'';
+  let facility_id='', facility_label='';
+  if(facSel==='__new__'){
+    const typed=(document.getElementById('pm-fac-new')?.value||'').trim();
+    if(typed){
+      const match=(DB.facilities||[]).find(f=>(f.name||'').toLowerCase()===typed.toLowerCase());
+      if(match) facility_id=match.id; else facility_label=typed;
+    }
+  } else if(facSel.startsWith('~')) facility_label=facSel.slice(1);
+  else facility_id=facSel;
+
   const prod={id:pid, name, description:desc, material_code, category};
   if(facility_id) prod.facility_id=facility_id;
+  if(facility_label) prod.facility_label=facility_label;
   if(category==='additive' && scm_type) prod.scm_type=scm_type;
 
   if(S._editProductIdx!=null){
