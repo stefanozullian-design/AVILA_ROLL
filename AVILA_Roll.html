@@ -6949,7 +6949,7 @@ function renderDemandView(){
               const cellColor=isNwd?'rgba(255,61,90,.4)':isActual?'var(--real)':'var(--simulated)';
               h+=`<td class="dem-day-${mon.ym}" ondblclick="openDemandBuilder('${el.id}','${ds}')" title="Double-click to open the Forecast Builder for ${el.name.replace(/"/g,'&quot;')} starting ${ds}" style="cursor:cell;padding:1px 2px;border-bottom:1px solid var(--border);border-right:1px solid rgba(255,255,255,.03);${tdSty(ds)}">
                 ${isActual
-                  ? `<div style="width:50px;font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;color:${cellColor};background:${cellBg}" title="Actual shipment data — double-click for Forecast Builder">${v?Math.round(v*10)/10:''}</div>`
+                  ? `<div style="width:50px;font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;color:${cellColor};background:${cellBg}" title="${v?'Actual shipment data':'No shipments in the imported file — forecast overwritten with 0'} — double-click for Forecast Builder">${Math.round(v*10)/10}</div>`
                   : `<input class="dem-cell" data-el="${el.id}" data-date="${ds}"${isNwd?' data-nwd="1"':''} value="${v||''}" onchange="saveDemandCell(this)"
                       ${isNwd?'title="Non-working day — 0 by default; type a value to force a manual override"':''}
                       style="width:50px;background:${cellBg};border:${isNwd?'1px dashed rgba(255,61,90,.5)':'none'};color:${cellColor};font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;outline:none">`
@@ -21892,10 +21892,8 @@ async function spIngestFile(buf, fileName){
     origins: [...origins].sort(), products: [...products].sort()
   };
 
-  // Write actuals into the Demand grid (past dates only)
-  dsWriteActualsToDemandGrid();
-
-  // Write actuals to demand grid
+  // Write actuals into the Demand grid (past dates only). Call once — the zero-writing
+  // pass is not idempotent: a second run would read its own zeros as forecasts.
   dsWriteActualsToDemandGrid();
 
   // Always refresh Sales Performance view when data loads (not just if currently active)
@@ -22297,6 +22295,14 @@ function aiSetModel(m){
 // Aggregates DB.real_shipments_daily by Demand Point name + date,
 // matches to demand_point elements by name, and writes to DB.demand_values
 // with source:'actual' — overriding any existing value for past dates.
+//
+// The file is the truth for the past window of the origins it covers. Three cases:
+//   • DP + day present in the file      → real tonnage, source:'actual'
+//   • DP in the file, day absent        → explicit 0, source:'actual' (stale forecast overwritten)
+//   • DP absent from the file entirely, → explicit 0 on every day it had a forecast,
+//     but its ORIGIN is in the file       because "no shipments" is a real answer, not missing data
+//   • DP whose origin the file never mentions → untouched (a partial export must not
+//     wipe another plant's plan)
 
 function dsWriteActualsToDemandGrid(){
   if(!DB.real_shipments_daily.length) return;
@@ -22304,16 +22310,21 @@ function dsWriteActualsToDemandGrid(){
   const today = new Date()._ymd();
 
   // ── Aggregate by Demand Point name + date (past dates only) ───────────
-  const aggByDpDate = {}; // key: `dpName|date` → total volume
-  let winMin = null;      // earliest shipment date in the file
+  const aggByDpDate = {};          // key: `dpName|date` → total volume
+  let winMin = null, winMax = null; // window = span the file actually covers
+  const coveredOrigins = new Set(); // plant/terminal short names present in the file
   DB.real_shipments_daily.forEach(r=>{
     if(!r.product || !r.date || r.date > today) return;
     const key = r.product.trim() + '|' + r.date;
     aggByDpDate[key] = (aggByDpDate[key]||0) + r.volume;
     if(winMin === null || r.date < winMin) winMin = r.date;
+    if(winMax === null || r.date > winMax) winMax = r.date;
+    // r.origin is the first segment of INV_ROLL_NAME (CEMEX) or the Abrev column (new
+    // format); fall back to the DP name's own prefix when the origin column is blank.
+    const orig = ((r.origin||'').trim() || String(r.product).split('/')[0] || '').toUpperCase();
+    if(orig) coveredOrigins.add(orig);
   });
   if(!Object.keys(aggByDpDate).length) return;
-  const winMax = today;   // file is authoritative for the whole past window
 
   // ── Build lookup: dpName (upper) → element_id ─────────────────────────
   // Direct match on el.name — topology elements are now named to match Excel exactly
@@ -22339,13 +22350,33 @@ function dsWriteActualsToDemandGrid(){
     matchedElIds.add(elId); matchedDps.add(dpName);
   });
 
-  // ── Clear the whole actuals window for matched DPs ────────────────────
-  // The file is the truth for past dates: a day present in the file becomes an
-  // actual; a day ABSENT becomes 0 (its stale forecast is removed). Other demand
-  // points, and dates outside [winMin, today], are left untouched.
-  if(matchedElIds.size){
+  // ── Widen scope to every DP whose ORIGIN the file covers ──────────────
+  // A DP's origin is the first slash-segment of its dp_code (or name): BRS/DEM/… → BRS.
+  // el.facility_id is NOT usable here — it holds the SUPPLYING plant, not the destination.
+  // If no origin could be read from the file, this degenerates to matchedElIds.
+  const dpOrigin = el => String(el.props?.dp_code || el.name || '').trim().split('/')[0].toUpperCase();
+  const inScopeElIds = new Set(matchedElIds);
+  let byOriginOnly = 0;
+  dpEls.forEach(el=>{
+    if(inScopeElIds.has(el.id)) return;
+    const o = dpOrigin(el);
+    if(o && coveredOrigins.has(o)){ inScopeElIds.add(el.id); byOriginOnly++; }
+  });
+
+  // ── Snapshot the days that currently carry a forecast inside the window ─
+  // These are the days the file is about to contradict. ship_to-level and dp-level
+  // rows collapse to one key, so a DP gets at most one zero per day.
+  const hadForecast = new Set();
+  (DB.demand_values||[]).forEach(v=>{
+    if(!v.date || !inScopeElIds.has(v.element_id)) return;
+    if(v.date < winMin || v.date > winMax) return;
+    hadForecast.add(v.element_id + '|' + v.date);
+  });
+
+  // ── Clear the whole actuals window for in-scope DPs ───────────────────
+  if(inScopeElIds.size){
     DB.demand_values = (DB.demand_values||[]).filter(v=>{
-      if(!matchedElIds.has(v.element_id)) return true;       // untouched DP
+      if(!inScopeElIds.has(v.element_id)) return true;       // origin not in the file
       if(v.date < winMin || v.date > winMax) return true;    // outside window
       return false;                                          // inside window → drop
     });
@@ -22353,6 +22384,7 @@ function dsWriteActualsToDemandGrid(){
 
   // ── Write actuals into the cleared window ─────────────────────────────
   let written = 0;
+  const writtenKeys = new Set();
   Object.entries(aggByDpDate).forEach(([key, vol])=>{
     const pipeIdx = key.lastIndexOf('|');
     const dpName  = key.slice(0, pipeIdx);
@@ -22366,7 +22398,20 @@ function dsWriteActualsToDemandGrid(){
         source: 'actual'
       });
       written++;
+      writtenKeys.add(elId + '|' + date);
     }
+  });
+
+  // ── Overwrite every contradicted forecast with an explicit 0 ──────────
+  // Recorded as a real actual (not just a deleted row) so the grid can show a
+  // green read-only 0 — "the file says nothing shipped" reads differently from
+  // "nobody ever forecast this day".
+  let zeroed = 0;
+  hadForecast.forEach(k=>{
+    if(writtenKeys.has(k)) return;
+    const i = k.indexOf('|');
+    DB.demand_values.push({ element_id: k.slice(0, i), date: k.slice(i + 1), value_t: 0, source: 'actual' });
+    zeroed++;
   });
 
   // ── Warn about Excel DPs with no topology match ───────────────────────
@@ -22386,11 +22431,16 @@ function dsWriteActualsToDemandGrid(){
   }
 
   autoSave();
-  console.log('dsWriteActualsToDemandGrid:', written, 'actuals written,', unmatchedDps.size, 'unmatched DPs');
+  console.log('dsWriteActualsToDemandGrid:', written, 'actuals written,', zeroed, 'days zeroed,',
+    byOriginOnly, 'DPs zeroed by origin (absent from file),', unmatchedDps.size, 'unmatched DPs',
+    '· window', winMin, '→', winMax);
   if(unmatchedDps.size) console.log('Unmatched:', [...unmatchedDps]);
-  statMsg('Demand grid — ' + written + ' actuals written' + (unmatchedDps.size ? ' · ' + unmatchedDps.size + ' unmatched DPs' : ''));
+  statMsg('Demand grid — ' + written + ' actuals written · ' + zeroed + ' days zeroed'
+    + (byOriginOnly ? ' (' + byOriginOnly + ' DPs with no shipments)' : '')
+    + (unmatchedDps.size ? ' · ' + unmatchedDps.size + ' unmatched DPs' : ''));
 
   // Refresh demand view so actuals appear immediately
+  _demandCacheInvalidate();
   renderDemandView();
 }
 
