@@ -7296,6 +7296,20 @@ function demandScrollToday(){
   if(th) th.scrollIntoView({behavior:'smooth',inline:'center',block:'nearest'});
 }
 
+// Every demand-writing path should end here. Demand values are shown on THREE pages —
+// the Demand grid, the Supply page's nested demand rows (_demCellHtml), and Sales
+// Performance — so re-rendering only the Demand view leaves the others stale. That was
+// the "Forecast Builder does nothing on the Supply page" bug: the values WERE written,
+// the Supply row just never redrew. Re-render whichever view is actually showing, then
+// re-run the sim (debounced) so the new demand flows through, same as a manual cell edit.
+function _demandChanged(resim=true){
+  _demandCacheInvalidate();
+  if(S.view==='supply'){ if(typeof renderSupplyView==='function') renderSupplyView(); }
+  else if(S.view==='salesperf'){ if(typeof renderSalesPerfView==='function') renderSalesPerfView(); }
+  else if(typeof renderDemandView==='function') renderDemandView();
+  if(resim && typeof scheduleSimulation==='function') scheduleSimulation();
+}
+
 // Single-cell save — fires on every cell change (incl. clearing to delete) so a
 // manual edit persists immediately, no "Save Forecast" click needed. Clearing a
 // cell (empty / 0) removes the row permanently.
@@ -10437,10 +10451,8 @@ function fbpApply(){
     if(r.value>0){ DB.demand_values.push({element_id:elId,date:r.date,value_t:r.value}); days++; tot+=r.value; }
   });
   if(typeof autoSave==='function') autoSave();
-  if(typeof _demandCacheInvalidate==='function') _demandCacheInvalidate();
   fbpMsg(`<span style="color:var(--green)">✓ Applied ${days} days · ${Math.round(tot).toLocaleString()} t</span> to ${fbpElName()} · ${FBP.horizon.toUpperCase()} (${c.hzDates[0]||'—'} → ${c.end||'—'})`);
-  if(typeof renderSalesPerfView==='function') renderSalesPerfView();
-  if(typeof renderDemandView==='function' && S.view==='demand') renderDemandView();
+  _demandChanged();
 }
 function fbpOnFac(){ const allDp=(DB.elements||[]).filter(e=>e.type==='demand_point'); const facOf=e=>e.assigned_facility_id||e.facility_id||null; const dps=allDp.filter(e=>!FBP.facId||facOf(e)===FBP.facId); FBP.elId=dps[0]?dps[0].id:null; fbpRender(); }
 
@@ -10796,12 +10808,12 @@ function _fbApply(){
     const inp=document.querySelector(`.dem-cell[data-el="${eid}"][data-date="${r.date}"]`);
     if(inp) inp.value=r.value>0?Math.round(r.value*10)/10:'';
   });
-  autoSave(); _demandCacheInvalidate();
+  autoSave();
   const active=rows.filter(r=>r.value>0);
   const total=Math.round(active.reduce((s,r)=>s+r.value,0));
   const lbl=st?` for <em>${st}</em>`:'';
   document.getElementById('fb-msg').innerHTML=`<span style="color:var(--green)">✓ Applied${lbl}</span> — ${[...msgs,`${active.length} days · ${total.toLocaleString()} t`].join(' · ')}`;
-  renderDemandView();
+  _demandChanged();
 }
 
 // ── Bulk monthly-total import (wide format: demand points in rows, months as columns) ──
@@ -10954,7 +10966,7 @@ function _fbBulkProcess(rawRows){
     });
   });
 
-  autoSave(); _demandCacheInvalidate(); renderDemandView();
+  autoSave(); _demandChanged();
 
   const matchedCount=Object.keys(agg).length;
   if(!matchedCount){
