@@ -8871,7 +8871,7 @@ function _renderSupplyViewInner(wrap){
                         ||Object.keys(planBy).sort((a,b)=>planBy[b]-planBy[a])[0]||null;
                 byDate[ds]={cars,pid,byProduct:by,isReal:false,plan,isCamp:!!(pid&&_railActivePlan(disp.id,pid,ds))};
               });
-              return {disp,carCap,stdRate,byDate};
+              return {disp,carCap,stdRate,prods,byDate};
             });
             const railTonsDay=ds=>dpDays.reduce((s,d)=>{ const e=d.byDate[ds]; return s+(e?e.cars*d.carCap:0); },0);
             // Section header — monthly totals in tonnes (cars × car capacity)
@@ -8885,14 +8885,17 @@ function _renderSupplyViewInner(wrap){
             });
             _railHTML+=`</tr>`;
 
-            // ── One "Rail Car Loading" Gantt row per dispatch point ──
-            dpDays.forEach(({disp,carCap,stdRate,byDate})=>{
+            // ── One "Rail Car Loading" row per dispatch point — each day is an editable
+            // number-of-cars cell (like the Demand grid's _demCellHtml), not a Gantt bar.
+            // Typing in a cell writes a single-day override (date_from=date_to=ds) into
+            // DB.rail_loading_plan via saveRailCell(); double-clicking a cell still opens
+            // the full campaign popup to plan/edit a date-range forecast or enter real data.
+            dpDays.forEach(({disp,carCap,stdRate,prods,byDate})=>{
               let rr=`<tr class="supsec-railLoad" style="background:rgba(179,136,255,.03)">
                 <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${railColor};font-size:9px">Rail Car Loading${railDisp.length>1?' — '+disp.name:''}
                   <span style="color:var(--text-dim);font-size:8px;margin-left:4px">max ${stdRate} cars/d · ${carCap}t/car</span>
                 </td>`;
-              let _gPrev=null;
-              // Contiguous same-product runs so a click pre-fills the campaign dialog with the run's range.
+              // Contiguous same-product runs so a double-click pre-fills the campaign dialog with the run's range.
               const _runByDate={};
               { let cs=null,cp=null,pd=null;
                 const _fin=(endDs)=>{ if(cs==null)return; let on=false; for(const d of allDates){ if(d===cs)on=true; if(on)_runByDate[d]={start:cs,end:endDs,product:cp}; if(d===endDs)break; } };
@@ -8908,33 +8911,28 @@ function _renderSupplyViewInner(wrap){
                 rr+=`<td title="cars loaded" style="border-left:2px solid rgba(179,136,255,.1);font-size:9px;color:${railColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
                 if(!isCol) mon.dates.forEach(ds=>{
                   const e=byDate[ds]||{cars:0,pid:null,byProduct:{},isReal:false,plan:0,isCamp:false};
-                  const prod=e.pid?_prodById.get(e.pid):null;
-                  const barColor=prod?((typeof spProdColor==='function')?spProdColor(prod.name||prod.id,false):railColor):railColor;
+                  const pid=e.pid||prods[0]||null;
+                  const prod=pid?_prodById.get(pid):null;
+                  const cellColor=prod?((typeof spProdColor==='function')?spProdColor(prod.name||prod.id,false):railColor):railColor;
                   const run=_runByDate[ds];
                   const campArgs=run?`'${disp.id}','${ds}','${run.start}','${run.end}','${run.product}'`:`'${disp.id}','${ds}'`;
                   const clickFn=`showRailCampaignPopup(${campArgs})`;
                   if(e.isReal){
-                    _gPrev='__real';
-                    const tip=Object.keys(e.byProduct).map(pid=>(_prodById.get(pid)?.name||pid)+' '+e.byProduct[pid]+' cars').join(' + ')+' · actual';
-                    rr+=`<td class="sup-day-${mon.ym} cell-real" title="${tip}" onclick="event.stopPropagation();${clickFn}" style="cursor:pointer;font-size:9px;color:${barColor};font-weight:700;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${Math.round(e.cars)}</td>`;
+                    const tip=Object.keys(e.byProduct).map(p=>(_prodById.get(p)?.name||p)+' '+e.byProduct[p]+' cars').join(' + ')+' · actual';
+                    rr+=`<td class="sup-day-${mon.ym} cell-real" title="${tip}" onclick="event.stopPropagation();${clickFn}" style="cursor:pointer;font-size:9px;color:${cellColor};font-weight:700;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${Math.round(e.cars)}</td>`;
                     return;
                   }
-                  const runKey=e.cars>0?(e.pid||'__p'):'__idle';
-                  const isRunStart=(e.cars>0&&runKey!==_gPrev);
-                  _gPrev=runKey;
                   const isStarved=(e.cars<=0&&e.plan>0);
                   const isShort=(e.cars>0&&e.plan>e.cars);
-                  const starvedBg='repeating-linear-gradient(45deg,#5f5e5a,#5f5e5a 3px,#a32d2d 3px,#a32d2d 6px)';
-                  const barBg=isStarved?starvedBg:(e.cars>0?barColor:'transparent');
-                  const campMark=e.isCamp?'border-top:2px solid #4ade80;':'';
-                  const shortMark=isShort?'box-shadow:inset 0 -2px 0 #ffb830;':'';
-                  const cellTitle=isStarved?`⚠ plan ${e.plan} cars — nothing loaded (no cement in rail silo)`
-                    :(e.cars>0?`${prod?.name||''} · ${e.cars} cars/d${isShort?` (plan ${e.plan} — short ${e.plan-e.cars})`:''}${e.isCamp?' · 🔒 campaign':''}`
-                    :'Idle — click to plan loading');
-                  const lblName=(typeof spShortProd==='function')?spShortProd(prod?.name||''):(prod?.name||'');
-                  const label=isRunStart?`<span style="position:absolute;left:5px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:9px;font-weight:700;color:${_barTextColor(barColor)};pointer-events:none">${lblName} · ${e.cars} cars${e.isCamp?' 🔒':''}</span>`:'';
-                  const zpos=isRunStart?'position:relative;z-index:2;':'';
-                  rr+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="${zpos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barBg};${campMark}${shortMark}">${label}</div></td>`;
+                  const cellBg=isStarved?'rgba(163,45,45,.15)':e.isCamp?'rgba(74,222,128,.08)':'transparent';
+                  const borderSty=isStarved?'1px dashed rgba(163,45,45,.7)':isShort?'1px solid rgba(255,184,48,.6)':e.isCamp?'1px solid rgba(74,222,128,.4)':'1px solid transparent';
+                  const cellTitle=isStarved?`⚠ plan ${e.plan} cars — nothing loaded (no cement in rail silo). Double-click to plan a range.`
+                    :(e.cars>0?`${prod?.name||''} · ${e.cars} cars/d${isShort?` (plan ${e.plan} — short ${e.plan-e.cars})`:''}${e.isCamp?' · 🔒 campaign':''} — type to edit this day, double-click for a date range`
+                    :'Idle — type to plan loading, double-click for a date range');
+                  rr+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" ondblclick="event.stopPropagation();${clickFn}" style="padding:3px 2px;border-bottom:1px solid var(--border);${tdSty(ds)}">
+                    <input class="rail-cell" data-dp="${disp.id}" data-date="${ds}" data-pid="${pid||''}" value="${e.cars>0?Math.round(e.cars):''}" onchange="saveRailCell(this)"
+                      style="width:44px;background:${cellBg};border:${borderSty};border-radius:2px;color:${cellColor};font-family:var(--mono);font-size:9px;font-weight:700;text-align:right;padding:3px 4px;outline:none">
+                  </td>`;
                 });
               });
               _railHTML+=rr+`</tr>`;
@@ -11708,6 +11706,26 @@ function _railActivePlan(dpId, pid, ds){
 }
 // The facility a rail dispatch point belongs to (real_rail_daily rows are keyed by facility).
 function _railDpFacId(dp){ return dp?.assigned_facility_id||dp?.facility_id||S.facility_id; }
+
+// Single-cell save for the Rail Car Loading row's per-day number inputs — fires on every
+// change so a manual edit persists immediately (mirrors saveDemandCell). Writes/replaces a
+// single-day (date_from===date_to===date) DB.rail_loading_plan row for this dispatch
+// point + product; since it's pushed after any existing range campaign it takes priority
+// for that one day (railPlanRate resolves the last matching row). Clearing to 0 removes it,
+// falling back to whatever campaign/base rate would otherwise apply.
+function saveRailCell(inp){
+  if(!inp) return;
+  const dpId=inp.dataset.dp, ds=inp.dataset.date, pid=inp.dataset.pid;
+  if(!pid){ statMsg('No rail product configured for this dispatch point'); inp.value=''; return; }
+  const cars=Math.max(0,parseFloat(inp.value)||0);
+  if(!DB.rail_loading_plan) DB.rail_loading_plan=[];
+  DB.rail_loading_plan=DB.rail_loading_plan.filter(p=>!(p.dispatch_id===dpId&&p.product_id===pid&&p.date_from===ds&&p.date_to===ds));
+  if(cars>0) DB.rail_loading_plan.push({id:'lp_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),
+    dispatch_id:dpId, product_id:pid, cars_per_day:cars, date_from:ds, date_to:ds});
+  autoSave();
+  renderSupplyView();
+  scheduleSimulation();
+}
 
 // ── Rail loading campaign popup ──────────────────────────────────────────────
 // Mirrors showCampaignPopup (finish mills) but the rate is CARS/DAY. Forecast mode
