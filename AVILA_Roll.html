@@ -9755,8 +9755,22 @@ function _renderSupplyViewInner(wrap){
           // Unloading to set the actual.
           const _railPids=gr.pids.filter(pid=>_railBerths.length&&_railFedPids.has(pid));
           if(_railPids.length){
+            // Volume being unloaded (added to inventory) across all rail-fed products —
+            // rendered directly in the section header so it stays visible when the
+            // section is collapsed (child rows are hidden via CSS, not the header).
+            const _railUnlDayT=ds=>_railPids.reduce((s,pid)=>{ const rv=_unlReal(pid,ds); return s+(rv>0?rv:_unlPlan(pid,ds)); },0);
+            const _railUnlDayIsReal=ds=>_railPids.some(pid=>_unlReal(pid,ds)>0);
+            let _railHdrCells='';
+            months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+              const mt=mon.dates.reduce((s,ds)=>s+_railUnlDayT(ds),0);
+              _railHdrCells+=`<td title="total unloaded (added to inventory) this month" style="border-left:2px solid rgba(179,136,255,.2);font-size:9px;font-weight:700;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+              if(!isCol) mon.dates.forEach(ds=>{
+                const v=_railUnlDayT(ds); const isReal=_railUnlDayIsReal(ds);
+                const col=isReal?rcReal:(v>0?rc:'rgba(179,136,255,.25)');
+                _railHdrCells+=`<td class="sup-day-${mon.ym}" title="${Math.round(v).toLocaleString()} t unloaded (added to inventory)${isReal?' · actual':' · planned'}" style="font-size:9px;font-weight:700;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
+            });
             h+=`<tr class="sup-sec-hdr" data-seckey="termRail" onclick="_supToggleSec('termRail')" style="cursor:pointer;background:rgba(179,136,255,.06);border-top:1px solid rgba(179,136,255,.4)">
-              <td title="Rail pipeline per product — In Transit → At Rail Yard → At Local Yard → Unloading · cells are RAIL CARS · click to reconcile physical counts" style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${rc};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('termRail')}</span> RAIL ARRIVALS ${suffix} <span style="opacity:.55;font-weight:400;font-size:7px;margin-left:3px;text-transform:none">cars @ ${Math.round(_railCarCap)}t</span> <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>${_blankCells()}</tr>`;
+              <td title="Rail pipeline per product — In Transit → At Rail Yard → At Local Yard → Unloading · cells are RAIL CARS · click to reconcile physical counts · row totals show tons unloaded (added to inventory)" style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${rc};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('termRail')}</span> RAIL ARRIVALS ${suffix} <span style="opacity:.55;font-weight:400;font-size:7px;margin-left:3px;text-transform:none">cars @ ${Math.round(_railCarCap)}t</span> <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>${_railHdrCells}</tr>`;
             _railPids.forEach(pid=>{
               const pname=_pNameOf(pid);
               // Product sub-header inside the rail section
