@@ -11880,6 +11880,16 @@ function _railCampSetMode(mode){
   const clrW=document.getElementById('camp-clear-real-wrap'); if(clrW) clrW.style.display=real?'':'none';
 }
 
+// Re-render whichever view the rail popup was opened from. It is reachable from the Supply
+// page's RAIL LOADING gantt and from the Rail Schedule's "Loaded (cars/d)" row, and both
+// read the same rail_loading_plan / real_rail_daily rows — so refresh the one on screen
+// (runSimulation refreshes it again with the new numbers once the re-run finishes).
+function _railRefreshViews(){
+  if(S.view==='supply') renderSupplyView();
+  else if(S.view==='schedules'&&S.activeSchedTab==='rail'&&typeof rpRender==='function') rpRender();
+  else renderSupplyView();
+}
+
 // Save the rail popup: Real mode → real_rail_daily (one day); Forecast → dated rail_loading_plan row.
 function applyRailCampaign(dpId){
   const pid=document.getElementById('camp-product')?.value;
@@ -11898,7 +11908,7 @@ function applyRailCampaign(dpId){
     closeCampaignPopup();
     autoSave();
     _demandCacheInvalidate();
-    renderSupplyView();
+    _railRefreshViews();
     statMsg('Real rail loading saved — running simulation…');
     scheduleSimulation();
     return;
@@ -11917,7 +11927,7 @@ function applyRailCampaign(dpId){
     dispatch_id:dpId,product_id:pid,cars_per_day:cars,date_from:fromDate,date_to:toDate});
   closeCampaignPopup();
   autoSave();
-  renderSupplyView();
+  _railRefreshViews();
   statMsg('Loading campaign saved — running simulation…');
   scheduleSimulation();
 }
@@ -11928,7 +11938,7 @@ function _railDeletePlanRow(rowId){
   DB.rail_loading_plan=(DB.rail_loading_plan||[]).filter(p=>p.id!==rowId);
   closeCampaignPopup();
   autoSave();
-  renderSupplyView();
+  _railRefreshViews();
   statMsg('Loading campaign deleted — running simulation…');
   scheduleSimulation();
 }
@@ -11941,7 +11951,7 @@ function _railCampClearReal(dpId, dateStr){
   closeCampaignPopup();
   autoSave();
   _demandCacheInvalidate();
-  renderSupplyView();
+  _railRefreshViews();
   statMsg('Real rail loading cleared — running simulation…');
   scheduleSimulation();
 }
@@ -12093,6 +12103,32 @@ function _rpPushEdit(inp){
   else { delete window._rpDrafts[_rpDraftKey(inp)]; if(inp.dataset.cls) inp.classList.add(inp.dataset.cls); }
   _rpValidateSwitch(inp.dataset.dp, inp.dataset.sw);
 }
+// The "Available (cars @ switch)" cell was edited — record how many cars really stood in
+// the yard when the railroad came. Saved as a real_rail_daily 'yard_count' row, which the
+// simulation applies as that day's absolute yard value (after loading, before the switch
+// allocation). Clearing the cell, or typing back the simulated number, drops the override.
+// Saves straight away rather than using the push row's draft/confirm dance: this is a
+// recorded fact, not a plan the manager is still shaping.
+function _rpAvailEdit(inp){
+  const {dp,fac,pid,ds}=inp.dataset;
+  const sim=Math.max(0,parseInt(inp.dataset.sim)||0);
+  const txt=String(inp.value).trim();
+  const now=new Date().toISOString();
+  if(!DB.real_rail_daily) DB.real_rail_daily=[];
+  const had=DB.real_rail_daily.some(rr=>rr.type==='yard_count'&&rr.date===ds&&rr.facility_id===fac
+    &&(rr.product_id||'')===pid&&(!rr.dispatch_id||rr.dispatch_id===dp));
+  DB.real_rail_daily=DB.real_rail_daily.filter(rr=>!(rr.type==='yard_count'&&rr.date===ds&&rr.facility_id===fac
+    &&(rr.product_id||'')===pid&&(!rr.dispatch_id||rr.dispatch_id===dp)));
+  const cars=Math.max(0,parseInt(txt)||0);
+  const clearing=txt===''||(!had&&cars===sim);
+  if(!clearing) DB.real_rail_daily.push({date:ds,facility_id:fac,dispatch_id:dp,product_id:pid,
+    type:'yard_count',cars,source:'actual',created_at:now,updated_at:now});
+  autoSave();
+  statMsg(clearing?`Yard count cleared for ${ds} — running simulation…`
+                 :`Yard count set to ${cars} cars for ${ds} — running simulation…`);
+  scheduleSimulation();
+}
+
 // Redistribution guard: per product, the switch total may not exceed the cars available in
 // the yard at that switch (pushing LESS is fine — the rest stays behind for the next switch).
 // Flags every cell of an over-allocated product red; returns false if any product is over.
@@ -12392,8 +12428,15 @@ function rpRender(){
       const loadedOn=(pid,d)=>{ const e=rh[d-1]; return e?(e.carsLoadedByProduct?.[pid]||0):0; };
       const yardAfter=(pid,d)=>{ const e=rh[d-1]; return d>=1&&e?(e.carsInYardByProduct?.[pid]||0):0; };
       const prevSwitch=d=>{ for(let x=d-1;x>=1;x--){ if(rpIsSwitch(x,switchDays)) return x; } return 0; };
-      // Cars available to push at switch S = yard carried from the previous switch + loaded since.
-      const availAtSwitch=(pid,S)=>{ const P=prevSwitch(S); let a=yardAfter(pid,P); for(let x=P+1;x<=S;x++) a+=loadedOn(pid,x); return a; };
+      // Cars available to push at switch S: read straight from the simulation, which records
+      // the yard AFTER that day's loading and any real yard-count reconciliation but BEFORE
+      // the switch ships. Older sim results have no carsAvailByProduct, so fall back to the
+      // old reconstruction (yard carried from the previous switch + everything loaded since).
+      const availAtSwitch=(pid,S)=>{
+        const e=rh[S-1];
+        if(e&&e.carsAvailByProduct) return e.carsAvailByProduct[pid]||0;
+        const P=prevSwitch(S); let a=yardAfter(pid,P); for(let x=P+1;x<=S;x++) a+=loadedOn(pid,x); return a;
+      };
       const transitOf=fid=>{ const d=(dp.props?.destinations||[]).find(x=>x.facility_id===fid); return parseInt(d?.transit_days)||1; };
       // Match saved pushes by DATE (day numbers drift when the sim start date moves).
       const existingPush=(pid,fid,d)=>{ const ds=rpDayDate(d);
@@ -12409,24 +12452,58 @@ function rpRender(){
         const prod=DB.products.find(p=>p.id===pid);
         const pName=prod?.name||pid;
 
-        // 1) Actual loading per day (from sim)
+        // 1) Cars loaded per day. Click a cell to open the SAME rail loading popup the
+        // Supply page uses (Forecast campaign -> rail_loading_plan · Real -> real_rail_daily
+        // type 'loading'), so whichever page you edit from, both show the same numbers.
+        // Days with a real entry are bold green, exactly as on the Supply page.
+        const _firstDpProd=railDpProducts(dp)[0];
+        const realLoad=(ds)=>(DB.real_rail_daily||[]).filter(rr=>rr.type==='loading'&&rr.date===ds
+          &&rr.facility_id===_rpFacId&&((rr.product_id||'')===pid||(!rr.product_id&&pid===_firstDpProd)))
+          .reduce((a,rr)=>a+(parseFloat(rr.cars)||0),0)||null;
+        // Contiguous same-product forecast runs, so a click pre-fills the campaign range.
+        const _loadRun={};
+        { let cs=null,pd=null;
+          const _fin=end=>{ if(cs==null)return; for(let x=cs;x<=end;x++) _loadRun[x]={start:rpDayDate(cs),end:rpDayDate(end)}; };
+          days.forEach(d=>{ const on=loadedOn(pid,d)>0&&realLoad(rpDayDate(d))===null;
+            if(on){ if(cs==null)cs=d; pd=d; } else { if(cs!=null)_fin(pd); cs=null; pd=null; } });
+          if(cs!=null)_fin(pd);
+        }
         const loadCells=months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
           const mc=mon.days.reduce((s,d)=>s+loadedOn(pid,d),0);
           const mTd=`<td class="logi-mcol" style="${_mTdSty}">${mc>0?mc+' cars':'—'}</td>`;
-          return mTd+(isCol?[]:mon.days).map(d=>{ const c=loadedOn(pid,d); const tSty=_tpTdSty(d); const sw=rpIsSwitch(d,switchDays);
-            return `<td${sw?' class="tp-col-switch"':''}${tSty?` style="${tSty}"`:''}>${c>0?c:'—'}</td>`; }).join('');
+          return mTd+(isCol?[]:mon.days).map(d=>{
+            const c=loadedOn(pid,d); const ds=rpDayDate(d); const tSty=_tpTdSty(d); const sw=rpIsSwitch(d,switchDays);
+            const rv=realLoad(ds);
+            const run=_loadRun[d];
+            const args=run?`'${dp.id}','${ds}','${run.start}','${run.end}','${pid}'`:`'${dp.id}','${ds}',null,null,'${pid}'`;
+            const sty=(rv!==null?'color:#00d9a3;font-weight:700;':'')+(tSty||'');
+            const ttl=rv!==null?`REAL: ${Math.round(rv)} cars loaded — click to edit`
+                               :'Forecast from the loading plan — click to set a loading campaign or record the real cars';
+            return `<td class="tp-cell-clickable${sw?' tp-col-switch':''}"${sty?` style="cursor:pointer;${sty}"`:' style="cursor:pointer"'} title="${ttl}" onclick="showRailCampaignPopup(${args})">${c>0?c:'—'}</td>`; }).join('');
         }).join('');
-        origRows.push(`<tr class="tp-row-loading"><td style="color:#4da6ff">  ↑ Loaded ${pName} (cars/d)</td>${loadCells}</tr>`);
+        origRows.push(`<tr class="tp-row-loading"><td style="color:#4da6ff" title="Cars loaded per day — click a cell to set the loading campaign or the real value. Same data as RAIL LOADING on the Supply page.">  ↑ Loaded ${pName} (cars/d)</td>${loadCells}</tr>`);
 
-        // 2) Accumulated cars available at each switch
+        // 2) Cars accumulated in the yard and available to push at each switch. EDITABLE:
+        // type the number that was really standing there when the railroad came and it is
+        // saved as a real_rail_daily 'yard_count' row, which the simulation applies as the
+        // yard's absolute value for that day (after loading, before the switch allocation).
+        // Blank the cell to drop the override and fall back to the simulated figure.
+        const realYard=ds=>(DB.real_rail_daily||[]).find(rr=>rr.type==='yard_count'&&rr.date===ds
+          &&rr.facility_id===_rpFacId&&(rr.product_id||'')===pid&&(!rr.dispatch_id||rr.dispatch_id===dp.id));
         const availCells=months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
           const mTd=`<td class="logi-mcol" style="${_mTdSty}">—</td>`;
           return mTd+(isCol?[]:mon.days).map(d=>{ const tSty=_tpTdSty(d); const sw=rpIsSwitch(d,switchDays);
             if(!sw) return `<td${tSty?` style="${tSty}"`:''}></td>`;
+            const ds=rpDayDate(d);
             const a=availAtSwitch(pid,d);
-            return `<td class="tp-col-switch"${tSty?` style="${tSty}"`:''} title="cars accumulated in the yard, available to push">${a>0?a:'0'}</td>`; }).join('');
+            const ry=realYard(ds);
+            const isReal=!!ry;
+            const cls=isReal?'rp-real':'rp-proposed';
+            const ttl=isReal?`REAL: ${a} cars stood in the yard at this switch — clear the cell to go back to the simulated figure`
+                            :'Cars accumulated in the yard, available to push. Type the number that was really there to override the simulation.';
+            return `<td class="tp-col-switch"${tSty?` style="${tSty}"`:''}><input type="number" min="0" step="1" value="${a>0?a:0}" data-dp="${dp.id}" data-fac="${_rpFacId}" data-pid="${pid}" data-ds="${ds}" data-sim="${a}" title="${ttl}" onchange="_rpAvailEdit(this)" class="rp-push-inp ${cls}"></td>`; }).join('');
         }).join('');
-        origRows.push(`<tr class="tp-row-avail"><td style="color:#b388ff">  ▣ Available ${pName} (cars @ switch)</td>${availCells}</tr>`);
+        origRows.push(`<tr class="tp-row-avail"><td style="color:#b388ff" title="Cars in the yard at the switch. Editable — enter the real count to reconcile the simulation; blank it to undo.">  ▣ Available ${pName} (cars @ switch)</td>${availCells}</tr>`);
 
         // Pre-fill suggestion per switch: distribute ALL the cars available at that switch across
         // the terminals proportional to each terminal's demand over the days right after arrival.
@@ -12507,7 +12584,14 @@ function rpRender(){
     <span><span class="rp-lg" style="background:rgba(255,184,48,.25);border:1px solid rgba(255,184,48,.7)"></span> Edited (unsaved — click ✓)</span>
     <span><span class="rp-lg" style="background:rgba(56,189,248,.2);border:1px solid rgba(56,189,248,.7)"></span> Planned (confirmed)</span>
     <span><span class="rp-lg" style="background:rgba(0,217,163,.22);border:1px solid rgba(0,217,163,.7)"></span> Real (actual dispatch)</span>
-    <span><span class="rp-lg" style="background:rgba(255,61,90,.25);border:1px solid #ff3d5a"></span> Exceeds available cars</span>`;
+    <span><span class="rp-lg" style="background:rgba(255,61,90,.25);border:1px solid #ff3d5a"></span> Exceeds available cars</span>
+    <span style="opacity:.35">|</span>
+    <span style="opacity:.7">↑ LOADED:</span>
+    <span>click a day to set the loading campaign or the real cars — same data as RAIL LOADING on the Supply page
+      (<span style="color:#00d9a3;font-weight:700">green</span> = real)</span>
+    <span style="opacity:.35">|</span>
+    <span style="opacity:.7">▣ AVAILABLE:</span>
+    <span>type the cars really standing in the yard at a switch; blank the cell to undo</span>`;
 }
 
 // ── Rail exception banner ──────────────────────────────────────────
@@ -15803,7 +15887,8 @@ function simulate(elements, connections, horizon, includeProposed=false){
       const s=state[el.id];
       const _yardProd=()=>({...s.yardByProduct}); // yard is by product in v2
       if(s.status==='maintenance'){
-        r.railHistory[el.id].push({carsLoadedByProduct:{},carsInYardByProduct:_yardProd(),dispatchByDest:{}});
+        r.railHistory[el.id].push({carsLoadedByProduct:{},carsInYardByProduct:_yardProd(),
+          carsAvailByProduct:_yardProd(),dispatchByDest:{}});
         return;
       }
 
@@ -15865,6 +15950,24 @@ function simulate(elements, connections, horizon, includeProposed=false){
         });
       }
 
+      // ── REAL yard count at the ORIGIN (switch reconciliation) ────────────────
+      // "This many cars were actually standing in the yard when the railroad came."
+      // Absolute per product, applied AFTER the day's loading and BEFORE the switch
+      // allocation, so it is exactly what was available to push. The origin twin of the
+      // terminal's railyard_count / localyard_count reconciliation, entered from the
+      // Rail Schedule's "Available (cars @ switch)" row. Reruns are idempotent (SET).
+      (DB.real_rail_daily||[]).filter(rr=>rr.type==='yard_count'&&rr.date===_dateStr
+        &&rr.facility_id===(el.assigned_facility_id||el.facility_id)
+        &&(!rr.dispatch_id||rr.dispatch_id===el.id))
+        .forEach(rr=>{ const pid=rr.product_id; if(!pid) return;
+          s.yardByProduct[pid]=Math.max(0,Math.round(parseFloat(rr.cars)||0)); });
+
+      // Cars available to push = the yard AFTER loading and any real reconciliation, but
+      // BEFORE the switch ships anything. Recorded so the Rail Schedule reads it straight
+      // out of the history instead of reconstructing it from prevYard + loadings — that
+      // reconstruction silently ignored real overrides and drifted from the simulation.
+      const carsAvailByProduct={...s.yardByProduct};
+
       // ── SHIPPING (railroad, operator pushes) ─────────────────────────────────
       // On a switch day the railroad departs. The logistics manager's pushes (railPushes, from
       // DB.rail_movements) say how many cars of each product go to each terminal. We ship
@@ -15913,6 +16016,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
       r.railHistory[el.id].push({
         carsLoadedByProduct:{...carsLoadedByProduct},
         carsInYardByProduct:_yardProd(),
+        carsAvailByProduct:{...carsAvailByProduct},
         dispatchByDest:{...dispatchByDest},
         siloCompositionByProduct:{...siloCompositionByProduct}
       });
@@ -24077,7 +24181,7 @@ const _MG_KEYS = {
   real_production_daily: r=>['rp', r.date, r.facility_id, r.element_id, r.product_id].join('|'),
   real_inventory_daily:  r=>['ri', r.date, r.facility_id, r.silo_id, r.product_id].join('|'),
   real_transfers_daily:  r=>['rt', r.date, r.origin_facility_id, r.dest_facility_id, r.mode, r.product_id].join('|'),
-  real_rail_daily:       r=>['rr', r.date, r.facility_id, r.product_id, r.type].join('|'),
+  real_rail_daily:       r=>['rr', r.date, r.facility_id, r.product_id, r.type, r.dispatch_id??'', r.dest_facility_id??''].join('|'),
   real_shipping_daily:   r=>['rsh', r.date, r.facility_id, r.product_id].join('|'),
   real_unloading_daily:  r=>['ru', r.date, r.facility_id, r.berth_id, r.product_id, r.mode].join('|'),
 };
