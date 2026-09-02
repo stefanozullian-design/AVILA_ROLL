@@ -2023,8 +2023,11 @@ const ET = {
   berth:{label:'Berth / Unloading Point',shape:'rect',color:'#4da6ff',cat:'movement',fields:[
     {k:'berth_type',l:'Type',t:'select',opts:['Ship Berth','Truck Receiving','Rail Receiving']},
     {k:'max_unload_rate_tph',l:'Ship: Max Unloading Rate (t/h)',t:'number',show_if:{k:'berth_type',v:'Ship Berth'}},
-    {k:'max_unload_cars_shift',l:'Rail: Max Cars Unloaded / Shift',t:'number',show_if:{k:'berth_type',v:'Rail Receiving'}},
-    {k:'shifts_per_day',l:'Rail: Shifts per Day',t:'number',show_if:{k:'berth_type',v:'Rail Receiving'}},
+    // NOTE: "Max Cars Unloaded / Shift" and "Shifts per Day" used to live here. Rail
+    // unloading is no longer rate-limited — what a terminal receives is inventory the next
+    // morning — so they constrained nothing and only misled. Switch days (below, on the
+    // berth) and the downstream silo's capacity are the real limits. Stored values are
+    // left alone in case the throttle is ever reinstated.
     {k:'car_capacity_t',l:'Rail: Car Capacity (t/car)',t:'number',show_if:{k:'berth_type',v:'Rail Receiving'}},
     {k:'max_trucks_day',l:'Truck: Max Trucks Received / Day',t:'number',show_if:{k:'berth_type',v:'Truck Receiving'}},
     {k:'truck_capacity_t',l:'Truck: Capacity per Truck (t)',t:'number',show_if:{k:'berth_type',v:'Truck Receiving'}},
@@ -12335,20 +12338,9 @@ function rpRender(){
     }).join('');
     destRows.push(`<tr class="tp-row-arrival"><td style="padding-left:14px">TRANSF/ARRIVAL</td>${arrCells}</tr>`);
 
-    // 3) UNLOADING — daily volume unloaded from the rail berth into the terminal silo
-    if(berth&&S.simResults?.berthUnloadHistory?.[berth.id]){
-      const unldHist=S.simResults.berthUnloadHistory[berth.id];
-      const unldCells=months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
-        const monT=mon.days.reduce((s,d)=>s+(unldHist[d-1]||0),0);
-        const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString()+'t':'—'}</td>`;
-        return mTd+(isCol?[]:mon.days).map(d=>{
-          const v=unldHist[d-1]||0;
-          const tSty=_tpTdSty(d);
-          return `<td style="color:var(--real);font-size:10px;${tSty}">${v>0?Number(v).toLocaleString()+'t':'—'}</td>`;
-        }).join('');
-      }).join('');
-      destRows.push(`<tr class="tp-row-unload"><td style="padding-left:14px;color:var(--real);font-size:10px">Unloading</td>${unldCells}</tr>`);
-    }
+    // 3) (No UNLOADING row.) Rail unloading is no longer a multi-day, rate-limited stage:
+    // whatever the terminal receives is inventory the next morning, so the row only ever
+    // restated the arrival one day later. INVENTORY above already shows the effect.
 
     // 4) DEMAND — consolidated to ONE row per product (EFFECTIVE: own − swapped-out + swapped-in)
     _activeProdIds.forEach(pid=>{
@@ -16319,11 +16311,13 @@ function simulate(elements, connections, horizon, includeProposed=false){
       const berthType=berth.props.berth_type||'Ship Berth';
       let dailyCap;
       if(berthType==='Rail Receiving'){
-        const carsPerShift=parseFloat(berth.props.max_unload_cars_shift||berth.props.max_unload_cars_day)||99999;
-        const unldShifts=parseFloat(berth.props.shifts_per_day)||1;
-        const carCap=parseFloat(berth.props.car_capacity_t)||50;
-        const simPoints=parseFloat(berth.props.simultaneous_points)||1;
-        dailyCap=carsPerShift*unldShifts*carCap*simPoints;
+        // RAIL: no rate limit. Planning assumption — whatever was received at the terminal
+        // is fully available as inventory the next day, so the entire local yard discharges
+        // in one day. The only remaining brakes are the ones that are physically real:
+        // the SWITCH DAYS (the railroad only pulls on its switch — see SPOTTING below) and
+        // the downstream silo's free space (canUnload is min'd with siloSpace). The berth's
+        // "max cars unloaded / shift" no longer throttles anything.
+        dailyCap=Infinity;
       } else if(berthType==='Truck Receiving'){
         const trucksDay=parseFloat(berth.props.max_trucks_day)||99999;
         const truckCap=parseFloat(berth.props.truck_capacity_t)||25;
@@ -16426,7 +16420,9 @@ function simulate(elements, connections, horizon, includeProposed=false){
     // that day is pulled and RECEIVED AT THE LOCAL YARD THE NEXT MORNING (railPulled
     // overnight buffer; see the receive step at the top of this function). Between
     // switches, arrivals accumulate at the rail yard.
-    // WITHOUT switch days: legacy behavior — spot daily up to one day of unload capacity.
+    // WITHOUT switch days: the whole rail yard is spotted the day it arrives, so it
+    // unloads in full the next morning (arrival → inventory in one day). No capacity cap —
+    // see the rail dailyCap note in the unload step.
     // A real 'placed' record for the day replaces the day's move exactly (immediate).
     {
       const _railDs=new Date(simStartDate.getTime()+(day-1)*864e5)._ymd();
@@ -16454,16 +16450,8 @@ function simulate(elements, connections, horizon, includeProposed=false){
               if(t>0){ bs.railPulled[pid]=(bs.railPulled[pid]||0)+t; bs.railArrived[pid]=0; } });
           }
         } else {
-          const carsPerShift=parseFloat(berth.props.max_unload_cars_shift||berth.props.max_unload_cars_day)||99999;
-          const shifts=parseFloat(berth.props.shifts_per_day)||1;
-          const simPoints=parseFloat(berth.props.simultaneous_points)||1;
-          const dailyCapT=carsPerShift*shifts*simPoints*carCap;
-          const yardT=Object.values(bs.berthQueue||{}).reduce((a,b)=>a+b,0);
-          let spotT=Math.max(0,Math.min(arrTot,dailyCapT-yardT));
-          Object.keys(bs.railArrived).forEach(pid=>{ if(spotT<=0) return;
-            const take=Math.min(spotT,bs.railArrived[pid]||0);
-            if(take>0){ bs.railArrived[pid]-=take; bs.berthQueue[pid]=(bs.berthQueue[pid]||0)+take; spotT-=take; }
-          });
+          Object.keys(bs.railArrived).forEach(pid=>{ const t=bs.railArrived[pid];
+            if(t>0){ bs.berthQueue[pid]=(bs.berthQueue[pid]||0)+t; bs.railArrived[pid]=0; } });
         }
       });
     }
