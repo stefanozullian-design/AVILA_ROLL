@@ -7636,7 +7636,7 @@ function _renderSupplyViewInner(wrap){
   // opens as a compact overview (headers + inventory charts) instead of a wall of rows.
   if(!window._supSecDefaultApplied){
     window._supSecDefaultApplied=true;
-    ['clinkerInv','clinkerReq','clinkerProd','cementInv','cementNeed','cementProd','cementByProd','packedInv','packedNeed','packProd','railLoad','termUnload','scmInv','termVessel','termRail','truckIn'].forEach(k=>window._supSecCol.add(k));
+    ['clinkerInv','clinkerReq','clinkerProd','cementInv','cementNeed','cementProd','cementByProd','packedInv','packedNeed','packProd','railLoad','scmInv','termVessel','truckIn'].forEach(k=>window._supSecCol.add(k));
   }
   if(!S.simCfg.start_date){
     wrap.innerHTML=`<div style="font-family:var(--mono);font-size:10px;color:var(--text-dim);padding:30px;text-align:center">Configure simulation dates in Configure first.</div>`;
@@ -8838,14 +8838,18 @@ function _renderSupplyViewInner(wrap){
               return {disp,carCap,stdRate,prods,byDate};
             });
             const railTonsDay=ds=>dpDays.reduce((s,d)=>{ const e=d.byDate[ds]; return s+(e?e.cars*d.carCap:0); },0);
-            // Section header — monthly totals in tonnes (cars × car capacity)
+            const railCarsDay=ds=>dpDays.reduce((s,d)=>{ const e=d.byDate[ds]; return s+(e?e.cars:0); },0);
+            // Section header — totals in RAIL CARS, the same unit as the editable row below
+            // (these are the cars that show up as Available on the Logistics / Rail page).
+            // Tonnes are in the cell tooltip.
             _railHTML+=`<tr class="sup-sec-hdr" data-seckey="railLoad" onclick="_supToggleSec('railLoad')" style="cursor:pointer;background:rgba(179,136,255,.05);border-top:2px solid rgba(179,136,255,.3)">
-              <td title="The plant's rail-car loading forecast, in tonnes (cars × car capacity). The cars forecast here are what shows up as AVAILABLE CARS on the Logistics / Rail page for that day, ready to be allocated to destinations · click a cell to plan" style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${railColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('railLoad')}</span> RAIL LOADING <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>`;
+              <td title="The plant's rail-car loading forecast, in RAIL CARS (tonnes in each cell's tooltip). The cars forecast here are what shows up as AVAILABLE CARS on the Logistics / Rail page for that day, ready to be allocated to destinations · type in a cell to plan a day, double-click for a date range" style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${railColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('railLoad')}</span> RAIL LOADING <span style="opacity:.55;font-weight:400;font-size:7px;margin-left:3px;text-transform:none">rail cars</span> <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>`;
             months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+              const mc=mon.dates.reduce((a,ds)=>a+railCarsDay(ds),0);
               const mt=mon.dates.reduce((a,ds)=>a+railTonsDay(ds),0);
-              _railHTML+=`<td style="border-left:2px solid rgba(179,136,255,.2);font-size:9px;font-weight:700;color:${railColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
-              if(!isCol) mon.dates.forEach(ds=>{ const v=railTonsDay(ds);
-                _railHTML+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${railColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
+              _railHTML+=`<td title="${Math.round(mt).toLocaleString()} t" style="border-left:2px solid rgba(179,136,255,.2);font-size:9px;font-weight:700;color:${railColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mc>0?Math.round(mc).toLocaleString():''}</td>`;
+              if(!isCol) mon.dates.forEach(ds=>{ const c=railCarsDay(ds);
+                _railHTML+=`<td class="sup-day-${mon.ym}" title="${Math.round(railTonsDay(ds)).toLocaleString()} t" style="font-size:9px;font-weight:700;color:${railColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${c>0?Math.round(c).toLocaleString():''}</td>`; });
             });
             _railHTML+=`</tr>`;
 
@@ -9711,46 +9715,42 @@ function _renderSupplyViewInner(wrap){
             });
           }
 
-          // 🚂 RAIL ARRIVALS — one row per rail-fed product: the tonnage that ARRIVED that
-          // day, which in the simplified rail model is unloaded in full on the arrival date
-          // (it lands in inventory the following morning). No rail-yard / local-yard /
-          // unloading-rate rows — the arrival IS the unloading. Dbl-click sets the actual.
+          // 🚂 RAIL ARRIVAL — ONE flat row, the same shape as the Logistics page's
+          // TRANSF/ARRIVAL: the tonnage that arrived that day, which in the simplified rail
+          // model is unloaded in full on the arrival date and is in inventory from the next
+          // morning. No section, no per-product rows, no rail-yard / unloading-rate lines —
+          // the arrival IS the unloading. The per-product split is in the cell tooltip.
           const _railPids=gr.pids.filter(pid=>_railBerths.length&&_railFedPids.has(pid));
           if(_railPids.length){
-            // Volume being unloaded (added to inventory) across all rail-fed products —
-            // rendered directly in the section header so it stays visible when the
-            // section is collapsed (child rows are hidden via CSS, not the header).
-            const _railUnlDayT=ds=>_railPids.reduce((s,pid)=>{ const rv=_unlReal(pid,ds); return s+(rv>0?rv:_unlPlan(pid,ds)); },0);
-            const _railUnlDayIsReal=ds=>_railPids.some(pid=>_unlReal(pid,ds)>0);
-            let _railHdrCells='';
+            const _railPidT=(pid,ds)=>{ const rv=_unlReal(pid,ds); return rv>0?rv:_unlPlan(pid,ds); };
+            const _railPidCars=(pid,ds)=>{ const rv=_unlReal(pid,ds);
+              if(rv>0){ const rc2=_unlRealCars(pid,ds); return rc2!=null?rc2:rv/_railCarCap; }
+              return _unlPlan(pid,ds)/_railCarCap; };
+            const _railDayT=ds=>_railPids.reduce((s,pid)=>s+_railPidT(pid,ds),0);
+            const _railDayCars=ds=>_railPids.reduce((s,pid)=>s+_railPidCars(pid,ds),0);
+            const _railDayReal=ds=>_railPids.some(pid=>_unlReal(pid,ds)>0);
+            // With a single rail-fed product the cell can still open the actual-entry popup.
+            // With several, one row can't say which product to edit — per-product actuals go
+            // through the Daily Data form's RECEIVING section (in rail cars).
+            const _soloPid=_railPids.length===1?_railPids[0]:null;
+            h+=`<tr><td title="Tonnes arriving by rail — 100% is unloaded on the arrival date and counts in inventory from the next morning${_soloPid?' · dbl-click a cell to set the actual':''}" style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${rc};font-size:9px;font-weight:700">TRANSF / ARRIVAL <span style="opacity:.55;font-weight:400;font-size:7px;margin-left:3px">tonnes unloaded · cars @ ${Math.round(_railCarCap)}t</span></td>`;
             months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-              const mt=mon.dates.reduce((s,ds)=>s+_railUnlDayT(ds),0);
-              _railHdrCells+=`<td title="total unloaded (added to inventory) this month" style="border-left:2px solid rgba(179,136,255,.2);font-size:9px;font-weight:700;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+              const mt=mon.dates.reduce((s,ds)=>s+_railDayT(ds),0);
+              const mc=Math.round(mon.dates.reduce((s,ds)=>s+_railDayCars(ds),0));
+              h+=`<td title="${mc} cars this month" style="border-left:2px solid rgba(179,136,255,.2);font-size:9px;font-weight:700;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
               if(!isCol) mon.dates.forEach(ds=>{
-                const v=_railUnlDayT(ds); const isReal=_railUnlDayIsReal(ds);
+                const v=_railDayT(ds); const isReal=_railDayReal(ds);
                 const col=isReal?rcReal:(v>0?rc:'rgba(179,136,255,.25)');
-                _railHdrCells+=`<td class="sup-day-${mon.ym}" title="${Math.round(v).toLocaleString()} t unloaded (added to inventory)${isReal?' · actual':' · planned'}" style="font-size:9px;font-weight:700;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
+                const split=_railPids.length>1
+                  ? ' · '+_railPids.filter(pid=>_railPidT(pid,ds)>0)
+                      .map(pid=>`${_pNameOf(pid)} ${Math.round(_railPidT(pid,ds)).toLocaleString()}t`).join(' + ')
+                  : '';
+                const ttl=`Arrived & unloaded · ${Math.round(v).toLocaleString()} t (${Math.round(_railDayCars(ds))} cars)${isReal?' · actual':' · planned'}${split} — in inventory from the next morning`
+                  +(_soloPid?' — dbl-click to set actual':'');
+                const click=_soloPid?` ondblclick="event.stopPropagation();showTermRealPopup('unload','${fac.id}','${_soloPid}','${ds}')"`:'';
+                h+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''}"${click} title="${ttl}" style="${_soloPid?'cursor:pointer;':''}font-size:9px;font-weight:700;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
             });
-            h+=`<tr class="sup-sec-hdr" data-seckey="termRail" onclick="_supToggleSec('termRail')" style="cursor:pointer;background:rgba(179,136,255,.06);border-top:1px solid rgba(179,136,255,.4)">
-              <td title="Tonnes arriving by rail per product — 100% is unloaded on the arrival date and counts in inventory from the next morning · dbl-click a cell to set the actual" style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${rc};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('termRail')}</span> RAIL ARRIVALS ${suffix} <span style="opacity:.55;font-weight:400;font-size:7px;margin-left:3px;text-transform:none">tonnes unloaded · cars @ ${Math.round(_railCarCap)}t</span> <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>${_railHdrCells}</tr>`;
-            _railPids.forEach(pid=>{
-              const pname=_pNameOf(pid);
-              // ONE row per product: tonnes arrived (= unloaded) that day. Cars in the tooltip.
-              const _uCars=(ds)=>{ const rv=_unlReal(pid,ds); if(rv>0){ const rc2=_unlRealCars(pid,ds); return rc2!=null?rc2:rv/_railCarCap; } return _unlPlan(pid,ds)/_railCarCap; };
-              h+=`<tr class="supsec-termRail"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${_pColor(pid)};font-size:9px">${_pChip(pid)}${pname}<span style="font-size:7px;opacity:.55;margin-left:4px">ARRIVED / UNLOADED · t</span></td>`;
-              months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-                const mtT=mon.dates.reduce((s,ds)=>{ const rv=_unlReal(pid,ds); return s+(rv>0?rv:_unlPlan(pid,ds)); },0);
-                const mCars=Math.round(mon.dates.reduce((s,ds)=>s+_uCars(ds),0));
-                h+=`<td title="${mCars} cars" style="border-left:2px solid rgba(179,136,255,.1);font-size:9px;font-weight:700;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mtT>0?Math.round(mtT).toLocaleString():''}</td>`;
-                if(!isCol) mon.dates.forEach(ds=>{
-                  const rv=_unlReal(pid,ds); const isReal=rv>0; const vT=isReal?rv:_unlPlan(pid,ds);
-                  const col=isReal?rcReal:(vT>0?rc:'rgba(179,136,255,.25)');
-                  const cars=vT>0?Math.round(_uCars(ds)):0;
-                  const ttl=`${pname} arrived & unloaded · ${Math.round(vT).toLocaleString()} t (${cars} cars)${isReal?' · actual':' · planned'} — in inventory from the next morning — dbl-click to set actual`;
-                  h+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''}" ondblclick="event.stopPropagation();showTermRealPopup('unload','${fac.id}','${pid}','${ds}')" title="${ttl}" style="cursor:pointer;font-size:9px;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${isReal?'700':'400'};${tdSty(ds)}">${vT>0?Math.round(vT).toLocaleString():0}</td>`; });
-              });
-              h+=`</tr>`;
-            });
+            h+=`</tr>`;
           }
 
           // OTHER ARRIVALS — safety net for products with scheduled arrivals
