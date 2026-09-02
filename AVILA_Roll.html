@@ -9489,6 +9489,34 @@ function _renderSupplyViewInner(wrap){
         const totalNeed=(pid,ds)=>demandPoints.filter(dp=>dp.products?.some(p=>_canon(p.product_id)===pid))
           .reduce((s,dp)=>s+(_demandRate(dp.element_id,ds)||0),0);
 
+        // ── Demand-swap split at a TERMINAL ────────────────────────────────
+        // Same treatment the plant block gives PRODUCT REQUIREMENT. Terminals used to have
+        // none, so a swap whose DESTINATION demand point lives at a terminal moved volume
+        // in the engine (inventory drew down correctly) but the requirement rows here still
+        // showed the point's own demand only — the tonnes appeared to vanish between the
+        // source plant and the receiving terminal.
+        const _tDpsOf=pid=>demandPoints.filter(dp=>dp.products?.some(p=>_canon(p.product_id)===pid));
+        const _tSwappedOut=(pid,ds)=>_tDpsOf(pid).reduce((q,dp)=>{
+          const t=_demandRate(dp.element_id,ds)||0;
+          const sw=(typeof _resolveDemandSwap==='function')?_resolveDemandSwap(dp.element_id,t,ds):null;
+          return q+(sw?Math.min(sw.qty,t):0);
+        },0);
+        const _tSwappedIn=(pid,ds)=>_tDpsOf(pid).reduce((q,dp)=>
+          q+((typeof _resolveDemandSwapIn==='function')?_resolveDemandSwapIn(dp.element_id,ds,(id)=>_demandRate(id,ds)):0),0);
+        const _tDpName=id=>DB.elements.find(e=>e.id===id)?.name
+          ||DB.demand_points.find(d=>d.element_id===id)?.element_name||id;
+        const _tOutTargets=pid=>{ const n=new Set();
+          _tDpsOf(pid).forEach(dp=>(DB.demand_substitutions||[])
+            .filter(sb=>sb.from_element_id===dp.element_id)
+            .forEach(sb=>n.add(sb.to_element_id?_tDpName(sb.to_element_id)
+              :(_prodById.get(sb.to_product_id)?.name||sb.to_product_id))));
+          return [...n].join(', '); };
+        const _tInSources=pid=>{ const n=new Set();
+          const ids=new Set(_tDpsOf(pid).map(dp=>dp.element_id));
+          (DB.demand_substitutions||[]).filter(sb=>ids.has(sb.to_element_id))
+            .forEach(sb=>n.add(_tDpName(sb.from_element_id)));
+          return [...n].join(', '); };
+
         // ── CATEGORY-FIRST LAYOUT ──────────────────────────────────────────
         // Products are grouped by how they are STORED, not one block each:
         // one BULK block (bulk silos — cement, SCM, clinker alike), then one
@@ -9629,6 +9657,32 @@ function _renderSupplyViewInner(wrap){
               });
               h+=`</tr>`;
               h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, depth+4, _dpnBase, stickyLeft);
+
+              // ── Swap breakdown child rows (only when a swap touches this product) ──
+              // Mirrors the plant block so a relocation reads the same at both ends.
+              const _soArr=allDates.map(ds=>_tSwappedOut(pid,ds));
+              const _siArr=allDates.map(ds=>_tSwappedIn(pid,ds));
+              const _hasSO=_soArr.some(v=>v>0), _hasSI=_siArr.some(v=>v>0);
+              if(_hasSO||_hasSI){
+                const _ix={}; allDates.forEach((ds,i)=>_ix[ds]=i);
+                const _swapChild=(label,color,bg,valFn)=>{
+                  let rr=`<tr class="supsec-${reqSeckey}" style="background:${bg}"><td style="${stickyLeft('var(--surface)',depth+4,'border-bottom:1px solid var(--border),')}color:${color};font-size:8px;font-style:italic">${label}</td>`;
+                  months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+                    const mt=mon.dates.reduce((a,ds)=>a+valFn(ds),0);
+                    rr+=`<td style="border-left:2px solid rgba(255,255,255,.05);font-size:8px;color:${color};text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                    if(!isCol) mon.dates.forEach(ds=>{ const v=valFn(ds);
+                      rr+=`<td class="sup-day-${mon.ym}" style="font-size:8px;color:${color};text-align:right;padding:3px 4px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
+                  });
+                  return rr+`</tr>`;
+                };
+                const _ownFn=ds=>Math.max(0,totalNeed(pid,ds)-(_soArr[_ix[ds]]||0));
+                h+=_swapChild('↳ '+_pNameOf(pid)+' · own','var(--green)','rgba(76,175,80,.03)',_ownFn);
+                if(_hasSO) h+=_swapChild('↳ ⇄ swapped out → '+(_tOutTargets(pid)||'substitute'),'var(--amber)','rgba(255,184,48,.05)',ds=>_soArr[_ix[ds]]||0);
+                if(_hasSI){
+                  h+=_swapChild('↳ ⇄ swapped in ← '+(_tInSources(pid)||'other demand'),'#4dd0e1','rgba(77,208,225,.06)',ds=>_siArr[_ix[ds]]||0);
+                  h+=_swapChild('↳ = required here (own+in)','#4da6ff','rgba(77,166,255,.06)',ds=>_ownFn(ds)+(_siArr[_ix[ds]]||0));
+                }
+              }
             });
           }
 
