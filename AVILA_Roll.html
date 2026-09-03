@@ -1733,6 +1733,8 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
         <button id="bi-push-btn" onclick="pushToBI()" style="width:100%;padding:18px;font-family:var(--mono);font-size:13px;letter-spacing:3px;background:var(--green);color:#000;border:none;cursor:pointer;font-weight:700;transition:opacity .2s">
           📤 PUSH TO BI
         </button>
+        <!-- Where the file lands — filled by _biRenderDest() whenever this view opens -->
+        <div id="bi-push-dest" style="margin-top:9px;font-size:9px;text-align:center;color:var(--text-dim);line-height:1.6"></div>
         <div id="bi-push-msg" style="margin-top:14px;font-size:10px;text-align:center;min-height:14px"></div>
 
         <div style="margin-top:28px;font-size:9px;color:var(--text-dim);line-height:1.6">
@@ -17679,6 +17681,9 @@ async function pushToBI(){
   const setMsg=(html)=>{ const m=document.getElementById('bi-push-msg'); if(m) m.innerHTML=html; };
   try{
     if(btn) btn.disabled=true;
+    // Resolve the destination FIRST: showDirectoryPicker() and requestPermission()
+    // need this click's user activation, which does not survive the awaits below.
+    const dir=await exportDir('bi',true);
     setMsg('<span style="color:var(--amber)">Loading XLSX engine…</span>');
     await loadLib('xlsx'); // pinned version + SRI — see LIBS
     setMsg('<span style="color:var(--amber)">Building star schema…</span>');
@@ -17689,15 +17694,31 @@ async function pushToBI(){
       const ws=XLSX.utils.json_to_sheet(rows.length?rows:[{note:'(no rows)'}]);
       XLSX.utils.book_append_sheet(wb,ws,name);
     });
-    const stamp=new Date()._ymd();
-    XLSX.writeFile(wb,`AVILA_BI_${stamp}.xlsx`);
+    // Same name, same folder, every time — Power BI can be pointed at this file once
+    // and simply refreshed from then on.
+    setMsg(`<span style="color:var(--amber)">${dir?'Saving':'Downloading'}…</span>`);
+    const res=await exportWriteWorkbook('bi',wb,dir);
     const total=Object.values(tables).reduce((a,t)=>a+t.length,0);
-    setMsg(`<span style="color:var(--green)">✓ Exported ${total.toLocaleString()} rows across ${Object.keys(tables).length} sheets</span>`);
+    setMsg(`<span style="color:var(--green)">✓ ${res.saved?'Saved to '+esc(res.where):'Downloaded '+esc(res.where)} — `+
+      `${total.toLocaleString()} rows across ${Object.keys(tables).length} sheets</span>`+
+      (res.saved?'':`<div style="color:var(--text-dim);margin-top:5px">Set a folder in Configuration → Data Sources to save it in place instead.</div>`));
   }catch(e){
     setMsg(`<span style="color:var(--red)">Export failed: ${e.message}</span>`);
   }finally{
     if(btn) btn.disabled=false;
   }
+}
+
+// Destination line under the Push to BI button — mirrors the folder set in
+// Configuration → Data Sources, or says the file will download instead.
+function _biRenderDest(){
+  const el=document.getElementById('bi-push-dest'); if(!el) return;
+  const cfg=exportSlot('bi'), name=exportDirName('bi');
+  el.innerHTML = name
+    ? `Writes <span style="color:var(--text)">${esc(name)}/${cfg.file}</span>, replacing the previous file.`
+    : `Downloads as <span style="color:var(--text)">${cfg.file}</span> — `+
+      `<span style="color:var(--blue);cursor:pointer;text-decoration:underline" onclick="chooseExportDir('bi')">choose a folder</span> `+
+      `to save it in place instead.`;
 }
 
 function _pushBIBuildTables(){
@@ -18453,102 +18474,137 @@ function resInitFilters(){
   _resRenderDockSummary();
 }
 
-// ── RESULTS EXPORT DESTINATION ──────────────────────────────────────────────
-// The Results export always writes the SAME file name into the SAME folder, so each
-// export replaces the last one and anything pointing at that path (Power BI, a shared
-// drive) keeps working without re-pointing.
-//   The folder is a FileSystemDirectoryHandle chosen once by the user in
-//   Configuration → Data Sources, kept in IndexedDB alongside the scenario handles
-//   (they can't be serialised to localStorage). Only its display name goes to
-//   localStorage, so the panel can label the setting before the handle is loaded.
+// ── EXPORT DESTINATIONS ─────────────────────────────────────────────────────
+// Both spreadsheet exports write the SAME file name into the SAME user-chosen folder,
+// replacing what is already there — so anything pointing at that path (Power BI, a
+// shared drive, a scheduled refresh) keeps working without ever being re-pointed.
+//   Each destination is a FileSystemDirectoryHandle picked once in
+//   Configuration → Data Sources and kept in IndexedDB beside the scenario handles
+//   (handles can't be serialised to localStorage). Only the folder's display name goes
+//   to localStorage, so the panel can label itself before the handle loads.
 // Browsers without the File System Access API fall back to a normal download that
-// still carries the fixed name — the browser decides the folder there.
-const RESULTS_EXPORT_FILENAME='Avila Results.xlsx';
-const RESULTS_DIR_KEY='__results_export_dir__';   // key inside the historyDirs store
-const RESULTS_DIR_NAME_KEY='avila_results_dir_name';
-let _resultsDirHandle=null;
+// still carries the fixed name — there the browser picks the folder.
+const EXPORT_SLOTS={
+  results:{
+    dirKey:'__results_export_dir__', nameKey:'avila_results_dir_name',
+    file:'Avila Results.xlsx', pickerId:'avila-results-export', rowId:'res-export-dir-row',
+    label:'Results export folder',
+    desc:'Where <b style="color:var(--text)">⤓ Export full data</b> on the Results page writes.'
+  },
+  bi:{
+    dirKey:'__bi_export_dir__', nameKey:'avila_bi_dir_name',
+    file:'Avila Power BI.xlsx', pickerId:'avila-bi-export', rowId:'bi-export-dir-row',
+    label:'Power BI export folder',
+    desc:'Where <b style="color:var(--text)">📤 Push to BI</b> on the Results page writes. Point Power BI at this file once and refresh it from there.'
+  }
+};
+const _exportDirHandles={};   // slot → handle granted this session
 
-function resultsExportDirName(){ try{ return localStorage.getItem(RESULTS_DIR_NAME_KEY)||''; }catch(e){ return ''; } }
+function exportSlot(slot){ return EXPORT_SLOTS[slot]||EXPORT_SLOTS.results; }
+function exportDirName(slot){
+  try{ return localStorage.getItem(exportSlot(slot).nameKey)||''; }catch(e){ return ''; }
+}
 
-// Returns the saved folder handle with write permission, or null.
-//   prompt=true  — ask for the folder (or re-grant) as part of a user gesture
-//   prompt=false — silent: only returns a handle already granted this session
-async function resultsExportDir(prompt){
+// Returns the slot's folder handle with write permission, or null.
+//   prompt=true  — may open the picker / ask to re-grant; call it inside a user gesture
+//   prompt=false — silent: only a handle already granted this session
+async function exportDir(slot, prompt){
+  const cfg=exportSlot(slot);
   try{
-    if(_resultsDirHandle&&await _dsEnsureWritePermission(_resultsDirHandle)) return _resultsDirHandle;
-    let h=await scLoadHistoryDirHandle(RESULTS_DIR_KEY);
+    const cached=_exportDirHandles[slot];
+    if(cached&&await _dsEnsureWritePermission(cached)) return cached;
+    let h=await scLoadHistoryDirHandle(cfg.dirKey);
     if(h){
       // A stored handle needs its permission re-granted each new session, and that
       // request only succeeds inside a user gesture.
       const perm=await h.queryPermission({mode:'readwrite'});
-      if(perm==='granted'){ _resultsDirHandle=h; return h; }
-      if(prompt&&await _dsEnsureWritePermission(h)){ _resultsDirHandle=h; return h; }
+      if(perm==='granted'){ _exportDirHandles[slot]=h; return h; }
+      if(prompt&&await _dsEnsureWritePermission(h)){ _exportDirHandles[slot]=h; return h; }
       return null;
     }
     if(!prompt||!window.showDirectoryPicker) return null;
-    h=await window.showDirectoryPicker({id:'avila-results-export',mode:'readwrite'});
-    _resultsDirHandle=h;
-    await scSaveHistoryDirHandle(RESULTS_DIR_KEY,h);
-    try{ localStorage.setItem(RESULTS_DIR_NAME_KEY,h.name||''); }catch(e){}
+    h=await window.showDirectoryPicker({id:cfg.pickerId,mode:'readwrite'});
+    _exportDirHandles[slot]=h;
+    await scSaveHistoryDirHandle(cfg.dirKey,h);
+    try{ localStorage.setItem(cfg.nameKey,h.name||''); }catch(e){}
     return h;
   }catch(e){ return null; } // cancelled picker or denied permission
 }
 
-async function resultsChooseExportDir(){
-  if(!window.showDirectoryPicker){
-    alert('This browser cannot pick a folder — use Chrome or Edge.\n\nExports will download to your usual Downloads folder as "'+RESULTS_EXPORT_FILENAME+'".');
-    return;
+// Write a built workbook to the slot's folder, or fall back to a download. `dir` is
+// passed in rather than resolved here because the picker needs the click's user
+// activation, which does not survive building the workbook.
+async function exportWriteWorkbook(slot, wb, dir){
+  const cfg=exportSlot(slot);
+  if(dir){
+    const data=XLSX.write(wb,{bookType:'xlsx',type:'array'});
+    const fh=await dir.getFileHandle(cfg.file,{create:true});
+    const w=await fh.createWritable();
+    await w.write(data);
+    await w.close();
+    return {saved:true, where:dir.name+'/'+cfg.file};
   }
-  const h=await resultsExportDir(true);
-  if(h){ statMsg('Results export folder set — '+h.name); }
-  _resultsRenderDirRow();
-}
-async function resultsClearExportDir(){
-  _resultsDirHandle=null;
-  try{ await scDeleteHistoryDirHandle(RESULTS_DIR_KEY); }catch(e){}
-  try{ localStorage.removeItem(RESULTS_DIR_NAME_KEY); }catch(e){}
-  statMsg('Results export folder cleared — exports will download instead');
-  _resultsRenderDirRow();
+  XLSX.writeFile(wb,cfg.file);
+  return {saved:false, where:cfg.file};
 }
 
-// The Data Sources row for this setting. Rendered on its own so choosing or clearing
-// the folder can repaint just this block.
-function resultsExportDirHTML(){
+async function chooseExportDir(slot){
+  const cfg=exportSlot(slot);
+  if(!window.showDirectoryPicker){
+    alert('This browser cannot pick a folder — use Chrome or Edge.\n\nExports will download to your usual Downloads folder as "'+cfg.file+'".');
+    return;
+  }
+  const h=await exportDir(slot,true);
+  if(h) statMsg(cfg.label+' set — '+h.name);
+  _renderExportDirRow(slot);
+}
+async function clearExportDir(slot){
+  const cfg=exportSlot(slot);
+  delete _exportDirHandles[slot];
+  try{ await scDeleteHistoryDirHandle(cfg.dirKey); }catch(e){}
+  try{ localStorage.removeItem(cfg.nameKey); }catch(e){}
+  statMsg(cfg.label+' cleared — exports will download instead');
+  _renderExportDirRow(slot);
+}
+
+// The Data Sources block for one destination. Rendered on its own so choosing or
+// clearing a folder can repaint just that block.
+function exportDirHTML(slot){
+  const cfg=exportSlot(slot);
   const supported=!!window.showDirectoryPicker;
-  const name=resultsExportDirName();
+  const name=exportDirName(slot);
   const body=!supported
     ? `<div style="font-family:var(--mono);font-size:9px;color:var(--amber)">
          This browser can't save to a chosen folder — Chrome or Edge required.
-         Exports download as <b style="color:var(--text)">${RESULTS_EXPORT_FILENAME}</b>.
+         Exports download as <b style="color:var(--text)">${cfg.file}</b>.
        </div>`
     : name
       ? `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
            <span style="font-family:var(--mono);font-size:10px;color:var(--green)">📁 ${esc(name)}</span>
-           <span style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">/ ${RESULTS_EXPORT_FILENAME}</span>
-           <button class="tb-btn sec" style="font-size:9px;padding:3px 10px" onclick="resultsChooseExportDir()">Change…</button>
-           <button class="tb-btn sec" style="font-size:9px;padding:3px 10px" onclick="resultsClearExportDir()">Clear</button>
+           <span style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">/ ${cfg.file}</span>
+           <button class="tb-btn sec" style="font-size:9px;padding:3px 10px" onclick="chooseExportDir('${slot}')">Change…</button>
+           <button class="tb-btn sec" style="font-size:9px;padding:3px 10px" onclick="clearExportDir('${slot}')">Clear</button>
          </div>
          <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-top:5px">
            Each export replaces this file. Your browser may ask you to confirm access once per session.
          </div>`
       : `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-           <button class="tb-btn sec" style="font-size:9px;padding:3px 10px" onclick="resultsChooseExportDir()">Choose folder…</button>
+           <button class="tb-btn sec" style="font-size:9px;padding:3px 10px" onclick="chooseExportDir('${slot}')">Choose folder…</button>
            <span style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">Not set — exports download to your browser's Downloads folder</span>
          </div>`;
-  return `<div id="res-export-dir-row" style="border:1px solid var(--border2);background:var(--surface2);padding:12px 14px;margin-bottom:12px">
+  return `<div id="${cfg.rowId}" style="border:1px solid var(--border2);background:var(--surface2);padding:12px 14px;margin-bottom:12px">
     <div style="font-family:var(--mono);font-size:9px;color:var(--text);letter-spacing:1px;text-transform:uppercase;margin-bottom:8px">
-      Results export folder
+      ${cfg.label}
     </div>
     <div style="font-family:var(--mono);font-size:9px;color:var(--text-dim);line-height:1.7;margin-bottom:9px">
-      Where <b style="color:var(--text)">⤓ Export full data</b> on the Results page writes.
-      Always the same file name, always the same folder, so the previous export is replaced.
+      ${cfg.desc} Always the same file name, always the same folder, so the previous export is replaced.
     </div>
     ${body}
   </div>`;
 }
-function _resultsRenderDirRow(){
-  const row=document.getElementById('res-export-dir-row');
-  if(row) row.outerHTML=resultsExportDirHTML();
+function _renderExportDirRow(slot){
+  const row=document.getElementById(exportSlot(slot).rowId);
+  if(row) row.outerHTML=exportDirHTML(slot);
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -18570,7 +18626,7 @@ async function exportResultsFull(){
     if(btn) btn.disabled=true;
     // Resolve the destination FIRST: showDirectoryPicker() and requestPermission()
     // need the click's user activation, which does not survive the awaits below.
-    const dir=await resultsExportDir(true);
+    const dir=await exportDir('results',true);
     setMsg('Loading…');
     await loadLib('xlsx');
     setMsg('Building…');
@@ -18650,23 +18706,12 @@ async function exportResultsFull(){
     ]),'Info');
 
     // Same name, same folder, every time — the previous export is replaced.
-    // Falls back to a normal download (still fixed name) when no folder is set or
-    // the browser has no File System Access API.
-    if(dir){
-      setMsg('Saving…');
-      const data=XLSX.write(wb,{bookType:'xlsx',type:'array'});
-      const fh=await dir.getFileHandle(RESULTS_EXPORT_FILENAME,{create:true});
-      const w=await fh.createWritable();
-      await w.write(data);
-      await w.close();
-      setMsg('✓ Saved');
-      statMsg('Results exported → '+dir.name+'/'+RESULTS_EXPORT_FILENAME);
-    }else{
-      XLSX.writeFile(wb,RESULTS_EXPORT_FILENAME);
-      setMsg('✓ Downloaded');
-      if(!resultsExportDirName())
-        statMsg('Downloaded '+RESULTS_EXPORT_FILENAME+' — set a folder in Configuration → Data Sources to save it in place');
-    }
+    setMsg(dir?'Saving…':'Downloading…');
+    const res=await exportWriteWorkbook('results',wb,dir);
+    setMsg(res.saved?'✓ Saved':'✓ Downloaded');
+    statMsg(res.saved
+      ? 'Results exported → '+res.where
+      : 'Downloaded '+res.where+' — set a folder in Configuration → Data Sources to save it in place');
     setTimeout(()=>setMsg(prev),2500);
   }catch(e){
     setMsg('Export failed');
@@ -23317,7 +23362,8 @@ function dsCfgPanelHTML(){
       <div style="font-family:var(--mono);font-size:9px;color:var(--text-dim);margin-bottom:12px">
         You can still load files manually using the ↑ Load Actuals button on the Sales page.
       </div>
-      ${resultsExportDirHTML()}
+      ${exportDirHTML('results')}
+      ${exportDirHTML('bi')}
     </div>`;
   }
   return `<div style="padding:14px 16px">
@@ -23325,7 +23371,8 @@ function dsCfgPanelHTML(){
       Configure a file path for each data source. The app will automatically refresh these files on startup and when you click Refresh.
       Files are read directly from your local disk — nothing is uploaded to any server.
     </div>
-    ${resultsExportDirHTML()}
+    ${exportDirHTML('results')}
+    ${exportDirHTML('bi')}
     ${DS_SLOTS.map(s=>dsBuildSlotHTML(s)).join('')}
     <div style="margin-top:12px;display:flex;justify-content:flex-end">
       <button class="btn-pri" onclick="dsAutoRefreshAll();statMsg('Refreshing all data sources…')">↻ Refresh All</button>
@@ -23691,6 +23738,7 @@ function switchView(view){
   if(view==='results'){
     const af=document.getElementById('bi-active-fac');
     if(af) af.textContent=getFacility()?.name||'no sim run yet';
+    _biRenderDest();
   }
 }
 
