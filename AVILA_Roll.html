@@ -1102,12 +1102,35 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
         <input type="date" id="vw-end" onchange="applyCustomWindow()">
       </div>
       <span class="vw-range-lbl" id="vw-range-lbl"></span>
+      <!-- ── FILTER DOCK ─── same three-panel dock as the Supply page: Facility,
+           Process (the data-tree groups) and the Family → Category → Product
+           cascade, each multi-select, summarised on the button face. -->
       <div class="vw-fac-filter" id="vw-fac-filter">
-        <span class="vw-label">Facility</span>
-        <div class="vw-fac-chip all-chip active" id="vw-fac-all" onclick="setFacFilter(null)">All</div>
-        <!-- populated dynamically -->
+        <div class="sup-drop">
+          <button class="sup-drop-btn" id="res-btn-fac" aria-expanded="false" aria-haspopup="true" onclick="resToggleDock(event,'fac')">
+            <span class="k">Facility</span><span class="v" id="res-v-fac">All</span><span class="car">▼</span>
+          </button>
+          <div class="sup-panel" id="res-pan-fac" onclick="event.stopPropagation()"></div>
+        </div>
+        <div class="sup-drop">
+          <button class="sup-drop-btn" id="res-btn-proc" aria-expanded="false" aria-haspopup="true" onclick="resToggleDock(event,'proc')">
+            <span class="k">Process</span><span class="v" id="res-v-proc">All</span><span class="car">▼</span>
+          </button>
+          <div class="sup-panel" id="res-pan-proc" style="min-width:300px" onclick="event.stopPropagation()"></div>
+        </div>
+        <div class="sup-drop">
+          <button class="sup-drop-btn" id="res-btn-prod" aria-expanded="false" aria-haspopup="true" onclick="resToggleDock(event,'prod')">
+            <span class="k">Product</span><span class="v" id="res-v-prod">All</span><span class="car">▼</span>
+          </button>
+          <div class="sup-panel" id="res-pan-prod" style="min-width:540px" onclick="event.stopPropagation()"></div>
+        </div>
+        <button class="vw-btn" onclick="resClearAllFilters()">✕ Clear all</button>
+        <button class="vw-btn" id="res-export-btn" onclick="exportResultsFull()" style="margin-left:6px"
+                title="Every group, facility and element across the full simulation horizon — filters and collapse state are ignored">⤓ Export full data</button>
       </div>
     </div>
+    <!-- Active-filter tokens for the results views -->
+    <div id="res-tokens" class="sup-toks" style="display:none"></div>
 
     <!-- DASHBOARD VIEW -->
     <div id="dashboard-view" class="view-panel" style="overflow-y:auto;background:var(--bg)">
@@ -2505,18 +2528,24 @@ function getFacConnections(){ return DB.connections.filter(c=>c.facility_id===S.
 // Get effective facility for an element — assigned_facility_id overrides facility_id for results/analysis
 function getElFacility(el){ return el.assigned_facility_id||el.facility_id; }
 
-// Get elements filtered by the active facility filter (for results/analysis views)
-// Start with canvas elements, then filter by assigned facility if facFilter is set
+// Get elements filtered by the Results filter dock (for results/analysis views).
+// Start with canvas elements, then narrow by the selected facilities and, when a
+// product filter is on, drop elements that handle none of the allowed products.
+// Both selections are "empty means all", so an untouched dock changes nothing.
 function getResultElements(){
   const canvasEls=getFacElements();
-  if(!S.facFilter) return canvasEls;
-  return canvasEls.filter(el=>getElFacility(el)===S.facFilter);
+  const facs=resFacIdSet();
+  let els=facs?canvasEls.filter(el=>facs.has(getElFacility(el))):canvasEls;
+  const pids=resAllowedProdIds();
+  if(pids) els=els.filter(el=>resElementHandlesProduct(el,pids));
+  return els;
 }
 function getEl(id){ return DB.elements.find(e=>e.id===id); }
 
 function selectFacility(id){
   S.facility_id=id;
-  S.facFilter=null; // reset facility filter when switching canvas
+  // The results facility filter is NOT cleared here — resNormalizeProdFilters()
+  // drops any facility that isn't on the new canvas, and the rest survives a reload.
   const fac=getFacility();
   if(!fac) return;
   document.getElementById('stat-fac').textContent=fac.name;
@@ -18086,45 +18115,459 @@ function importJSON(input){
 
 
 // ═══════════════════════════════════════════════════════
-// VIEW WINDOW — controls display range across all result views
+// RESULTS FILTER DOCK — same concept as the Supply page: three summary buttons that
+// open panels of multi-select pills, plus a token strip listing what is on. Keeps the
+// view-window bar to one row however many facilities/products the scenario holds.
+//   facIds / fams / cats / prodIds — empty array means "all", so an untouched dock
+//     leaves the page exactly as it was.
+//   procHidden — data-tree groups switched OFF (empty = every group shown). Stored as
+//     the off-list so a group added later shows by default.
 // ═══════════════════════════════════════════════════════
-function setFacFilter(facId){
-  S.facFilter=facId;
-  // Reset dtree collapsed state so new facility view starts with default (L2 collapsed)
-  Object.keys(_dtreeCollapsed).forEach(k=>{
-    if(k.includes('_fac_')) delete _dtreeCollapsed[k];
+const RES_FILTER_KEY='avila_res_filters';
+if(!window._resView) window._resView={facIds:[],fams:[],cats:[],prodIds:[],procHidden:[]};
+resLoadFilterPrefs();
+
+function resSaveFilterPrefs(){
+  const v=window._resView||{};
+  try{ localStorage.setItem(RES_FILTER_KEY,JSON.stringify({
+    facIds:v.facIds||[], fams:v.fams||[], cats:v.cats||[], prodIds:v.prodIds||[], procHidden:v.procHidden||[]
+  })); }catch(e){}
+}
+function resLoadFilterPrefs(){
+  const v=window._resView; if(!v) return;
+  const arr=x=>Array.isArray(x)?x.filter(i=>typeof i==='string'):[];
+  try{
+    const raw=localStorage.getItem(RES_FILTER_KEY); if(!raw) return;
+    const p=JSON.parse(raw)||{};
+    v.facIds=arr(p.facIds); v.fams=arr(p.fams); v.cats=arr(p.cats);
+    v.prodIds=arr(p.prodIds); v.procHidden=arr(p.procHidden);
+  }catch(e){}
+}
+
+// ── PROCESS CATALOG ────────────────────────────────────────────────────────
+// One entry per level-0 group of the data tree. `match` decides which built group ids
+// belong to a process — Rail Transfers is one process covering every origin facility,
+// which each get their own `cem_rail_from_<id>` group.
+const RES_PROCESSES=[
+  {g:'Demand',     c:'#4da6ff', key:'demand_total', n:'Cement',   full:'CEM Demand',      match:id=>id==='demand_total'},
+  {g:'Demand',     c:'#ff9d5c', key:'clk_req',      n:'Clinker',  full:'CLK Demand',      match:id=>id==='clk_req'},
+  {g:'Inventory',  c:'#00d9a3', key:'cem_inv',      n:'Cement',   full:'CEM Inventory',   match:id=>id==='cem_inv'},
+  {g:'Inventory',  c:'#ff8c42', key:'clk_inv',      n:'Clinker',  full:'CLK Inventory',   match:id=>id==='clk_inv'},
+  {g:'Production', c:'#00ff9d', key:'cem_prod',     n:'Cement',   full:'CEM Production',  match:id=>id==='cem_prod'},
+  {g:'Production', c:'#ff8c42', key:'clk_prod',     n:'Clinker',  full:'CLK Production',  match:id=>id==='clk_prod'},
+  {g:'Logistics',  c:'#b388ff', key:'rail',         n:'Rail transfers', full:'Rail transfers', match:id=>id.startsWith('cem_rail_from_')},
+  {g:'Logistics',  c:'#b388ff', key:'imports',      n:'Imports',  full:'Imports',         match:id=>id==='cem_imports'}
+];
+const RES_PROC_GROUPS=['Demand','Inventory','Production','Logistics'];
+function resProcOn(key){ return !(window._resView?.procHidden||[]).includes(key); }
+// True when a built group belongs to a process the user has switched off.
+function resGroupHidden(groupId){
+  return RES_PROCESSES.some(p=>!resProcOn(p.key)&&p.match(groupId));
+}
+
+// ── Selection helpers (same convention as the Supply dock) ──────────────────
+function _resSel(field){ const v=window._resView||{}; return v[field]||(v[field]=[]); }
+function _resHas(field,id){ const a=_resSel(field); return a.length===0||a.includes(id); }
+
+// Facilities that can appear in the results tree: any facility owning an element on
+// the current canvas.
+function resFilterableFacilities(){
+  const ids=[...new Set(getFacElements().map(el=>getElFacility(el)).filter(Boolean))];
+  return ids.map(id=>DB.facilities.find(f=>f.id===id)).filter(Boolean)
+    .sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+}
+function resFacIdSet(){
+  const a=window._resView?.facIds||[];
+  return a.length?new Set(a):null;
+}
+
+// Products the results tree can show, for the selected facilities.
+function resScopeProductIds(facIds){
+  const fset=(facIds&&facIds.length)?new Set(facIds):null;
+  const out=new Set();
+  getFacElements().forEach(el=>{
+    if(fset&&!fset.has(getElFacility(el))) return;
+    resProductsOfElement(el).forEach(p=>out.add(p));
   });
-  updateFacFilterBar();
+  return out;
+}
+// Which products an element handles — silos by contents, mills/kilns/packers by their
+// capacity table, demand points by what is demanded there.
+function resProductsOfElement(el){
+  if(!el) return [];
+  if(el.type==='bulk_silo'||el.type==='packed_silo') return getSiloProducts(el)||[];
+  if(['kiln','finish_mill','raw_meal_mill','packing_plant'].includes(el.type))
+    return DB.element_product_capacities.filter(c=>c.element_id===el.id).map(c=>c.product_id).filter(Boolean);
+  if(el.type==='demand_point')
+    return (DB.demand_points.find(d=>d.element_id===el.id)?.products||[]).map(p=>p.product_id).filter(Boolean);
+  return [];
+}
+// Element types that declare the products they handle. Anything else (berths, rail
+// dispatch points, connectors) carries no product of its own and is left alone, so a
+// product filter never silently deletes the Imports / Rail Transfers groups — those
+// rows are narrowed by product further down, where the product is actually known.
+const RES_PRODUCT_BEARING=['bulk_silo','packed_silo','kiln','finish_mill','raw_meal_mill','packing_plant','demand_point'];
+function resElementHandlesProduct(el,allowed){
+  if(!RES_PRODUCT_BEARING.includes(el.type)) return true;
+  // A product-bearing element with an empty product list declares nothing, so it
+  // matches no product filter. It still shows when no product filter is on.
+  return resProductsOfElement(el).some(p=>allowed.has(p));
+}
+
+function resNormalizeProdFilters(){
+  const v=window._resView; if(!v) return;
+  const scope=resScopeProductIds(v.facIds||[]);
+  const catOf=pid=>DB.products.find(p=>p.id===pid)?.category||'';
+  const famOf=pid=>PRODUCT_FAMILY_OF[catOf(pid)]||'';
+  v.fams=(v.fams||[]).filter(f=>[...scope].some(id=>famOf(id)===f));
+  v.cats=(v.cats||[]).filter(c=>[...scope].some(id=>catOf(id)===c)
+    &&(!v.fams.length||v.fams.includes(PRODUCT_FAMILY_OF[c])));
+  v.prodIds=(v.prodIds||[]).filter(pid=>scope.has(pid)
+    &&(!v.fams.length||v.fams.includes(famOf(pid)))
+    &&(!v.cats.length||v.cats.includes(catOf(pid))));
+  const facOk=new Set(resFilterableFacilities().map(f=>f.id));
+  v.facIds=(v.facIds||[]).filter(id=>facOk.has(id));
+  if(facOk.size&&v.facIds.length===facOk.size) v.facIds=[];
+}
+
+// Allowed product ids, or null for unrestricted. Product beats Category beats Family.
+function resAllowedProdIds(){
+  const v=window._resView||{};
+  const fams=v.fams||[], cats=v.cats||[], prods=v.prodIds||[];
+  if(!fams.length && !cats.length && !prods.length) return null;
+  if(prods.length) return new Set(prods);
+  return new Set((DB.products||[]).filter(p=>
+    cats.length ? cats.includes(p.category||'')
+                : fams.includes(PRODUCT_FAMILY_OF[p.category]||'')
+  ).map(p=>p.id));
+}
+
+// ── Panels ─────────────────────────────────────────────────────────────────
+function _resRenderFacPanel(){
+  const pan=document.getElementById('res-pan-fac'); if(!pan) return;
+  const facs=resFilterableFacilities();
+  let h=`<div class="sup-pan-hd"><span>Facility · ALL flips a whole group</span></div>`;
+  [['plant','Plants'],['terminal','Terminals']].forEach(([type,label])=>{
+    const inGrp=facs.filter(f=>(f.type||'plant')===type);
+    if(!inGrp.length) return;
+    const allOn=inGrp.every(f=>_resHas('facIds',f.id));
+    h+=`<div class="sup-grp"><div class="sup-grp-hd"><h4>${label}</h4><i></i></div><div class="sup-chips">`;
+    h+=_supPill('All',allOn,`resToggleFacGroup('${type}')`,{all:true,title:'Every '+label.toLowerCase()});
+    inGrp.forEach(f=>{ h+=_supPill(f.name,_resHas('facIds',f.id),`resToggleFac('${f.id}')`); });
+    h+=`</div></div>`;
+  });
+  const untyped=facs.filter(f=>!['plant','terminal'].includes(f.type||'plant'));
+  if(untyped.length){
+    h+=`<div class="sup-grp"><div class="sup-grp-hd"><h4>Other</h4><i></i></div><div class="sup-chips">`;
+    untyped.forEach(f=>{ h+=_supPill(f.name,_resHas('facIds',f.id),`resToggleFac('${f.id}')`); });
+    h+=`</div></div>`;
+  }
+  pan.innerHTML=h;
+}
+
+function _resRenderProcPanel(){
+  const pan=document.getElementById('res-pan-proc'); if(!pan) return;
+  let h=`<div class="sup-pan-hd"><span>Process · ALL flips a whole group</span><div>`+
+    `<button class="sup-mini" onclick="resSetAllProcesses(true)">All</button>`+
+    `<button class="sup-mini" onclick="resSetAllProcesses(false)">None</button></div></div>`;
+  RES_PROC_GROUPS.forEach(g=>{
+    const items=RES_PROCESSES.filter(p=>p.g===g);
+    if(!items.length) return;
+    const allOn=items.every(p=>resProcOn(p.key));
+    h+=`<div class="sup-grp"><div class="sup-grp-hd"><h4>${g}</h4><i></i></div><div class="sup-chips">`;
+    h+=_supPill('All',allOn,`resToggleProcGroup('${g}')`,{all:true,title:'Every '+g.toLowerCase()+' group'});
+    items.forEach(p=>{ h+=_supPill(p.n,resProcOn(p.key),`resToggleProc('${p.key}')`,{swatch:p.c,title:p.full}); });
+    h+=`</div></div>`;
+  });
+  pan.innerHTML=h;
+}
+
+function _resRenderProdPanel(){
+  const pan=document.getElementById('res-pan-prod'); if(!pan) return;
+  const v=window._resView||{};
+  const scope=[...resScopeProductIds(v.facIds||[])];
+  const catOf=pid=>DB.products.find(p=>p.id===pid)?.category||'';
+  const famOf=pid=>PRODUCT_FAMILY_OF[catOf(pid)]||'';
+
+  const fams=[...new Set(scope.map(famOf).filter(Boolean))]
+    .sort((a,b)=>(PRODUCT_FAMILY_LABELS[a]||a).localeCompare(PRODUCT_FAMILY_LABELS[b]||b));
+  let catIds=scope.slice();
+  if((v.fams||[]).length) catIds=catIds.filter(id=>v.fams.includes(famOf(id)));
+  const cats=[...new Set(catIds.map(catOf).filter(Boolean))]
+    .sort((a,b)=>(SUP_CAT_LABELS[a]||a).localeCompare(SUP_CAT_LABELS[b]||b));
+  let prodIds=catIds.slice();
+  if((v.cats||[]).length) prodIds=prodIds.filter(id=>v.cats.includes(catOf(id)));
+  const prods=prodIds.map(pid=>({pid,name:DB.products.find(pr=>pr.id===pid)?.name||pid}))
+    .sort((a,b)=>a.name.localeCompare(b.name));
+
+  const col=(title,allOn,allFn,body)=>
+    `<div><h4>${title}</h4><div class="sup-chips">`+
+    _supPill('All',allOn,allFn,{all:true,title:'Every '+title.toLowerCase()})+body+`</div></div>`;
+
+  let h=`<div class="sup-pan-hd"><span>Family → Category → Product · each column narrows the next</span>`+
+    `<div><button class="sup-mini" onclick="resClearProdFilters()">Clear</button></div></div><div class="sup-mill">`;
+  h+=col('Family',!(v.fams||[]).length,`resClearProdField('fams')`,
+    fams.map(f=>_supPill(PRODUCT_FAMILY_LABELS[f]||f,(v.fams||[]).includes(f),`resToggleProdField('fams','${f}')`)).join(''));
+  h+=col('Category',!(v.cats||[]).length,`resClearProdField('cats')`,
+    cats.map(c=>_supPill(SUP_CAT_LABELS[c]||c,(v.cats||[]).includes(c),`resToggleProdField('cats','${c}')`)).join(''));
+  h+=col('Product',!(v.prodIds||[]).length,`resClearProdField('prodIds')`,
+    prods.map(o=>_supPill(o.name,(v.prodIds||[]).includes(o.pid),`resToggleProdField('prodIds','${o.pid}')`)).join(''));
+  h+=`</div>`;
+  pan.innerHTML=h;
+}
+
+function _resRenderDockSummary(){
+  const v=window._resView||{};
+  const facs=resFilterableFacilities();
+  const nameOfFac=id=>facs.find(f=>f.id===id)?.name||id;
+  const nameOfProd=id=>DB.products.find(p=>p.id===id)?.name||id;
+  const setBtn=(id,txt,on)=>{
+    const b=document.getElementById(id); if(!b) return;
+    b.classList.toggle('set',!!on);
+    const sp=b.querySelector('.v'); if(sp) sp.textContent=txt;
+  };
+  const nFac=(v.facIds||[]).length;
+  setBtn('res-btn-fac', nFac?nFac+' of '+facs.length:'All '+facs.length, nFac>0);
+  const nOff=(v.procHidden||[]).length;
+  setBtn('res-btn-proc', nOff?(RES_PROCESSES.length-nOff)+' of '+RES_PROCESSES.length:'All '+RES_PROCESSES.length, nOff>0);
+  const bits=[];
+  if((v.fams||[]).length)    bits.push(v.fams.length+(v.fams.length>1?' fams':' fam'));
+  if((v.cats||[]).length)    bits.push(v.cats.length+(v.cats.length>1?' cats':' cat'));
+  if((v.prodIds||[]).length) bits.push(v.prodIds.length+(v.prodIds.length>1?' prods':' prod'));
+  setBtn('res-btn-prod', bits.length?bits.join(' · '):'All', bits.length>0);
+
+  const strip=document.getElementById('res-tokens'); if(!strip) return;
+  const tok=(kind,label,val,fn)=>
+    `<button type="button" class="sup-tok k-${kind}" title="Remove this filter" onclick="${fn}">`+
+    `<span style="opacity:.6">${label}</span><b>${esc(val)}</b><span class="x">✕</span></button>`;
+  let h=`<span class="lbl">Active</span>`, n=0;
+  (v.facIds||[]).forEach(id=>{ n++; h+=tok('fac','Facility',nameOfFac(id),`resToggleFac('${id}')`); });
+  (v.procHidden||[]).forEach(k=>{ const p=RES_PROCESSES.find(x=>x.key===k);
+    n++; h+=tok('proc','Hidden',p?p.full:k,`resToggleProc('${k}')`); });
+  (v.fams||[]).forEach(f=>{ n++; h+=tok('prod','Family',PRODUCT_FAMILY_LABELS[f]||f,`resToggleProdField('fams','${f}')`); });
+  (v.cats||[]).forEach(c=>{ n++; h+=tok('prod','Category',SUP_CAT_LABELS[c]||c,`resToggleProdField('cats','${c}')`); });
+  (v.prodIds||[]).forEach(p=>{ n++; h+=tok('prod','Product',nameOfProd(p),`resToggleProdField('prodIds','${p}')`); });
+  if(!n) h+=`<span class="none">no filters — showing everything</span>`;
+  strip.innerHTML=h;
+}
+
+// ── Open / close ───────────────────────────────────────────────────────────
+function resCloseDock(){
+  document.querySelectorAll('#view-window-bar .sup-panel.open').forEach(p=>p.classList.remove('open'));
+  document.querySelectorAll('#view-window-bar .sup-drop-btn').forEach(b=>b.setAttribute('aria-expanded','false'));
+}
+function resToggleDock(ev,which){
+  if(ev) ev.stopPropagation();
+  const pan=document.getElementById('res-pan-'+which);
+  const btn=document.getElementById('res-btn-'+which);
+  if(!pan||!btn) return;
+  const wasOpen=pan.classList.contains('open');
+  resCloseDock();
+  if(wasOpen) return;
+  pan.classList.add('open');
+  btn.setAttribute('aria-expanded','true');
+  pan.classList.remove('flip');
+  if(pan.getBoundingClientRect().right>window.innerWidth-8) pan.classList.add('flip');
+}
+document.addEventListener('click',()=>resCloseDock());
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') resCloseDock(); });
+
+// ── Click handlers ─────────────────────────────────────────────────────────
+function resToggleFac(facId){
+  const v=window._resView, all=resFilterableFacilities().map(f=>f.id);
+  let a=(v.facIds||[]).slice();
+  if(!a.length) a=all.slice();
+  a=a.includes(facId)?a.filter(x=>x!==facId):a.concat([facId]);
+  v.facIds=(a.length===all.length)?[]:a;
+  resNormalizeProdFilters();
+  _resFiltersChanged();
+}
+function resToggleFacGroup(type){
+  const v=window._resView, all=resFilterableFacilities();
+  const ids=all.filter(f=>(f.type||'plant')===type).map(f=>f.id);
+  const allOn=ids.every(id=>_resHas('facIds',id));
+  let a=(v.facIds||[]).slice();
+  if(!a.length) a=all.map(f=>f.id);
+  a=allOn ? a.filter(id=>!ids.includes(id))
+          : a.concat(ids.filter(id=>!a.includes(id)));
+  v.facIds=(a.length===all.length)?[]:a;
+  resNormalizeProdFilters();
+  _resFiltersChanged();
+}
+function resToggleProc(key){
+  const v=window._resView, off=(v.procHidden||[]).slice();
+  const i=off.indexOf(key);
+  if(i>=0) off.splice(i,1); else off.push(key);
+  v.procHidden=off;
+  _resFiltersChanged();
+}
+function resToggleProcGroup(g){
+  const v=window._resView;
+  const keys=RES_PROCESSES.filter(p=>p.g===g).map(p=>p.key);
+  const allOn=keys.every(resProcOn);
+  let off=(v.procHidden||[]).filter(k=>!keys.includes(k));
+  if(allOn) off=off.concat(keys);
+  v.procHidden=off;
+  _resFiltersChanged();
+}
+function resSetAllProcesses(on){
+  window._resView.procHidden = on ? [] : RES_PROCESSES.map(p=>p.key);
+  _resFiltersChanged();
+}
+function resToggleProdField(field,id){
+  const v=window._resView, a=(v[field]||[]).slice();
+  const i=a.indexOf(id);
+  if(i>=0) a.splice(i,1); else a.push(id);
+  v[field]=a;
+  resNormalizeProdFilters();
+  _resFiltersChanged();
+}
+function resClearProdField(field){
+  window._resView[field]=[]; resNormalizeProdFilters(); _resFiltersChanged();
+}
+function resClearProdFilters(){
+  const v=window._resView; v.fams=[]; v.cats=[]; v.prodIds=[]; _resFiltersChanged();
+}
+function resClearAllFilters(){
+  const v=window._resView;
+  v.facIds=[]; v.fams=[]; v.cats=[]; v.prodIds=[]; v.procHidden=[];
+  _resFiltersChanged();
+}
+function _resFiltersChanged(){
+  resSaveFilterPrefs();
+  resInitFilters();
   if(S.simResults){
     renderDtree(S.simResults);
     renderDashCharts(S.simResults);
     renderEvLog(S.simResults);
-    renderResultsTable();
   }
 }
 
-function updateFacFilterBar(){
-  const bar=document.getElementById('vw-fac-filter'); if(!bar) return;
-  // Rebuild chips from all facilities that have elements on this canvas
-  const canvasEls=getFacElements();
-  const facIds=[...new Set(canvasEls.map(el=>getElFacility(el)))];
-  const facs=facIds.map(id=>DB.facilities.find(f=>f.id===id)).filter(Boolean);
+// Repaints the dock. Called on every results render, so an open panel stays open.
+function resInitFilters(){
+  if(!window._resView) window._resView={facIds:[],fams:[],cats:[],prodIds:[],procHidden:[]};
+  resNormalizeProdFilters();
+  _resRenderFacPanel();
+  _resRenderProcPanel();
+  _resRenderProdPanel();
+  _resRenderDockSummary();
+}
 
-  // Keep the All chip, rebuild the rest
-  const allChip=document.getElementById('vw-fac-all');
-  if(allChip){
-    allChip.className=`vw-fac-chip all-chip${!S.facFilter?' active':''}`;
+// ════════════════════════════════════════════════════════════════
+// EXPORT FULL DATA — the whole Daily Results tree as XLSX.
+// Deliberately ignores the filter dock, the collapse state and the view window: this
+// is the complete dataset, every group, every facility, every element, across the
+// entire simulation horizon. Two sheets of the same numbers:
+//   Data (tidy) — one row per element per day. Pivot-ready, and what Power BI wants.
+//   Table (wide) — element rows down, one column per date across; reads like the
+//                  screen when fully expanded.
+// ════════════════════════════════════════════════════════════════
+async function exportResultsFull(){
+  const btn=document.getElementById('res-export-btn');
+  const prev=btn?btn.textContent:'';
+  const setMsg=t=>{ if(btn) btn.textContent=t; };
+  try{
+    const r=S.simResults;
+    if(!r){ alert('Run a simulation first — there is no result data to export yet.'); return; }
+    if(btn) btn.disabled=true;
+    setMsg('Loading…');
+    await loadLib('xlsx');
+    setMsg('Building…');
+
+    // Full horizon, every element on the canvas — not getResultElements(), which
+    // applies the dock's facility/product narrowing.
+    const horizon=S.simCfg.horizon||0;
+    const days=[]; for(let d=1;d<=horizon;d++) days.push(d);
+    const groups=_dtreeBuildGroups(r, days, getFacElements());
+    const dates=days.map(d=>dayToDate(d));
+
+    // ── Sheet 1: tidy ──────────────────────────────────────────────────────
+    // Level tags let a pivot filter to just totals, just facilities, or just elements
+    // without double-counting.
+    const tidy=[];
+    const push=(group,level,facility,element,i,v)=>{
+      if(v===null||v===undefined||isNaN(v)) return;
+      tidy.push({Group:group, Level:level, Facility:facility||'', Element:element||'',
+                 Date:dates[i], Day:days[i], Value:Math.round(v*100)/100});
+    };
+    groups.forEach(g=>{
+      (g.totals||[]).forEach((v,i)=>push(g.label,'Total','','',i,v));
+      (g.facGroups||[]).forEach(fg=>{
+        (fg.totals||[]).forEach((v,i)=>push(g.label,'Facility',fg.label,'',i,v));
+        (fg.children||[]).forEach(c=>
+          (c.days||[]).forEach((v,i)=>push(g.label,'Element',fg.label,c.label.trim(),i,v)));
+      });
+      // Flat groups (Rail Transfers / Imports) carry their own one- or two-level rows.
+      (g.children||[]).forEach(c=>{
+        const lvl=c.isGroup||c.isSectionHeader?'Facility':'Element';
+        (c.days||[]).forEach((v,i)=>push(g.label,lvl,'',c.label.trim(),i,v));
+        (c.children||[]).forEach(cc=>
+          (cc.days||[]).forEach((v,i)=>push(g.label,'Element',c.label.trim(),cc.label.trim(),i,v)));
+      });
+    });
+
+    // ── Sheet 2: wide ──────────────────────────────────────────────────────
+    // Indentation in the Element column mirrors the on-screen hierarchy.
+    const wide=[];
+    const row=(group,level,label,arr)=>{
+      const o={Group:group, Level:level, Element:label};
+      dates.forEach((ds,i)=>{ const v=arr?arr[i]:null;
+        o[ds]=(v===null||v===undefined||isNaN(v))?'':Math.round(v*100)/100; });
+      wide.push(o);
+    };
+    groups.forEach(g=>{
+      row(g.label,'Total',g.label,g.totals);
+      (g.facGroups||[]).forEach(fg=>{
+        row(g.label,'Facility','  '+fg.label,fg.totals);
+        (fg.children||[]).forEach(c=>row(g.label,'Element','    '+c.label.trim(),c.days));
+      });
+      (g.children||[]).forEach(c=>{
+        const lvl=c.isGroup||c.isSectionHeader?'Facility':'Element';
+        row(g.label,lvl,'  '+c.label.trim(),c.totals||c.days);
+        (c.children||[]).forEach(cc=>row(g.label,'Element','    '+cc.label.trim(),cc.days));
+      });
+    });
+
+    const wb=XLSX.utils.book_new();
+    const wsT=XLSX.utils.json_to_sheet(tidy.length?tidy:[{note:'(no rows)'}]);
+    XLSX.utils.book_append_sheet(wb,wsT,'Data');
+    const wsW=XLSX.utils.json_to_sheet(wide.length?wide:[{note:'(no rows)'}]);
+    wsW['!cols']=[{wch:22},{wch:9},{wch:34}].concat(dates.map(()=>({wch:11})));
+    XLSX.utils.book_append_sheet(wb,wsW,'Table');
+
+    const from=dates[0]||'', to=dates[dates.length-1]||'';
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([
+      {Field:'Exported',        Value:new Date().toISOString().slice(0,19).replace('T',' ')},
+      {Field:'Scenario',        Value:(typeof SC!=='undefined'&&SC.meta&&SC.activeId)?(SC.meta.find(m=>m.id===SC.activeId)?.name||''):''},
+      {Field:'Simulation start',Value:S.simCfg.start_date||''},
+      {Field:'Horizon (days)',  Value:horizon},
+      {Field:'Date range',      Value:from+' → '+to},
+      {Field:'Groups',          Value:groups.length},
+      {Field:'Scope',           Value:'Full dataset — all facilities, all processes, all products (filters not applied)'},
+      {Field:'Data rows',       Value:tidy.length},
+      {Field:'Table rows',      Value:wide.length}
+    ]),'Info');
+
+    XLSX.writeFile(wb,`AVILA_Results_${new Date()._ymd()}.xlsx`);
+    setMsg('✓ Exported');
+    setTimeout(()=>setMsg(prev),2500);
+  }catch(e){
+    setMsg('Export failed');
+    console.warn('exportResultsFull',e);
+    alert('Export failed: '+e.message);
+    setTimeout(()=>setMsg(prev),2500);
+  }finally{
+    if(btn) btn.disabled=false;
   }
-  // Remove old fac chips
-  bar.querySelectorAll('.vw-fac-chip:not(.all-chip)').forEach(c=>c.remove());
-  // Add fac chips
-  facs.forEach(fac=>{
-    const chip=document.createElement('div');
-    chip.className=`vw-fac-chip${S.facFilter===fac.id?' active':''}`;
-    chip.textContent=fac.name;
-    chip.onclick=()=>setFacFilter(fac.id);
-    bar.appendChild(chip);
-  });
+}
+
+// ═══════════════════════════════════════════════════════
+// VIEW WINDOW — controls display range across all result views
+// ═══════════════════════════════════════════════════════
+// The facility chip bar became the three-panel filter dock; this repaints it.
+// Kept under the old name because every results render already calls it.
+function updateFacFilterBar(){
+  if(document.getElementById('vw-fac-filter')) resInitFilters();
 }
 
 function setViewWindow(preset, btn){
@@ -18239,21 +18682,17 @@ function renderDashCharts(r){
 // ── DATA TREE ─────────────────────────────────────────
 const _dtreeCollapsed={};
 
-function renderDtree(r){
-  const wrap=document.getElementById('dtree-wrap'); if(!wrap) return;
-  if(!r){wrap.innerHTML='<div style="font-family:var(--mono);font-size:9px;color:var(--text-dim);padding:14px">Run simulation to see data tree</div>';return;}
+// Data-tree level colours (shared by the builder and the renderer).
+const C_L0='#00d68f';   // level 0 group headers — green
+const C_L1='#ff9433';   // level 1 children — orange
+const C_L2='#a78bfa';   // level 2 grandchildren — purple
 
-  // Ensure demand display uses the same values the sim used
-  _demandCacheInvalidate();
-
-  const {startDay,endDay}=getViewRange();
-  const fac=getResultElements();
-  const simStart=new Date(S.simCfg.start_date+'T00:00:00');
-
-  // Build column headers (dates)
-  const days=[];
-  for(let d=startDay;d<=endDay;d++) days.push(d);
-
+// ── DATA-TREE GROUP BUILDER ──────────────────────────────────────────────────
+// Builds the Daily Results tree for a given results object, a list of simulation day
+// numbers, and a set of elements. Split out of renderDtree() so the same tree can be
+// rebuilt for the Excel export at full horizon / all facilities while the on-screen
+// table keeps using the view range and the active filters.
+function _dtreeBuildGroups(r, days, fac){
   // Helper: get BOD inventory for a specific day for an element
   // BOD day N = EOD day N-1 = hist[N-2]; day 1 BOD = start_inventory
   const inv=(elId,day)=>{
@@ -18322,9 +18761,6 @@ function renderDtree(r){
 
 
   // ── COLORS BY LEVEL ──────────────────────────────────
-  const C_L0='#00d68f';   // level 0 group headers — green
-  const C_L1='#ff9433';   // level 1 children — orange
-  const C_L2='#a78bfa';   // level 2 grandchildren — purple
 
   // ─────────────────────────────────────────────────────
   // UNIVERSAL 7-GROUP SCHEMA
@@ -18558,6 +18994,29 @@ function renderDtree(r){
         children:importChildren,totals:importTotals});
     }
   }
+  return groups;
+}
+
+function renderDtree(r){
+  const wrap=document.getElementById('dtree-wrap'); if(!wrap) return;
+  if(!r){wrap.innerHTML='<div style="font-family:var(--mono);font-size:9px;color:var(--text-dim);padding:14px">Run simulation to see data tree</div>';return;}
+
+  // Ensure demand display uses the same values the sim used
+  _demandCacheInvalidate();
+
+  const {startDay,endDay}=getViewRange();
+  const fac=getResultElements();
+  const simStart=new Date(S.simCfg.start_date+'T00:00:00');
+
+  // Build column headers (dates)
+  const days=[];
+  for(let d=startDay;d<=endDay;d++) days.push(d);
+
+  // The 7-group tree is built by _dtreeBuildGroups() so the XLSX exporter can rebuild
+  // it over the full horizon and every facility, independent of what is on screen.
+  let groups=_dtreeBuildGroups(r, days, fac);
+  // Process filter — drop whole level-0 groups the user has switched off.
+  groups=groups.filter(g=>!resGroupHidden(g.id));
 
   // ── RENDER TABLE ──
   // Date headers — one column per day, always
@@ -18658,13 +19117,15 @@ function renderDtree(r){
     return `<td${wkAttr}>${Number(v).toLocaleString()}</td>`;
   };
 
-  // Pre-collapse facility rows (L1) by default so only L0+L1 are visible initially.
-  // Only set default if the user hasn't already interacted (key not present in _dtreeCollapsed).
+  // The tree opens fully collapsed — every level-0 group, every facility row and every
+  // nested sub-group — so the page starts as a short list of headings and the user
+  // expands only what they need. A key already present means the user has toggled that
+  // row before, and their choice wins.
+  const _seed=id=>{ if(!Object.prototype.hasOwnProperty.call(_dtreeCollapsed,id)) _dtreeCollapsed[id]=true; };
   groups.forEach(g=>{
-    (g.facGroups||[]).forEach(fg=>{
-      if(!Object.prototype.hasOwnProperty.call(_dtreeCollapsed,fg.id))
-        _dtreeCollapsed[fg.id]=true;
-    });
+    _seed(g.id);
+    (g.facGroups||[]).forEach(fg=>_seed(fg.id));
+    (g.children||[]).forEach(c=>{ if(c.isGroup) _seed(c.id); });
   });
 
   groups.forEach(g=>{
@@ -19299,7 +19760,8 @@ function _drawProdBarChart(id,r,type){
     const simBase=new Date(S.simCfg.start_date+'T00:00:00');
     DB.demand_points.filter(dp=>{
       const dpEl=DB.elements.find(e=>e.id===dp.element_id); if(!dpEl) return false;
-      if(S.facFilter) return dpEl.assigned_facility_id===S.facFilter;
+      const _rf=resFacIdSet();
+      if(_rf) return _rf.has(dpEl.assigned_facility_id);
       return dp.facility_id===S.facility_id&&(!dpEl.assigned_facility_id||dpEl.assigned_facility_id===S.facility_id);
     }).forEach((dp,di)=>{
       const dpEl=DB.elements.find(e=>e.id===dp.element_id); if(!dpEl) return;
@@ -19311,7 +19773,7 @@ function _drawProdBarChart(id,r,type){
           data.push(_demandRate(dpEl.id,dt._ymd()));
         }
         const facName=DB.facilities.find(f=>f.id===(dpEl.assigned_facility_id||S.facility_id))?.name||'';
-        const facPrefix=!S.facFilter&&facName?`${facName} — `:'';
+        const facPrefix=!resFacIdSet()&&facName?`${facName} — `:'';
         demSeries.push({label:`${facPrefix}${prod?.name||pp.product_id}`,data,col:demCols[(di*2+pi)%demCols.length]});
       });
     });
@@ -23101,8 +23563,11 @@ function switchView(view){
   // Show view window bar on result views
   const vwViews=['dashboard','analysis'];
   const vwBar=document.getElementById('view-window-bar');
-  if(vwBar) vwBar.style.display=vwViews.includes(view)?'flex':'none';
-  if(vwViews.includes(view)) updateFacFilterBar();
+  const vwTok=document.getElementById('res-tokens');
+  const onResults=vwViews.includes(view);
+  if(vwBar) vwBar.style.display=onResults?'flex':'none';
+  if(vwTok) vwTok.style.display=onResults?'flex':'none';
+  if(onResults) updateFacFilterBar();
 
   if(view==='results'){
     const af=document.getElementById('bi-active-fac');
