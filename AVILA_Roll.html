@@ -18453,6 +18453,104 @@ function resInitFilters(){
   _resRenderDockSummary();
 }
 
+// ── RESULTS EXPORT DESTINATION ──────────────────────────────────────────────
+// The Results export always writes the SAME file name into the SAME folder, so each
+// export replaces the last one and anything pointing at that path (Power BI, a shared
+// drive) keeps working without re-pointing.
+//   The folder is a FileSystemDirectoryHandle chosen once by the user in
+//   Configuration → Data Sources, kept in IndexedDB alongside the scenario handles
+//   (they can't be serialised to localStorage). Only its display name goes to
+//   localStorage, so the panel can label the setting before the handle is loaded.
+// Browsers without the File System Access API fall back to a normal download that
+// still carries the fixed name — the browser decides the folder there.
+const RESULTS_EXPORT_FILENAME='Avila Results.xlsx';
+const RESULTS_DIR_KEY='__results_export_dir__';   // key inside the historyDirs store
+const RESULTS_DIR_NAME_KEY='avila_results_dir_name';
+let _resultsDirHandle=null;
+
+function resultsExportDirName(){ try{ return localStorage.getItem(RESULTS_DIR_NAME_KEY)||''; }catch(e){ return ''; } }
+
+// Returns the saved folder handle with write permission, or null.
+//   prompt=true  — ask for the folder (or re-grant) as part of a user gesture
+//   prompt=false — silent: only returns a handle already granted this session
+async function resultsExportDir(prompt){
+  try{
+    if(_resultsDirHandle&&await _dsEnsureWritePermission(_resultsDirHandle)) return _resultsDirHandle;
+    let h=await scLoadHistoryDirHandle(RESULTS_DIR_KEY);
+    if(h){
+      // A stored handle needs its permission re-granted each new session, and that
+      // request only succeeds inside a user gesture.
+      const perm=await h.queryPermission({mode:'readwrite'});
+      if(perm==='granted'){ _resultsDirHandle=h; return h; }
+      if(prompt&&await _dsEnsureWritePermission(h)){ _resultsDirHandle=h; return h; }
+      return null;
+    }
+    if(!prompt||!window.showDirectoryPicker) return null;
+    h=await window.showDirectoryPicker({id:'avila-results-export',mode:'readwrite'});
+    _resultsDirHandle=h;
+    await scSaveHistoryDirHandle(RESULTS_DIR_KEY,h);
+    try{ localStorage.setItem(RESULTS_DIR_NAME_KEY,h.name||''); }catch(e){}
+    return h;
+  }catch(e){ return null; } // cancelled picker or denied permission
+}
+
+async function resultsChooseExportDir(){
+  if(!window.showDirectoryPicker){
+    alert('This browser cannot pick a folder — use Chrome or Edge.\n\nExports will download to your usual Downloads folder as "'+RESULTS_EXPORT_FILENAME+'".');
+    return;
+  }
+  const h=await resultsExportDir(true);
+  if(h){ statMsg('Results export folder set — '+h.name); }
+  _resultsRenderDirRow();
+}
+async function resultsClearExportDir(){
+  _resultsDirHandle=null;
+  try{ await scDeleteHistoryDirHandle(RESULTS_DIR_KEY); }catch(e){}
+  try{ localStorage.removeItem(RESULTS_DIR_NAME_KEY); }catch(e){}
+  statMsg('Results export folder cleared — exports will download instead');
+  _resultsRenderDirRow();
+}
+
+// The Data Sources row for this setting. Rendered on its own so choosing or clearing
+// the folder can repaint just this block.
+function resultsExportDirHTML(){
+  const supported=!!window.showDirectoryPicker;
+  const name=resultsExportDirName();
+  const body=!supported
+    ? `<div style="font-family:var(--mono);font-size:9px;color:var(--amber)">
+         This browser can't save to a chosen folder — Chrome or Edge required.
+         Exports download as <b style="color:var(--text)">${RESULTS_EXPORT_FILENAME}</b>.
+       </div>`
+    : name
+      ? `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+           <span style="font-family:var(--mono);font-size:10px;color:var(--green)">📁 ${esc(name)}</span>
+           <span style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">/ ${RESULTS_EXPORT_FILENAME}</span>
+           <button class="tb-btn sec" style="font-size:9px;padding:3px 10px" onclick="resultsChooseExportDir()">Change…</button>
+           <button class="tb-btn sec" style="font-size:9px;padding:3px 10px" onclick="resultsClearExportDir()">Clear</button>
+         </div>
+         <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-top:5px">
+           Each export replaces this file. Your browser may ask you to confirm access once per session.
+         </div>`
+      : `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+           <button class="tb-btn sec" style="font-size:9px;padding:3px 10px" onclick="resultsChooseExportDir()">Choose folder…</button>
+           <span style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">Not set — exports download to your browser's Downloads folder</span>
+         </div>`;
+  return `<div id="res-export-dir-row" style="border:1px solid var(--border2);background:var(--surface2);padding:12px 14px;margin-bottom:12px">
+    <div style="font-family:var(--mono);font-size:9px;color:var(--text);letter-spacing:1px;text-transform:uppercase;margin-bottom:8px">
+      Results export folder
+    </div>
+    <div style="font-family:var(--mono);font-size:9px;color:var(--text-dim);line-height:1.7;margin-bottom:9px">
+      Where <b style="color:var(--text)">⤓ Export full data</b> on the Results page writes.
+      Always the same file name, always the same folder, so the previous export is replaced.
+    </div>
+    ${body}
+  </div>`;
+}
+function _resultsRenderDirRow(){
+  const row=document.getElementById('res-export-dir-row');
+  if(row) row.outerHTML=resultsExportDirHTML();
+}
+
 // ════════════════════════════════════════════════════════════════
 // EXPORT FULL DATA — the whole Daily Results tree as XLSX.
 // Deliberately ignores the filter dock, the collapse state and the view window: this
@@ -18470,6 +18568,9 @@ async function exportResultsFull(){
     const r=S.simResults;
     if(!r){ alert('Run a simulation first — there is no result data to export yet.'); return; }
     if(btn) btn.disabled=true;
+    // Resolve the destination FIRST: showDirectoryPicker() and requestPermission()
+    // need the click's user activation, which does not survive the awaits below.
+    const dir=await resultsExportDir(true);
     setMsg('Loading…');
     await loadLib('xlsx');
     setMsg('Building…');
@@ -18548,8 +18649,24 @@ async function exportResultsFull(){
       {Field:'Table rows',      Value:wide.length}
     ]),'Info');
 
-    XLSX.writeFile(wb,`AVILA_Results_${new Date()._ymd()}.xlsx`);
-    setMsg('✓ Exported');
+    // Same name, same folder, every time — the previous export is replaced.
+    // Falls back to a normal download (still fixed name) when no folder is set or
+    // the browser has no File System Access API.
+    if(dir){
+      setMsg('Saving…');
+      const data=XLSX.write(wb,{bookType:'xlsx',type:'array'});
+      const fh=await dir.getFileHandle(RESULTS_EXPORT_FILENAME,{create:true});
+      const w=await fh.createWritable();
+      await w.write(data);
+      await w.close();
+      setMsg('✓ Saved');
+      statMsg('Results exported → '+dir.name+'/'+RESULTS_EXPORT_FILENAME);
+    }else{
+      XLSX.writeFile(wb,RESULTS_EXPORT_FILENAME);
+      setMsg('✓ Downloaded');
+      if(!resultsExportDirName())
+        statMsg('Downloaded '+RESULTS_EXPORT_FILENAME+' — set a folder in Configuration → Data Sources to save it in place');
+    }
     setTimeout(()=>setMsg(prev),2500);
   }catch(e){
     setMsg('Export failed');
@@ -23197,9 +23314,10 @@ function dsCfgPanelHTML(){
       <div style="font-family:var(--mono);font-size:9px;color:var(--amber);padding:10px;background:rgba(255,184,48,.06);border:1px solid rgba(255,184,48,.2);margin-bottom:12px">
         ⚠ File System Access API is not supported in this browser. Use Chrome or Edge for auto-refresh functionality.
       </div>
-      <div style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">
+      <div style="font-family:var(--mono);font-size:9px;color:var(--text-dim);margin-bottom:12px">
         You can still load files manually using the ↑ Load Actuals button on the Sales page.
       </div>
+      ${resultsExportDirHTML()}
     </div>`;
   }
   return `<div style="padding:14px 16px">
@@ -23207,6 +23325,7 @@ function dsCfgPanelHTML(){
       Configure a file path for each data source. The app will automatically refresh these files on startup and when you click Refresh.
       Files are read directly from your local disk — nothing is uploaded to any server.
     </div>
+    ${resultsExportDirHTML()}
     ${DS_SLOTS.map(s=>dsBuildSlotHTML(s)).join('')}
     <div style="margin-top:12px;display:flex;justify-content:flex-end">
       <button class="btn-pri" onclick="dsAutoRefreshAll();statMsg('Refreshing all data sources…')">↻ Refresh All</button>
