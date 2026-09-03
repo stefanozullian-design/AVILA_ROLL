@@ -1691,7 +1691,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;font-size:10px;line-height:1.7">
             <div>
               <div style="color:var(--blue);margin-bottom:4px">DIMENSIONS</div>
-              <div style="color:var(--text-dim)">dim_date <span style="opacity:.6">(contiguous calendar)</span> · dim_facility · dim_element · dim_product</div>
+              <div style="color:var(--text-dim)">dim_date <span style="opacity:.6">(contiguous calendar)</span> · dim_facility · dim_element · dim_product · dim_scenario</div>
             </div>
             <div>
               <div style="color:var(--green);margin-bottom:4px">FACTS</div>
@@ -1699,7 +1699,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
             </div>
           </div>
           <div style="margin-top:14px;padding-top:12px;border-top:1px dashed var(--border2);font-size:9px;color:var(--text-dim);line-height:1.6">
-            Every fact row is tagged with <span style="color:var(--amber)">scenario_type</span> = <i>actual</i> or <i>forecast</i> and stamped with a <span style="color:var(--amber)">scenario_run_id</span> + <span style="color:var(--amber)">as_of_date</span>. Open the file in Power BI and build relationships from each fact's element_id / facility_id / product_id / date back to the dim_* tables.
+            Every fact row is tagged with <span style="color:var(--amber)">scenario_type</span> = <i>actual</i> or <i>forecast</i> and stamped with a <span style="color:var(--amber)">scenario_run_id</span> + <span style="color:var(--amber)">as_of_date</span>. The model needs <b style="color:var(--text)">32 relationships</b> — the join keys are not all named after their dimension (<code>berth_id</code>, <code>demand_point_id</code> and <code>dispatch_id</code> all point at dim_element), and rail carries two dates, two facilities and two elements, so three relationships must be <b style="color:var(--text)">inactive</b>. The full list is below.
           </div>
         </div>
 
@@ -1713,11 +1713,43 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
         <div id="bi-push-msg" style="margin-top:14px;font-size:10px;text-align:center;min-height:14px"></div>
 
         <div style="margin-top:28px;font-size:9px;color:var(--text-dim);line-height:1.6">
-          <div style="color:var(--text);margin-bottom:6px;letter-spacing:1px">▾ POWER BI MODEL HINTS</div>
-          • In Power BI, mark <code>dim_date.date</code> as a date table.<br>
-          • Relate facts to dimensions: <code>fact_*.date → dim_date.date</code>, <code>.element_id → dim_element.element_id</code>, <code>.facility_id → dim_facility.facility_id</code>, <code>.product_id → dim_product.product_id</code>.<br>
-          • Filter visuals by <code>scenario_type</code> to switch between an actual line and a forecast line on the same chart.<br>
-          • Multiple exports can coexist — slice by <code>scenario_run_id</code> to compare runs.
+          <div style="color:var(--text);margin-bottom:8px;letter-spacing:1px">▾ POWER BI MODEL — 32 RELATIONSHIPS</div>
+
+          <div style="margin-bottom:10px;padding:8px 10px;border-left:2px solid var(--amber);background:rgba(245,197,66,.04)">
+            <span style="color:var(--amber)">First, in Power Query:</span> every date column exports as <b style="color:var(--text)">text</b> — retype <code>dim_date.date</code> and every fact <code>date</code> / <code>departure_date</code> / <code>arrival_date</code> to <b style="color:var(--text)">Date</b>, then mark <code>dim_date</code> as the date table. Relationships will not bind until you do.
+          </div>
+
+          <div style="font-size:8px;color:var(--text-dim);margin-bottom:8px;letter-spacing:.5px">All are <b style="color:var(--text)">one-to-many, single direction, dim → fact</b>. Never bidirectional.</div>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px 18px;font-size:8.5px;line-height:1.75">
+            <div>
+              <div style="color:var(--blue);margin-bottom:2px">dim_date[date] → 7</div>
+              <div>fact_production<span style="opacity:.5">[date]</span> · fact_inventory<span style="opacity:.5">[date]</span> · fact_demand<span style="opacity:.5">[date]</span> · fact_unloading<span style="opacity:.5">[date]</span> · fact_stop_events<span style="opacity:.5">[date]</span> · fact_rail_movement<span style="opacity:.5">[departure_date]</span><br>
+              <span style="color:var(--amber)">⬜ inactive:</span> fact_rail_movement<span style="opacity:.5">[arrival_date]</span></div>
+            </div>
+            <div>
+              <div style="color:var(--blue);margin-bottom:2px">dim_facility[facility_id] → 7</div>
+              <div>fact_production · fact_inventory · fact_demand · fact_unloading · fact_stop_events <span style="opacity:.5">[facility_id]</span> · fact_rail_movement<span style="opacity:.5">[from_facility_id]</span><br>
+              <span style="color:var(--amber)">⬜ inactive:</span> fact_rail_movement<span style="opacity:.5">[to_facility_id]</span></div>
+            </div>
+            <div>
+              <div style="color:var(--blue);margin-bottom:2px">dim_element[element_id] → 7</div>
+              <div>fact_production · fact_inventory · fact_stop_events <span style="opacity:.5">[element_id]</span> · fact_unloading<span style="opacity:.5">[<b style="color:var(--text)">berth_id</b>]</span> · fact_demand<span style="opacity:.5">[<b style="color:var(--text)">demand_point_id</b>]</span> · fact_rail_movement<span style="opacity:.5">[<b style="color:var(--text)">dispatch_id</b>]</span><br>
+              <span style="color:var(--amber)">⬜ inactive:</span> fact_rail_movement<span style="opacity:.5">[berth_id]</span></div>
+            </div>
+            <div>
+              <div style="color:var(--blue);margin-bottom:2px">dim_product[product_id] → 5</div>
+              <div>fact_production · fact_inventory · fact_demand · fact_unloading · fact_rail_movement <span style="opacity:.5">[product_id]</span></div>
+              <div style="color:var(--blue);margin:6px 0 2px">dim_scenario[scenario_run_id] → 6</div>
+              <div>all six fact_* tables — append several exports, then slice run against run</div>
+            </div>
+          </div>
+
+          <div style="margin-top:12px;padding-top:10px;border-top:1px dashed var(--border2);font-size:8.5px;line-height:1.7">
+            <span style="color:var(--red)">✕ Do NOT create</span> <code>dim_element.facility_id</code> or <code>dim_product.facility_id</code> → <code>dim_facility</code>. Every fact already joins dim_facility directly, so a dim→dim hop makes the path ambiguous and Power BI deactivates one relationship at random. Both dims already carry their facility columns; merge in Power Query if you need more.<br>
+            <span style="color:var(--amber)">◆ The three inactive ones</span> are role-playing keys on rail — reach them with <code>USERELATIONSHIP</code> in a measure. A slicer cannot activate an inactive relationship: for an arrival-date slicer, reference <code>dim_date</code> as <code>dim_date_arrival</code> and relate that one actively.<br>
+            <span style="color:var(--green)">▸ Full spec + starter DAX:</span> <code>POWERBI_MODEL.md</code> in the repo.
+          </div>
         </div>
       </div>
     </div>
@@ -17656,8 +17688,14 @@ async function pushToBI(){
     const tables=_pushBIBuildTables();
     const wb=XLSX.utils.book_new();
     Object.keys(tables).forEach(name=>{
-      const rows=tables[name];
-      const ws=XLSX.utils.json_to_sheet(rows.length?rows:[{note:'(no rows)'}]);
+      const rows=tables[name], cols=BI_COLUMNS[name];
+      // Empty table: write the header row on its own rather than letting the
+      // sheet collapse — Power BI reads columns from row 1, and a sheet that
+      // loses them breaks every relationship built on this table. Non-empty:
+      // pass the header so column order does not drift between exports.
+      const ws=rows.length
+        ? XLSX.utils.json_to_sheet(rows,{header:cols})
+        : XLSX.utils.aoa_to_sheet([cols]);
       XLSX.utils.book_append_sheet(wb,ws,name);
     });
     const stamp=new Date()._ymd();
@@ -17670,6 +17708,33 @@ async function pushToBI(){
     if(btn) btn.disabled=false;
   }
 }
+
+// Canonical column order per sheet. Two jobs:
+//  1) SCHEMA ON EMPTY — a table with no rows used to be written as a single
+//     {note:'(no rows)'} cell, so a refresh against an export where a fact
+//     happened to be empty dropped every column and broke every relationship
+//     built on it. With an explicit header the sheet still carries its columns.
+//  2) STABLE ORDER — json_to_sheet otherwise derives columns from the keys it
+//     encounters, so a fact whose rows all came from one source (e.g. only
+//     demand_values, no real shipments) would omit the other source's columns
+//     and shift the rest. Power BI treats that as a schema change on refresh.
+// Keys a row carries that are not listed here are appended, never dropped, so
+// this list can lag a new field without losing data.
+const BI_COLUMNS={
+  meta:['key','value'],
+  dim_date:['date','year','quarter','month','month_name','week','day_of_week','is_weekend'],
+  dim_facility:['facility_id','facility_name','facility_type','status','sub_region','region','country'],
+  dim_element:['element_id','element_name','element_type','facility_id','assigned_facility_id','rated_capacity_tpd','max_capacity_t','start_inventory_t','product_id','output_product_id','berth_type','dispatch_type'],
+  dim_product:['product_id','product_name','category','product_family','scm_type','material_code','facility_id','facility_name'],
+  dim_scenario:['scenario_run_id','as_of_date','simulation_start_date','simulation_horizon_days','simulation_active_facility','is_actual_only'],
+  // Facts: stamp() prepends as_of_date + scenario_run_id to every row.
+  fact_production:['as_of_date','scenario_run_id','scenario_type','date','facility_id','element_id','element_type','product_id','tonnes','status','stop_cause'],
+  fact_inventory:['as_of_date','scenario_run_id','scenario_type','date','facility_id','element_id','element_type','product_id','tonnes_eod'],
+  fact_demand:['as_of_date','scenario_run_id','scenario_type','date','facility_id','demand_point_id','product_id','ship_to','demand_t','origin','product_key','customer_type','sales_manager','shipped_t'],
+  fact_unloading:['as_of_date','scenario_run_id','scenario_type','date','facility_id','berth_id','mode','product_id','value','unit'],
+  fact_rail_movement:['as_of_date','scenario_run_id','scenario_type','departure_date','arrival_date','from_facility_id','to_facility_id','dispatch_id','berth_id','product_id','cars','tonnes','transit_days','status'],
+  fact_stop_events:['as_of_date','scenario_run_id','scenario_type','date','facility_id','element_id','element_name','element_type','cause','type']
+};
 
 function _pushBIBuildTables(){
   const asOf=new Date()._ymd();
@@ -17791,6 +17856,17 @@ function _pushBIBuildTables(){
   const elFac={};
   DB.elements.forEach(e=>{ elFac[e.id]=e.assigned_facility_id||e.facility_id||''; });
   const elType={}; DB.elements.forEach(e=>{ elType[e.id]=e.type; });
+  // A kiln's output (its clinker) lives in element_product_capacities — the same
+  // table dim_element reads for rated capacity — NOT in props. props.product_id on
+  // a kiln is its FUEL in real scenarios, so it must never be used here.
+  // props.output_product_id is only a fallback for a kiln with no capacity row.
+  const elOutProd={};
+  DB.elements.forEach(e=>{ elOutProd[e.id]=e.props?.output_product_id||''; });
+  DB.element_product_capacities.forEach(c=>{
+    if(elType[c.element_id]!=='kiln'||!c.product_id) return;
+    if(!elOutProd[c.element_id]) elOutProd[c.element_id]=c.product_id;
+  });
+  const elById={}; DB.elements.forEach(e=>{ elById[e.id]=e; });
 
   // ── FACT: PRODUCTION ───────────────────────────────────
   const fact_production=[];
@@ -17814,7 +17890,10 @@ function _pushBIBuildTables(){
         fact_production.push(stamp({
           scenario_type:'forecast', date:offsetToDate(i),
           facility_id:elFac[kid]||'', element_id:kid, element_type:'kiln',
-          product_id:'', // kiln product is implicit (its clinker); leave blank for v1
+          // The kiln's clinker (see elOutProd), so the fact relates to
+          // dim_product like the mill rows do instead of piling up on the
+          // blank member.
+          product_id:elOutProd[kid]||'',
           tonnes:Math.round(t)||0,
           status:states[i]||'', stop_cause:''
         }));
@@ -17858,11 +17937,18 @@ function _pushBIBuildTables(){
     Object.keys(r.inventoryHistory||{}).forEach(eid=>{
       const t=elType[eid]; if(t!=='bulk_silo'&&t!=='packed_silo'&&t!=='raw_material_storage'&&t!=='fuel_storage') return;
       const arr=r.inventoryHistory[eid]||[];
+      // The sim aggregates a silo's inventory, so the per-product split is gone
+      // after the run. Attribute the total to the silo's primary product — the
+      // same choice _buildForecastInventoryDaily() and the inventory bar charts
+      // make (getSiloProducts()[0]) — so the row relates to dim_product instead
+      // of vanishing into the blank member. Multi-product silos are therefore
+      // reported under their first product; see the note in `meta`.
+      const primaryProd=getSiloProducts(elById[eid])[0]||'';
       arr.forEach((tn,i)=>{
         fact_inventory.push(stamp({
           scenario_type:'forecast', date:offsetToDate(i),
           facility_id:elFac[eid]||'', element_id:eid, element_type:t,
-          product_id:'', // sim aggregates inventory; product breakdown lost after run
+          product_id:primaryProd,
           tonnes_eod:Math.round(tn)||0
         }));
       });
@@ -17883,11 +17969,23 @@ function _pushBIBuildTables(){
       demand_t:parseFloat(row.value_t)||0
     }));
   });
+  // RealShipments rows key on free text (origin = plant short-name, product =
+  // demand-point name), so the catalog ids Power BI relates on have to be
+  // resolved here — an unresolved id lands the row in the dimension's blank
+  // member, where it silently drops out of every facility/product visual.
+  // Same resolvers the Sales org tree uses, so the two views agree.
+  const facOfOrigin=_originFacilityResolver();
+  const dpOfProduct=_demandPointResolver();
   (DB.real_shipments_daily||[]).forEach(row=>{
+    const dpEl=dpOfProduct(row.product);
     fact_demand.push(stamp({
       scenario_type:'actual', date:row.date,
-      facility_id:'', // origin code is plant short-name; left for Power BI to relate
-      demand_point_id:'', origin:row.origin||'', product_id:'', product_key:row.product||'',
+      facility_id:facOfOrigin(row.origin)||'',
+      demand_point_id:dpEl?.id||'', origin:row.origin||'',
+      // The demand point carries the material; its primary product is the one
+      // the shipment moved (_dpPrimaryProduct reads demand_points.products,
+      // falling back to the element's own product list).
+      product_id:(dpEl?_dpPrimaryProduct(dpEl.id):'')||'', product_key:row.product||'',
       customer_type:row.customer_type||'', ship_to:row.ship_to||'',
       sales_manager:row.sales_manager||'',
       shipped_t:parseFloat(row.volume)||0
@@ -17966,6 +18064,20 @@ function _pushBIBuildTables(){
     });
   }
 
+  // ── DIM: SCENARIO ─────────────────────────────────────
+  // Every fact row is already stamped with scenario_run_id; this gives that key
+  // a dimension to hang off so several exports can be appended into one model
+  // and sliced against each other. The same values live in `meta` as free text,
+  // but a key/value sheet cannot be related to anything.
+  const dim_scenario=[{
+    scenario_run_id:runId,
+    as_of_date:asOf,
+    simulation_start_date:simStart||'',
+    simulation_horizon_days:horizon,
+    simulation_active_facility:getFacility()?.name||'',
+    is_actual_only:!r
+  }];
+
   // ── META ──────────────────────────────────────────────
   const meta=[
     {key:'as_of_date',value:asOf},
@@ -17974,7 +18086,9 @@ function _pushBIBuildTables(){
     {key:'simulation_horizon_days',value:horizon},
     {key:'simulation_active_facility',value:getFacility()?.name||''},
     {key:'note_forecast_scope',value:'Forecast rows cover only the simulation\'s active facility. Actuals span every facility present in real_* tables.'},
-    {key:'note_inventory_breakdown',value:'Forecast inventory is total per silo (product breakdown is not retained after the run). Actual inventory carries product_id.'},
+    {key:'note_inventory_breakdown',value:'Forecast inventory is the silo total (the per-product split is not retained after the run) and is attributed to the silo\'s primary product, matching the inventory charts. Actual inventory carries its own product_id.'},
+    {key:'note_shipments_keys',value:'fact_demand rows sourced from real shipments resolve facility_id from the origin code and demand_point_id/product_id from the product name. A blank id means no catalog match — origin and product_key keep the raw text so the row can still be traced.'},
+    {key:'note_relationships',value:'See POWERBI_MODEL.md in the repo for the full relationship list (32), including the three that must be created INACTIVE on fact_rail_movement.'},
     {key:'note_mill_tonnes',value:'Forecast mill tonnes are estimated as rated_tpd for the chosen product on running days. Kiln tonnes are actual simulation outputs.'},
     {key:'note_dim_date',value:'dim_date is a contiguous day-by-day calendar covering every date referenced by any fact (including rail departure/arrival and forecast demand). Safe to mark as the Power BI date table.'},
     {key:'note_scm_type',value:'dim_product.scm_type splits category=additive into slag/ash. Blank means the product has not been tagged yet in the product editor.'}
@@ -17982,7 +18096,7 @@ function _pushBIBuildTables(){
 
   return {
     meta,
-    dim_date, dim_facility, dim_element, dim_product,
+    dim_date, dim_facility, dim_element, dim_product, dim_scenario,
     fact_production, fact_inventory, fact_demand,
     fact_unloading, fact_rail_movement, fact_stop_events
   };
@@ -18000,6 +18114,40 @@ function _addDays(ymd,n){
   const d=new Date(ymd+'T00:00:00');
   d.setDate(d.getDate()+(n||0));
   return d._ymd();
+}
+
+// ── Free-text key resolvers (shared: Sales org tree + BI export) ──────
+// RealShipments rows arrive keyed on free text — `origin` is a plant
+// short-name or code, `product` is a demand-point name — so anything that
+// wants to join them to the catalog has to do the same name→id matching.
+// spBuildOrgTree() and _pushBIBuildTables() both call these; if they diverge,
+// the Sales page and the Power BI model disagree about which facility a
+// shipment belongs to.
+// Each returns a resolver closed over a prebuilt index (built once per call,
+// not once per row).
+function _originFacilityResolver(){
+  const idx={};
+  DB.facilities.forEach(f=>{
+    const n=(f.name||'').toUpperCase(); if(n) idx[n]=f.id;
+    const c=(f.code||'').toUpperCase(); if(c) idx[c]=f.id;
+  });
+  return orig=>{
+    const up=(orig||'').toUpperCase();
+    // Empty input must not fall through to the substring scan: ''.includes('')
+    // and name.includes('') are both true, so the first facility would match
+    // everything unlabelled.
+    if(!up) return null;
+    return idx[up]||DB.facilities.find(f=>up.includes((f.name||'').toUpperCase())||(f.name||'').toUpperCase().includes(up))?.id||null;
+  };
+}
+
+function _demandPointResolver(){
+  const idx={};
+  (DB.elements||[]).filter(e=>e.type==='demand_point').forEach(el=>{
+    const k=(el.name||'').trim().toUpperCase(); if(k) idx[k]=el;
+    const c=(el.props?.dp_code||'').trim().toUpperCase(); if(c) idx[c]=el;
+  });
+  return prod=>idx[(prod||'').trim().toUpperCase()]||null;
 }
 
 // Flattens the simulation's per-silo inventory projection into per-date,
@@ -21271,22 +21419,8 @@ function spBuildOrgTree(rows){
   const facMap=Object.fromEntries(DB.facilities.map(f=>[f.id,f]));
   const subMap=Object.fromEntries(DB.sub_regions.map(s=>[s.id,s]));
   const regMap=Object.fromEntries(DB.regions.map(r=>[r.id,r]));
-  const origFacIdx={};
-  DB.facilities.forEach(f=>{
-    const n=(f.name||'').toUpperCase(); if(n) origFacIdx[n]=f.id;
-    const c=(f.code||'').toUpperCase(); if(c) origFacIdx[c]=f.id;
-  });
-  const getFacId=orig=>{
-    const up=(orig||'').toUpperCase();
-    return origFacIdx[up]||DB.facilities.find(f=>up.includes((f.name||'').toUpperCase())||(f.name||'').toUpperCase().includes(up))?.id||null;
-  };
-  const dpEls=(DB.elements||[]).filter(e=>e.type==='demand_point');
-  const dpNameIdx={};
-  dpEls.forEach(el=>{
-    const k=(el.name||'').trim().toUpperCase(); if(k) dpNameIdx[k]=el;
-    const c=(el.props?.dp_code||'').trim().toUpperCase(); if(c) dpNameIdx[c]=el;
-  });
-  const getDpEl=prod=>dpNameIdx[(prod||'').trim().toUpperCase()]||null;
+  const getFacId=_originFacilityResolver();
+  const getDpEl=_demandPointResolver();
   // 7-day activity cutoff relative to data max (not today, in case data lags)
   const refDate=DB.real_shipments_meta?.date_max||new Date()._ymd();
   const cutoffD=new Date(refDate+'T00:00:00'); cutoffD.setDate(cutoffD.getDate()-7);
