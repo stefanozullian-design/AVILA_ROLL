@@ -12556,8 +12556,18 @@ function _rpSetPush(dpId, destFacId, pid, dayNum, ds, value, skipRun){
   // rows without a departure_date still match by switch_day.
   let row=DB.rail_movements.find(rm=>rm.from_dispatch_id===dpId&&rm.to_facility_id===destFacId&&(rm.product_id||'')===pid
     &&(rm.departure_date?rm.departure_date===ds:rm.switch_day===dayNum));
-  if(cars<=0){ if(row) DB.rail_movements=DB.rail_movements.filter(r=>r!==row); }
-  else if(row){ row.wagon_count=cars; row.wagon_capacity_t=carCap; row.total_capacity_t=cars*carCap; row.status='Confirmed'; row.switch_day=dayNum; row.departure_date=ds; if(!row.to_berth_id) row.to_berth_id=berthId; }
+  // A confirmed 0 is a DECISION ("send nothing here this switch"), not the absence of one,
+  // so it is stored as a 0-car Confirmed row rather than by deleting the movement. Deleting
+  // it made existingPush() find nothing on the next render, which fell back to the suggested
+  // split — so the cell sprang back to the proposed number while the simulation shipped
+  // nothing. The simulation ignores a 0-car push (cars>0 guard in the switch-day shipping
+  // step), so the row is inert; delete it from the Rail movement records table to clear it.
+  if(cars<=0&&!row){
+    DB.rail_movements.push({id:'push_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),from_facility_id:S.facility_id,to_facility_id:destFacId,from_dispatch_id:dpId,to_berth_id:berthId,product_id:pid,wagon_count:0,wagon_capacity_t:carCap,total_capacity_t:0,switch_day:dayNum,departure_date:ds,transit_days:transit,status:'Confirmed',notes:'Operator push — nothing to this terminal'});
+  }
+  else if(row){ row.wagon_count=cars; row.wagon_capacity_t=carCap; row.total_capacity_t=cars*carCap; row.status='Confirmed'; row.switch_day=dayNum; row.departure_date=ds; if(!row.to_berth_id) row.to_berth_id=berthId;
+    if(cars<=0&&!/nothing to this terminal/.test(row.notes||'')) row.notes='Operator push — nothing to this terminal';
+    else if(cars>0&&/nothing to this terminal/.test(row.notes||'')) row.notes='Operator push'; }
   else DB.rail_movements.push({id:'push_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),from_facility_id:S.facility_id,to_facility_id:destFacId,from_dispatch_id:dpId,to_berth_id:berthId,product_id:pid,wagon_count:cars,wagon_capacity_t:carCap,total_capacity_t:cars*carCap,switch_day:dayNum,departure_date:ds,transit_days:transit,status:'Confirmed',notes:'Operator push'});
   if(!skipRun){ autoSave(); scheduleSimulation(); }
 }
