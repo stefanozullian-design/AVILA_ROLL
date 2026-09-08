@@ -9281,7 +9281,11 @@ function _renderSupplyViewInner(wrap){
         // struck-through red number = starved (planned but nothing available to load).
         // ⚠ DO NOT re-introduce a Gantt bar here — this row is deliberately numeric so the
         // daily loading volume is readable. The mill / vessel rows around it are bars; this
-        // one is not. Click a cell → rail loading campaign popup (edit campaign / enter real).
+        // one is not.
+        // Editing follows the demand grid (see _demCellHtml): a forecast day is an INPUT —
+        // click once and type the cars for that day (saveRailLoadCell writes a one-day
+        // campaign) — and DOUBLE-CLICK opens the full campaign popup for a date range.
+        // Real days are read-only text; double-click them to correct the actual.
         let _railHTML='';
         {
           const railDisp=facEls.filter(e=>e.type==='dispatch_point'&&e.props?.dispatch_type==='Rail');
@@ -9329,6 +9333,11 @@ function _renderSupplyViewInner(wrap){
 
             // ── One "Rail Car Loading" row per dispatch point — numeric cars/day, no bars ──
             dpDays.forEach(({disp,carCap,stdRate,byDate})=>{
+              // A typed value has to be attributed to a product. Use the day's own product
+              // when the sim/plan gives one, else the dispatch point's first configured
+              // product — same fallback the campaign popup uses for its default selection.
+              const _dpProds=railDpProducts(disp);
+              const _fallbackPid=_dpProds[0]||'';
               let rr=`<tr class="supsec-railLoad" style="background:rgba(179,136,255,.03)">
                 <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${railColor};font-size:9px">Rail Car Loading${railDisp.length>1?' — '+disp.name:''}
                   <span style="color:var(--text-dim);font-size:8px;margin-left:4px">max ${stdRate} cars/d · ${carCap}t/car</span>
@@ -9356,7 +9365,7 @@ function _renderSupplyViewInner(wrap){
                   const clickFn=`showRailCampaignPopup(${campArgs})`;
                   if(e.isReal){
                     const tip=Object.keys(e.byProduct).map(pid=>(_prodById.get(pid)?.name||pid)+' '+e.byProduct[pid]+' cars').join(' + ')+' · actual';
-                    rr+=`<td class="sup-day-${mon.ym} cell-real" title="${tip}" onclick="event.stopPropagation();${clickFn}" style="cursor:pointer;font-size:9px;color:${barColor};font-weight:700;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${Math.round(e.cars)}</td>`;
+                    rr+=`<td class="sup-day-${mon.ym} cell-real" title="${tip} — dbl-click to correct" ondblclick="event.stopPropagation();${clickFn}" style="cursor:cell;font-size:9px;color:${barColor};font-weight:700;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${Math.round(e.cars)}</td>`;
                     return;
                   }
                   const isStarved=(e.cars<=0&&e.plan>0);
@@ -9366,12 +9375,18 @@ function _renderSupplyViewInner(wrap){
                   const cellTitle=isStarved?`⚠ plan ${e.plan} cars — nothing loaded (no cement in rail silo)`
                     :(e.cars>0?`${prod?.name||''} · ${e.cars} cars/d${isShort?` (plan ${e.plan} — short ${e.plan-e.cars})`:''}${e.isCamp?' · 🔒 campaign':''}`
                     :'Idle — click to plan loading');
-                  // Forecast day = plain car count coloured by product (real days above use the
-                  // same cell in bold). Starved days show the unmet plan struck through in red.
-                  const numTxt=isStarved?`<span style="text-decoration:line-through">${Math.round(e.plan)}</span>`
-                    :(e.cars>0?String(Math.round(e.cars)):'');
+                  // Forecast day = an editable car count coloured by product. The value shown
+                  // is what the day will load; on a starved day it is the PLAN that could not
+                  // be met (red), since the plan is the thing the user actually edits.
                   const numCol=isStarved?'#e06a6a':barColor;
-                  rr+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="cursor:pointer;font-size:9px;color:${numCol};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${campMark}${shortMark}${tdSty(ds)}">${numTxt}</td>`;
+                  const cellVal=isStarved?Math.round(e.plan):(e.cars>0?Math.round(e.cars):'');
+                  const editPid=e.pid||_fallbackPid;
+                  const editTitle=cellTitle+' \u2014 type to set this day, dbl-click for the campaign popup';
+                  rr+=`<td class="sup-day-${mon.ym}" title="${editTitle}" ondblclick="event.stopPropagation();${clickFn}" style="cursor:cell;padding:1px 2px;border-bottom:1px solid var(--border);${campMark}${shortMark}${tdSty(ds)}">`
+                    +(editPid
+                      ? `<input class="rail-load-cell" data-dp="${disp.id}" data-date="${ds}" data-pid="${editPid}" value="${cellVal}" onchange="saveRailLoadCell(this)" style="width:34px;background:transparent;border:none;color:${numCol};font-family:var(--mono);font-size:9px;text-align:right;padding:3px 2px;outline:none">`
+                      : `<div style="width:34px;font-family:var(--mono);font-size:9px;text-align:right;padding:3px 2px;color:${numCol}">${cellVal}</div>`)
+                    +`</td>`;
                 });
               });
               _railHTML+=rr+`</tr>`;
@@ -9827,7 +9842,6 @@ function _renderSupplyViewInner(wrap){
         const _railAtYardT=_railHistT('railAtRailyardHistory');
         const _railYardT=_railHistT('railYardHistory');
         const _railPendT=(pid,ds)=>_railTransT(pid,ds)+_railAtYardT(pid,ds)+_railYardT(pid,ds);
-        const _placedRec=(pid,ds)=>(DB.real_rail_daily||[]).find(rr=>rr.type==='placed'&&rr.date===ds&&rr.facility_id===fac.id&&(!rr.product_id||rr.product_id===pid));
         const _carries=_vesselCarriesFn();
 
         // ── PER-PRODUCT BLOCKS ─────────────────────────────────────────────
@@ -9873,15 +9887,6 @@ function _renderSupplyViewInner(wrap){
         const _prodSilos=pid=>allSilos.filter(s=>getSiloProducts(s).includes(pid));
         const _unlPlan=(pid,ds)=>{ const di=_dIdx(ds); if(di<0)return 0; return _prodSilos(pid).reduce((s,si)=>s+((r&&r.siloUnloadHistory&&r.siloUnloadHistory[si.id]||[])[di]||0),0); };
         const _unlReal=(pid,ds)=>realUnloadTonnesFacProdDay(fac.id,pid,ds);
-        // Real cars unloaded (rail display): the entered car count if present, else derive
-        // from the tonnes ÷ car capacity. Returns null when there's no real entry.
-        const _unlRealCars=(pid,ds)=>{
-          const rows=(DB.real_unloading_daily||[]).filter(u=>u.date===ds&&u.product_id===pid
-            &&(u.facility_id===fac.id||(_railBerths||[]).some(b=>b.id===u.berth_id)));
-          if(!rows.length) return null;
-          return rows.reduce((s,u)=>s+(u.cars!=null?(parseFloat(u.cars)||0)
-            :u.unit==='cars'?(parseFloat(u.value)||0):((parseFloat(u.value)||0)/_railCarCap)),0);
-        };
         const totalNeed=(pid,ds)=>demandPoints.filter(dp=>dp.products?.some(p=>_canon(p.product_id)===pid))
           .reduce((s,dp)=>s+(_demandRate(dp.element_id,ds)||0),0);
 
@@ -10241,50 +10246,47 @@ function _renderSupplyViewInner(wrap){
             });
           }
 
-          // 🚂 RAIL ARRIVALS — per rail-fed product, the full pipeline IN ORDER:
-          //   ⇢ In Transit → ▤ At Rail Yard → ▣ At Local Yard → Unloading (cars).
-          // Click a pipeline cell to reconcile physical yard counts; dbl-click
-          // Unloading to set the actual.
+          // 🚂 RAIL ARRIVALS — ONE row per rail-fed product: the cars that ARRIVE at the
+          // terminal that day. The in-transit / rail-yard / local-yard stages are deliberately
+          // NOT shown here, matching the Logistics › Rail Schedule destination table (which
+          // dropped its UNLOADING row for the same reason): what the terminal receives is
+          // inventory the next morning, so the extra rows only restated the arrival on later
+          // dates. The INVENTORY rows / chart above already show the day-after effect.
+          // The stages still exist in the simulation (transit → rail yard → spotting on the
+          // berth's switch days → local yard → unload), they are just not tabulated here.
+          // Dbl-click a cell → Reconcile Rail Yard, to correct the physical car counts.
           const _railPids=gr.pids.filter(pid=>_railBerths.length&&_railFedPids.has(pid));
           if(_railPids.length){
             h+=`<tr class="sup-sec-hdr" data-seckey="termRail" onclick="_supToggleSec('termRail')" style="cursor:pointer;background:rgba(179,136,255,.06);border-top:1px solid rgba(179,136,255,.4)">
-              <td title="Rail pipeline per product — In Transit → At Rail Yard → At Local Yard → Unloading · cells are RAIL CARS · click to reconcile physical counts" style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${rc};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('termRail')}</span> RAIL ARRIVALS ${suffix} <span style="opacity:.55;font-weight:400;font-size:7px;margin-left:3px;text-transform:none">cars @ ${Math.round(_railCarCap)}t</span> <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>${_blankCells()}</tr>`;
+              <td title="Cars arriving at the terminal per product · available in the silo the next day (or the berth's next switch day) · dbl-click a cell to reconcile the physical car count" style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${rc};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('termRail')}</span> RAIL ARRIVALS ${suffix} <span style="opacity:.55;font-weight:400;font-size:7px;margin-left:3px;text-transform:none">cars @ ${Math.round(_railCarCap)}t</span> <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>${_blankCells()}</tr>`;
             _railPids.forEach(pid=>{
               const pname=_pNameOf(pid);
               // Product sub-header inside the rail section
               h+=`<tr class="supsec-termRail"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${_pColor(pid)};font-size:9px;font-weight:700">${_pChip(pid)}${pname}</td>${_blankCells()}</tr>`;
+              // Cars arriving at the terminal on each day. Real transfers win over the planned
+              // arrival (rail movement departure + transit days), same source and precedence as
+              // the Rail Schedule's TRANSF/ARRIVAL row, so both pages agree on the arrival date.
+              // A physical car count entered through Reconcile Rail Yard marks the day as real.
               const _countRec=(type,ds)=>(DB.real_rail_daily||[]).find(rr=>rr.type===type&&rr.date===ds&&rr.facility_id===fac.id&&(!rr.product_id||rr.product_id===pid));
-              const _rowRail=(lbl,fn,stColor,stDesc,recType)=>{
-                let rr2=`<tr class="supsec-termRail"><td style="${stickyLeft('var(--surface)',depth+4,'border-bottom:1px solid var(--border),')}color:${stColor};font-size:9px">${lbl} <span style="font-size:7px;opacity:.55">RAIL CARS</span></td>`;
-                months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-                  const lastDs=mon.dates[mon.dates.length-1];
-                  const mc=Math.round(fn(pid,lastDs)/_railCarCap);
-                  rr2+=`<td title="end of month" style="border-left:2px solid rgba(179,136,255,.1);font-size:9px;color:${stColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mc>0?mc:''}</td>`;
-                  if(!isCol) mon.dates.forEach(ds=>{
-                    const t=fn(pid,ds); const cars=Math.round(t/_railCarCap);
-                    const rec=recType?_countRec(recType,ds):null; const isReal=!!rec;
-                    const col=isReal?'#00d9a3':(cars>0?stColor:'rgba(179,136,255,.25)');
-                    const ttl=`${cars} cars (${Math.round(t).toLocaleString()} t) ${stDesc}${isReal?' · physical count set ('+rec.cars+' cars)':''} — click to reconcile the physical yard counts`;
-                    rr2+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''}" title="${ttl}" onclick="event.stopPropagation();showRailPlacementPopup('${fac.id}','${pid}','${ds}')" style="cursor:pointer;font-size:9px;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${isReal?'700':'400'};${tdSty(ds)}">${cars>0?cars:0}</td>`; });
-                });
-                h+=rr2+`</tr>`;
-              };
-              _rowRail('⇢ In Transit',_railTransT,rc,'in transit (on rail)',null);
-              _rowRail('▤ At Rail Yard',_railAtYardT,'#ff9433','at the rail yard, awaiting spotting','railyard_count');
-              _rowRail('▣ At Local Yard',_railYardT,'#38bdf8','at the local yard, unloading at the berth spec','localyard_count');
-              // Unloading (cars; tonnes in the tooltip) — dbl-click to set actual.
-              const _uCars=(ds)=>{ const rv=_unlReal(pid,ds); if(rv>0){ const rc2=_unlRealCars(pid,ds); return rc2!=null?rc2:rv/_railCarCap; } return _unlPlan(pid,ds)/_railCarCap; };
-              h+=`<tr class="supsec-termRail"><td style="${stickyLeft('var(--surface)',depth+4,'border-bottom:1px solid var(--border),')}color:${rc};font-size:9px">Unloading <span style="font-size:7px;opacity:.55">RAIL CARS</span></td>`;
+              const _arrCars=ds=>_arrDay(pid,ds)/_railCarCap;
+              // "Available next day" holds only when the receiving berth spots on arrival.
+              // A berth with switch days pulls the cars on its next switch day instead, so
+              // don't promise a date the simulation will not hit.
+              const _hasSwitch=_railBerths.some(b=>(b.props?.switch_days||[]).length);
+              h+=`<tr class="supsec-termRail"><td title="Cars arriving at the terminal — available in the silo the next day" style="${stickyLeft('var(--surface)',depth+4,'border-bottom:1px solid var(--border),')}color:${rc};font-size:9px">⇢ Arrived at terminal <span style="font-size:7px;opacity:.55">RAIL CARS</span></td>`;
               months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-                const mtT=mon.dates.reduce((s,ds)=>{ const rv=_unlReal(pid,ds); return s+(rv>0?rv:_unlPlan(pid,ds)); },0);
-                const mDisp=Math.round(mon.dates.reduce((s,ds)=>s+_uCars(ds),0));
-                h+=`<td title="${Math.round(mtT).toLocaleString()+' t'}" style="border-left:2px solid rgba(179,136,255,.1);font-size:9px;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mtT>0?mDisp.toLocaleString():''}</td>`;
+                const mCars=Math.round(mon.dates.reduce((s,ds)=>s+_arrCars(ds),0));
+                const mT=mon.dates.reduce((s,ds)=>s+_arrDay(pid,ds),0);
+                h+=`<td title="${Math.round(mT).toLocaleString()} t" style="border-left:2px solid rgba(179,136,255,.1);font-size:9px;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mCars>0?mCars.toLocaleString():''}</td>`;
                 if(!isCol) mon.dates.forEach(ds=>{
-                  const rv=_unlReal(pid,ds); const isReal=rv>0; const vT=isReal?rv:_unlPlan(pid,ds);
-                  const col=isReal?rcReal:(vT>0?rc:'rgba(179,136,255,.25)');
-                  const disp=vT>0?Math.round(_uCars(ds)):0;
-                  const ttl=`${pname} unloading · ${disp} cars (${Math.round(vT).toLocaleString()} t)${isReal?' · actual':' · planned'} — dbl-click to set actual`;
-                  h+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''}" ondblclick="event.stopPropagation();showTermRealPopup('unload','${fac.id}','${pid}','${ds}')" title="${ttl}" style="cursor:pointer;font-size:9px;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${isReal?'700':'400'};${tdSty(ds)}">${disp}</td>`; });
+                  const t=_arrDay(pid,ds); const cars=Math.round(_arrCars(ds));
+                  const isReal=_arrReal(pid,ds)>0||!!_countRec('railyard_count',ds);
+                  const col=isReal?rcReal:(t>0?rc:'rgba(179,136,255,.25)');
+                  const nextDs=(()=>{ const d=new Date(ds+'T00:00:00'); d.setDate(d.getDate()+1); return d._ymd(); })();
+                  const avail=_hasSwitch?'in the silo after the next switch day at this berth':`in the silo from ${nextDs}`;
+                  const ttl=t>0?`${pname} · ${cars} cars (${Math.round(t).toLocaleString()} t) arrive ${ds}${isReal?' · actual':' · planned'} — ${avail} — dbl-click to reconcile the physical car count`
+                    :`No rail arrival ${ds} — dbl-click to reconcile the physical car count`;
+                  h+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''}" ondblclick="event.stopPropagation();showRailPlacementPopup('${fac.id}','${pid}','${ds}')" title="${ttl}" style="cursor:cell;font-size:9px;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${isReal?'700':'400'};${tdSty(ds)}">${cars>0?cars:0}</td>`; });
               });
               h+=`</tr>`;
             });
@@ -12204,9 +12206,37 @@ function railPlanRate(dispatchId, productId, dateStr){
   return override!==null?override:base;
 }
 // A dated loading-plan row (= a loading CAMPAIGN) covering dateStr for this dp+product, if any.
+// Returns the LAST match, not the first: railPlanRate resolves overlaps the same way, so a
+// one-day row written by saveRailLoadCell (appended after a longer campaign) is the row that
+// actually governs the day — and therefore the one the popup should edit.
 function _railActivePlan(dpId, pid, ds){
-  return (DB.rail_loading_plan||[]).find(p=>p.dispatch_id===dpId&&p.product_id===pid&&(p.date_from||p.date_to)
+  const hits=(DB.rail_loading_plan||[]).filter(p=>p.dispatch_id===dpId&&p.product_id===pid&&(p.date_from||p.date_to)
     &&ds>=(p.date_from||'0000-01-01')&&ds<=(p.date_to||'9999-12-31'));
+  return hits[hits.length-1];
+}
+
+// Save one typed cell from the Supply page's Rail Car Loading row. A typed number becomes a
+// ONE-DAY loading campaign for that dispatch point + product, appended after any broader
+// campaign so it wins for that day only (railPlanRate: last dated match wins) and the rest of
+// the campaign survives untouched. Clearing the cell removes the day override and lets the
+// underlying campaign / base rate take over again; typing 0 is an explicit "load nothing".
+function saveRailLoadCell(inp){
+  if(!inp) return;
+  const dpId=inp.dataset.dp, ds=inp.dataset.date, pid=inp.dataset.pid;
+  if(!dpId||!ds||!pid) return;
+  if(!DB.rail_loading_plan) DB.rail_loading_plan=[];
+  const raw=(inp.value||'').trim();
+  // Drop any existing single-day override for this dp+product+day before writing the new one.
+  DB.rail_loading_plan=DB.rail_loading_plan.filter(p=>!(p.dispatch_id===dpId&&p.product_id===pid
+    &&p.date_from===ds&&p.date_to===ds));
+  if(raw!==''){
+    const cars=Math.max(0,parseFloat(raw)||0);
+    DB.rail_loading_plan.push({id:'lp_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),
+      dispatch_id:dpId,product_id:pid,cars_per_day:cars,date_from:ds,date_to:ds});
+  }
+  autoSave();
+  _railRefreshViews();
+  scheduleSimulation();
 }
 // The facility a rail dispatch point belongs to (real_rail_daily rows are keyed by facility).
 function _railDpFacId(dp){ return dp?.assigned_facility_id||dp?.facility_id||S.facility_id; }
