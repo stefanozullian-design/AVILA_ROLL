@@ -10022,11 +10022,35 @@ function _renderSupplyViewInner(wrap){
         const _termArr={};
         const _addArr=(pid,ds,t)=>{ pid=_canon(pid); if(!pid||!ds||!(t>0))return; (_termArr[pid]=_termArr[pid]||{}); _termArr[pid][ds]=(_termArr[pid][ds]||0)+t; };
         const _dayToDs=day=>{const d=new Date(simStart.getFullYear(),simStart.getMonth(),simStart.getDate());d.setDate(d.getDate()+(day-1));return d._ymd();}; // calendar increment — DST-safe (no duplicate day)
+        // REAL rail dispatches (DB.real_rail_daily type 'dispatched'). The Rail Schedule records
+        // a PAST switch this way — a real dispatch never creates a rail movement — so a row
+        // reading only DB.rail_movements missed every actual rail arrival while the simulation
+        // shipped it anyway. Precedence matches the simulation: a real record REPLACES the
+        // planned movements departing that origin on that date.
+        const _railOrigins=(typeof rpGetOriginsForDest==='function')?rpGetOriginsForDest(fac.id):[];
+        const _railOrigFacIds=new Set(_railOrigins.map(o=>_railDpFacId(o.dp)));
+        const _realRailRows=(DB.real_rail_daily||[]).filter(rr=>rr.type==='dispatched'&&rr.date);
+        const _realRailCovers=new Set();  // `${originFacId}|${departureDate}` reality already covers
+        _realRailRows.filter(rr=>_railOrigFacIds.has(rr.facility_id))
+          .forEach(rr=>_realRailCovers.add(rr.facility_id+'|'+rr.date));
+        const _termArrRail={};            // real rail arrivals — {pid:{ds:tonnes}}
+        _realRailRows.filter(rr=>rr.dest_facility_id===fac.id).forEach(rr=>{
+          const o=_railOrigins.find(x=>_railDpFacId(x.dp)===rr.facility_id)||_railOrigins[0];
+          const carCap=parseFloat(o?.dp?.props?.car_capacity_t)||RAIL_CAR_T_DEFAULT;
+          const transit=parseInt(o?.destCfg?.transit_days)||1;
+          const pid=_canon(rr.product_id), t=(parseInt(rr.cars)||0)*carCap;
+          if(!pid||!(t>0)||!S.simCfg.start_date) return;
+          const ds=_dayToDs(Math.round((new Date(rr.date)-simStart)/864e5)+1+transit);
+          (_termArrRail[pid]=_termArrRail[pid]||{}); _termArrRail[pid][ds]=(_termArrRail[pid][ds]||0)+t;
+        });
+        const _arrRealRail=(pid,ds)=>(_termArrRail[pid]&&_termArrRail[pid][ds])||0;
+
         (DB.rail_movements||[]).filter(rm=>rm.to_facility_id===fac.id).forEach(rm=>{
-          let depDay=null;
-          if(rm.departure_date&&S.simCfg.start_date) depDay=Math.round((new Date(rm.departure_date)-simStart)/864e5)+1;
-          else if(rm.switch_day) depDay=rm.switch_day;
+          let depDay=null,depDs=rm.departure_date||null;
+          if(depDs&&S.simCfg.start_date) depDay=Math.round((new Date(depDs)-simStart)/864e5)+1;
+          else if(rm.switch_day){ depDay=rm.switch_day; depDs=_dayToDs(depDay); }
           if(!depDay) return;
+          if(_realRailCovers.has(_railDpFacId(getEl(rm.from_dispatch_id))+'|'+depDs)) return;
           _addArr(rm.product_id,_dayToDs(depDay+(parseInt(rm.transit_days)||1)),parseFloat(rm.total_capacity_t)||0);
         });
         // (Truck arrivals are shown separately as UNLOAD-node rows inside TRANSFERRED,
@@ -10041,7 +10065,8 @@ function _renderSupplyViewInner(wrap){
           }
         });
         const _arrPlan=(pid,ds)=>(_termArr[pid]&&_termArr[pid][ds])||0;
-        const _arrReal=(pid,ds)=>(DB.real_transfers_daily||[]).filter(t=>t.date===ds&&t.dest_facility_id===fac.id&&_canon(t.product_id)===pid).reduce((s,t)=>s+(parseFloat(t.volume_t)||0),0);
+        const _arrReal=(pid,ds)=>(DB.real_transfers_daily||[]).filter(t=>t.date===ds&&t.dest_facility_id===fac.id&&_canon(t.product_id)===pid).reduce((s,t)=>s+(parseFloat(t.volume_t)||0),0)
+          +_arrRealRail(pid,ds);
         const _arrDay=(pid,ds)=>{ const rv=_arrReal(pid,ds); return rv>0?rv:_arrPlan(pid,ds); };
         const _prodSilos=pid=>allSilos.filter(s=>getSiloProducts(s).includes(pid));
         const _unlPlan=(pid,ds)=>{ const di=_dIdx(ds); if(di<0)return 0; return _prodSilos(pid).reduce((s,si)=>s+((r&&r.siloUnloadHistory&&r.siloUnloadHistory[si.id]||[])[di]||0),0); };
@@ -10111,6 +10136,8 @@ function _renderSupplyViewInner(wrap){
         const _railFedPids=new Set();
         _railBerths.forEach(b=>_downSilosOf(b).forEach(s=>getSiloProducts(s).forEach(p=>_railFedPids.add(p))));
         (DB.rail_movements||[]).filter(rm=>rm.to_facility_id===fac.id&&rm.product_id).forEach(rm=>_railFedPids.add(_canon(rm.product_id)));
+        // …and products that only ever arrived as a REAL dispatch (no planned movement exists).
+        _realRailRows.filter(rr=>rr.dest_facility_id===fac.id&&rr.product_id).forEach(rr=>_railFedPids.add(_canon(rr.product_id)));
         const _shipFedPids=new Set();
         _shipBerths.forEach(b=>_downSilosOf(b).forEach(s=>getSiloProducts(s).forEach(p=>_shipFedPids.add(p))));
         (DB.vessel_calls||[]).forEach(vc=>{
@@ -12301,28 +12328,68 @@ function rpInv(elId,d){
   return hist[d-2]??null;
 }
 
-// ── Planned arrivals from DB.rail_movements ───────────────────────
+// ── Arrivals at a rail destination ────────────────────────────────
 function rpPlannedArrivalsForDest(destFacId,berthId){
-  // Returns {day: [{tonnes,status,productId}]} — all movements, all statuses, switch_day used
-  // as fallback. productId is carried so the schedule can break the arrival total down per
-  // product (TRANSF/ARRIVAL total row + one child row per product).
+  // Returns {day: [{tonnes,status,productId}]} — what actually reaches this terminal.
+  //
+  // TWO sources, mirroring exactly what the simulation ships (see the railPushes build in
+  // the rail schedule step of the sim):
+  //   1. DB.rail_movements                — the plan (Confirmed / Planned / Proposed / …)
+  //   2. DB.real_rail_daily type 'dispatched' — what really left the siding
+  // A real dispatch REPLACES the plan for the origin + departure date it covers, just as the
+  // simulation does. Reading only the movements (as this did) meant a real dispatch — a past
+  // switch committed with ✓ — moved inventory while showing no arrival at all, so this row
+  // and the INVENTORY row above it disagreed.
+  //
+  // productId is carried so the arrival total can be split per product.
   const map={};
+  const startDs=S.simCfg.start_date;
+  if(!startDs) return map;
+  const _dayOfDate=ds=>Math.round((new Date(ds+'T00:00:00')-new Date(startDs+'T00:00:00'))/864e5)+1;
+  const _add=(arrDay,tonnes,status,productId)=>{
+    // A 0-car push is a decision ("send nothing this switch"), not an arrival — it was
+    // rendering as a phantom 0t cell on the arrival date.
+    if(!arrDay||arrDay<1||!(tonnes>0)) return;
+    (map[arrDay]=map[arrDay]||[]).push({tonnes,status,productId:productId||''});
+  };
+
+  // Origins feeding this terminal — they price a real dispatch (cars → tonnes) and say which
+  // origin facility's real records override which planned movements.
+  const origins=rpGetOriginsForDest(destFacId);
+  const origFacIds=new Set(origins.map(o=>_railDpFacId(o.dp)));
+  const realRows=(DB.real_rail_daily||[]).filter(rr=>rr.type==='dispatched'&&rr.date);
+
+  // Origin + departure date pairs covered by a real record. Built from EVERY real dispatch at
+  // those origins, not just the ones bound for this terminal: the simulation replaces the
+  // whole switch day's pushes once reality is recorded for it.
+  const _realCovers=new Set();
+  realRows.filter(rr=>origFacIds.has(rr.facility_id))
+    .forEach(rr=>_realCovers.add(`${rr.facility_id}|${rr.date}`));
+
+  // 1) REAL dispatches bound for this terminal.
+  realRows.filter(rr=>rr.dest_facility_id===destFacId)
+    .filter(rr=>!_rp.prodId||(rr.product_id||'')===_rp.prodId)
+    .forEach(rr=>{
+      const o=origins.find(x=>_railDpFacId(x.dp)===rr.facility_id)||origins[0];
+      const carCap=parseFloat(o?.dp?.props?.car_capacity_t)||RAIL_CAR_T_DEFAULT;
+      const transit=parseInt(o?.destCfg?.transit_days)||1;
+      _add(_dayOfDate(rr.date)+transit,(parseInt(rr.cars)||0)*carCap,'Real',rr.product_id);
+    });
+
+  // 2) PLANNED movements — skipped where a real record already covers that origin + day.
   DB.rail_movements
     .filter(rm=>rm.to_facility_id===destFacId)
     .filter(rm=>!_rp.prodId||rm.product_id===_rp.prodId)
     .forEach(rm=>{
       const st=rm.status||'Planned';
-      let depDay=null;
-      if(rm.departure_date&&S.simCfg.start_date){
-        depDay=Math.round((new Date(rm.departure_date)-new Date(S.simCfg.start_date+'T00:00:00'))/864e5)+1;
-      } else if(rm.switch_day){
-        depDay=rm.switch_day;
-      }
+      let depDay=null,depDs=rm.departure_date||null;
+      if(depDs) depDay=_dayOfDate(depDs);
+      else if(rm.switch_day){ depDay=rm.switch_day; depDs=rpDayDate(depDay); }
       if(!depDay) return;
+      const origFacId=_railDpFacId(getEl(rm.from_dispatch_id));
+      if(_realCovers.has(`${origFacId}|${depDs}`)) return;
       const transit=parseInt(rm.transit_days)||1;
-      const arrDay=depDay+transit;
-      if(!map[arrDay]) map[arrDay]=[];
-      map[arrDay].push({tonnes:rm.total_capacity_t||0,status:st,productId:rm.product_id||''});
+      _add(depDay+transit,parseFloat(rm.total_capacity_t)||0,st,rm.product_id);
     });
   return map;
 }
@@ -13013,7 +13080,9 @@ function rpRender(){
     // 2) TRANSF/ARRIVAL — clickable, color-coded by movement status.
     // A TOTAL row (every product that arrives) plus one child row per product; a child cell
     // opens the same dialog scoped to that product, so an arrival can be edited per product.
-    const _statusPriority=['In Transit','Unloading','Confirmed','Planned','Proposed','Finished'];
+    // 'Real' first: a recorded dispatch outranks any plan for the same day.
+    const _statusPriority=['Real','In Transit','Unloading','Confirmed','Planned','Proposed','Finished'];
+    const _statusColor=st=>st==='Real'?'#00d9a3':_tsGet(st).color;
     // Builds the month-summary + day cells for an arrival row. `pid` null = all products.
     const _arrCellsFor=(pid)=>{
       const entriesOn=d=>(arrivals[d]||[]).filter(e=>pid===null||(e.productId||'')===pid);
@@ -13028,7 +13097,7 @@ function rpRender(){
           if(entries.length>0){
             const totalTonnes=entries.reduce((s,e)=>s+e.tonnes,0);
             const domSt=_statusPriority.find(s=>entries.some(e=>e.status===s))||entries[0].status;
-            const col=_tsGet(domSt).color;
+            const col=_statusColor(domSt);
             cls+=' tp-cell-planned';
             val=`<span style="color:${col}">${Number(totalTonnes).toLocaleString()}t</span>`;
           }
