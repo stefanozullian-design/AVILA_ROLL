@@ -1352,7 +1352,11 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
         <div class="sp-chip green active" id="dem-type-all" onclick="_demOnTypeChange('all')">ALL</div>
         <div class="sp-chip"             id="dem-type-ext" onclick="_demOnTypeChange('EXT')">EXT</div>
         <div class="sp-chip"             id="dem-type-int" onclick="_demOnTypeChange('INT')">INT</div>
-        <button class="tb-btn sec" style="margin-left:auto" onclick="_demClearFilters()">✕ Clear</button>
+        <label style="margin-left:auto;display:flex;align-items:center;gap:6px;cursor:pointer;font-family:var(--mono);font-size:9px;color:var(--text-dim)">
+          <input type="checkbox" id="dem-show-inactive" onchange="window._demShowInactive=this.checked;renderDemandView()" style="width:14px;height:14px;accent-color:var(--green);cursor:pointer">
+          <span>Show inactive</span>
+        </label>
+        <button class="tb-btn sec" onclick="_demClearFilters()">✕ Clear</button>
       </div>
       <!-- Daily demand chart — mirrors the Sales page daily chart (actual+forecast bars,
            last-year area behind, working-day average guides) -->
@@ -1447,8 +1451,13 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
           <div class="sup-panel" id="sup-pan-prod" style="min-width:540px" onclick="event.stopPropagation()"></div>
         </div>
         <button class="tb-btn sec" style="font-size:9px;padding:3px 10px" onclick="supClearAllFilters()">✕ Clear all</button>
+        <!-- Show inactive elements -->
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-family:var(--mono);font-size:9px;color:var(--text-dim);margin-left:auto;margin-right:8px">
+          <input type="checkbox" id="sup-show-inactive" onchange="window._supShowInactive=this.checked;renderSupplyView()" style="width:14px;height:14px;accent-color:var(--green);cursor:pointer">
+          <span>Show inactive</span>
+        </label>
         <!-- Today button -->
-        <button class="tb-btn sec" style="margin-left:auto;font-size:9px;padding:3px 10px" onclick="supplyScrollToday()">Today</button>
+        <button class="tb-btn sec" style="font-size:9px;padding:3px 10px" onclick="supplyScrollToday()">Today</button>
       </div>
 
       <!-- Active-filter tokens — what is on right now; click a token's ✕ to drop it. -->
@@ -2708,7 +2717,7 @@ function addElement(type,x,y){
   const id=`el_${++S.elCounter}`;
   const el={id, facility_id:S.facility_id, type, x, y,
     name:`${ET[type].label} ${S.elCounter}`, props:{}, state:'idle',
-    maintenanceEvents:[], productCapacities:[]};
+    maintenanceEvents:[], productCapacities:[], is_active:true};
   DB.elements.push(el);
   renderEl(el); updateEmpty(); updateStatusBar(); selectEl(id); autoSave();
 }
@@ -3253,6 +3262,7 @@ function renderProps(id){
       </select>
       <div class="fhint">Use this to assign terminal elements to their logical facility for filtering results</div>
     </div>
+    <div class="pf"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="pp-is-active" ${el.is_active!==false?'checked':''} style="width:16px;height:16px;accent-color:var(--green);cursor:pointer"><span style="font-family:var(--mono);font-size:10px">Active (show in tables)</span></label><div class="fhint">Inactive elements are hidden from demand & supply tables but kept for historical reference</div></div>
   </div><div class="pg"><div class="pg-title">Characteristics</div>`;
 
   t.fields.forEach(f=>{
@@ -3762,6 +3772,9 @@ function saveProps(id){
   // Save assigned facility
   const af=document.getElementById('pp-assigned-fac');
   el.assigned_facility_id=af?.value||null;
+  // Save active status
+  const isActive=document.getElementById('pp-is-active');
+  el.is_active=isActive?.checked??true;
   t.fields.forEach(f=>{
     const inp=document.getElementById(`pp-${f.k}`);
     if(inp) el.props[f.k]=f.t==='number'?parseFloat(inp.value)||0:inp.value;
@@ -7086,6 +7099,8 @@ function saveProduct(){
 function renderDemandView(){
   const wrap=document.getElementById('demand-table-wrap'); if(!wrap) return;
   let allDpEls=getFacElements().filter(e=>e.type==='demand_point');
+  // Filter by active status unless user has toggled to show inactive
+  if(!window._demShowInactive) allDpEls=allDpEls.filter(e=>e.is_active!==false);
   const _facForEl=el=>el.assigned_facility_id||el.facility_id||S.facility_id;
   if(!allDpEls.length||!S.simCfg.start_date){
     wrap.innerHTML=`<div style="font-family:var(--mono);font-size:10px;color:var(--text-dim);padding:30px;text-align:center">
@@ -8433,7 +8448,9 @@ function _renderSupplyViewInner(wrap){
   // Family or Category pick behaves like picking each of its products at once.
   const _supAllowedPids=(typeof supAllowedProdIds==='function')?supAllowedProdIds():null;
   const _supProdAllows=pid=>!_supAllowedPids||_supAllowedPids.has(pid);
-  const allEls=getFacElements();
+  let allEls=getFacElements();
+  // Filter by active status unless user has toggled to show inactive
+  if(!window._supShowInactive) allEls=allEls.filter(e=>e.is_active!==false);
   // Terminal-type facilities ALWAYS render via the terminal (category-first) path,
   // even when they own production elements (e.g. a packing plant at PEV). Without
   // this exclusion a terminal packer routes the whole facility into the plant tree,
