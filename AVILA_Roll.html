@@ -11035,10 +11035,12 @@ function fbpCompute(){
   let rows=(DB.real_shipments_daily||[]);
   if(prods.length) rows=rows.filter(r=>prods.includes((r.product||'').trim().toUpperCase()));
   const actualsMap={}; rows.forEach(r=>{ if(r.date) actualsMap[r.date]=(actualsMap[r.date]||0)+(parseFloat(r.volume)||0); });
+  const nwdSet=new Set((DB.non_working_days||[]).map(n=>n.date));
   const isWk=ds=>{const d=new Date(ds+'T00:00:00').getDay();return d>=1&&d<=5;};
+  const isWorkday=ds=>isWk(ds)&&!nwdSet.has(ds);
   const addDays=(ds,n)=>{const d=new Date(ds+'T00:00:00');d.setDate(d.getDate()+n);return d._ymd();};
   const histDates=[]; let ch=addDays(start,-1),gh=0;
-  while(histDates.length<170&&gh<800){ gh++; if(isWk(ch)) histDates.push(ch); ch=addDays(ch,-1); }
+  while(histDates.length<170&&gh<800){ gh++; if(isWorkday(ch)) histDates.push(ch); ch=addDays(ch,-1); }
   histDates.reverse();
   const vols=histDates.map(ds=>actualsMap[ds]||0);
   const adaptive=_fbAdaptiveRun(histDates, vols);
@@ -11259,6 +11261,7 @@ function _fbBuildRows(elIdOverride){
   const isWkday=ds=>{const d=new Date(ds+'T00:00:00').getDay();return d>=1&&d<=5;};
   const isSat=ds=>new Date(ds+'T00:00:00').getDay()===6;
   const isSun=ds=>new Date(ds+'T00:00:00').getDay()===0;
+  const isWorkday=ds=>isWkday(ds)&&!nwdSet.has(ds);
   const isEligible=ds=>!nwdSet.has(ds)&&!isSun(ds)&&(shipsSat?true:!isSat(ds));
   const addDays=(ds,n)=>{const d=new Date(ds+'T00:00:00');d.setDate(d.getDate()+n);return d._ymd();};
   const endOfMonth=ds=>{const d=new Date(ds+'T00:00:00');return new Date(d.getFullYear(),d.getMonth()+1,0)._ymd();};
@@ -11290,10 +11293,10 @@ function _fbBuildRows(elIdOverride){
 
   let rows=[];
   if(method==='adaptive'){
-    // Build a weekday history spine (up to ~170 weekdays) ending the day before `start`,
+    // Build a workday history spine (up to ~170 workdays, excluding non-working days) ending the day before `start`,
     // then let the adaptive engine pick the best window and rate.
     const histDates=[]; let ch=addDays(start,-1), gh=0;
-    while(histDates.length<170&&gh<800){ gh++; if(isWkday(ch)) histDates.push(ch); ch=addDays(ch,-1); }
+    while(histDates.length<170&&gh<800){ gh++; if(isWorkday(ch)) histDates.push(ch); ch=addDays(ch,-1); }
     histDates.reverse();
     const histVols=histDates.map(ds=>actualsMap[ds]||0);
     const ad=_fbAdaptiveRun(histDates,histVols);
@@ -11319,7 +11322,7 @@ function _fbBuildRows(elIdOverride){
     let guard=0;
     while(samples.length<n&&guard<500){
       guard++;
-      if(isWkday(cur)){
+      if(isWorkday(cur)){
         if(actualsMap[cur]!==undefined) samples.push(actualsMap[cur]);
       }
       cur=addDays(cur,-1);
@@ -11329,7 +11332,7 @@ function _fbBuildRows(elIdOverride){
       let cur2=addDays(start,-1); let g2=0;
       while(samples.length<n&&g2<500){
         g2++;
-        if(isWkday(cur2)){
+        if(isWorkday(cur2)){
           const existing=(DB.demand_values||[]).find(v=>v.element_id===elId&&v.date===cur2&&(shipTo?v.ship_to===shipTo:!v.ship_to));
           if(existing) samples.push(parseFloat(existing.value_t)||0);
         }
