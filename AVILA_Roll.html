@@ -1429,12 +1429,19 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
         </div>
         <div class="tb-div"></div>
         <!-- ── FILTER DOCK ────────────────────────────────────────────────
-             Three summary buttons, each opening a panel of multi-select pills:
-             Facility (which plants/terminals), Process (which table sections),
-             Product (the Family → Category → Product cascade). Every panel group
+             Four summary buttons, each opening a panel of multi-select pills:
+             Sub-region (NFL, SFL, … — narrows the Facility list), Facility (which
+             plants/terminals), Process (which table sections), Product (the
+             Family → Category → Product cascade). Every panel group
              leads with its own ALL pill. Selections are summarised on the button
              face and spelled out as removable tokens in the strip below, so the
              bar stays one row no matter how much the scenario grows. -->
+        <div class="sup-drop">
+          <button class="sup-drop-btn" id="sup-btn-sub" aria-expanded="false" aria-haspopup="true" onclick="supToggleDock(event,'sub')">
+            <span class="k">Sub-region</span><span class="v" id="sup-v-sub">All</span><span class="car">▼</span>
+          </button>
+          <div class="sup-panel" id="sup-pan-sub" onclick="event.stopPropagation()"></div>
+        </div>
         <div class="sup-drop">
           <button class="sup-drop-btn" id="sup-btn-fac" aria-expanded="false" aria-haspopup="true" onclick="supToggleDock(event,'fac')">
             <span class="k">Facility</span><span class="v" id="sup-v-fac">All</span><span class="car">▼</span>
@@ -6014,14 +6021,15 @@ function exportElementsCSV(){
 // ═══════════════════════════════════════════════════════════════
 
 // State for supply view filters.
-//   facIds / fams / cats / prodIds — arrays of selected ids; EMPTY MEANS "ALL", so a
-//     user who never opens a panel sees the whole page exactly as before.
+//   subIds / facIds / fams / cats / prodIds — arrays of selected ids; EMPTY MEANS "ALL", so a
+//     user who never opens a panel sees the whole page exactly as before. subIds narrows
+//     the facilities in view (and the Facility panel) to those sub-regions.
 //   procHidden — the section keys the Process filter has switched OFF (empty = every
 //     section shown). Stored as the off-list rather than the on-list so a section added
 //     to the table later is visible by default instead of silently filtered out.
 const SUP_FILTER_KEY='avila_sup_filters';
 if(!window._supView) window._supView={preset:'rom', fromDate:'', toDate:'',
-  facIds:[], fams:[], cats:[], prodIds:[], procHidden:[]};
+  subIds:[], facIds:[], fams:[], cats:[], prodIds:[], procHidden:[]};
 supLoadFilterPrefs();
 
 // The filter selections outlive a reload (same pattern as avila_tbl_zoom). The date
@@ -6029,7 +6037,7 @@ supLoadFilterPrefs();
 function supSaveFilterPrefs(){
   const v=window._supView||{};
   try{ localStorage.setItem(SUP_FILTER_KEY,JSON.stringify({
-    facIds:v.facIds||[], fams:v.fams||[], cats:v.cats||[], prodIds:v.prodIds||[], procHidden:v.procHidden||[]
+    subIds:v.subIds||[], facIds:v.facIds||[], fams:v.fams||[], cats:v.cats||[], prodIds:v.prodIds||[], procHidden:v.procHidden||[]
   })); }catch(e){}
 }
 function supLoadFilterPrefs(){
@@ -6038,7 +6046,7 @@ function supLoadFilterPrefs(){
   try{
     const raw=localStorage.getItem(SUP_FILTER_KEY); if(!raw) return;
     const p=JSON.parse(raw)||{};
-    v.facIds=arr(p.facIds); v.fams=arr(p.fams); v.cats=arr(p.cats);
+    v.subIds=arr(p.subIds); v.facIds=arr(p.facIds); v.fams=arr(p.fams); v.cats=arr(p.cats);
     v.prodIds=arr(p.prodIds); v.procHidden=arr(p.procHidden);
   }catch(e){}
 }
@@ -6140,11 +6148,26 @@ function supFilterableFacilities(){
   DB.facilities.filter(f=>f.type==='terminal'&&termEls.has(f.id)).forEach(f=>qual.add(f.id));
   return DB.facilities.filter(f=>qual.has(f.id));
 }
+// Sub-regions that hold at least one Supply-page facility, in org-tree order.
+function supFilterableSubRegions(){
+  const ids=new Set(supFilterableFacilities().map(f=>f.sub_region_id).filter(Boolean));
+  return (DB.sub_regions||[]).filter(s=>ids.has(s.id));
+}
+// Supply-page facilities inside the selected sub-regions (all of them when none is picked).
+// This is the Facility panel's universe.
+function supSubScopedFacilities(){
+  const subs=window._supView?.subIds||[];
+  const all=supFilterableFacilities();
+  return subs.length?all.filter(f=>subs.includes(f.sub_region_id)):all;
+}
 // The facilities currently in view, as a Set — null when unrestricted, so callers can
-// skip filtering entirely.
+// skip filtering entirely. Sub-region and Facility picks intersect.
 function supFacIdSet(){
-  const a=window._supView?.facIds||[];
-  return a.length?new Set(a):null;
+  const v=window._supView||{};
+  const subs=v.subIds||[], facs=v.facIds||[];
+  if(!subs.length) return facs.length?new Set(facs):null;
+  const scoped=supSubScopedFacilities().map(f=>f.id);
+  return new Set(facs.length?scoped.filter(id=>facs.includes(id)):scoped);
 }
 function supFacOk(facId, set){
   const s=(set===undefined)?supFacIdSet():set;
@@ -6186,7 +6209,14 @@ function supScopeProductIds(facIds){
 // never filters on a combination the panels don't offer.
 function supNormalizeProdFilters(){
   const v=window._supView; if(!v) return;
-  const scope=supScopeProductIds(v.facIds||[]);
+  // A sub-region or facility that vanished from the topology — or a facility outside the
+  // picked sub-regions — shouldn't keep filtering the page. Done first: product scope reads it.
+  const subOk=new Set(supFilterableSubRegions().map(s=>s.id));
+  v.subIds=(v.subIds||[]).filter(id=>subOk.has(id));
+  const facOk=new Set(supSubScopedFacilities().map(f=>f.id));
+  v.facIds=(v.facIds||[]).filter(id=>facOk.has(id));
+  if(v.facIds.length===facOk.size) v.facIds=[];
+  const scope=supScopeProductIds([...(supFacIdSet()||[])]);
   const catOf=pid=>DB.products.find(p=>p.id===pid)?.category||'';
   const famOf=pid=>PRODUCT_FAMILY_OF[catOf(pid)]||'';
   // Families/categories must still exist somewhere in scope.
@@ -6197,10 +6227,6 @@ function supNormalizeProdFilters(){
   v.prodIds=(v.prodIds||[]).filter(pid=>scope.has(pid)
     &&(!v.fams.length||v.fams.includes(famOf(pid)))
     &&(!v.cats.length||v.cats.includes(catOf(pid))));
-  // A facility that vanished from the topology shouldn't keep filtering the page.
-  const facOk=new Set(supFilterableFacilities().map(f=>f.id));
-  v.facIds=(v.facIds||[]).filter(id=>facOk.has(id));
-  if(v.facIds.length===facOk.size) v.facIds=[];
 }
 
 // The set of product ids the page may currently show, or null for "no product
@@ -6234,9 +6260,24 @@ function _supPill(label,on,onclick,opt){
     `<span>${esc(label)}</span></button>`;
 }
 
+// Sub-region picks narrow the page (and the Facility panel). Like the product cascade, a
+// pill is lit only when picked and ALL is lit when nothing is — so clicking NFL means "NFL only".
+function _supRenderSubPanel(){
+  const pan=document.getElementById('sup-pan-sub'); if(!pan) return;
+  const v=window._supView||{};
+  const picked=v.subIds||[];
+  const subs=supFilterableSubRegions();
+  let h=`<div class="sup-pan-hd"><span>Sub-region · narrows the Facility list</span></div>`;
+  h+=`<div class="sup-grp"><div class="sup-grp-hd"><h4>Sub-regions</h4><i></i></div><div class="sup-chips">`;
+  h+=_supPill('All',!picked.length,`supClearSubs()`,{all:true,title:'Every sub-region'});
+  subs.forEach(s=>{ h+=_supPill(s.name,picked.includes(s.id),`supToggleSub('${s.id}')`); });
+  h+=`</div></div>`;
+  pan.innerHTML=h;
+}
+
 function _supRenderFacPanel(){
   const pan=document.getElementById('sup-pan-fac'); if(!pan) return;
-  const facs=supFilterableFacilities();
+  const facs=supSubScopedFacilities();
   const groups=[['plant','Plants'],['terminal','Terminals']];
   let h=`<div class="sup-pan-hd"><span>Facility · ALL flips a whole group</span></div>`;
   groups.forEach(([type,label])=>{
@@ -6278,7 +6319,7 @@ function _supRenderProcPanel(){
 function _supRenderProdPanel(){
   const pan=document.getElementById('sup-pan-prod'); if(!pan) return;
   const v=window._supView||{};
-  const scope=[...supScopeProductIds(v.facIds||[])];
+  const scope=[...supScopeProductIds([...(supFacIdSet()||[])])];
   const catOf=pid=>DB.products.find(p=>p.id===pid)?.category||'';
   const famOf=pid=>PRODUCT_FAMILY_OF[catOf(pid)]||'';
 
@@ -6316,8 +6357,10 @@ function _supRenderProdPanel(){
 // anything.
 function _supRenderDockSummary(){
   const v=window._supView||{};
-  const facs=supFilterableFacilities();
-  const nameOfFac=id=>facs.find(f=>f.id===id)?.name||id;
+  const facs=supSubScopedFacilities();
+  const subs=supFilterableSubRegions();
+  const nameOfFac=id=>DB.facilities.find(f=>f.id===id)?.name||id;
+  const nameOfSub=id=>subs.find(s=>s.id===id)?.name||id;
   const nameOfProd=id=>DB.products.find(p=>p.id===id)?.name||id;
 
   const setBtn=(id,txt,on)=>{
@@ -6325,6 +6368,8 @@ function _supRenderDockSummary(){
     b.classList.toggle('set',!!on);
     const s=b.querySelector('.v'); if(s) s.textContent=txt;
   };
+  const nSub=(v.subIds||[]).length;
+  setBtn('sup-btn-sub', nSub?nSub+' of '+subs.length:'All '+subs.length, nSub>0);
   const nFac=(v.facIds||[]).length;
   setBtn('sup-btn-fac', nFac?nFac+' of '+facs.length:'All '+facs.length, nFac>0);
   const nOff=(v.procHidden||[]).length;
@@ -6340,6 +6385,7 @@ function _supRenderDockSummary(){
     `<button type="button" class="sup-tok k-${kind}" title="Remove this filter" onclick="${fn}">`+
     `<span style="opacity:.6">${label}</span><b>${esc(val)}</b><span class="x">✕</span></button>`;
   let h=`<span class="lbl">Active</span>`, n=0;
+  (v.subIds||[]).forEach(id=>{ n++; h+=tok('fac','Sub-region',nameOfSub(id),`supToggleSub('${id}')`); });
   (v.facIds||[]).forEach(id=>{ n++; h+=tok('fac','Facility',nameOfFac(id),`supToggleFac('${id}')`); });
   (v.procHidden||[]).forEach(k=>{ const p=SUP_PROCESSES.find(x=>x.key===k);
     n++; h+=tok('proc','Hidden',p?p.full:k,`supToggleProc('${k}')`); });
@@ -6376,13 +6422,26 @@ document.addEventListener('keydown',e=>{ if(e.key==='Escape') supCloseDock(); })
 // ── Click handlers ─────────────────────────────────────────────────────────
 // Every one of these ends in _supFiltersChanged(), which re-renders the panels, the
 // summary, the section-visibility CSS and the table itself.
+function supToggleSub(subId){
+  const v=window._supView, a=(v.subIds||[]).slice();
+  const i=a.indexOf(subId);
+  if(i>=0) a.splice(i,1); else a.push(subId);
+  v.subIds=a;
+  supNormalizeProdFilters();   // also drops facility picks outside the new sub-regions
+  _supFiltersChanged();
+}
+function supClearSubs(){
+  window._supView.subIds=[];
+  supNormalizeProdFilters();
+  _supFiltersChanged();
+}
 function supToggleFac(facId){
-  _supToggle('facIds',facId,supFilterableFacilities().map(f=>f.id));
+  _supToggle('facIds',facId,supSubScopedFacilities().map(f=>f.id));
   supNormalizeProdFilters();
   _supFiltersChanged();
 }
 function supToggleFacGroup(type){
-  const v=window._supView, all=supFilterableFacilities();
+  const v=window._supView, all=supSubScopedFacilities();
   const ids=all.filter(f=>(f.type||'plant')===type).map(f=>f.id);
   const allOn=ids.every(id=>_supHas('facIds',id));
   let a=(v.facIds||[]).slice();
@@ -6433,7 +6492,7 @@ function supClearProdFilters(){
 }
 function supClearAllFilters(){
   const v=window._supView;
-  v.facIds=[]; v.fams=[]; v.cats=[]; v.prodIds=[]; v.procHidden=[];
+  v.subIds=[]; v.facIds=[]; v.fams=[]; v.cats=[]; v.prodIds=[]; v.procHidden=[];
   _supFiltersChanged();
 }
 function _supFiltersChanged(){
@@ -6445,8 +6504,9 @@ function _supFiltersChanged(){
 // the dock. The panels are rebuilt in place, so an open one stays open.
 function supInitFilters(){
   if(!window._supView) window._supView={preset:'rom',fromDate:'',toDate:'',
-    facIds:[],fams:[],cats:[],prodIds:[],procHidden:[]};
+    subIds:[],facIds:[],fams:[],cats:[],prodIds:[],procHidden:[]};
   supNormalizeProdFilters();
+  _supRenderSubPanel();
   _supRenderFacPanel();
   _supRenderProcPanel();
   _supRenderProdPanel();
@@ -8496,63 +8556,65 @@ function _renderSupplyViewInner(wrap){
 
   const facForEl=el=>el.assigned_facility_id||el.facility_id||S.facility_id;
   const relevantFacIds=new Set(prodEls.map(el=>facForEl(el)));
+  // Terminals keep their own render path (TERMINALS block below) but sit in the same org
+  // tree as the plants — grouped by sub-region, not by facility type.
+  const _termRender=_termFacs.filter(f=>!relevantFacIds.has(f.id))
+    .sort((a,b)=>(a.name||'').localeCompare(b.name||''));
 
-  // Build tree (same structure as demand)
+  // Build tree (same structure as demand). A level shows when it holds a plant element OR a
+  // terminal; its els stay plant elements only, since they feed the header-row sums.
+  // parents = ids of the rendered levels above a node, so collapsing any of them hides it.
+  const _orgOf=facId=>{ const sub=subMap[facMap[facId]?.sub_region_id];
+    const reg=regMap[sub?.region_id]; return {sub,reg,co:coMap[reg?.country_id]}; };
+  const _shownFacIds=[...relevantFacIds,..._termRender.map(f=>f.id)];
   const tree=[];
   DB.macro_regions.forEach(mr=>{
-    const mrEls=prodEls.filter(el=>{
-      const fac=facMap[facForEl(el)];
-      const sub=subMap[fac?.sub_region_id];
-      const reg=regMap[sub?.region_id];
-      const co=coMap[reg?.country_id];
-      return co?.macro_region_id===mr.id;
-    });
-    if(!mrEls.length) return;
+    const inMr=fid=>_orgOf(fid).co?.macro_region_id===mr.id;
+    if(!_shownFacIds.some(inMr)) return;
+    const mrEls=prodEls.filter(el=>inMr(facForEl(el)));
 
-    const multiMR=DB.macro_regions.filter(m=>prodEls.some(el=>{
-      const fac=facMap[facForEl(el)];const sub=subMap[fac?.sub_region_id];
-      const reg=regMap[sub?.region_id];const co=coMap[reg?.country_id];
-      return co?.macro_region_id===m.id;
-    })).length>1;
-    if(multiMR) tree.push({type:'mr',id:mr.id,name:mr.name,depth:0,els:mrEls});
+    const multiMR=DB.macro_regions.filter(m=>_shownFacIds.some(fid=>_orgOf(fid).co?.macro_region_id===m.id)).length>1;
+    const mrPath=multiMR?[mr.id]:[];
+    if(multiMR) tree.push({type:'mr',id:mr.id,name:mr.name,depth:0,els:mrEls,parents:[]});
 
     DB.countries.filter(c=>c.macro_region_id===mr.id).forEach(co=>{
-      const coEls=mrEls.filter(el=>{
-        const fac=facMap[facForEl(el)];const sub=subMap[fac?.sub_region_id];
-        const reg=regMap[sub?.region_id];
-        return reg?.country_id===co.id;
-      });
-      if(!coEls.length) return;
+      const inCo=fid=>_orgOf(fid).reg?.country_id===co.id;
+      if(!_shownFacIds.some(inCo)) return;
+      const coEls=mrEls.filter(el=>inCo(facForEl(el)));
       const depth=multiMR?1:0;
-      const multiCo=DB.countries.filter(c2=>c2.macro_region_id===mr.id&&mrEls.some(el=>{
-        const fac=facMap[facForEl(el)];const sub=subMap[fac?.sub_region_id];
-        const reg=regMap[sub?.region_id];return reg?.country_id===c2.id;
-      })).length>1;
-      if(multiCo) tree.push({type:'co',id:co.id,name:co.name,depth,els:coEls});
+      const multiCo=DB.countries.filter(c2=>c2.macro_region_id===mr.id&&_shownFacIds.some(fid=>_orgOf(fid).reg?.country_id===c2.id)).length>1;
+      const coPath=multiCo?[...mrPath,co.id]:mrPath;
+      if(multiCo) tree.push({type:'co',id:co.id,name:co.name,depth,els:coEls,parents:mrPath});
 
       DB.regions.filter(r=>r.country_id===co.id).forEach(reg=>{
-        const regEls=coEls.filter(el=>{
-          const fac=facMap[facForEl(el)];const sub=subMap[fac?.sub_region_id];
-          return sub?.region_id===reg.id;
-        });
-        if(!regEls.length) return;
-        tree.push({type:'reg',id:reg.id,name:reg.name,depth:depth+(multiCo?1:0),els:regEls});
+        const inReg=fid=>_orgOf(fid).sub?.region_id===reg.id;
+        if(!_shownFacIds.some(inReg)) return;
+        const regEls=coEls.filter(el=>inReg(facForEl(el)));
+        tree.push({type:'reg',id:reg.id,name:reg.name,depth:depth+(multiCo?1:0),els:regEls,parents:coPath});
         const regDepth=depth+(multiCo?1:0)+1;
+        const regPath=[...coPath,reg.id];
 
         DB.sub_regions.filter(s=>s.region_id===reg.id).forEach(sub=>{
-          const subEls=regEls.filter(el=>facMap[facForEl(el)]?.sub_region_id===sub.id);
-          if(!subEls.length) return;
-          tree.push({type:'sub',id:sub.id,name:sub.name,depth:regDepth,els:subEls});
+          const inSub=fid=>facMap[fid]?.sub_region_id===sub.id;
+          if(!_shownFacIds.some(inSub)) return;
+          const subEls=regEls.filter(el=>inSub(facForEl(el)));
+          tree.push({type:'sub',id:sub.id,name:sub.name,depth:regDepth,els:subEls,parents:regPath});
           const subDepth=regDepth+1;
+          const subPath=[...regPath,sub.id];
 
-          DB.facilities.filter(f=>f.sub_region_id===sub.id&&relevantFacIds.has(f.id)).forEach(fac=>{
+          // Plants first, then terminals — each A–Z.
+          DB.facilities.filter(f=>f.sub_region_id===sub.id&&relevantFacIds.has(f.id))
+            .sort((a,b)=>(a.name||'').localeCompare(b.name||'')).forEach(fac=>{
             const facEls=subEls.filter(el=>facForEl(el)===fac.id);
             if(!facEls.length) return;
             // Group kilns, mills and packing plants under facility
             const kilns=facEls.filter(e=>e.type==='kiln');
             const mills=facEls.filter(e=>e.type==='finish_mill');
             const packers=facEls.filter(e=>e.type==='packing_plant');
-            tree.push({type:'fac',id:fac.id,name:fac.name,depth:subDepth,ftype:fac.type,els:facEls,kilns,mills,packers});
+            tree.push({type:'fac',id:fac.id,name:fac.name,depth:subDepth,ftype:fac.type,els:facEls,kilns,mills,packers,parents:subPath});
+          });
+          _termRender.filter(f=>inSub(f.id)).forEach(fac=>{
+            tree.push({type:'fac',term:true,id:fac.id,name:fac.name,depth:subDepth,ftype:'terminal',els:[],parents:subPath});
           });
         });
       });
@@ -8564,7 +8626,14 @@ function _renderSupplyViewInner(wrap){
   const orphans=prodEls.filter(el=>!coveredEls.has(el.id));
   if(orphans.length) tree.push({type:'fac',id:'_orphan',name:'Unassigned',depth:0,ftype:'plant',
     els:orphans,kilns:orphans.filter(e=>e.type==='kiln'),mills:orphans.filter(e=>e.type==='finish_mill'),
-    packers:orphans.filter(e=>e.type==='packing_plant')});
+    packers:orphans.filter(e=>e.type==='packing_plant'),parents:[]});
+  // Terminals the org tree couldn't place (no sub-region, or a broken chain above it).
+  const _termPlaced=new Set(tree.filter(n=>n.term).map(n=>n.id));
+  const _termOrphans=_termRender.filter(f=>!_termPlaced.has(f.id));
+  if(_termOrphans.length){
+    tree.push({type:'sub',id:'_orphan_term',name:'Unassigned',depth:0,els:[],parents:[]});
+    _termOrphans.forEach(fac=>tree.push({type:'fac',term:true,id:fac.id,name:fac.name,depth:1,ftype:'terminal',els:[],parents:['_orphan_term']}));
+  }
 
   const indentPx=depth=>depth*16+8;   // one 16px step per level
   const stickyLeft=(bg,depth,extra='')=>
@@ -8772,25 +8841,30 @@ function _renderSupplyViewInner(wrap){
   const typeBgSolid={mr:'var(--surface2)',co:'var(--surface2)',reg:'var(--surface)',sub:'var(--surface)',fac:'var(--surface2)'};
   const typeColors={mr:'var(--text)',co:'var(--text)',reg:'var(--text-dim)',sub:'var(--text-dim)',fac:'var(--amber)'};
 
+  // Terminal slots left in the tree: facility id → depth. The TERMINALS block below renders
+  // each one and splices it in at its <!--sup-term:ID--> marker.
+  const _termSlots=new Map();
+
   tree.forEach(node=>{
     const isCollapsed=grpCol.has(node.id);
-    const parentCollapsed=tree.some(n=>n!==node&&n.els&&node.els.every(el=>n.els.includes(el))&&grpCol.has(n.id));
+    const parentCollapsed=node.parents.some(id=>grpCol.has(id));
     if(parentCollapsed) return;
 
-    if(node.type==='fac'){
-      const typeLabel=node.ftype==='plant'?'PLANT':'TERMINAL';
+    if(node.term){
+      _termSlots.set(node.id,node.depth);
+      h+=`<!--sup-term:${node.id}-->`;
+    } else if(node.type==='fac'){
       h+=`<tr class="sup-grp-hdr" onclick="_supToggleGrp('${node.id}')" style="cursor:pointer;background:${typeBg.fac};border-top:1px solid var(--border2)">
         <td style="${stickyLeft(typeBgSolid.fac,node.depth,'border-bottom:1px solid var(--border),')}color:var(--amber);font-weight:700;font-size:9px">
-          <span class="sup-chev">${isCollapsed?'▶':'▼'}</span>${node.name} <span style="font-size:7px;opacity:.5;margin-left:4px">${typeLabel}</span>
+          <span class="sup-chev">${isCollapsed?'▶':'▼'}</span>${node.name}
         </td>`;
+      // No numbers on the facility line — summed kiln + mill + packer capacity mixes clinker
+      // with cement and says nothing useful. Cells stay so the row keeps its shading.
       months.forEach(mon=>{
         const isCol=collapsed.has(mon.ym);
-        const mt=grpMonTotal(node.els,mon);
-        h+=`<td style="background:rgba(255,184,48,.06);border-left:2px solid rgba(255,184,48,.2);font-size:9px;font-weight:700;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+        h+=`<td style="background:rgba(255,184,48,.06);border-left:2px solid rgba(255,184,48,.2);font-size:9px;font-weight:700;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)"></td>`;
         if(!isCol) mon.dates.forEach(ds=>{
-          const dayIdx=_dIdx(ds);
-          const v=grpDailyTotal(node.els,ds,dayIdx);
-          h+=`<td class="sup-day-${mon.ym}" style="background:rgba(255,184,48,.04);font-size:9px;font-weight:700;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
+          h+=`<td class="sup-day-${mon.ym}" style="background:rgba(255,184,48,.04);font-size:9px;font-weight:700;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}"></td>`;
         });
       });
       h+=`</tr>`;
@@ -9826,16 +9900,15 @@ function _renderSupplyViewInner(wrap){
   });
 
   // ══════════════════════════════════════════════════════════════════════
-  // TERMINALS — receiving facilities, grouped AFTER all plants.
+  // TERMINALS — receiving facilities, rendered here and spliced into the org
+  // tree under their sub-region (the <!--sup-term:ID--> slots above).
   // Same cement inventory chart + starting inventory + requirements as a
   // plant, minus the clinker/mill sections. Finish-mill production is
   // replaced by a PRODUCT RECEIVED section: per-berth, per-product unloading
   // (actual from real_unloading_daily, else planned siloUnloadHistory).
   // ══════════════════════════════════════════════════════════════════════
   {
-    const _termRender=_termFacs.filter(f=>!relevantFacIds.has(f.id))
-      .sort((a,b)=>(a.name||'').localeCompare(b.name||''));
-    if(_termRender.length){
+    if(_termSlots.size){
       const _allFE=allEls;
       const _isCementPid=pid=>{ const pr=_prodById.get(pid); return pr&&(pr.category==='cement_bulk'||pr.category==='cement_packed'); };
       const _isScmPid=pid=>{ const pr=_prodById.get(pid); return pr&&pr.category==='additive'; };
@@ -9853,21 +9926,10 @@ function _renderSupplyViewInner(wrap){
         const hit=n&&DB.products.find(p=>_pnorm(p.id).startsWith(n)||_pnorm(p.name).startsWith(n));
         return (_canonCache[pid]=hit?hit.id:pid);
       };
-      // Unloading helpers — plan = simulated unload into silos; real = entered actuals.
+      // Silos a berth unloads into, and a facility's berths.
       const _downSilosOf=berth=>_allFE.filter(e=>e.type==='bulk_silo'&&
         DB.connections.some(c=>c.from_element_id===berth.id&&c.to_element_id===e.id));
-      const _unloadPlanSiloDay=(siloId,ds)=>{ const di=_dIdx(ds); if(di<0) return 0;
-        return (r?.siloUnloadHistory?.[siloId]||[])[di]||0; };
-      const _berthProducts=berth=>{ const set=new Set();
-        _downSilosOf(berth).forEach(s=>getSiloProducts(s).forEach(p=>{ if(_isCementPid(p)) set.add(p); })); return [...set]; };
-      const _unloadPlanBerthProd=(berth,pid,ds)=>{ let t=0;
-        _downSilosOf(berth).forEach(s=>{ const ps=getSiloProducts(s); if(!ps.includes(pid)) return; t+=_unloadPlanSiloDay(s.id,ds)/ps.length; }); return t; };
-      const _unloadRealBerthProd=(berthId,pid,ds)=>realUnloadTonnesBerthProdDay(berthId,pid,ds);
       const _facBerths=fac=>_allFE.filter(e=>e.type==='berth'&&(e.assigned_facility_id||e.facility_id)===fac.id);
-      // Received (throughput) on a date for a whole terminal = Σ berths/products (real else plan).
-      const _termRecvDay=(fac,ds)=>{ let t=0;
-        _facBerths(fac).forEach(b=>_berthProducts(b).forEach(pid=>{
-          const rv=_unloadRealBerthProd(b.id,pid,ds); t+=rv>0?rv:_unloadPlanBerthProd(b,pid,ds); })); return t; };
 
       // ── Truck transfer helpers — rendered as a per-facility subsection inside each
       // facility block below (withdrawal when the facility is the origin, input when it
@@ -9890,39 +9952,28 @@ function _renderSupplyViewInner(wrap){
       const _ttOut=(tm,ds)=>_ttDep(tm,ds); // withdrawal shown on the departure date
       const _ttIn=(tm,ds)=>{ const t=parseInt(tm.transit_days)||0; if(t<=0) return _ttDep(tm,ds); const dep=new Date(ds+'T00:00:00'); dep.setDate(dep.getDate()-t); return _ttDep(tm,dep._ymd()); }; // input on the arrival date
 
-      // ── Group divider row: TERMINALS ──
-      const _tGrp='_terminals_grp';
-      const _tCol=grpCol.has(_tGrp);
-      h+=`<tr class="sup-reg-hdr" onclick="_supToggleGrp('${_tGrp}')" style="cursor:pointer;background:rgba(77,166,255,.05);border-top:2px solid var(--border2)">
-        <td style="${stickyLeft('var(--surface2)',0,'border-bottom:1px solid var(--border2),')}color:var(--text);font-weight:700;font-size:9px;letter-spacing:.5px">
-          <span class="sup-chev">${_tCol?'▶':'▼'}</span>TERMINALS <span style="font-size:7px;opacity:.5;margin-left:4px">RECEIVING FACILITIES</span>
-        </td>`;
-      months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-        const mt=mon.dates.reduce((a,ds)=>a+_termRender.reduce((s,f)=>s+_termRecvDay(f,ds),0),0);
-        h+=`<td style="background:rgba(77,166,255,.06);border-left:2px solid rgba(77,166,255,.2);font-size:9px;font-weight:700;color:var(--text-dim);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border2)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
-        if(!isCol) mon.dates.forEach(ds=>{ const v=_termRender.reduce((s,f)=>s+_termRecvDay(f,ds),0);
-          h+=`<td class="sup-day-${mon.ym}" style="background:rgba(77,166,255,.03);font-size:9px;color:var(--text-dim);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border2);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
-      });
-      h+=`</tr>`;
-
-      if(!_tCol) _termRender.forEach(fac=>{
-        const depth=1;
+      // Each terminal renders at the end of h, then is cut out and dropped into its slot.
+      const _treeEnd=h.length;
+      const _termSeg=[];   // [facility id, start offset in h] — blocks are contiguous
+      _termRender.forEach(fac=>{
+        if(!_termSlots.has(fac.id)) return;   // its sub-region (or a level above) is collapsed
+        _termSeg.push([fac.id,h.length]);
+        const depth=_termSlots.get(fac.id);
         const facEls=_allFE.filter(e=>(e.assigned_facility_id||e.facility_id)===fac.id);
         const berths=_facBerths(fac);
         const demandEls=facEls.filter(e=>e.type==='demand_point');
         const demandPoints=DB.demand_points.filter(dp=>demandEls.some(el=>el.id===dp.element_id));
         const _facCol=grpCol.has(fac.id);
 
-        // ── Terminal header (amber) — total = throughput received ──
+        // ── Terminal header (amber) — no numbers, same as a plant's facility line ──
         h+=`<tr class="sup-grp-hdr" onclick="_supToggleGrp('${fac.id}')" style="cursor:pointer;background:rgba(255,184,48,.04);border-top:1px solid var(--border2)">
           <td style="${stickyLeft('var(--surface2)',depth,'border-bottom:1px solid var(--border),')}color:var(--amber);font-weight:700;font-size:9px">
-            <span class="sup-chev">${_facCol?'▶':'▼'}</span>${esc(fac.name)} <span style="font-size:7px;opacity:.5;margin-left:4px">TERMINAL</span>
+            <span class="sup-chev">${_facCol?'▶':'▼'}</span>${esc(fac.name)}
           </td>`;
         months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-          const mt=mon.dates.reduce((a,ds)=>a+_termRecvDay(fac,ds),0);
-          h+=`<td style="background:rgba(255,184,48,.06);border-left:2px solid rgba(255,184,48,.2);font-size:9px;font-weight:700;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
-          if(!isCol) mon.dates.forEach(ds=>{ const v=_termRecvDay(fac,ds);
-            h+=`<td class="sup-day-${mon.ym}" style="background:rgba(255,184,48,.04);font-size:9px;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+          h+=`<td style="background:rgba(255,184,48,.06);border-left:2px solid rgba(255,184,48,.2);font-size:9px;font-weight:700;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)"></td>`;
+          if(!isCol) mon.dates.forEach(ds=>{
+            h+=`<td class="sup-day-${mon.ym}" style="background:rgba(255,184,48,.04);font-size:9px;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}"></td>`; });
         });
         h+=`</tr>`;
 
@@ -10531,6 +10582,9 @@ function _renderSupplyViewInner(wrap){
         });
 
       });
+      const _termHTML={};
+      _termSeg.forEach(([id,st],i)=>{ _termHTML[id]=h.slice(st,i+1<_termSeg.length?_termSeg[i+1][1]:h.length); });
+      h=h.slice(0,_treeEnd).replace(/<!--sup-term:([^>]*?)-->/g,(m,id)=>_termHTML[id]||'');
     }
   }
 
