@@ -409,13 +409,33 @@ select.pi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
 .tp-row-inv td:first-child{color:#ff9433;}
 .tp-row-dem td:first-child{color:#a78bfa;}
 .tp-row-arrival td:first-child{color:#00d68f;font-weight:500;}
-/* Rail-schedule per-product breakdown rows folded under a section's TOTAL row */
-.rp-grp-child td{opacity:.88;}
-.rp-grp-child td:first-child{font-size:9px;opacity:1;}
-.tp-row-orig-inv td:first-child{color:#ff9433;}
-.tp-row-rail-silo td:first-child{color:#38bdf8;}
-.tp-row-loading td:first-child{color:#4da6ff;}
-.tp-row-dispatch td:first-child{color:#ff9433;}
+/* ── Rail Schedule tree ─────────────────────────────────────────────────
+   L0 band (ORIGINS / DESTINATIONS) · L1 dispatch point or terminal · L2 section or product
+   · L3 leaf. Indent is 16px per level, set inline from the row's depth (which also stamps
+   --d). Every row inside an origin carries an orange rail at x=0, every row inside a
+   terminal a sky-blue one, so a block's extent reads even while scrolled sideways; leaves
+   add a 1px guide in their section's hue (--hue) under the parent's chevron. */
+#rp-rail-table tr.rp-o{--rp-acc:255,148,51;}
+#rp-rail-table tr.rp-d{--rp-acc:56,189,248;}
+#rp-rail-table td.rp-lbl{white-space:nowrap;}
+#rp-rail-table td.rp-lbl[onclick]{cursor:pointer;user-select:none;}
+#rp-rail-table .rp-chev{display:inline-block;width:12px;font-size:8px;opacity:.75;}
+#rp-rail-table .rp-meta{font-size:8px;font-weight:400;letter-spacing:0;text-transform:none;color:var(--text-dim);margin-left:7px;}
+#rp-rail-table .rp-tag{font-size:8px;font-weight:400;letter-spacing:0;text-transform:none;color:var(--text-dim);border:1px solid var(--border2);border-radius:2px;padding:0 4px;margin-left:6px;}
+#rp-rail-table .rp-chip{display:inline-block;width:7px;height:7px;border-radius:1px;margin-right:5px;vertical-align:-1px;}
+#rp-rail-table tr.rp-band>td{background-color:var(--surface);background-image:linear-gradient(rgba(var(--rp-acc),.11),rgba(var(--rp-acc),.11));border-top:2px solid rgba(var(--rp-acc),.6);border-bottom:1px solid rgba(var(--rp-acc),.25);}
+#rp-rail-table tr.rp-band>td.rp-lbl{color:rgb(var(--rp-acc));font-size:10px;font-weight:700;letter-spacing:.14em;padding-top:5px;padding-bottom:5px;}
+#rp-rail-table tr.rp-fac>td{background-color:var(--surface2);border-top:1px solid var(--border2);}
+#rp-rail-table tr.rp-fac>td.rp-lbl{color:var(--text-bright);font-size:10px;font-weight:700;letter-spacing:.05em;box-shadow:inset 3px 0 0 rgb(var(--rp-acc));padding-top:4px;padding-bottom:4px;}
+#rp-rail-table tr.rp-sec>td.rp-lbl{color:var(--hue,var(--text));font-size:9px;font-weight:700;letter-spacing:.06em;box-shadow:inset 3px 0 0 rgba(var(--rp-acc),.35);}
+#rp-rail-table tr.rp-sec.rp-caps>td.rp-lbl{text-transform:uppercase;}
+#rp-rail-table tr.rp-leaf>td.rp-lbl{color:#d5dcea;font-size:9px;box-shadow:inset 3px 0 0 rgba(var(--rp-acc),.35);
+  background-image:linear-gradient(90deg,transparent calc((var(--d,1) - 1)*16px + 12px),var(--hue,var(--border2)) calc((var(--d,1) - 1)*16px + 12px),var(--hue,var(--border2)) calc((var(--d,1) - 1)*16px + 13px),transparent calc((var(--d,1) - 1)*16px + 13px));}
+#rp-rail-table tr.rp-leaf>td.rp-lbl .rp-glyph{display:inline-block;width:12px;color:var(--hue);}
+#rp-rail-table tr.rp-confirm>td.rp-lbl{color:var(--text-dim);font-size:8px;letter-spacing:.04em;}
+#rp-rail-table tr.rp-gap>td{height:10px;padding:0;border:0;background:transparent;}
+#rp-rail-table th .rp-mini{font-family:var(--mono);font-size:8px;color:var(--text-dim);background:var(--surface2);border:1px solid var(--border2);border-radius:2px;padding:1px 5px;margin-left:4px;cursor:pointer;}
+#rp-rail-table th .rp-mini:hover{color:var(--text);border-color:var(--blue);}
 .rp-push-inp{width:38px;background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:9px;padding:1px 2px;text-align:right;}
 /* Push-cell state colour code: purple dashed = proposed by the simulation (not saved),
    amber = edited draft (unsaved), blue = planned (confirmed ✓), green = real (actual),
@@ -2729,14 +2749,22 @@ function deleteFacility(id,e){
 // ═══════════════════════════════════════════════════════
 function getFacility(){ return DB.facilities.find(f=>f.id===S.facility_id); }
 
-// Get elements for CANVAS RENDERING (placed on current canvas, regardless of assignment)
-function getFacElements(){ return DB.elements.filter(e=>e.facility_id===S.facility_id); }
+// The ONE topology canvas (unified plane). Every element and connection is stamped with this
+// id and every canvas-scoped read filters on it. It is the facility every load selects
+// (DB.facilities[0] — see scAfterLoad), so it no longer follows S.facility_id: Organization →
+// Open or a nav click on another facility used to re-scope the Supply page and the simulation
+// to that facility, and stamp elements drawn there with its id — HEI(PC)'s silo and demand
+// point were saved that way and dropped off the Supply page for good after the next load.
+function mainCanvasFacilityId(){ return DB.facilities[0]?.id||S.facility_id; }
+
+// Get elements for CANVAS RENDERING (placed on the canvas, regardless of assignment)
+function getFacElements(){ const cv=mainCanvasFacilityId(); return DB.elements.filter(e=>e.facility_id===cv); }
 
 // Get elements ASSIGNED TO current facility (regardless of canvas placement)
 // This is the authoritative source for facility-specific analysis and results
 
 
-function getFacConnections(){ return DB.connections.filter(c=>c.facility_id===S.facility_id); }
+function getFacConnections(){ const cv=mainCanvasFacilityId(); return DB.connections.filter(c=>c.facility_id===cv); }
 
 // Get effective facility for an element — assigned_facility_id overrides facility_id for results/analysis
 function getElFacility(el){ return el.assigned_facility_id||el.facility_id; }
@@ -2806,7 +2834,7 @@ function onCanvasDrop(e){
 
 function addElement(type,x,y){
   const id=`el_${++S.elCounter}`;
-  const el={id, facility_id:S.facility_id, type, x, y,
+  const el={id, facility_id:mainCanvasFacilityId(), type, x, y,
     name:`${ET[type].label} ${S.elCounter}`, props:{}, state:'idle',
     maintenanceEvents:[], productCapacities:[], is_active:true};
   DB.elements.push(el);
@@ -3168,8 +3196,9 @@ function deleteEl(id){
 }
 
 function addConn(from,to){
-  if(DB.connections.find(c=>c.from_element_id===from&&c.to_element_id===to&&c.facility_id===S.facility_id)) return;
-  const c={id:`cn_${Date.now()}`,facility_id:S.facility_id,from_element_id:from,to_element_id:to};
+  const cv=mainCanvasFacilityId();
+  if(DB.connections.find(c=>c.from_element_id===from&&c.to_element_id===to&&c.facility_id===cv)) return;
+  const c={id:`cn_${Date.now()}`,facility_id:cv,from_element_id:from,to_element_id:to};
   DB.connections.push(c); drawConn(c); updateStatusBar(); autoSave();
 }
 
@@ -3822,7 +3851,7 @@ function renderProps(id){
   // ── SUPPLY SOURCE — berth allocation panel ─────────────────
   if(el.type==='supply_source'){
     const connectedBerths=DB.connections
-      .filter(c=>c.facility_id===S.facility_id&&c.from_element_id===id)
+      .filter(c=>c.facility_id===mainCanvasFacilityId()&&c.from_element_id===id)
       .map(c=>DB.elements.find(e=>e.id===c.to_element_id))
       .filter(e=>e&&e.type==='berth');
     if(connectedBerths.length>1){
@@ -3960,7 +3989,7 @@ function saveProps(id){
   // Save supply_source berth allocations
   if(el.type==='supply_source'){
     const connectedBerths=DB.connections
-      .filter(c=>c.facility_id===S.facility_id&&c.from_element_id===id)
+      .filter(c=>c.facility_id===mainCanvasFacilityId()&&c.from_element_id===id)
       .map(c=>DB.elements.find(e=>e.id===c.to_element_id))
       .filter(e=>e&&e.type==='berth');
     if(connectedBerths.length>1){
@@ -3979,7 +4008,7 @@ function _ssUpdateAllocTotal(ssId){
   const el=getEl(ssId); if(!el) return;
   const totalVol=parseFloat(el.props.typical_volume_t)||0;
   const connectedBerths=DB.connections
-    .filter(c=>c.facility_id===S.facility_id&&c.from_element_id===ssId)
+    .filter(c=>c.facility_id===mainCanvasFacilityId()&&c.from_element_id===ssId)
     .map(c=>DB.elements.find(e=>e.id===c.to_element_id))
     .filter(e=>e&&e.type==='berth');
   let sum=0;
@@ -4009,7 +4038,7 @@ function removeRailDest(elId,idx){
 }
 
 function getReachableProductsForSilo(elementId){
-  const facConns=DB.connections.filter(c=>c.facility_id===S.facility_id);
+  const facConns=getFacConnections();
   const upMap={};
   facConns.forEach(c=>{
     if(!upMap[c.to_element_id]) upMap[c.to_element_id]=[];
@@ -12207,7 +12236,7 @@ function rpGetRailDestinations(){
 // Get rail dispatch points on current canvas that can reach a destination
 function rpGetOriginsForDest(destFacId){
   const allEls=getFacElements();
-  const allConns=DB.connections.filter(c=>c.facility_id===S.facility_id);
+  const allConns=getFacConnections();
   const results=[];
   allEls.filter(e=>e.type==='dispatch_point'&&e.props?.dispatch_type==='Rail').forEach(dp=>{
     // Use canvas connections as primary check — catches terminals wired up but not yet in destinations config
@@ -12231,7 +12260,7 @@ function rpGetOriginsForDest(destFacId){
 // Get main production silos at origin that feed the RAIL silo (for inventory display)
 function rpGetOriginProdSilos(dpEl){
   const allEls=getFacElements();
-  const allConns=DB.connections.filter(c=>c.facility_id===S.facility_id);
+  const allConns=getFacConnections();
   // Find RAIL silo upstream of dp
   const railSiloId=(allConns.filter(c=>c.to_element_id===dpEl.id))
     .map(c=>c.from_element_id)
@@ -12259,7 +12288,7 @@ function rpGetOriginProdSilos(dpEl){
 function rpGetDestSilos(berthEl){
   if(!berthEl) return [];
   const allEls=getFacElements();
-  const allConns=DB.connections.filter(c=>c.facility_id===S.facility_id);
+  const allConns=getFacConnections();
   return allConns.filter(c=>c.from_element_id===berthEl.id)
     .map(c=>allEls.find(e=>e.id===c.to_element_id))
     .filter(e=>e?.type==='bulk_silo');
@@ -13058,13 +13087,57 @@ function railDpProducts(dp, connections){
 // (<= carsPerDay) and overflow lists movements with unplaced cars.
 
 
-// Destination-block groups (INVENTORY · TRANSF/ARRIVAL · DEMAND) keep a TOTAL row always
-// visible and fold their per-product rows under it. Key is `${destFacId}|inv|arr|dem`.
-// Collapsing is opt-in: everything starts expanded, so nothing is hidden by default.
+// ── Rail Schedule tree: collapsible groups ───────────────────────────────────
+// Every row carries data-rpp = the keys of the groups it sits inside; a group's header row
+// also carries data-rpk = its own key. Folding flips row visibility in place — no re-render,
+// so a push draft typed into a cell is not wiped — and the folded set survives a reload.
+// Keys: 'orig' / 'dest' (bands) · 'o:<dp>' dispatch point · 'o:<dp>:inv' its silos ·
+// 'o:<dp>:p:<pid>' one product · 'd:<fac>' terminal · 'd:<fac>:inv|arr|dem' its sections.
+// Folding is opt-in: a key that was never clicked is expanded.
+const RP_COLLAPSE_KEY='avila_rp_collapsed';
+function _rpCollapsed(){
+  if(!window._rpGrpCollapsed){
+    let a=[]; try{ a=JSON.parse(localStorage.getItem(RP_COLLAPSE_KEY)||'[]'); }catch(e){}
+    window._rpGrpCollapsed=new Set(Array.isArray(a)?a.filter(k=>typeof k==='string'):[]);
+  }
+  return window._rpGrpCollapsed;
+}
+function _rpSaveCollapsed(){
+  try{ localStorage.setItem(RP_COLLAPSE_KEY,JSON.stringify([..._rpCollapsed()])); }catch(e){}
+}
+function _rpApplyCollapse(){
+  const body=document.getElementById('rp-rail-tbody'); if(!body) return;
+  const set=_rpCollapsed();
+  body.querySelectorAll('tr[data-rpp]').forEach(tr=>{
+    tr.style.display=tr.dataset.rpp.split(' ').some(k=>k&&set.has(k))?'none':'';
+  });
+  body.querySelectorAll('tr[data-rpk]').forEach(tr=>{
+    const ch=tr.querySelector('.rp-chev'); if(ch) ch.textContent=set.has(tr.dataset.rpk)?'▶':'▼';
+  });
+}
 function _rpToggleGrp(key){
-  if(!window._rpGrpCollapsed) window._rpGrpCollapsed=new Set();
-  window._rpGrpCollapsed.has(key)?window._rpGrpCollapsed.delete(key):window._rpGrpCollapsed.add(key);
-  rpRender();
+  const set=_rpCollapsed();
+  set.has(key)?set.delete(key):set.add(key);
+  _rpSaveCollapsed();
+  _rpApplyCollapse();
+}
+function _rpExpandAll(){ _rpCollapsed().clear(); _rpSaveCollapsed(); _rpApplyCollapse(); }
+// Fold every dispatch point and terminal down to its header line — the bands stay open, so
+// what is left is the list of origins and terminals.
+function _rpCollapseAll(){
+  const set=_rpCollapsed();
+  document.querySelectorAll('#rp-rail-tbody tr.rp-fac[data-rpk]').forEach(tr=>set.add(tr.dataset.rpk));
+  set.delete('orig'); set.delete('dest');
+  _rpSaveCollapsed();
+  _rpApplyCollapse();
+}
+// "Mon–Fri" / "Mon · Wed · Fri" from a Mon=0..Sun=6 switch-day list.
+function _rpDowList(days){
+  const N=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  const s=[...new Set(days||[])].filter(d=>d>=0&&d<=6).sort((a,b)=>a-b);
+  if(!s.length) return 'no switch days';
+  if(s.length>=3&&s[s.length-1]-s[0]===s.length-1) return N[s[0]]+'–'+N[s[s.length-1]];
+  return s.map(d=>N[d]).join(' · ');
 }
 
 function _rpToggleMonth(ym){
@@ -13125,7 +13198,7 @@ function rpRender(){
   };
 
   // ── Build column headers (month summary col + day cols) ──
-  const thHtml=`<th>Element</th>`+months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
+  const thHtml=`<th>Element<button class="rp-mini" onclick="_rpExpandAll()" title="Expand every group">▼ all</button><button class="rp-mini" onclick="_rpCollapseAll()" title="Fold every dispatch point and terminal to its header line">▶ all</button></th>`+months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
     const dayThs=(isCol?[]:mon.days).map(d=>{
       const ds=rpDayDate(d).slice(5);
       let cls='';
@@ -13141,12 +13214,42 @@ function rpRender(){
   _logiYearHeader(document.getElementById('rp-thead-row'),'logi-mcol',_rpYr.monYms,_rpYr.yearEnds);
   const _railColspan=days.length+months.length+1;
 
+  // ── TREE ROW HELPERS ──────────────────────────────────────────
+  // The table is one tree: ORIGINS band → dispatch point → silos / product → leaf rows, then
+  // DESTINATIONS band → terminal → inventory / arrival / demand → product rows. Only the
+  // first cell of a row changes with its place in the tree; the data cells are built exactly
+  // as before. Folding is handled by _rpApplyCollapse (see the key list above it).
+  const _rpCol=_rpCollapsed();
+  const _pName=pid=>DB.products.find(p=>p.id===pid)?.name||pid;
+  const _pCol=pid=>{ try{ return (typeof spProdColor==='function')?spProdColor(_pName(pid),false):'var(--text)'; }catch(e){ return 'var(--text)'; } };
+  const _pChip=pid=>`<span class="rp-chip" style="background:${_pCol(pid)}"></span>`;
+  const _meta=t=>`<span class="rp-meta">${t}</span>`;
+  const _facName=id=>DB.facilities.find(f=>f.id===id)?.name||id;
+  // <tr> for a row inside the groups `parents` (outermost first). A group header passes its
+  // own `key`. Rows under an already-folded group are emitted hidden.
+  const _tr=(cls,parents,key)=>`<tr class="${cls}" data-rpp="${parents.join(' ')}"${key?` data-rpk="${key}"`:''}${parents.some(k=>_rpCol.has(k))?' style="display:none"':''}>`;
+  // Label cell at tree `depth`. `key` makes it a fold toggle; `hue` colours a section label
+  // and a leaf's guide line.
+  const _lbl=(depth,html,o={})=>`<td class="rp-lbl"${o.key?` onclick="_rpToggleGrp('${o.key}')"`:''}`+
+    ` style="padding-left:${depth*16+8}px;--d:${depth}${o.hue?';--hue:'+o.hue:''}"${o.title?` title="${esc(o.title)}"`:''}>`+
+    (o.key?`<span class="rp-chev">${_rpCol.has(o.key)?'▶':'▼'}</span>`:'')+html+`</td>`;
+  // Empty data cells for a header line — keeps the month / today / weekend grid (and, when
+  // `swFn` is given, the switch-day tint) running through it.
+  const _blankCells=swFn=>months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
+    return `<td class="logi-mcol" style="${_mTdSty}"></td>`+(isCol?[]:mon.days).map(d=>{
+      const tSty=_tpTdSty(d); const sw=swFn?swFn(d):false;
+      return `<td${sw?' class="tp-col-switch"':''}${tSty?` style="${tSty}"`:''}></td>`; }).join('');
+  }).join('');
+  // Section hues — the same ones the Supply page uses for the same data.
+  const HUE_INV='#00d9a3', HUE_RAIL='#b388ff', HUE_DEM='#4da6ff', HUE_PUSH='#ff9433';
+
   // ── DESTINATION TABLE ─────────────────────────────────────────
   const destRows=[];
-  _rp.dests.forEach(destFacId=>{
+  const _destShown=_rp.dests.filter(fid=>rpGetOriginsForDest(fid).length);
+  destRows.push(`${_tr('rp-band rp-d rp-hdr-blank',[],'dest')}${_lbl(0,`DESTINATIONS${_meta(`terminal inventory, arrivals &amp; demand · ${_destShown.length} terminal${_destShown.length===1?'':'s'}`)}`,{key:'dest'})}${_blankCells()}</tr>`);
+  _destShown.forEach(destFacId=>{
     const destFac=DB.facilities.find(f=>f.id===destFacId);
     const origins=rpGetOriginsForDest(destFacId);
-    if(!origins.length) return;
     const {berth}=origins[0]; // primary rail berth
     const destSilos=rpGetDestSilos(berth);
     const demEls=rpGetDestDemEls(destFacId);
@@ -13158,23 +13261,19 @@ function rpRender(){
       .filter(pid=>_railProdSet.size===0||_railProdSet.has(pid));
     const _activeProdIds=_rp.prodId?_termProdIds.filter(pid=>pid===_rp.prodId):_termProdIds;
 
-    // Destination group header (thick rule above the first destination is added in assembly)
-    const _colspan=days.length+months.length+1;
-    destRows.push(`<tr><td colspan="${_colspan}" style="background:rgba(77,166,255,.07);color:#4da6ff;font-family:var(--mono);font-size:8px;padding:3px 8px;letter-spacing:.06em;border-top:1px solid rgba(77,166,255,.18)">▸ ${destFac?.name||destFacId}</td></tr>`);
+    // Terminal header — names the origins that ship here, so both ends of a lane are readable.
+    const tKey='d:'+destFacId;
+    const _origNames=[...new Set(origins.map(o=>_facName(_railDpFacId(o.dp))))];
+    destRows.push(`${_tr('rp-fac rp-d rp-hdr-blank',['dest'],tKey)}${_lbl(1,`${esc(destFac?.name||destFacId)}${_meta('← '+esc(_origNames.join(' · ')))}`,
+      {key:tKey,title:`${destFac?.name||destFacId} — rail terminal, receives from ${_origNames.join(', ')}`})}${_blankCells()}</tr>`);
 
-    // ── Per-product presentation helpers for this destination block ──────────
-    // Each of the three sections below (INVENTORY · TRANSF/ARRIVAL · DEMAND) shows a TOTAL
-    // row that stays visible, plus one child row per product that can be folded away.
-    const _pName=pid=>DB.products.find(p=>p.id===pid)?.name||pid;
-    const _pCol=pid=>{ try{ return (typeof spProdColor==='function')?spProdColor(_pName(pid),false):'var(--text)'; }catch(e){ return 'var(--text)'; } };
-    const _pChipD=pid=>`<span style="display:inline-block;width:7px;height:7px;background:${_pCol(pid)};border-radius:1px;margin-right:5px;vertical-align:-1px"></span>`;
-    if(!window._rpGrpCollapsed) window._rpGrpCollapsed=new Set();
-    const _gKey=g=>`${destFacId}|${g}`;
-    const _gOpen=g=>!window._rpGrpCollapsed.has(_gKey(g));
-    // Total row's first cell: click the label to fold/unfold that section's product rows.
-    const _gHeadTd=(g,label)=>`<td style="padding-left:8px;cursor:pointer;font-weight:700" onclick="_rpToggleGrp('${_gKey(g)}')" title="Click to show/hide the per-product breakdown"><span style="display:inline-block;width:10px;opacity:.7">${_gOpen(g)?'▾':'▸'}</span>${label}</td>`;
-    // Opening <tr> for a product row inside section `g` — hidden while that section is folded.
-    const _gChildTr=(g,cls)=>`<tr class="${cls} rp-grp-child"${_gOpen(g)?'':' style="display:none"'}>`;
+    // Each section below (INVENTORY · TRANSF/ARRIVAL · DEMAND) is a TOTAL line that folds its
+    // per-product rows away. Products carry the same colour chip as at the origin.
+    const _gKey=g=>`${tKey}:${g}`;
+    const _secP=['dest',tKey];
+    const _secTr=(g,cls)=>_tr(`rp-sec rp-caps rp-d ${cls}`,_secP,_gKey(g));
+    const _leafTr=(g,cls)=>_tr(`rp-leaf rp-d ${cls}`,[..._secP,_gKey(g)]);
+    const _secLbl=(g,label,unit,hue)=>_lbl(2,`${label}${_meta(unit)}`,{key:_gKey(g),hue,title:'Click to show/hide the per-product breakdown'});
 
     // 1) INVENTORY — TOTAL at the terminal, expandable into one row per product silo.
     const _invSilos=[];
@@ -13193,7 +13292,7 @@ function rpRender(){
           return `<td style="font-weight:700;${tSty}">${Number(Math.round(v)).toLocaleString()}</td>`;
         }).join('');
       }).join('');
-      destRows.push(`<tr class="tp-row-inv">${_gHeadTd('inv','INVENTORY — total')}${invTotCells}</tr>`);
+      destRows.push(`${_secTr('inv','tp-row-inv')}${_secLbl('inv','INVENTORY','total · t',HUE_INV)}${invTotCells}</tr>`);
     }
     _invSilos.forEach(({pid,silo})=>{
       const invCells=months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
@@ -13209,7 +13308,7 @@ function rpRender(){
           return `<td${baseSty?` style="${baseSty}"`:''}>${v!==null?Number(v).toLocaleString():'—'}</td>`;
         }).join('');
       }).join('');
-      destRows.push(`${_gChildTr('inv','tp-row-inv')}<td style="padding-left:22px">${_pChipD(pid)}${esc(silo.name)}</td>${invCells}</tr>`);
+      destRows.push(`${_leafTr('inv','tp-row-inv')}${_lbl(3,`${_pChip(pid)}${esc(silo.name)}`,{hue:HUE_INV})}${invCells}</tr>`);
     });
 
     // 2) TRANSF/ARRIVAL — clickable, color-coded by movement status.
@@ -13243,7 +13342,9 @@ function rpRender(){
         }).join('');
       }).join('');
     };
-    destRows.push(`<tr class="tp-row-arrival">${_gHeadTd('arr','TRANSF/ARRIVAL — total')}${_arrCellsFor(null)}</tr>`);
+    destRows.push(`${_secTr('arr','tp-row-arrival')}${_secLbl('arr','TRANSF / ARRIVAL','total · t',HUE_RAIL)}${_arrCellsFor(null)}</tr>`);
+    // Which origin(s) ship a product here — shown on its arrival row.
+    const _arrFrom=pid=>[...new Set(origins.filter(o=>railDpProducts(o.dp).includes(pid)).map(o=>_facName(_railDpFacId(o.dp))))];
     // Product rows: every rail product at this terminal (kept even with no arrivals yet, so the
     // rows stay put and stay clickable), plus any product arriving that has no silo here, plus
     // a catch-all for movements saved without a product.
@@ -13252,8 +13353,9 @@ function rpRender(){
                         ..._arrProdIds.filter(pid=>pid&&!_activeProdIds.includes(pid))];
     if(_arrProdIds.includes('')) _arrRowProds.push('');
     _arrRowProds.forEach(pid=>{
-      const label=pid?`${_pChipD(pid)}${esc(_pName(pid))}`:'<span style="opacity:.6">(no product set)</span>';
-      destRows.push(`${_gChildTr('arr','tp-row-arrival')}<td style="padding-left:22px">${label}</td>${_arrCellsFor(pid)}</tr>`);
+      const from=pid?_arrFrom(pid):[];
+      const label=pid?`${_pChip(pid)}${esc(_pName(pid))}${from.length?_meta('← '+esc(from.join(' · '))):''}`:'<span style="opacity:.6">(no product set)</span>';
+      destRows.push(`${_leafTr('arr','tp-row-arrival')}${_lbl(3,label,{hue:HUE_RAIL})}${_arrCellsFor(pid)}</tr>`);
     });
 
     // 3) (No UNLOADING row.) Rail unloading is no longer a multi-day, rate-limited stage:
@@ -13277,9 +13379,9 @@ function rpRender(){
       }).join('');
     }).join('');
     if(_demByProd.length){
-      destRows.push(`<tr class="tp-row-dem">${_gHeadTd('dem','DEMAND — total')}${_demCellsFor(_demAllEls)}</tr>`);
+      destRows.push(`${_secTr('dem','tp-row-dem')}${_secLbl('dem','DEMAND','total · t',HUE_DEM)}${_demCellsFor(_demAllEls)}</tr>`);
       _demByProd.forEach(({pid,els})=>{
-        destRows.push(`${_gChildTr('dem','tp-row-dem')}<td style="padding-left:22px">${_pChipD(pid)}${esc(_pName(pid))} — demand</td>${_demCellsFor(els)}</tr>`);
+        destRows.push(`${_leafTr('dem','tp-row-dem')}${_lbl(3,`${_pChip(pid)}${esc(_pName(pid))}`,{hue:HUE_DEM})}${_demCellsFor(els)}</tr>`);
       });
     }
     // NOTE: only RAIL-associated demand points are listed (those whose product matches a
@@ -13289,15 +13391,22 @@ function rpRender(){
 
   // ── ORIGIN ROWS (planning) ────────────────────────────────────
   const origRows=[];
-  origRows.push(`<tr><td colspan="${_railColspan}" style="background:rgba(255,148,51,.08);color:#ff9433;font-family:var(--mono);font-size:8px;padding:3px 8px;letter-spacing:.06em;border-top:1px solid rgba(255,148,51,.22)">▸ ORIGIN — plan loading &amp; switches</td></tr>`);
-  // Collect all unique origins that serve any selected destination
-  const seenDp=new Set();
-  _rp.dests.forEach(destFacId=>{
-    const origins=rpGetOriginsForDest(destFacId);
-    origins.forEach(({dp,destCfg,railSilo,origFac})=>{
-      if(seenDp.has(dp.id)) return;
-      seenDp.add(dp.id);
-
+  // Every rail dispatch point that serves a selected destination, once each — minus those the
+  // Product filter leaves with nothing to show (no product it loads, no silo holding it).
+  const _origList=[];
+  { const seenDp=new Set();
+    const _pOk=pid=>!_rp.prodId||pid===_rp.prodId;
+    const _hasRows=o=>railDpProducts(o.dp).some(_pOk)
+      ||(o.railSilo&&(!_rp.prodId||getSiloProducts(o.railSilo).includes(_rp.prodId)))
+      ||rpGetOriginProdSilos(o.dp).some(s=>!_rp.prodId||getSiloProducts(s).includes(_rp.prodId));
+    _rp.dests.forEach(destFacId=>rpGetOriginsForDest(destFacId).forEach(o=>{
+      if(seenDp.has(o.dp.id)) return;
+      seenDp.add(o.dp.id);
+      if(_hasRows(o)) _origList.push(o);
+    }));
+  }
+  origRows.push(`${_tr('rp-band rp-o rp-hdr-blank',[],'orig')}${_lbl(0,`ORIGINS${_meta(`plan loading &amp; switches · ${_origList.length} dispatch point${_origList.length===1?'':'s'}`)}`,{key:'orig'})}${_blankCells()}</tr>`);
+  _origList.forEach(({dp,destCfg,railSilo,origFac})=>{
       const switchDays=dp.props?.switch_days||[];
       const carCap=parseFloat(dp.props?.car_capacity_t)||RAIL_CAR_T_DEFAULT;
       const carsPerDay=(parseFloat(dp.props?.std_loading_cars_shift||dp.props?.std_loading_cars_day)||10)
@@ -13305,8 +13414,32 @@ function rpRender(){
 
       // Get all selected destinations this dp serves
       const myDests=_rp.dests.filter(fid=>(dp.props?.destinations||[]).find(d=>d.facility_id===fid));
+      const _rpFacId=_railDpFacId(dp);
 
-      // Production inventory silos (main cement silos) — filtered by selected product
+      // Dispatch-point header: origin facility + dispatch point, its switch days and loading
+      // pace. Switch-day columns stay tinted through it so the switches read at a glance.
+      const oKey='o:'+dp.id, oP=['orig',oKey];
+      const _oName=_facName(_rpFacId);
+      origRows.push(`${_tr('rp-fac rp-o rp-hdr-blank',['orig'],oKey)}${_lbl(1,`${esc(_oName)}<span class="rp-tag">${esc(dp.name||dp.id)}</span>${_meta(`switch ${_rpDowList(switchDays)} · ${carsPerDay} cars/d`)}`,
+        {key:oKey,title:`${_oName} · ${dp.name||dp.id} — rail switch ${_rpDowList(switchDays)}, loads up to ${carsPerDay} cars/day at ${carCap} t/car, ships to ${myDests.map(_facName).join(', ')||'—'}`})}${_blankCells(d=>rpIsSwitch(d,switchDays))}</tr>`);
+
+      // SILO INVENTORY — the rail silo the cars load from, then the plant silos filled by the
+      // same mills. Both filtered by the selected product.
+      const invKey=oKey+':inv';
+      const silRows=[];
+      if(railSilo&&(!_rp.prodId||getSiloProducts(railSilo).includes(_rp.prodId))){
+        const railCells=months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
+          const lastV=rpInv(railSilo.id,mon.days[mon.days.length-1]);
+          const mTd=`<td class="logi-mcol" style="${_mTdSty}">${lastV!==null?Number(Math.round(lastV)).toLocaleString():'—'}</td>`;
+          return mTd+(isCol?[]:mon.days).map(d=>{
+            const v=rpInv(railSilo.id,d);
+            const tSty=_tpTdSty(d);
+            return `<td style="color:#38bdf8;${tSty}">${v!==null?Number(v).toLocaleString():'—'}</td>`;
+          }).join('');
+        }).join('');
+        const rp0=getSiloProducts(railSilo)[0];
+        silRows.push(`${_tr('rp-leaf rp-o tp-row-inv tp-row-rail-silo',[...oP,invKey])}${_lbl(3,`${rp0?_pChip(rp0):''}${esc(railSilo.name)}<span class="rp-tag">rail silo</span>`,{hue:HUE_INV})}${railCells}</tr>`);
+      }
       const prodSilos=rpGetOriginProdSilos(dp)
         .filter(s=>!_rp.prodId||getSiloProducts(s).includes(_rp.prodId));
       prodSilos.forEach(silo=>{
@@ -13319,21 +13452,12 @@ function rpRender(){
             return `<td${tSty?` style="${tSty}"`:''}>${v!==null?Number(v).toLocaleString():'—'}</td>`;
           }).join('');
         }).join('');
-        origRows.push(`<tr class="tp-row-orig-inv"><td style="color:#ff9433">${esc(silo.name)}</td>${invCells}</tr>`);
+        const sp0=getSiloProducts(silo)[0];
+        silRows.push(`${_tr('rp-leaf rp-o tp-row-inv tp-row-orig-inv',[...oP,invKey])}${_lbl(3,`${sp0?_pChip(sp0):''}${esc(silo.name)}`,{hue:HUE_INV})}${invCells}</tr>`);
       });
-
-      // RAIL transfer silo inventory — filtered by selected product
-      if(railSilo&&(!_rp.prodId||getSiloProducts(railSilo).includes(_rp.prodId))){
-        const railCells=months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
-          const lastV=rpInv(railSilo.id,mon.days[mon.days.length-1]);
-          const mTd=`<td class="logi-mcol" style="${_mTdSty}">${lastV!==null?Number(Math.round(lastV)).toLocaleString():'—'}</td>`;
-          return mTd+(isCol?[]:mon.days).map(d=>{
-            const v=rpInv(railSilo.id,d);
-            const tSty=_tpTdSty(d);
-            return `<td style="color:#38bdf8;${tSty}">${v!==null?Number(v).toLocaleString():'—'}</td>`;
-          }).join('');
-        }).join('');
-        origRows.push(`<tr class="tp-row-rail-silo"><td style="color:#38bdf8">${railSilo.name}</td>${railCells}</tr>`);
+      if(silRows.length){
+        origRows.push(`${_tr('rp-sec rp-caps rp-o rp-hdr-blank',oP,invKey)}${_lbl(2,`SILO INVENTORY${_meta('t')}`,{key:invKey,hue:HUE_INV})}${_blankCells()}</tr>`);
+        origRows.push(...silRows);
       }
 
       // ── RAIL v2 (operator-driven) ───────────────────────────────────────────
@@ -13359,7 +13483,6 @@ function rpRender(){
         return DB.rail_movements.find(rm=>rm.from_dispatch_id===dp.id&&rm.to_facility_id===fid&&(rm.product_id||'')===pid
           &&(rm.departure_date?rm.departure_date===ds:rm.switch_day===d)); };
       // Real dispatched cars (actuals) recorded for this origin/dest/product/date.
-      const _rpFacId=_railDpFacId(dp);
       const realPush=(pid,fid,ds)=>(DB.real_rail_daily||[]).find(rr=>rr.type==='dispatched'&&rr.date===ds
         &&rr.facility_id===_rpFacId&&rr.dest_facility_id===fid&&(rr.product_id||'')===pid);
       const _rpToday=new Date()._ymd();
@@ -13367,6 +13490,10 @@ function rpRender(){
       dpProducts.forEach(pid=>{
         const prod=DB.products.find(p=>p.id===pid);
         const pName=prod?.name||pid;
+        // Product header — its loaded / available / push rows fold under it. The chip colour
+        // matches the product's rows in the destination blocks.
+        const pKey=`${oKey}:p:${pid}`, pP=[...oP,pKey];
+        origRows.push(`${_tr('rp-sec rp-o rp-hdr-blank',oP,pKey)}${_lbl(2,`${_pChip(pid)}${esc(pName)}${_meta('rail cars')}`,{key:pKey,hue:_pCol(pid)})}${_blankCells()}</tr>`);
 
         // 1) Cars loaded per day. Click a cell to open the SAME rail loading popup the
         // Supply page uses (Forecast campaign -> rail_loading_plan · Real -> real_rail_daily
@@ -13397,7 +13524,7 @@ function rpRender(){
                                :'Forecast from the loading plan — click to set a loading campaign or record the real cars';
             return `<td class="tp-cell-clickable${sw?' tp-col-switch':''}"${sty?` style="cursor:pointer;${sty}"`:' style="cursor:pointer"'} title="${ttl}" onclick="showRailCampaignPopup(${args})">${c>0?c:'—'}</td>`; }).join('');
         }).join('');
-        origRows.push(`<tr class="tp-row-loading"><td style="color:#4da6ff" title="Cars loaded per day — click a cell to set the loading campaign or the real value. Same data as RAIL LOADING on the Supply page.">  ↑ Loaded ${pName} (cars/d)</td>${loadCells}</tr>`);
+        origRows.push(`${_tr('rp-leaf rp-o tp-row-loading',pP)}${_lbl(3,`<span class="rp-glyph">↑</span>Loaded${_meta('cars/d')}`,{hue:HUE_RAIL,title:`${pName} cars loaded per day — click a cell to set the loading campaign or the real value. Same data as RAIL LOADING on the Supply page.`})}${loadCells}</tr>`);
 
         // 2) Cars accumulated in the yard and available to push at each switch. EDITABLE:
         // type the number that was really standing there when the railroad came and it is
@@ -13419,7 +13546,7 @@ function rpRender(){
                             :'Cars accumulated in the yard, available to push. Type the number that was really there to override the simulation.';
             return `<td class="tp-col-switch"${tSty?` style="${tSty}"`:''}><input type="number" min="0" step="1" value="${a>0?a:0}" data-dp="${dp.id}" data-fac="${_rpFacId}" data-pid="${pid}" data-ds="${ds}" data-sim="${a}" title="${ttl}" onchange="_rpAvailEdit(this)" class="rp-push-inp ${cls}"></td>`; }).join('');
         }).join('');
-        origRows.push(`<tr class="tp-row-avail"><td style="color:#b388ff" title="Cars in the yard at the switch. Editable — enter the real count to reconcile the simulation; blank it to undo.">  ▣ Available ${pName} (cars @ switch)</td>${availCells}</tr>`);
+        origRows.push(`${_tr('rp-leaf rp-o tp-row-avail',pP)}${_lbl(3,`<span class="rp-glyph">▣</span>Available at switch${_meta('cars')}`,{hue:HUE_RAIL,title:`${pName} cars in the yard at the switch. Editable — enter the real count to reconcile the simulation; blank it to undo.`})}${availCells}</tr>`);
 
         // Pre-fill suggestion per switch: distribute ALL the cars available at that switch across
         // the terminals proportional to each terminal's demand over the days right after arrival.
@@ -13467,7 +13594,7 @@ function rpRender(){
               const avail=availAtSwitch(pid,d);
               return `<td class="tp-col-switch"${tSty?` style="${tSty}"`:''}><input type="number" min="0" step="1" value="${val}" data-dp="${dp.id}" data-sw="${d}" data-dest="${fid}" data-pid="${pid}" data-ds="${ds}" data-committed="${committed}" data-suggest="${sg}" data-real="${realVal!==null?realVal:''}" data-base="${base}" data-cls="${cls}" data-avail="${avail}" title="${ttl}" onchange="_rpPushEdit(this)" class="rp-push-inp ${shown}"></td>`; }).join('');
           }).join('');
-          origRows.push(`<tr class="tp-row-push"><td style="color:#ff9433">    → push ${destFac?.name||fid}</td>${pushCells}</tr>`);
+          origRows.push(`${_tr('rp-leaf rp-o tp-row-push',pP)}${_lbl(3,`<span class="rp-glyph">→</span>Push to ${esc(destFac?.name||fid)}${_meta(transitOf(fid)+'d transit')}`,{hue:HUE_PUSH,title:`${pName} cars sent from ${_oName} to ${destFac?.name||fid} at each switch — ${transitOf(fid)} day(s) in transit`})}${pushCells}</tr>`);
         });
       });
 
@@ -13481,21 +13608,27 @@ function rpRender(){
           const _cPast=rpDayDate(d)<_rpToday;
           return `<td class="tp-col-switch" style="text-align:center;${tSty||''}"><span class="rp-sw-icon" style="color:#00d9a3" title="${_cPast?'Record this switch\'s numbers as REAL dispatches':'Confirm all pushes for this switch as the plan'}" onclick="_rpConfirmSwitch('${dp.id}',${d})">✓</span><span class="rp-sw-icon" style="color:#8e9ab8" title="${_cPast?'Reset this switch to the planned values':'Reset this switch to the suggested distribution'}" onclick="_rpResetSwitch('${dp.id}',${d})">⟳</span></td>`; }).join('');
       }).join('');
-      origRows.push(`<tr class="tp-row-confirm"><td style="color:#8e9ab8;font-size:8px;letter-spacing:.04em">    ✓ confirm · ⟳ reset</td>${confirmCells}</tr>`);
-    });
+      // A sibling of the product groups, not inside one: ✓ commits every product's pushes.
+      origRows.push(`${_tr('rp-leaf rp-o rp-confirm tp-row-confirm',oP)}${_lbl(2,`<span class="rp-glyph" style="color:#00d9a3">✓</span>confirm · ⟳ reset${_meta(`all ${_oName} pushes of that switch`)}`,{hue:'var(--border2)'})}${confirmCells}</tr>`);
   });
-  // Single merged table: ORIGIN (planning) first, a thick rule, then the DESTINATIONS — same dates.
-  const _origDestSep=`<tr><td colspan="${_railColspan}" style="padding:0;height:0;border-top:4px solid var(--text-dim)"></td></tr>`;
-  document.getElementById('rp-rail-tbody').innerHTML=origRows.join('')+_origDestSep+destRows.join('');
-  _monthTotalsToEnd(document.getElementById('rp-rail-tbody'),'logi-mcol',true); // month total at END
-  _logiYearTotalsToEnd(document.getElementById('rp-rail-tbody'),'logi-mcol',_rpYr.monYms,_rpYr.yearEnds,_rpYr.nYears);
+  // Single merged table: ORIGINS (planning) first, a gap, then the DESTINATIONS — same dates.
+  const _origDestGap=`<tr class="rp-gap" aria-hidden="true"><td colspan="${_railColspan}"></td></tr>`;
+  const _rpBody=document.getElementById('rp-rail-tbody');
+  _rpBody.innerHTML=origRows.join('')+_origDestGap+destRows.join('');
+  _monthTotalsToEnd(_rpBody,'logi-mcol',true); // month total at END
+  _logiYearTotalsToEnd(_rpBody,'logi-mcol',_rpYr.monYms,_rpYr.yearEnds,_rpYr.nYears);
+  // Header lines carry no numbers — drop the "—" the year pass writes into their year cells.
+  _rpBody.querySelectorAll('tr.rp-hdr-blank>td.logi-ycol').forEach(td=>{ td.textContent=''; });
   // Re-flag over-allocated switches for any surviving drafts (they persist across re-renders).
   new Set(Object.keys(window._rpDrafts||{}).map(k=>k.split('|').slice(0,2).join('|'))).forEach(k=>{
     const [dpId,sw]=k.split('|'); _rpValidateSwitch(dpId,sw);
   });
   // Push-cell colour legend above the table.
   const legend=document.getElementById('rp-legend');
-  if(legend) legend.innerHTML=`<span style="opacity:.7">PUSH CELLS:</span>
+  if(legend) legend.innerHTML=`<span style="opacity:.7">ROWS:</span>
+    <span>click a <b style="color:var(--text)">▼</b> name to fold it — <span style="color:#ff9433">orange</span> rail = origin, <span style="color:#38bdf8">blue</span> rail = terminal</span>
+    <span style="opacity:.35">|</span>
+    <span style="opacity:.7">PUSH CELLS:</span>
     <span><span class="rp-lg" style="background:rgba(179,136,255,.15);border:1px dashed rgba(179,136,255,.6)"></span> Proposed (simulation)</span>
     <span><span class="rp-lg" style="background:rgba(255,184,48,.25);border:1px solid rgba(255,184,48,.7)"></span> Edited (unsaved — click ✓)</span>
     <span><span class="rp-lg" style="background:rgba(56,189,248,.2);border:1px solid rgba(56,189,248,.7)"></span> Planned (confirmed)</span>
@@ -13841,7 +13974,7 @@ function vpGetVesselProducts(){
   // Only show products that are relevant to the currently-selected destination(s)
   if(!_vp.dests.length) return [];
   const allEls=getFacElements();
-  const allConns=DB.connections.filter(c=>c.facility_id===S.facility_id);
+  const allConns=getFacConnections();
   const prodIds=new Set();
   // Berths assigned to the selected destination facilities (non-rail berths)
   const destBerthIds=new Set(
