@@ -2438,9 +2438,49 @@ function selectLocNode(type, id, e){
   renderFacilitiesForNode(type,id);
 }
 
+// Org levels, top-down. fk = the field on a row that points at its parent one level up.
+const LOC_LEVELS=[
+  {type:'macro_region', table:'macro_regions', fk:null,              label:'Macro Region'},
+  {type:'country',      table:'countries',     fk:'macro_region_id', label:'Country'},
+  {type:'region',       table:'regions',       fk:'country_id',      label:'Region'},
+  {type:'sub_region',   table:'sub_regions',   fk:'region_id',       label:'Sub-Region'},
+  {type:'facility',     table:'facilities',    fk:'sub_region_id',   label:'Facility'},
+];
+// Ancestor ids of a node, top-down ('' where the chain is missing or broken).
+function _locParentChain(type,record){
+  const li=LOC_LEVELS.findIndex(l=>l.type===type);
+  const ids=new Array(Math.max(0,li)).fill('');
+  let cur=record;
+  for(let k=li;k>0;k--){
+    const pid=cur?.[LOC_LEVELS[k].fk]||'';
+    ids[k-1]=pid;
+    cur=pid?(DB[LOC_LEVELS[k-1].table]||[]).find(r=>r.id===pid):null;
+  }
+  return ids;
+}
+function _locOptHTML(rows,selId){
+  return `<option value="">— choose —</option>`+
+    rows.map(r=>`<option value="${r.id}" ${r.id===selId?'selected':''}>${esc(r.name)}</option>`).join('');
+}
+// A "Belongs to" dropdown changed: refill every level below it with the new parent's
+// children — keeping a pick that is still valid, taking the only choice when there is one.
+function _locHierChange(type,k){
+  const li=LOC_LEVELS.findIndex(l=>l.type===type);
+  let parentId=document.getElementById('ld-par-'+k)?.value||'';
+  for(let j=k+1;j<li;j++){
+    const sel=document.getElementById('ld-par-'+j); if(!sel) break;
+    const L=LOC_LEVELS[j];
+    const rows=parentId?(DB[L.table]||[]).filter(r=>r[L.fk]===parentId):[];
+    const keep=rows.some(r=>r.id===sel.value)?sel.value:(rows.length===1?rows[0].id:'');
+    sel.innerHTML=_locOptHTML(rows,keep);
+    parentId=keep;
+  }
+}
+
 function renderLocDetail(type,id){
   const panel=document.getElementById('loc-detail-panel');
   if(!panel) return;
+  panel.dataset.node='';
   const typeLabels={macro_region:'Macro Region',country:'Country',region:'Region',sub_region:'Sub-Region',facility:'Facility'};
   let record=null;
   if(type==='macro_region') record=DB.macro_regions.find(r=>r.id===id);
@@ -2449,16 +2489,29 @@ function renderLocDetail(type,id){
   else if(type==='sub_region') record=DB.sub_regions.find(r=>r.id===id);
   else if(type==='facility') record=DB.facilities.find(r=>r.id===id);
   if(!record){panel.innerHTML='<div class="loc-detail-empty">Record not found</div>';return;}
-
-  let parentInfo='';
-  if(type==='country'){const p=DB.macro_regions.find(r=>r.id===record.macro_region_id); parentInfo=p?`Macro Region: ${p.name}`:''; }
-  else if(type==='region'){const p=DB.countries.find(r=>r.id===record.country_id); parentInfo=p?`Country: ${p.name}`:''; }
-  else if(type==='sub_region'){const p=DB.regions.find(r=>r.id===record.region_id); parentInfo=p?`Region: ${p.name}`:''; }
-  else if(type==='facility'){const p=DB.sub_regions.find(r=>r.id===record.sub_region_id); parentInfo=p?`Sub-Region: ${p.name}`:''; }
+  // Marks which node the panel shows — saveLocNode / saveRenameNode check it.
+  panel.dataset.node=type+':'+id;
 
   let h=`<div class="loc-detail-title">${typeLabels[type]} — <span style="color:var(--green)">${record.name}</span></div>
-    <div class="loc-fields">
-      <div class="loc-field"><div class="loc-field-label">Name</div>
+    <div class="loc-fields">`;
+
+  // Belongs to — one dropdown per level above this node, pre-filled with where it sits now.
+  // Each one narrows the next; Save moves the node under the deepest one.
+  const li=LOC_LEVELS.findIndex(l=>l.type===type);
+  if(li>0){
+    const chain=_locParentChain(type,record);
+    h+=`<div class="loc-field" style="grid-column:1/-1"><div class="loc-field-label">Belongs to</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px">`;
+    for(let k=0;k<li;k++){
+      const L=LOC_LEVELS[k];
+      const rows=k===0?(DB[L.table]||[]):(chain[k-1]?(DB[L.table]||[]).filter(r=>r[L.fk]===chain[k-1]):[]);
+      h+=`<div class="loc-field"><div class="loc-field-label">${L.label}</div>
+        <select class="loc-field-input" id="ld-par-${k}" onchange="_locHierChange('${type}',${k})">${_locOptHTML(rows,chain[k])}</select></div>`;
+    }
+    h+=`</div></div>`;
+  }
+
+  h+=`<div class="loc-field"><div class="loc-field-label">Name</div>
         <input class="loc-field-input" id="ld-name" value="${record.name}"></div>`;
 
   if(type==='facility'){
@@ -2478,8 +2531,6 @@ function renderLocDetail(type,id){
   h+=`<div class="loc-field" style="grid-column:1/-1"><div class="loc-field-label">Notes</div>
     <input class="loc-field-input" id="ld-notes" value="${record.notes||''}" placeholder="Optional notes"></div>`;
 
-  if(parentInfo) h+=`<div class="loc-field" style="grid-column:1/-1"><div class="loc-field-label">Parent</div><div class="loc-field-value" style="font-size:10px;color:var(--text-dim)">${parentInfo}</div></div>`;
-
   h+=`</div><button class="loc-save-btn" onclick="saveLocNode('${type}','${id}')">Save Changes</button>`;
   if(type==='facility') h+=`<button class="loc-save-btn" style="background:var(--blue);margin-left:8px" onclick="openFacilityInTopology('${id}',null)">Open in Topology →</button>`;
   panel.innerHTML=h;
@@ -2491,12 +2542,24 @@ function saveLocNode(type,id){
   let table=DB[type==='macro_region'?'macro_regions':type==='country'?'countries':type==='region'?'regions':type==='sub_region'?'sub_regions':'facilities'];
   const rec=table.find(r=>r.id===id);
   if(!rec) return;
+  // Move: the new parent is the deepest "Belongs to" dropdown — read only when the detail
+  // panel is showing this node.
+  const li=LOC_LEVELS.findIndex(l=>l.type===type);
+  const fk=li>0?LOC_LEVELS[li].fk:null;
+  let newParent=null;
+  if(fk&&document.getElementById('loc-detail-panel')?.dataset.node===type+':'+id){
+    newParent=document.getElementById('ld-par-'+(li-1))?.value||'';
+    if(!newParent&&rec[fk]){ statMsg(`Pick a ${LOC_LEVELS[li-1].label} to save`); return; }
+  }
   rec.name=name; rec.notes=notes;
   if(type==='facility'){
     rec.type=document.getElementById('ld-fac-type')?.value||rec.type;
     rec.status=document.getElementById('ld-fac-status')?.value||rec.status;
   }
-  autoSave(); renderLocationTree(); statMsg('Saved');
+  const moved=!!newParent&&rec[fk]!==newParent;
+  if(newParent) rec[fk]=newParent;
+  autoSave(); renderLocationTree();
+  statMsg(moved?`Saved — moved to ${LOC_LEVELS[li-1].label} ${(DB[LOC_LEVELS[li-1].table]||[]).find(r=>r.id===newParent)?.name||''}`:'Saved');
 }
 
 function renderFacilitiesForNode(type,id){
@@ -2582,11 +2645,29 @@ function startRenameNode(type,id,e){
   setTimeout(()=>{
     const table=type==='macro_region'?DB.macro_regions:type==='country'?DB.countries:type==='region'?DB.regions:DB.sub_regions;
     const rec=table.find(r=>r.id===id);
+    const modal=document.getElementById('modal-content');
     if(rec&&document.getElementById('an-name')) document.getElementById('an-name').value=rec.name;
+    if(rec&&document.getElementById('an-notes')) document.getElementById('an-notes').value=rec.notes||'';
+    const title=modal?.querySelector('.modal-title');
+    if(title) title.textContent=title.textContent.replace(/^Add /,'Rename ');
     // Override save button
-    const footer=document.querySelector('.modal-footer');
-    if(footer) footer.innerHTML=`<button class="btn-sec" onclick="closeModal()">Cancel</button><button class="btn-pri" onclick="saveLocNode('${type}','${id}');closeModal();renderLocationTree()">Save</button>`;
+    const footer=modal?.querySelector('.modal-footer');
+    if(footer) footer.innerHTML=`<button class="btn-sec" onclick="closeModal()">Cancel</button><button class="btn-pri" onclick="saveRenameNode('${type}','${id}')">Save</button>`;
   },60);
+}
+// Save for the Rename pop-up — reads the pop-up's own Name / Notes. It used to go through
+// saveLocNode, which reads the Selected Node panel: renaming one node while the panel showed
+// another copied that node's name and notes, and with no panel open nothing was saved.
+function saveRenameNode(type,id){
+  const name=document.getElementById('an-name')?.value?.trim(); if(!name) return;
+  const table=type==='macro_region'?DB.macro_regions:type==='country'?DB.countries:type==='region'?DB.regions:DB.sub_regions;
+  const rec=table.find(r=>r.id===id);
+  if(!rec) return;
+  rec.name=name; rec.notes=document.getElementById('an-notes')?.value||'';
+  autoSave(); closeModal(); renderLocationTree();
+  // Keep the Selected Node panel in step when it shows this node, so its Save can't revert the name.
+  if(document.getElementById('loc-detail-panel')?.dataset.node===type+':'+id) renderLocDetail(type,id);
+  statMsg('Saved');
 }
 
 function deleteLocNode(type,id,e){
