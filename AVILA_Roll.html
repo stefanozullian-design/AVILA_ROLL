@@ -4425,14 +4425,35 @@ function getActiveCampaign(elId, dateStr){
   )||null;
 }
 
-// Active demand swap OUT of a demand point on a date: a portion of this point's
-// demand is relocated to another demand point (to_element_id). Returns the swap
-// record (or null). Keyed by from_element_id.
+// Active demand swaps OUT of a demand point on a date, in the order they were created: a
+// portion of this point's demand relocated to another demand point (to_element_id). A point
+// can swap to several destinations at once (300 t/d to PEV + 200 t/d to MIA_IL(11)), so every
+// reader must take ALL of them. This used to be a .find — only the first swap was subtracted at
+// the source while each destination still added its own share, creating demand from nothing.
+function getActiveDemandSwaps(elementId, dateStr){
+  if(!elementId) return [];
+  return (DB.demand_substitutions||[]).filter(s=>
+    s.from_element_id===elementId && dateStr>=s.start_date && dateStr<=s.end_date);
+}
 function getActiveDemandSwap(elementId, dateStr){
-  if(!elementId) return null;
-  return (DB.demand_substitutions||[]).find(s=>
-    s.from_element_id===elementId && dateStr>=s.start_date && dateStr<=s.end_date
-  )||null;
+  return getActiveDemandSwaps(elementId, dateStr)[0]||null;
+}
+// Tonnes each active swap takes out of a source point's demand `rate` on a date — the ONE
+// allocation both the source (_resolveDemandSwap) and the destinations (_resolveDemandSwapIn)
+// read, so what the destinations receive always equals what the source gives up. Swaps that
+// together ask for more than the point's demand (60% + 60%, or 300 + 300 t/d on 500 t) are
+// scaled down in proportion; a single swap is capped at the demand exactly as before.
+function _demandSwapAlloc(fromElId, rate, dateStr){
+  if(!(rate>0)) return [];
+  const list=getActiveDemandSwaps(fromElId, dateStr).map(s=>({swap:s,
+    qty:Math.max(0, s.mode==='percent' ? rate*(parseFloat(s.amount)||0)/100 : (parseFloat(s.amount)||0))
+  })).filter(x=>x.qty>0);
+  const total=list.reduce((a,x)=>a+x.qty,0);
+  if(total>rate){
+    const k=rate/total; let given=0;
+    list.forEach((x,i)=>{ x.qty = i===list.length-1 ? rate-given : x.qty*k; given+=x.qty; });
+  }
+  return list;
 }
 // Primary product/material carried by a demand point element.
 function _dpPrimaryProduct(elId){
@@ -4442,21 +4463,20 @@ function _dpPrimaryProduct(elId){
   const ids=(el&&typeof _demElProdIds==='function')?_demElProdIds(el):[];
   return ids[0]||null;
 }
-// How many tonnes of a demand point's daily demand are swapped OUT on a date.
-// The swap is point-to-point: the volume is relocated to to_element_id (whose
-// own material is the substitute). Returns {swap, qty, toElement, toProduct} or null.
+// How many tonnes of a demand point's daily demand are swapped OUT on a date — the sum over
+// ALL its active swaps. The swap is point-to-point: each leg's volume is relocated to its
+// to_element_id (whose own material is the substitute). Returns {qty, legs:[{swap, qty,
+// toElement, toProduct}], swap/toElement/toProduct of the first leg} or null.
 function _resolveDemandSwap(elementId, todayRate, dateStr){
   if(!todayRate||todayRate<=0) return null;
-  const s=getActiveDemandSwap(elementId, dateStr);
-  if(!s) return null;
-  const qty = s.mode==='percent'
-    ? todayRate*(parseFloat(s.amount)||0)/100
-    : Math.min(todayRate, parseFloat(s.amount)||0);
-  if(qty<=0) return null;
+  const alloc=_demandSwapAlloc(elementId, todayRate, dateStr);
+  if(!alloc.length) return null;
   // Substitute material derives from the destination demand point (new model);
   // fall back to the legacy to_product_id field for older records.
-  const toProduct = s.to_element_id ? _dpPrimaryProduct(s.to_element_id) : s.to_product_id;
-  return {swap:s, qty, toElement:s.to_element_id||null, toProduct, fromElement:elementId};
+  const legs=alloc.map(a=>({swap:a.swap, qty:a.qty, toElement:a.swap.to_element_id||null,
+    toProduct:a.swap.to_element_id ? _dpPrimaryProduct(a.swap.to_element_id) : a.swap.to_product_id}));
+  return {swap:legs[0].swap, qty:legs.reduce((s,l)=>s+l.qty,0), toElement:legs[0].toElement,
+    toProduct:legs[0].toProduct, fromElement:elementId, legs};
 }
 // Tonnes swapped INTO a demand point on a date, summed over all swaps targeting
 // it (each computed from its SOURCE point's own demand). Keyed by to_element_id.
@@ -4464,13 +4484,14 @@ function _resolveDemandSwapIn(toElementId, dateStr, rateFn){
   if(!toElementId) return 0;
   const rate=rateFn||((id)=>(typeof _demandRate==='function')?(_demandRate(id,dateStr)||0):0);
   let q=0;
+  const allocBySource={};   // each source point's allocation, shared by all its swaps
   (DB.demand_substitutions||[]).forEach(s=>{
     if(s.to_element_id!==toElementId) return;
     if(!(dateStr>=s.start_date&&dateStr<=s.end_date)) return;
-    const fromRate=rate(s.from_element_id);
-    if(fromRate<=0) return;
-    const v = s.mode==='percent' ? fromRate*(parseFloat(s.amount)||0)/100 : Math.min(fromRate, parseFloat(s.amount)||0);
-    if(v>0) q+=Math.min(fromRate,v);
+    const alloc=allocBySource[s.from_element_id]
+      ||(allocBySource[s.from_element_id]=_demandSwapAlloc(s.from_element_id, rate(s.from_element_id), dateStr));
+    const leg=alloc.find(a=>a.swap===s);
+    if(leg&&leg.qty>0) q+=leg.qty;
   });
   return q;
 }
@@ -4561,9 +4582,8 @@ function _saveDemandSwap(){
   }
   autoSave();
   closeModal();
-  renderDemandView();
+  _demandChanged();   // Demand page, Supply page or Sales view — whichever is showing — then re-run
   statMsg((editId?'Demand swap updated':'Demand swap saved')+' — running simulation…');
-  scheduleSimulation();
 }
 // Open the manager with an existing swap loaded into the form for editing.
 function _editDemandSwap(id){
@@ -4574,9 +4594,9 @@ function _editDemandSwap(id){
 function _deleteDemandSwap(id){
   DB.demand_substitutions=(DB.demand_substitutions||[]).filter(s=>s.id!==id);
   autoSave();
-  renderDemandView();
+  _demandChanged();   // it used to leave the projections stale until the next run
   openDemandSwapManager(); // refresh the list
-  statMsg('Demand swap removed — re-run simulation to update projections');
+  statMsg('Demand swap removed — running simulation…');
 }
 // Open the swap dialog from a material context (Supply page CEMENT NEED cell):
 // pre-select a demand point that carries that material (prefer current facility)
@@ -13209,7 +13229,7 @@ function _railSavePlacement(facId, pid, ds){
   _railUpsertRec('placed',facId,pid,ds,document.getElementById('railpl-spot')?.value);
   closeCampaignPopup();
   autoSave();
-  renderSupplyView();
+  _railRefreshViews();
   statMsg('Rail yard reconciled — running simulation…');
   scheduleSimulation();
 }
@@ -13217,7 +13237,7 @@ function _railClearPlacement(facId, pid, ds){
   DB.real_rail_daily=(DB.real_rail_daily||[]).filter(rr=>!(['railyard_count','localyard_count','placed'].includes(rr.type)&&rr.date===ds&&rr.facility_id===facId&&(rr.product_id||'')===pid));
   closeCampaignPopup();
   autoSave();
-  renderSupplyView();
+  _railRefreshViews();
   statMsg('Rail yard records cleared — running simulation…');
   scheduleSimulation();
 }
@@ -13783,19 +13803,23 @@ function rpRender(){
     // with the Supply page's "Pulled to local yard" cells, so both pages agree).
     const _pullCell=(pid,d)=>{
       const tSty=_tpTdSty(d);
-      if(!pulls.isPullDay(d)&&!(pulls.pulledT(pid,d)>0)) return `<td${tSty?` style="${tSty}"`:''}></td>`;
       const ds=rpDayDate(d), pNm=_pName(pid);
+      // Dbl-click any day → Reconcile Rail Yard: the same popup (and records) as the Supply
+      // page's "Pulled to local yard" cells. On a pull day ahead, a single click still types a target.
+      const dbl=`ondblclick="event.stopPropagation();showRailPlacementPopup('${destFacId}','${pid}','${ds}')"`;
+      if(!pulls.isPullDay(d)&&!(pulls.pulledT(pid,d)>0))
+        return `<td ${dbl} title="Not a pull day at this terminal — dbl-click to reconcile the physical car count" style="cursor:cell;${tSty||''}"></td>`;
       const info=_railPullInfo(pulls,arrivals,pid,d), {tP,cars,short,allReal}=info;
       const cls=short>0?'rp-over':allReal?'rp-real':(info.ents.length||cars>0)?'rp-committed':'rp-proposed';
       const next=rpDayDate(d+1).slice(5);
       const past=d<_todayD;
       const ttl=`${pNm} — pulled ${_dowNm(d)} ${ds.slice(5)}: ${cars} car${cars===1?'':'s'} (${Math.round(tP).toLocaleString()} t), at the local yard ${next}`
-        +_railPullTipLines(info,pulls.carCap,!past);
+        +_railPullTipLines(info,pulls.carCap,!past)+'\nDbl-click to reconcile the physical car count';
       if(past){
         const col=short>0?'#ff3d5a':allReal?'#00d9a3':cars>0?'#38bdf8':'var(--text-dim)';
-        return `<td title="${esc(ttl)}" style="color:${col};${allReal?'font-weight:700;':''}${tSty}">${cars>0?cars:'—'}</td>`;
+        return `<td ${dbl} title="${esc(ttl)}" style="cursor:cell;color:${col};${allReal?'font-weight:700;':''}${tSty}">${cars>0?cars:'—'}</td>`;
       }
-      return `<td class="tp-col-switch"${tSty?` style="${tSty}"`:''}><input type="number" min="0" step="1" value="${cars}" data-dest="${destFacId}" data-pid="${pid}" data-day="${d}" data-base="${cars}" title="${esc(ttl)}" onchange="_rpPullTarget(this)" class="rp-push-inp rp-pull-inp ${cls}"></td>`;
+      return `<td class="tp-col-switch" ${dbl} style="cursor:cell;${tSty||''}"><input type="number" min="0" step="1" value="${cars}" data-dest="${destFacId}" data-pid="${pid}" data-day="${d}" data-base="${cars}" title="${esc(ttl)}" onchange="_rpPullTarget(this)" class="rp-push-inp rp-pull-inp ${cls}"></td>`;
     };
     // Which origin(s) ship a product here — shown on its row.
     const _arrFrom=pid=>[...new Set(origins.filter(o=>railDpProducts(o.dp).includes(pid)).map(o=>_facName(_railDpFacId(o.dp))))];
