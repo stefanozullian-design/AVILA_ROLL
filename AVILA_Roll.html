@@ -782,6 +782,22 @@ select.pi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
 .typing-dots span:nth-child(3){animation-delay:.4s;}
 @keyframes tp{0%,60%,100%{opacity:.2;transform:scale(.8);}30%{opacity:1;transform:scale(1);}}
 .chat-typing-label{font-size:9px;color:var(--text-dim);font-style:italic;}
+.chat-msg.agent-prop{border-left-color:var(--amber);max-width:100%;}
+.agent-prop-title{font-weight:700;margin-bottom:5px;}
+.agent-prop-list{display:flex;flex-direction:column;gap:3px;margin-bottom:6px;max-height:230px;overflow-y:auto;}
+.agent-prop-line{font-size:8.5px;line-height:1.45;padding:2px 5px;background:var(--surface);border:1px solid var(--border2);}
+.agent-prop-line.del{border-left:2px solid var(--red);}
+.agent-prop-line.upd{border-left:2px solid var(--blue);}
+.agent-prop-line .dim,.agent-prop-line.dim{color:var(--text-dim);}
+.agent-prop-btns{display:flex;gap:6px;margin-top:4px;}
+.agent-prop-btns button{font-family:var(--mono);font-size:9px;padding:4px 10px;cursor:pointer;border-radius:2px;}
+.agent-prop-ok{background:var(--green);color:#000;border:none;font-weight:700;}
+.agent-prop-no{background:transparent;color:var(--text-dim);border:1px solid var(--border2);}
+.agent-prop-no:hover{color:var(--text);}
+.agent-prop-hint{font-size:8px;color:var(--text-dim);margin-top:4px;}
+.agent-prop-state{font-size:9px;color:var(--text-dim);margin-top:2px;}
+.agent-prop-state.ok{color:var(--green);}
+.agent-prop-state.bad{color:var(--red);}
 
 /* REAL DATA INPUT PANEL */
 #real-data-panel{position:fixed;right:0;top:48px;bottom:0;width:340px;background:var(--surface);border-left:1px solid var(--border);display:none;flex-direction:column;z-index:301;box-shadow:-6px 0 32px rgba(0,0,0,.45);}
@@ -10642,14 +10658,14 @@ function _renderSupplyViewInner(wrap){
                     h+=`<td class="sup-day-${mon.ym}" ${dbl} title="Not a pull day at this terminal — dbl-click to reconcile the physical car count" style="cursor:cell;border-bottom:1px solid var(--border);${tdSty(ds)}"></td>`;
                     return;
                   }
-                  const P=_pulls.prevPullDay(d), ents=[];
-                  for(let a=P+1;a<=d;a++) (_railArrAll[a]||[]).forEach(e=>{ if(!e.unmatched&&e.productId===pid) ents.push({...e,arrDay:a}); });
+                  const P=_pulls.prevPullDay(d), ents=[], ignored=[];
+                  for(let a=P+1;a<=d;a++) (_railArrAll[a]||[]).forEach(e=>{ if(e.productId===pid) (e.unmatched?ignored:ents).push({...e,arrDay:a}); });
                   const isReal=(ents.length>0&&ents.every(e=>e.status==='Real'))||!!_countRec('railyard_count',ds);
                   const col=isReal?rcReal:(t>0?rc:'rgba(179,136,255,.25)');
                   const nextDs=rpDayDate(d+1);
                   let ttl=`${pname} · ${cars} cars (${Math.round(t).toLocaleString()} t) pulled ${ds}${isReal?' · actual':' · planned'} — at the local yard and in the silo ${nextDs}`;
-                  if(ents.length) ttl+=' · reached the rail yard '+ents.map(e=>`${rpDayDate(e.arrDay).slice(5)} (${_cars(e.tonnes)})`).join(', ');
-                  ttl+=' — dbl-click to reconcile the physical car count';
+                  if(ents.length||ignored.length) ttl+='\nCars in this pull:\n'+_railArrivalSourceText([...ents,...ignored],_pulls.carCap);
+                  ttl+='\nDbl-click to reconcile the physical car count';
                   h+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''}" ${dbl} title="${esc(ttl)}" style="cursor:cell;font-size:9px;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${isReal?'700':'400'};${tdSty(ds)}">${cars>0?cars:0}</td>`; });
               });
               h+=`</tr>`;
@@ -12513,7 +12529,7 @@ function rpInv(elId,d){
 
 // ── Arrivals at a rail destination ────────────────────────────────
 function rpPlannedArrivalsForDest(destFacId,berthId,opts){
-  // Returns {day: [{tonnes,status,productId,depDay,fromFacId,unmatched}]} — what reaches this
+  // Returns {day: [{tonnes,status,productId,depDay,fromFacId,unmatched,fromDpId,rec}]} — what reaches this
   // terminal's rail yard, by arrival day. Honours the Rail Schedule's Product filter unless
   // opts.allProducts. `unmatched` marks a real dispatch whose origin facility has no rail
   // dispatch point serving this terminal — the simulation never ships those.
@@ -12527,17 +12543,18 @@ function rpPlannedArrivalsForDest(destFacId,berthId,opts){
   // switch committed with ✓ — moved inventory while showing no arrival at all, so this row
   // and the INVENTORY row above it disagreed.
   //
-  // productId is carried so the arrival total can be split per product.
+  // productId is carried so the arrival total can be split per product; fromDpId and rec (the
+  // source row itself) let tooltips name the dispatch point and the AI agent edit the record.
   const map={};
   const startDs=S.simCfg.start_date;
   if(!startDs) return map;
   const _dayOfDate=ds=>Math.round((new Date(ds+'T00:00:00')-new Date(startDs+'T00:00:00'))/864e5)+1;
   const _pidOk=pid=>opts?.allProducts||!_rp.prodId||(pid||'')===_rp.prodId;
-  const _add=(arrDay,tonnes,status,productId,depDay,fromFacId,unmatched)=>{
+  const _add=(arrDay,tonnes,status,productId,depDay,fromFacId,unmatched,fromDpId,rec)=>{
     // A 0-car push is a decision ("send nothing this switch"), not an arrival — it was
     // rendering as a phantom 0t cell on the arrival date.
     if(!arrDay||arrDay<1||!(tonnes>0)) return;
-    (map[arrDay]=map[arrDay]||[]).push({tonnes,status,productId:productId||'',depDay,fromFacId,unmatched:!!unmatched});
+    (map[arrDay]=map[arrDay]||[]).push({tonnes,status,productId:productId||'',depDay,fromFacId,unmatched:!!unmatched,fromDpId:fromDpId||null,rec});
   };
 
   // Origins feeding this terminal — they price a real dispatch (cars → tonnes) and say which
@@ -12562,7 +12579,7 @@ function rpPlannedArrivalsForDest(destFacId,berthId,opts){
       const carCap=parseFloat(o?.dp?.props?.car_capacity_t)||RAIL_CAR_T_DEFAULT;
       const transit=parseInt(o?.destCfg?.transit_days)||1;
       const dep=_dayOfDate(rr.date);
-      _add(dep+transit,(parseInt(rr.cars)||0)*carCap,'Real',rr.product_id,dep,rr.facility_id,!own);
+      _add(dep+transit,(parseInt(rr.cars)||0)*carCap,'Real',rr.product_id,dep,rr.facility_id,!own,own?.dp?.id,rr);
     });
 
   // 2) PLANNED movements — skipped where a real record already covers that origin + day.
@@ -12578,9 +12595,29 @@ function rpPlannedArrivalsForDest(destFacId,berthId,opts){
       const origFacId=_railDpFacId(getEl(rm.from_dispatch_id));
       if(_realCovers.has(`${origFacId}|${depDs}`)) return;
       const transit=parseInt(rm.transit_days)||1;
-      _add(depDay+transit,parseFloat(rm.total_capacity_t)||0,st,rm.product_id,depDay,origFacId,false);
+      _add(depDay+transit,parseFloat(rm.total_capacity_t)||0,st,rm.product_id,depDay,origFacId,false,rm.from_dispatch_id,rm);
     });
   return map;
+}
+
+// Tooltip lines for the cars behind one terminal pull: for each arrival record, how many cars,
+// from which origin and dispatch point, when they left and reached the rail yard, and whether
+// it is a real dispatch or a planned push. Records the simulation ignores (a dispatch filed
+// under a facility with no rail link to this terminal) are listed too and flagged, so a
+// misfiled or mistyped record can be traced straight from the cell. ents need arrDay.
+function _railArrivalSourceText(ents, carCap){
+  const day=d=>`${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][_rpDow(d)]} ${rpDayDate(d).slice(5)}`;
+  return ents.slice().sort((a,b)=>a.depDay-b.depDay||a.arrDay-b.arrDay).map(e=>{
+    const cars=Math.round((e.tonnes||0)/(carCap||RAIL_CAR_T_DEFAULT));
+    const fac=DB.facilities.find(f=>f.id===e.fromFacId)?.name||e.fromFacId||'?';
+    const dp=e.fromDpId?getEl(e.fromDpId)?.name:null;
+    const kind=e.status==='Real'?'real dispatch':`${String(e.status||'Planned').toLowerCase()} push`;
+    const stamp=e.rec?.updated_at||e.rec?.created_at;
+    let s=`• ${cars} car${cars===1?'':'s'} from ${fac}${dp?` (${dp})`:''} — left ${day(e.depDay)}, at the rail yard ${day(e.arrDay)} · ${kind}`;
+    if(stamp) s+=` · entered ${String(stamp).slice(0,10)}`;
+    if(e.unmatched) s+=`\n   ⚠ NOT COUNTED — ${fac} has no rail dispatch point linked to this terminal (misfiled record?)`;
+    return s;
+  }).join('\n');
 }
 
 // ── Rail terminal PULLS (rail yard → local yard) ────────────────────────────
@@ -13560,12 +13597,12 @@ function rpRender(){
     const _dowNm=d=>['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][_rpDow(d)];
     // Everything the plan says reaches the rail yard between the previous pull and pull day S.
     const _winOf=(pid,S)=>{
-      const P=pulls.prevPullDay(S), ents=[]; let simArrT=0;
+      const P=pulls.prevPullDay(S), ents=[], ignored=[]; let simArrT=0;
       for(let a=P+1;a<=S;a++){
-        (arrivals[a]||[]).forEach(e=>{ if(!e.unmatched&&e.productId===pid) ents.push({...e,arrDay:a}); });
+        (arrivals[a]||[]).forEach(e=>{ if(e.productId===pid) (e.unmatched?ignored:ents).push({...e,arrDay:a}); });
         simArrT+=pulls.arrivedT(pid,a);
       }
-      return {P,ents,simArrT};
+      return {P,ents,ignored,simArrT};
     };
     // One pull cell: value, status and tooltip for product pid on day d.
     const _pullCell=(pid,d)=>{
@@ -13573,14 +13610,14 @@ function rpRender(){
       const tSty=_tpTdSty(d);
       if(!pulls.isPullDay(d)&&!(tP>0)) return `<td${tSty?` style="${tSty}"`:''}></td>`;
       const ds=rpDayDate(d), pNm=_pName(pid);
-      const {ents,simArrT}=_winOf(pid,d);
+      const {ents,ignored,simArrT}=_winOf(pid,d);
       const planT=ents.reduce((s,e)=>s+e.tonnes,0)+(tP-simArrT); // plan + yard-count / placed adjustments
       const short=Math.max(0,_carsOf(planT)-cars);
       const allReal=ents.length>0&&ents.every(e=>e.status==='Real');
       const cls=short>0?'rp-over':allReal?'rp-real':(ents.length||cars>0)?'rp-committed':'rp-proposed';
       const next=rpDayDate(d+1).slice(5);
       let ttl=`${pNm} — pulled ${_dowNm(d)} ${ds.slice(5)}: ${cars} car${cars===1?'':'s'} (${Math.round(tP).toLocaleString()} t), at the local yard ${next}`;
-      if(ents.length) ttl+='\nReached the rail yard: '+ents.map(e=>`${rpDayDate(e.arrDay).slice(5)} ${_carsOf(e.tonnes)} from ${_facName(e.fromFacId)} (${e.status==='Real'?'real':String(e.status).toLowerCase()}, left ${rpDayDate(e.depDay).slice(5)})`).join(' · ');
+      if(ents.length||ignored.length) ttl+='\nCars in this pull:\n'+_railArrivalSourceText([...ents,...ignored],pulls.carCap);
       const adj=_carsOf(tP-simArrT);
       if(adj) ttl+=`\nYard count / placed record: ${adj>0?'+':''}${adj} cars`;
       if(short) ttl+=`\n⚠ ${short} planned car${short===1?'':'s'} not shipped — the origin is short`;
@@ -26386,13 +26423,415 @@ function agentToolCreateReport({title, subtitle, sections}={}){
   }catch(e){ return {error:'Could not generate the report: '+e.message}; }
 }
 
+// ── AGENT DATA EDITING ───────────────────────────────────
+// The agent may change planning DATA — records the planner could also edit by hand — never
+// the simulation logic, settings or topology. Every change is two steps: a finder tool
+// returns records with short refs ("r12") or leftover groups ("g3"), then
+// propose_data_changes names those refs. The proposal is drawn in the chat as a card and
+// NOTHING is touched until the user clicks Apply; an applied card keeps an Undo button.
+// Applying follows a manual edit's path: autoSave, demand caches/renders, debounced re-run.
+const AGENT_EDIT_TABLES={
+  real_rail_daily:{date:'date', label:'real rail record', note:'Actuals, by type: loading (cars loaded at an origin), dispatched (cars that left an origin for dest_facility_id — replaces that switch\'s planned pushes), yard_count (cars available at an origin switch), railyard_count / localyard_count (physical count at a terminal), placed (spotted rail yard → local yard). Deleting a row removes the actual and the plan takes over again; cars 0 records that really nothing happened.'},
+  rail_movements:{date:'departure_date', label:'rail push', note:'Planned rail shipments; status Confirmed = operator push from the Rail Schedule. To stop a push, update wagon_count to 0 (total_capacity_t follows) — DELETING a Confirmed push makes the Rail Schedule suggest the cars again. Delete only leftovers.'},
+  rail_loading_plan:{date:'date_from', label:'rail loading plan', note:'Cars/day loaded per product at a rail dispatch point. No dates = base rate; dated rows override that range.'},
+  vessel_calls:{date:'arrival_date', label:'vessel call'},
+  vessel_campaigns:{date:'start_date', label:'vessel status override'},
+  truck_movements:{date:'date', label:'truck transfer'},
+  production_campaigns:{date:'start_date', label:'production campaign', note:'product_id values starting with "__" (e.g. __down_repair__) are special downtime markers, not products.'},
+  element_maintenance_events:{date:'start_date', label:'maintenance event'},
+  demand_values:{date:'date', label:'demand value', note:'One row per demand point (element_id) per date; source actual = shipped, forecast = plan. The table is large — always filter by element_id and a date range.'},
+  real_production_daily:{date:'date', label:'real production'},
+  real_inventory_daily:{date:'date', label:'real inventory'},
+  real_transfers_daily:{date:'date', label:'real transfer'},
+  real_shipping_daily:{date:'date', label:'real shipping'},
+  real_unloading_daily:{date:'date', label:'real unloading'},
+  non_working_days:{date:'date', label:'non-working day'}
+};
+const _AGENT_EL_FIELDS=/^(element_id|dispatch_id|from_dispatch_id|to_berth_id|berth_id|silo_id|berth_element_id|to_element_id|from_element_id)$/;
+const _AGENT_QTY=['cars','wagon_count','value_t','volume_t','eod_volume_t','quantity_t','cars_per_day','rate_tpd','value','duration_days'];
+
+// Refs are handed out per object, so a record keeps its ref across lookups. They point at
+// the live object: a record replaced by a reload or re-import no longer resolves.
+const _agentRefByObj=new WeakMap(), _agentObjByRef=new Map();
+let _agentRefSeq=0;
+function _agentRef(table,obj){
+  let ref=_agentRefByObj.get(obj);
+  if(!ref){ ref='r'+(++_agentRefSeq); _agentRefByObj.set(obj,ref); }
+  _agentObjByRef.set(ref,{table,obj});
+  return ref;
+}
+function _agentIdList(field){
+  if(/facility_id$/.test(field)) return DB.facilities||[];
+  if(/product_id$/.test(field)) return DB.products||[];
+  if(_AGENT_EL_FIELDS.test(field)) return DB.elements||[];
+  if(field==='vessel_call_id') return DB.vessel_calls||[];
+  return null;
+}
+function _agentNameOf(field,id){
+  const x=(_agentIdList(field)||[]).find(o=>o.id===id);
+  return x?(x.name||id):null;
+}
+// Values a filter on `field` accepts: the value itself plus the ids of records NAMED like it
+// (exact name first, else partial), so the agent can filter facility_id by "JAX".
+function _agentMatchVals(field,v){
+  if(v==null) return [''];
+  const s=String(v), list=_agentIdList(field);
+  if(!list) return [s];
+  const q=s.toLowerCase();
+  const exact=list.filter(o=>o.id===s||String(o.name||'').toLowerCase()===q);
+  const hits=exact.length?exact:list.filter(o=>String(o.name||'').toLowerCase().includes(q));
+  return [s,...hits.map(o=>o.id)];
+}
+function _agentFindFacility(q){
+  if(!q) return null;
+  const s=String(q).toLowerCase();
+  return DB.facilities.find(f=>f.id===q||String(f.name).toLowerCase()===s)
+    ||DB.facilities.find(f=>String(f.name).toLowerCase().includes(s))||null;
+}
+function _agentRowView(table,obj){
+  const out={ref:_agentRef(table,obj)};
+  for(const k in obj){
+    if(k==='created_at') continue;
+    const v=obj[k]; out[k]=v;
+    if(typeof v==='string'&&v&&!v.startsWith('__')&&_agentIdList(k)){
+      const n=_agentNameOf(k,v);
+      if(n!==v) out[k.replace(/_id$/,'')+'_name']=n==null?'(deleted)':n;
+    }
+  }
+  return out;
+}
+// One readable line for a record: date · origin → dest · element · product · type · qty.
+function _agentDescribe(table,obj){
+  const cfg=AGENT_EDIT_TABLES[table]||{};
+  const nm=k=>{ const v=obj[k]; if(v==null||v==='') return null; const n=_agentNameOf(k,v); return n||(String(v).startsWith('__')?v:`${v} (deleted)`); };
+  const parts=[];
+  if(obj[cfg.date]) parts.push(obj[cfg.date]);
+  const from=nm('from_facility_id')||nm('origin_facility_id')||nm('facility_id');
+  const to=nm('to_facility_id')||nm('dest_facility_id');
+  if(from&&to) parts.push(`${from} → ${to}`); else if(from||to) parts.push(from||to);
+  ['element_id','dispatch_id','from_dispatch_id','berth_id','silo_id','berth_element_id'].forEach(k=>{ const n=nm(k); if(n) parts.push(n); });
+  const pn=nm('product_id'); if(pn) parts.push(pn);
+  if(obj.name) parts.push(obj.name);
+  if(obj.type) parts.push(obj.type);
+  if(obj.status) parts.push(obj.status);
+  const q=_AGENT_QTY.find(k=>obj[k]!=null&&obj[k]!=='');
+  if(q) parts.push(`${q.replace(/_/g,' ')} ${obj[q]}`);
+  return parts.map(x=>esc(String(x))).join(' · ');
+}
+
+function agentToolFindRecords({table, filters, date_from, date_to, limit}={}){
+  const cfg=AGENT_EDIT_TABLES[table];
+  if(!cfg) return {error:`"${table}" is not an editable table. Editable: ${Object.keys(AGENT_EDIT_TABLES).join(', ')}.`};
+  let rows=DB[table]||[];
+  Object.entries(filters||{}).forEach(([f,v])=>{
+    const ok=new Set((Array.isArray(v)?v:[v]).flatMap(x=>_agentMatchVals(f,x)));
+    rows=rows.filter(r=>ok.has(String(r[f]??'')));
+  });
+  const df=cfg.date;
+  if(date_from) rows=rows.filter(r=>String(r[df]||'')>=date_from);
+  if(date_to) rows=rows.filter(r=>String(r[df]||'')<=date_to);
+  rows=rows.slice().sort((a,b)=>String(a[df]||'').localeCompare(String(b[df]||'')));
+  const lim=Math.min(Math.max(parseInt(limit)||50,1),200);
+  const out={table, matched:rows.length, returned:Math.min(lim,rows.length), date_field:df, note:cfg.note,
+    records:rows.slice(0,lim).map(r=>_agentRowView(table,r))};
+  if(!rows.length&&(DB[table]||[]).length) out.fields_on_this_table=Object.keys(DB[table][0]);
+  return out;
+}
+
+// The records behind the rail cars a terminal shows on a date. The Rail Schedule and the
+// Supply page date a terminal's receipts by its PULL day (every car reaching the rail yard
+// after the previous pull day), so a pull-day date gathers that whole arrival window.
+function agentToolFindRailArrivals({terminal, date, product}={}){
+  if(!S.simCfg?.start_date) return {error:'No simulation start date is set.'};
+  const fac=_agentFindFacility(terminal);
+  if(!fac) return {error:`No facility matching "${terminal}".`};
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(date||'')) return {error:'date must be YYYY-MM-DD.'};
+  const tp=railTerminalPulls(fac.id);
+  if(!tp.berths.length) return {error:`${fac.name} has no rail receiving berth.`};
+  const d=Math.round((new Date(date+'T00:00:00')-new Date(S.simCfg.start_date+'T00:00:00'))/864e5)+1;
+  const pullDay=tp.isPullDay(d);
+  const from=pullDay?tp.prevPullDay(d)+1:d;
+  const pids=product?new Set(_agentMatchVals('product_id',product)):null;
+  const arr=rpPlannedArrivalsForDest(fac.id,null,{allProducts:true});
+  const fName=id=>DB.facilities.find(f=>f.id===id)?.name||id;
+  const sources=[];
+  for(let a=from;a<=d;a++) (arr[a]||[]).forEach(e=>{
+    if(!e.rec||(pids&&!pids.has(e.productId))) return;
+    const real=e.status==='Real', table=real?'real_rail_daily':'rail_movements';
+    sources.push({ref:_agentRef(table,e.rec), table,
+      kind:real?'real dispatch':`planned push (${e.status})`,
+      origin:fName(e.fromFacId), product:_agentProdName(e.productId),
+      departure_date:rpDayDate(e.depDay), reaches_rail_yard:rpDayDate(a),
+      cars:parseInt(real?e.rec.cars:e.rec.wagon_count)||0, tonnes:Math.round(e.tonnes),
+      leftover:e.unmatched||undefined,
+      how_to_remove:e.unmatched?'Leftover: the origin has no rail dispatch point serving this terminal, so the simulation already ignores it — delete the record.'
+        :real?'Delete to drop the recorded actual (that switch\'s planned pushes then count again), or update cars to 0 if the switch really sent nothing.'
+        :'Update wagon_count to 0. Do not delete — a deleted push is suggested again on the Rail Schedule.'});
+  });
+  const yard=(DB.real_rail_daily||[]).filter(rr=>rr.facility_id===fac.id&&rr.date===date
+      &&['railyard_count','localyard_count','placed'].includes(rr.type)&&(!pids||pids.has(rr.product_id)))
+    .map(rr=>({ref:_agentRef('real_rail_daily',rr), type:rr.type, product:_agentProdName(rr.product_id), cars:rr.cars}));
+  const out={terminal:fac.name, date, is_pull_day:pullDay,
+    arrivals_counted:`${rpDayDate(from)} … ${date}`, sources,
+    physical_count_records_on_date:yard.length?yard:undefined};
+  if(tp.hasSim){
+    const t=pids?[...pids].reduce((s,pid)=>s+tp.pulledT(pid,d),0):tp.pulledT(null,d);
+    out.simulated_cars_pulled_that_day=Math.round(t/tp.carCap);
+  }
+  if(!pullDay){
+    let nx=null; for(let x=d+1;x<=d+7;x++) if(tp.isPullDay(x)){ nx=x; break; }
+    out.note=`${date} is not a pull day for ${fac.name}; only cars reaching the rail yard that day are listed. The schedule shows them on the next pull day${nx?` (${rpDayDate(nx)})`:''}.`;
+  }
+  if(!sources.length&&!yard.length) out.note=(out.note?out.note+' ':'')+'No arrival records found in that window.';
+  return out;
+}
+
+// Leftover scan: records whose references no longer exist, and rail records the simulation
+// ignores because they were filed under the wrong facility. Grouped so a stale block can be
+// removed in one proposal (delete_groups) — the group list is replaced on every scan.
+const _agentGroups=new Map();
+let _agentGroupSeq=0;
+function agentToolFindLeftovers({table, max_groups}={}){
+  if(table&&!AGENT_EDIT_TABLES[table]) return {error:`"${table}" is not an editable table.`};
+  _agentGroups.clear();
+  const sets={facility:new Set(DB.facilities.map(f=>f.id)), element:new Set(DB.elements.map(e=>e.id)),
+    product:new Set((DB.products||[]).map(p=>p.id)), 'vessel call':new Set((DB.vessel_calls||[]).map(v=>v.id))};
+  const refKind=k=>/facility_id$/.test(k)?'facility':/product_id$/.test(k)?'product':_AGENT_EL_FIELDS.test(k)?'element':k==='vessel_call_id'?'vessel call':null;
+  const fName=id=>DB.facilities.find(f=>f.id===id)?.name||id;
+  const canvas=new Set(getFacElements().map(e=>e.id));
+  const railDpFacs=new Set(DB.elements.filter(e=>e.type==='dispatch_point'&&e.props?.dispatch_type==='Rail').map(_railDpFacId));
+  const originsCache={}; const originsOf=fid=>originsCache[fid]||(originsCache[fid]=rpGetOriginsForDest(fid));
+  const groups=new Map();
+  const add=(t,key,reason,obj)=>{ const k=t+'|'+key; let g=groups.get(k); if(!g){ g={table:t,reason,objs:[]}; groups.set(k,g); } g.objs.push(obj); };
+  (table?[table]:Object.keys(AGENT_EDIT_TABLES)).forEach(t=>{
+    (DB[t]||[]).forEach(r=>{
+      for(const k in r){
+        const v=r[k], kind=refKind(k);
+        if(!kind||typeof v!=='string'||!v||v.startsWith('__')) continue;
+        if(!sets[kind].has(v)){ add(t,`${k}=${v}`,`${k} points to ${kind==='element'?'an':'a'} ${kind} ("${v}") that no longer exists`,r); return; }
+      }
+      if(t==='real_rail_daily'){
+        if(r.type==='dispatched'&&r.dest_facility_id&&!originsOf(r.dest_facility_id).some(o=>_railDpFacId(o.dp)===r.facility_id))
+          return add(t,`disp|${r.facility_id}|${r.dest_facility_id}`,`"dispatched" rows filed under ${fName(r.facility_id)} → ${fName(r.dest_facility_id)}, but ${fName(r.facility_id)} has no rail dispatch point connected to ${fName(r.dest_facility_id)} — the simulation ignores them`,r);
+        if(r.type==='yard_count'&&r.dispatch_id){
+          const dp=getEl(r.dispatch_id);
+          if(dp&&_railDpFacId(dp)!==r.facility_id)
+            return add(t,`yc|${r.facility_id}|${dp.id}`,`"yard_count" rows filed under ${fName(r.facility_id)}, but dispatch point ${dp.name} belongs to ${fName(_railDpFacId(dp))} — the simulation ignores them`,r);
+        }
+        if(r.type==='loading'&&!railDpFacs.has(r.facility_id))
+          return add(t,`load|${r.facility_id}`,`"loading" rows for ${fName(r.facility_id)}, which has no rail dispatch point — the simulation ignores them`,r);
+      }
+      if(t==='rail_movements'&&canvas.has(r.from_dispatch_id)&&r.to_facility_id
+        &&!originsOf(r.to_facility_id).some(o=>o.dp.id===r.from_dispatch_id))
+        add(t,`nolink|${r.from_dispatch_id}|${r.to_facility_id}`,`rail pushes from ${getEl(r.from_dispatch_id)?.name} to ${fName(r.to_facility_id)}, but that dispatch point is not connected to a rail berth at ${fName(r.to_facility_id)}`,r);
+    });
+  });
+  const list=[...groups.values()].sort((a,b)=>b.objs.length-a.objs.length);
+  const cap=Math.min(Math.max(parseInt(max_groups)||40,1),80);
+  return {
+    groups_found:list.length, records_found:list.reduce((s,g)=>s+g.objs.length,0),
+    groups:list.slice(0,cap).map(g=>{
+      g.id='g'+(++_agentGroupSeq); _agentGroups.set(g.id,g);
+      const df=AGENT_EDIT_TABLES[g.table].date, ds=g.objs.map(o=>o[df]).filter(Boolean).sort();
+      return {group:g.id, table:g.table, reason:g.reason, count:g.objs.length,
+        date_range:ds.length?`${ds[0]} … ${ds[ds.length-1]}`:undefined,
+        records:g.objs.length<=12?g.objs.map(o=>_agentRowView(g.table,o)):undefined,
+        sample:g.objs.length>12?g.objs.slice(0,2).map(o=>_agentRowView(g.table,o)):undefined};
+    }),
+    note:'These are suspicions based on the current topology, not certainties. Tell the user what you found (reason, count, date range) and propose deleting only what they asked about — delete_groups removes a whole group, refs remove single records.'
+  };
+}
+
+// ── Proposal card ──
+const _agentProposals={};
+let _agentPropSeq=0;
+let _chatTurnApplied=[];     // summaries applied during the running reply (see sendChat's catch)
+let _chatPendingNotes=[];    // app events the agent hasn't heard about yet, e.g. an Undo click
+function _agentPendingProposal(){ return Object.values(_agentProposals).find(p=>p.state==='pending')||null; }
+
+async function agentToolProposeChanges({summary, changes, delete_groups}={}){
+  if(_agentPendingProposal()) return {error:'Another proposal is still waiting for the user.'};
+  const live={}, isLive=(t,o)=>(live[t]||(live[t]=new Set(DB[t]||[]))).has(o);
+  const errors=[], resolved=[], lines=[], seen=new Set();
+  let gone=0;
+  const now=new Date().toISOString();
+  (delete_groups||[]).forEach(gid=>{
+    const g=_agentGroups.get(gid);
+    if(!g){ errors.push(`${gid}: unknown group — run find_leftover_records again`); return; }
+    const objs=g.objs.filter(o=>isLive(g.table,o)&&!seen.has(o));
+    gone+=g.objs.length-objs.length;
+    objs.forEach(o=>{ seen.add(o); resolved.push({table:g.table,obj:o,action:'delete'}); });
+    const df=AGENT_EDIT_TABLES[g.table].date, ds=objs.map(o=>o[df]).filter(Boolean).sort();
+    if(objs.length) lines.push(`<div class="agent-prop-line del">✕ delete ${objs.length} × ${esc(AGENT_EDIT_TABLES[g.table].label)} — ${esc(g.reason)}${ds.length?` <span class="dim">(${esc(ds[0])} … ${esc(ds[ds.length-1])})</span>`:''}</div>`);
+  });
+  (changes||[]).forEach((c,i)=>{
+    const hit=_agentObjByRef.get(c?.ref);
+    if(!hit){ errors.push(`${c?.ref||'change #'+(i+1)}: unknown ref — look the record up first`); return; }
+    if(seen.has(hit.obj)){ errors.push(`${c.ref}: listed more than once`); return; }
+    if(!isLive(hit.table,hit.obj)){ errors.push(`${c.ref}: record no longer exists (edited or reloaded) — look it up again`); return; }
+    const label=esc(AGENT_EDIT_TABLES[hit.table].label);
+    if(c.action==='delete'){
+      seen.add(hit.obj); resolved.push({table:hit.table,obj:hit.obj,action:'delete'});
+      lines.push(`<div class="agent-prop-line del">✕ delete ${label} · ${_agentDescribe(hit.table,hit.obj)}</div>`);
+      return;
+    }
+    if(c.action!=='update'){ errors.push(`${c.ref}: action must be "delete" or "update"`); return; }
+    const set={};
+    for(const [k,raw] of Object.entries(c.set||{})){
+      if(k==='id'){ errors.push(`${c.ref}: id cannot be changed`); continue; }
+      if(!(k in hit.obj)){ errors.push(`${c.ref}: field "${k}" does not exist on this record`); continue; }
+      const old=hit.obj[k];
+      let v=raw;
+      if(old!=null&&typeof old==='object'){ errors.push(`${c.ref}: "${k}" is a nested value — change it in the app`); continue; }
+      if(typeof old==='number'){ v=Number(raw); if(raw===''||raw==null||!isFinite(v)){ errors.push(`${c.ref}: "${k}" needs a number`); continue; } }
+      else if(typeof old==='boolean') v=(raw===true||raw==='true');
+      else if(typeof raw==='string'&&raw&&_agentIdList(k)){
+        const ids=[...new Set(_agentMatchVals(k,raw).slice(1))];
+        if(ids.length!==1){ errors.push(`${c.ref}: "${raw}" does not name exactly one ${k.replace(/_id$/,'')}`); continue; }
+        v=ids[0];
+      }
+      set[k]=v;
+    }
+    if(!Object.keys(set).length){ if(!errors.some(e=>e.startsWith(c.ref+':'))) errors.push(`${c.ref}: nothing to update`); return; }
+    // total_capacity_t is what the simulation ships — keep it in step with the car count.
+    if(hit.table==='rail_movements'&&'wagon_count' in set&&!('total_capacity_t' in set))
+      set.total_capacity_t=set.wagon_count*(parseFloat(hit.obj.wagon_capacity_t)||RAIL_CAR_T_DEFAULT);
+    if('updated_at' in hit.obj) set.updated_at=now;
+    seen.add(hit.obj); resolved.push({table:hit.table,obj:hit.obj,action:'update',set});
+    const show=v=>{ const s=v==null||v===''?'—':String(v); return esc(s); };
+    const diffs=Object.entries(set).filter(([k])=>k!=='updated_at').map(([k,v])=>{
+      const on=_agentIdList(k)?(_agentNameOf(k,hit.obj[k])||hit.obj[k]):hit.obj[k];
+      const nn=_agentIdList(k)?(_agentNameOf(k,v)||v):v;
+      return `${esc(k)}: <span class="dim">${show(on)}</span> → <b>${show(nn)}</b>`;
+    }).join(' · ');
+    lines.push(`<div class="agent-prop-line upd">✎ ${label} · ${_agentDescribe(hit.table,hit.obj)}<br>${diffs}</div>`);
+  });
+  if(errors.length) return {error:'Proposal not shown to the user — fix these first.', problems:errors.slice(0,25)};
+  if(!resolved.length) return {error:gone?'Those records no longer exist — nothing to change.':'No changes given. Pass changes:[{ref, action, set}] and/or delete_groups:[group ids].'};
+
+  const p={id:'prop'+(++_agentPropSeq), summary:String(summary||'Data change'), changes:resolved, lines, total:resolved.length, state:'pending'};
+  _agentProposals[p.id]=p;
+  hideTyping();
+  _agentRenderProposal(p);
+  showTyping('waiting for you to Apply or Cancel…');
+  await new Promise(res=>{ p.resolve=res; });
+  if(p.state==='applied') return {applied:true, records_changed:p.appliedCount, records_no_longer_there:p.skipped||undefined,
+    note:'Applied and saved; the simulation is re-running, so the pages update in a moment. The card keeps an Undo button.'};
+  if(p.state==='failed') return {applied:false, error:`Applying failed and was rolled back: ${p.error}`};
+  return {applied:false, cancelled:true, user_reply:p.reply||undefined,
+    note:p.reply?'The user typed a reply instead of clicking Apply — the proposal was cancelled and nothing changed. Respond to what they said.'
+      :'The user clicked Cancel — nothing was changed.'};
+}
+
+function _agentDecide(id, ok, reply){
+  const p=_agentProposals[id];
+  if(!p||p.state!=='pending') return;
+  if(ok) _agentApplyProposal(p);
+  else { p.state='cancelled'; p.reply=reply||null; }
+  _agentRenderProposal(p);
+  const r=p.resolve; p.resolve=null; if(r) r();
+}
+
+function _agentApplyProposal(p){
+  const inverse=[], touched=new Set();
+  let applied=0, skipped=0;
+  try{
+    const live={}, isLive=(t,o)=>(live[t]||(live[t]=new Set(DB[t]||[]))).has(o);
+    p.changes.filter(c=>c.action==='update').forEach(c=>{
+      if(!isLive(c.table,c.obj)){ skipped++; return; }
+      const old={};
+      Object.keys(c.set).forEach(k=>{ old[k]=Object.prototype.hasOwnProperty.call(c.obj,k)?c.obj[k]:undefined; });
+      inverse.push({kind:'update',table:c.table,obj:c.obj,old});
+      Object.assign(c.obj,c.set);
+      touched.add(c.table); applied++;
+    });
+    // Deletes: one filter pass per table (demand_values runs to tens of thousands of rows),
+    // remembering each removed row's position so Undo can put it back in order.
+    const del={};
+    p.changes.filter(c=>c.action==='delete').forEach(c=>{ (del[c.table]=del[c.table]||new Set()).add(c.obj); });
+    Object.entries(del).forEach(([t,objs])=>{
+      const removed=[], keep=[];
+      (DB[t]||[]).forEach((r,i)=>{ if(objs.has(r)) removed.push({obj:r,idx:i}); else keep.push(r); });
+      skipped+=objs.size-removed.length;
+      if(!removed.length) return;
+      inverse.push({kind:'delete',table:t,removed});
+      DB[t]=keep;
+      touched.add(t); applied+=removed.length;
+    });
+  }catch(e){
+    _agentRevert(inverse);
+    p.state='failed'; p.error=e.message;
+    return;
+  }
+  p.inverse=inverse; p.appliedCount=applied; p.skipped=skipped; p.state='applied';
+  _chatTurnApplied.push(p.summary);
+  _agentAfterDataEdit(touched);
+  statMsg(`AI change applied (${applied} record${applied===1?'':'s'}) — running simulation…`);
+}
+
+function _agentRevert(inverse){
+  const touched=new Set();
+  inverse.slice().reverse().forEach(inv=>{
+    const arr=DB[inv.table]||(DB[inv.table]=[]);
+    touched.add(inv.table);
+    if(inv.kind==='delete'){
+      const present=new Set(arr);
+      inv.removed.forEach(({obj,idx})=>{ if(!present.has(obj)) arr.splice(Math.min(idx,arr.length),0,obj); });
+    } else if(arr.includes(inv.obj)){
+      Object.entries(inv.old).forEach(([k,v])=>{ if(v===undefined) delete inv.obj[k]; else inv.obj[k]=v; });
+    }
+  });
+  return touched;
+}
+
+function _agentUndo(id){
+  const p=_agentProposals[id];
+  if(!p||p.state!=='applied') return;
+  const touched=_agentRevert(p.inverse||[]);
+  p.state='undone';
+  _agentRenderProposal(p);
+  _agentAfterDataEdit(touched);
+  _chatPendingNotes.push(`[App note: the user clicked Undo on your change "${p.summary}" — it was reverted and those records are back as they were.]`);
+  statMsg('AI change undone — running simulation…');
+}
+
+// Same aftermath as a manual edit: persist, refresh whatever shows the data, re-run.
+// The simulation's completion re-renders the Supply page and the logistics planners.
+function _agentAfterDataEdit(touched){
+  autoSave();
+  if(touched.has('demand_values')) _demandChanged(false);
+  else _demandCacheInvalidate();
+  if(S.view==='schedules'){ try{ renderVesselTable(); renderRailTable(); renderTruckTable(); renderMaintenanceCalendar(); }catch(e){} }
+  if(S.facility_id) scheduleSimulation();
+}
+
+function _agentRenderProposal(p){
+  const msgs=document.getElementById('chat-msgs');
+  if(!msgs) return;
+  let el=document.getElementById('agent-prop-'+p.id);
+  if(!el){ el=document.createElement('div'); el.id='agent-prop-'+p.id; el.className='chat-msg agent agent-prop'; msgs.appendChild(el); }
+  const shown=p.lines.slice(0,30), more=p.lines.length-shown.length;
+  let foot;
+  if(p.state==='pending') foot=`<div class="agent-prop-btns"><button class="agent-prop-ok" onclick="_agentDecide('${p.id}',true)">✓ Apply ${p.total} change${p.total===1?'':'s'}</button><button class="agent-prop-no" onclick="_agentDecide('${p.id}',false)">Cancel</button></div><div class="agent-prop-hint">Nothing changes until you click Apply.</div>`;
+  else if(p.state==='applied') foot=`<div class="agent-prop-state ok">✓ Applied ${p.appliedCount} change${p.appliedCount===1?'':'s'}${p.skipped?` · ${p.skipped} no longer existed`:''} — saved, simulation re-running</div><div class="agent-prop-btns"><button class="agent-prop-no" onclick="_agentUndo('${p.id}')">↶ Undo</button></div>`;
+  else if(p.state==='undone') foot=`<div class="agent-prop-state">↶ Undone — records restored</div>`;
+  else if(p.state==='failed') foot=`<div class="agent-prop-state bad">✕ Failed and rolled back: ${esc(p.error)}</div>`;
+  else foot=`<div class="agent-prop-state">Cancelled — nothing changed</div>`;
+  el.innerHTML=`<div class="chat-msg-lbl">Agent · proposed data change</div><div class="agent-prop-title">${esc(p.summary)}</div><div class="agent-prop-list">${shown.join('')}${more>0?`<div class="agent-prop-line dim">+ ${more} more</div>`:''}</div>${foot}`;
+  msgs.scrollTop=msgs.scrollHeight;
+}
+
 const AGENT_TOOL_FNS={
   get_stop_events: agentToolGetStopEvents,
   get_inventory_on_date: agentToolGetInventoryOnDate,
   run_whatif_simulation: agentToolRunWhatif,
   get_production_model: agentToolGetProductionModel,
   find_max_demand: agentToolFindMaxDemand,
-  create_report: agentToolCreateReport
+  create_report: agentToolCreateReport,
+  find_records: agentToolFindRecords,
+  find_rail_arrivals: agentToolFindRailArrivals,
+  find_leftover_records: agentToolFindLeftovers,
+  propose_data_changes: agentToolProposeChanges
 };
 
 const AGENT_TOOLS=[
@@ -26451,19 +26890,70 @@ const AGENT_TOOLS=[
         table:{type:'object',description:'Optional table.',properties:{headers:{type:'array',items:{type:'string'}},rows:{type:'array',items:{type:'array',items:{type:'string'}}}}}
       },required:['heading']}}
     },required:['title','sections']}
+  },
+  {
+    name:'find_records',
+    description:'Look up editable planning-data records so they can be changed with propose_data_changes. Each record comes back with a ref (e.g. "r12"), its fields, and a readable *_name next to every id field. Filters match field values exactly; id fields (facility_id, dest_facility_id, product_id, element_id, dispatch_id, …) also accept a NAME such as "JAX". The result carries table-specific notes on how its records should be changed. Read-only.',
+    input_schema:{type:'object',properties:{
+      table:{type:'string',enum:Object.keys(AGENT_EDIT_TABLES)},
+      filters:{type:'object',description:'Optional exact-match filters, field → value or array of values, e.g. {"type":"dispatched","facility_id":"JAX"}.'},
+      date_from:{type:'string',description:'Optional YYYY-MM-DD (inclusive) on the table\'s main date field.'},
+      date_to:{type:'string',description:'Optional YYYY-MM-DD (inclusive).'},
+      limit:{type:'integer',description:'Max records returned. Default 50, max 200.'}
+    },required:['table']}
+  },
+  {
+    name:'find_rail_arrivals',
+    description:'Find the records behind the rail cars a terminal shows on a date. Terminals show received cars on their PULL (switch) day — every car that reached the rail yard since the previous pull day — so this returns each contributing planned push or real dispatch with a ref, origin, departure date, cars and how_to_remove, plus physical-count records on that date and the simulated cars pulled. Use it when the user wants to remove or change rail cars arriving at a terminal. Read-only.',
+    input_schema:{type:'object',properties:{
+      terminal:{type:'string',description:'Terminal facility name, e.g. "JAX".'},
+      date:{type:'string',description:'YYYY-MM-DD — the day the cars show at the terminal.'},
+      product:{type:'string',description:'Optional product name or id.'}
+    },required:['terminal','date']}
+  },
+  {
+    name:'find_leftover_records',
+    description:'Scan editable tables for leftover records: references to deleted facilities/elements/products, real rail records filed under the wrong facility (the simulation ignores them), and rail pushes between a dispatch point and a terminal that are not connected. Returns groups (id like "g3") with reason, count, date range and records or a sample with refs. Use when the user asks to clean up stale, leftover or phantom values. Read-only.',
+    input_schema:{type:'object',properties:{
+      table:{type:'string',enum:Object.keys(AGENT_EDIT_TABLES),description:'Optional — scan only this table.'},
+      max_groups:{type:'integer',description:'Optional. Default 40, max 80.'}
+    }}
+  },
+  {
+    name:'propose_data_changes',
+    description:'Propose deleting or updating records found with find_records / find_rail_arrivals / find_leftover_records. The app shows the user an Apply / Cancel card and WAITS for their click: nothing changes unless the result has applied:true. Applied changes are saved, the simulation re-runs, and the card keeps an Undo button. Updates may only set fields the record already has (never id); id fields accept a name. Creating new records is not supported — send the user to the app for that.',
+    input_schema:{type:'object',properties:{
+      summary:{type:'string',description:'One line shown as the card title, e.g. "Remove the 10 cars BRS → JAX pulled 2026-09-22".'},
+      changes:{type:'array',description:'Individual record changes.',items:{type:'object',properties:{
+        ref:{type:'string',description:'Record ref, e.g. "r12".'},
+        action:{type:'string',enum:['delete','update']},
+        set:{type:'object',description:'For update: field → new value, e.g. {"wagon_count":0}.'}
+      },required:['ref','action']}},
+      delete_groups:{type:'array',items:{type:'string'},description:'Leftover group ids from find_leftover_records to delete whole.'}
+    },required:['summary']}
   }
 ];
 
+let _chatBusy=false;
 async function sendChat(){
   const inp=document.getElementById('chat-in');
   const msg=inp.value.trim(); if(!msg) return;
+  // Typing while a proposed data change waits counts as "not that": the card is cancelled
+  // and the text goes back to the agent inside the reply that is already running.
+  const pendingProp=_agentPendingProposal();
+  if(pendingProp){ inp.value=''; addMsg('user',msg); _agentDecide(pendingProp.id,false,msg); return; }
+  // One reply at a time — a second loop would interleave its messages into chatHistory.
+  if(_chatBusy){ statMsg('The AI agent is still answering — send again when it is done.'); return; }
   const apiKey=getApiKey();
   if(!apiKey){addMsg('agent','No API key set — click "Configure in Settings" below.');return;}
   inp.value=''; addMsg('user',msg);
   const historySnapshot=JSON.stringify(chatHistory);
   const turnsSnapshot=JSON.stringify(chatTurnStarts);
+  const notes=_chatPendingNotes; _chatPendingNotes=[];
+  _chatTurnApplied=[];
   chatTurnStarts.push(chatHistory.length);
-  chatHistory.push({role:'user',content:msg});
+  chatHistory.push({role:'user',content:notes.length?notes.join('\n')+'\n\n'+msg:msg});
+  _chatBusy=true;
   showTyping();
   try{
     const ctx=buildCtx();
@@ -26474,6 +26964,8 @@ You have tools to look up real simulation results and to try sandboxed "what if"
 
 For capacity / bottleneck questions ("where's the constraint", "which mill limits X", "how much headroom"), call get_production_model first — it hands you every mill's per-product rate, which mills can make each product (a single-mill product is usually the bottleneck), clinker factors, and demand by product, so you can reason about it. For "how much of product X can we supply before we stock out of something else" questions, call find_max_demand with that demand point — it binary-searches real sandbox sims and returns the max annual tonnage plus which product breaks first; report those, and note it holds production & maintenance as-is and saved nothing. When the user asks for a document/report/write-up, do the analysis, then call create_report with clear sections (and tables where useful) to download it for them.
 
+You can also change planning DATA when the user asks — records they could edit by hand (rail pushes and real rail records, vessel calls, campaigns, maintenance, demand values, real production/inventory…) — never the simulation logic, settings or topology. Always two steps. First find the exact records: find_rail_arrivals for cars shown arriving or pulled at a terminal on a date, find_leftover_records for stale / leftover / phantom values, find_records for anything else; every record comes with a ref like "r12". Then call propose_data_changes with those refs: the app shows the user an Apply / Cancel card and waits. Nothing is changed unless that result says applied:true — never say you changed something otherwise, and don't ask "shall I?" in text first, the card is the confirmation. Follow the how_to_remove and note hints (a Confirmed rail push is set to 0 cars, not deleted). Change exactly what was asked; if what you find doesn't clearly match the request (different numbers, several candidates, nothing found), say what you found and ask instead of proposing. If the user types a reply instead of clicking, the card is cancelled and their reply comes back in the tool result.
+
 What you're working with:
 Database tables: macro_regions, countries, regions, sub_regions, facilities, elements, connections, products, recipes, raw_materials, fuels, element_maintenance_events, element_product_capacities, vessel_calls, rail_movements, truck_movements, transport_links, in_transit_inventory, demand_points, simulation_runs, simulation_stop_events. Element types: raw_material_storage, fuel_storage, bulk_silo (replaces clinker_silo/cement_silo/homo_silo — color by product category), packed_silo, raw_meal_mill, kiln, finish_mill, packing_plant, berth, dispatch_point (truck=no constraint same-day; rail=car accumulation with switch days and transit lag), demand_point, supply_source. Products have category: clinker, raw_meal, cement_bulk, cement_packed, additive. Kiln product capacities include capacity_tpd, specific_heat_kcal_kg, raw_meal_ratio per clinker product. Rail dispatch points have: car_capacity_t, std_loading_cars_day, max_loading_cars_day, working_days, switch_days (array of 0-6 Mon-Sun), transit_days.
 
@@ -26482,7 +26974,7 @@ Current state: ${ctx}
 You're mid-conversation with this person — earlier turns are included below, so use them; don't ask them to repeat context they already gave you.`;
 
     let rounds=0, finalText=null;
-    while(rounds<6){
+    while(rounds<8){
       rounds++;
       const data=await callClaude({model,maxTokens:1200,system,messages:chatHistory,tools:AGENT_TOOLS});
       if(data.error) throw new Error(data.error.message);
@@ -26503,6 +26995,7 @@ You're mid-conversation with this person — earlier turns are included below, s
         results.push({type:'tool_result', tool_use_id:tu.id, content:JSON.stringify(out)});
       }
       chatHistory.push({role:'user', content:results});
+      showTyping();
     }
     hideTyping();
     addMsg('agent', finalText || 'Ran out of steps on that one — try breaking it into a smaller question.');
@@ -26517,12 +27010,19 @@ You're mid-conversation with this person — earlier turns are included below, s
     addMsg('agent',`Error: ${e.message}`);
     chatHistory=JSON.parse(historySnapshot);
     chatTurnStarts=JSON.parse(turnsSnapshot);
+    // The rolled-back history no longer mentions this turn — don't let the agent believe a
+    // change it applied (or a note it was just given) never happened.
+    _chatPendingNotes=notes.concat(
+      _chatTurnApplied.map(s=>`[App note: your change "${s}" was applied during a reply that then failed — it IS in the data now.]`),
+      _chatPendingNotes);
+  }finally{
+    _chatBusy=false;
   }
 }
 
 function buildCtx(){
   const fac=getFacility();
-  let c=`Organization: ${DB.macro_regions.length} macro_regions, ${DB.countries.length} countries, ${DB.facilities.length} facilities. `;
+  let c=`Today: ${new Date()._ymd()}. Simulation start: ${S.simCfg?.start_date||'not set'}. Organization: ${DB.macro_regions.length} macro_regions, ${DB.countries.length} countries, ${DB.facilities.length} facilities. `;
   if(fac) c+=`Active facility: ${esc(fac.name)} (${fac.type}), path: ${getFullPath(fac)}. Elements: ${getFacElements().length}, Connections: ${getFacConnections().length}. `;
   c+=`Products: ${DB.products.map(p=>p.name).join(', ')}. `;
   c+=`Maintenance events: ${DB.element_maintenance_events.length}. Vessel calls: ${DB.vessel_calls.length}. Rail movements: ${DB.rail_movements.length}. Truck movements: ${DB.truck_movements.length}. `;
@@ -26540,6 +27040,7 @@ function addMsg(role,text){
 
 let typingEl=null;
 function showTyping(label){
+  hideTyping(); // one indicator at a time — a second call used to leave the first one behind
   const msgs=document.getElementById('chat-msgs');
   typingEl=document.createElement('div');
   typingEl.className='chat-msg agent';
