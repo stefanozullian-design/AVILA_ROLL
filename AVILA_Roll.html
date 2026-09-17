@@ -1692,7 +1692,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
             <div id="rp-legacy-wrap" style="display:none;margin-top:8px">
               <table class="sched-table"><thead><tr>
                 <th>Reference</th><th>Departure Date</th><th>From</th><th>To</th>
-                <th>Wagons</th><th>Total (t)</th><th>Product</th><th>Transit Days</th><th>Status</th><th></th>
+                <th>Wagons</th><th>Total (t)</th><th>Product</th><th>Transit Days</th><th>Min Load</th><th>Status</th><th></th>
               </tr></thead><tbody id="rail-tbody"></tbody></table>
             </div>
           </div>
@@ -5117,8 +5117,8 @@ function _termBerthForProduct(facId,pid){
 // Infer the dominant origin facility shipping this product to the terminal (for real_transfers_daily).
 function _termOriginForProduct(facId,pid){
   const c={};
-  (DB.rail_movements||[]).filter(rm=>rm.to_facility_id===facId&&rm.product_id===pid&&rm.from_facility_id)
-    .forEach(rm=>{ c[rm.from_facility_id]=(c[rm.from_facility_id]||0)+1; });
+  (DB.rail_movements||[]).filter(rm=>rm.to_facility_id===facId&&rm.product_id===pid&&_railMoveOriginFacId(rm))
+    .forEach(rm=>{ const o=_railMoveOriginFacId(rm); c[o]=(c[o]||0)+1; });
   const best=Object.entries(c).sort((a,b)=>b[1]-a[1])[0];
   return best?best[0]:(S.facility_id||'');
 }
@@ -12003,6 +12003,8 @@ function _logiApplyProcStyle(){
 
 function setSchedTab(tab,el){
   S.activeSchedTab=tab;
+  // The in-page tab strip changes the sub-tab too — keep the section's second-row tabs on it.
+  if(S.topSection==='logistics') _syncSecTab('schedules');
   document.querySelectorAll('.sched-tab').forEach(t=>t.classList.remove('active'));
   if(el) el.classList.add('active');
   else document.querySelector(`.sched-tab[onclick*="'${tab}'"]`)?.classList.add('active');
@@ -12216,6 +12218,12 @@ function renderVesselTable(){
         // Legs can advance independently only once parent is past In Transit
         const parentPastInTransit=TRANSPORT_STATUSES.findIndex(s=>s.id===(v.status||'Planned'))>
                                    TRANSPORT_STATUSES.findIndex(s=>s.id==='In Transit');
+        // The leg's next status — the one advanceLegStatus() moves it to. Offered whenever there
+        // is one, like the parent row's link: from Confirmed on every status counts as "locked"
+        // (simulation ground truth), so a lock test here would have hidden it for good. These
+        // two names used to be read without ever being defined, which threw as soon as a split
+        // vessel's parent passed In Transit and took the rest of the schedules render with it.
+        const legNext=_tsNext(leg.status||v.status||'Planned');
         rows+=`<tr style="background:rgba(255,184,48,.02)">
           <td style="padding-left:28px;color:var(--text-dim);font-size:9px">↳ Leg ${li+1}</td>
           <td style="font-family:var(--mono);font-size:9px">${leg.arrival_date||'—'}</td>
@@ -12226,7 +12234,7 @@ function renderVesselTable(){
           <td></td>
           <td>${_tsBadge(leg.status||v.status||'Planned')}</td>
           <td style="white-space:nowrap">
-            ${parentPastInTransit&&legNext&&!legLocked?`<span class="tbl-act" onclick="advanceLegStatus('${v.id}',${li})" title="→ ${legNext}">→ ${legNext}</span>`:''}
+            ${parentPastInTransit&&legNext?`<span class="tbl-act" onclick="advanceLegStatus('${v.id}',${li})" title="→ ${legNext}">→ ${legNext}</span>`:''}
             ${!parentPastInTransit?`<span style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">advances with parent</span>`:''}
           </td>
         </tr>`;
@@ -12859,6 +12867,35 @@ function saveRailLoadCell(inp){
 }
 // The facility a rail dispatch point belongs to (real_rail_daily rows are keyed by facility).
 function _railDpFacId(dp){ return dp?.assigned_facility_id||dp?.facility_id||S.facility_id; }
+// The facility a rail movement leaves from: its dispatch point's facility when it names one, else
+// the stored from_facility_id (a manual movement carries no dispatch point). Pushes used to store
+// the canvas facility for EVERY dispatch point — a CLI push read BRS — so read the origin through
+// here rather than from from_facility_id directly.
+function _railMoveOriginFacId(rm){
+  const dp=rm&&rm.from_dispatch_id?getEl(rm.from_dispatch_id):null;
+  return dp?_railDpFacId(dp):rm?.from_facility_id;
+}
+// Does rail movement rm ship from dispatch point dp (destIds = the terminals dp serves)? A movement
+// that names its dispatch point belongs to that one only; one that names none (a manual entry)
+// belongs to the dispatch points at its origin facility serving its terminal. Matching "canvas
+// facility + terminal served" handed every push to EVERY dispatch point serving that terminal —
+// BRS, CLI and Bowen pushes to SUT each ran at all three, which shipped nothing and logged
+// phantom shortfalls (and would double-ship where two dispatch points load the same product).
+function _railMoveFromDp(rm,dp,destIds){
+  if(rm.from_dispatch_id) return rm.from_dispatch_id===dp.id;
+  return rm.from_facility_id===_railDpFacId(dp)&&destIds.has(rm.to_facility_id);
+}
+// Corrects stored origins written the old way to their dispatch point's facility, so exports and
+// anything still reading the raw field agree. Returns how many rows changed.
+function _railHealOrigins(){
+  let n=0;
+  (DB.rail_movements||[]).forEach(rm=>{
+    if(!rm.from_dispatch_id) return;
+    const f=_railMoveOriginFacId(rm);
+    if(f&&rm.from_facility_id!==f){ rm.from_facility_id=f; n++; }
+  });
+  return n;
+}
 
 // ── Rail loading campaign popup ──────────────────────────────────────────────
 // Mirrors showCampaignPopup (finish mills) but the rate is CARS/DAY. Forecast mode
@@ -13185,6 +13222,7 @@ function _rpSetPush(dpId, destFacId, pid, dayNum, ds, value, skipRun){
   const transit=parseInt(destCfg?.transit_days)||1;
   const berth=DB.elements.find(e=>e.type==='berth'&&(e.props?.berth_type||'').includes('Rail')&&(e.assigned_facility_id||e.facility_id)===destFacId);
   const berthId=berth?berth.id:null;
+  const fromFacId=_railDpFacId(dp);   // the dispatch point's own facility, not the canvas facility
   // Match by DEPARTURE DATE (day numbers drift when the sim start date moves); legacy
   // rows without a departure_date still match by switch_day.
   let row=DB.rail_movements.find(rm=>rm.from_dispatch_id===dpId&&rm.to_facility_id===destFacId&&(rm.product_id||'')===pid
@@ -13196,14 +13234,14 @@ function _rpSetPush(dpId, destFacId, pid, dayNum, ds, value, skipRun){
   // nothing. The simulation ignores a 0-car push (cars>0 guard in the switch-day shipping
   // step), so the row is inert; delete it from the Rail movement records table to clear it.
   if(cars<=0&&!row){
-    DB.rail_movements.push({id:'push_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),from_facility_id:S.facility_id,to_facility_id:destFacId,from_dispatch_id:dpId,to_berth_id:berthId,product_id:pid,wagon_count:0,wagon_capacity_t:carCap,total_capacity_t:0,switch_day:dayNum,departure_date:ds,transit_days:transit,status:'Confirmed',notes:'Operator push — nothing to this terminal'});
+    DB.rail_movements.push({id:'push_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),from_facility_id:fromFacId,to_facility_id:destFacId,from_dispatch_id:dpId,to_berth_id:berthId,product_id:pid,wagon_count:0,wagon_capacity_t:carCap,total_capacity_t:0,switch_day:dayNum,departure_date:ds,transit_days:transit,status:'Confirmed',notes:'Operator push — nothing to this terminal'});
   }
   // transit_days is refreshed too: a row saved before the destination's transit changed kept
   // the old value, and the simulation dates the arrival from the row, not the topology.
-  else if(row){ delete row.sync_trimmed; row.wagon_count=cars; row.wagon_capacity_t=carCap; row.total_capacity_t=cars*carCap; row.status='Confirmed'; row.switch_day=dayNum; row.departure_date=ds; row.transit_days=transit; if(!row.to_berth_id) row.to_berth_id=berthId;
+  else if(row){ delete row.sync_trimmed; row.from_facility_id=fromFacId; row.wagon_count=cars; row.wagon_capacity_t=carCap; row.total_capacity_t=cars*carCap; row.status='Confirmed'; row.switch_day=dayNum; row.departure_date=ds; row.transit_days=transit; if(!row.to_berth_id) row.to_berth_id=berthId;
     if(cars<=0&&!/nothing to this terminal/.test(row.notes||'')) row.notes='Operator push — nothing to this terminal';
     else if(cars>0&&/nothing to this terminal/.test(row.notes||'')) row.notes='Operator push'; }
-  else DB.rail_movements.push({id:'push_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),from_facility_id:S.facility_id,to_facility_id:destFacId,from_dispatch_id:dpId,to_berth_id:berthId,product_id:pid,wagon_count:cars,wagon_capacity_t:carCap,total_capacity_t:cars*carCap,switch_day:dayNum,departure_date:ds,transit_days:transit,status:'Confirmed',notes:'Operator push'});
+  else DB.rail_movements.push({id:'push_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),from_facility_id:fromFacId,to_facility_id:destFacId,from_dispatch_id:dpId,to_berth_id:berthId,product_id:pid,wagon_count:cars,wagon_capacity_t:carCap,total_capacity_t:cars*carCap,switch_day:dayNum,departure_date:ds,transit_days:transit,status:'Confirmed',notes:'Operator push'});
   if(!skipRun){ autoSave(); scheduleSimulation(); }
 }
 // Record the REAL cars dispatched from a rail dp to one terminal on a (past) switch date.
@@ -14852,13 +14890,18 @@ function renderRailTable(){
     return;
   }
   tbody.innerHTML=filtered.map(({r,i})=>{
-    const fromFac=DB.facilities.find(f=>f.id===r.from_facility_id);
+    // Origin = the facility of the dispatch point the cars leave from (_railMoveOriginFacId).
+    const fromFac=DB.facilities.find(f=>f.id===_railMoveOriginFacId(r));
     const toFac=DB.facilities.find(f=>f.id===r.to_facility_id);
     const prod=DB.products.find(p=>p.id===r.product_id);
     const rLocked=_tsLocked(r.status||'Planned');
     const rNextSt=_tsNext(r.status||'Planned');
+    // Operator pushes carry no reference; show one built from the departure date and terminal
+    // (the same shape as the SIM-… references) instead of "undefined".
+    const refTxt=r.reference||`PUSH-${r.departure_date||r.date||'?'}-${toFac?.name||'?'}`;
+    const refTip=r.reference?'':` title="${esc(`No reference stored — shown from the departure date and terminal${r.notes?' · '+r.notes:''} · id ${r.id}`)}"`;
     return `<tr>
-      <td style="color:var(--blue);font-family:var(--mono)">${r.reference}</td>
+      <td style="color:var(--blue);font-family:var(--mono)"${refTip}>${esc(refTxt)}</td>
       <td style="font-family:var(--mono)">${r.departure_date||r.date||'—'}</td>
       <td style="color:var(--text-dim)">${fromFac?.name||'—'}</td>
       <td style="color:var(--text-dim)">${toFac?.name||'—'}</td>
@@ -15063,8 +15106,9 @@ function _planRailShipments(rBase){
     // are already locked (Planned/Confirmed/In Transit) or user-created Proposed — i.e.
     // everything except the auto-Proposed entries this pass just cleared and will regenerate.
     const loadUsedByDay={};
+    const _destIdSet=new Set(dests.map(x=>x.facility_id));
     DB.rail_movements
-      .filter(rm=>(rm.from_dispatch_id===dp.id||(rm.from_facility_id===S.facility_id&&dests.some(x=>x.facility_id===rm.to_facility_id)))
+      .filter(rm=>_railMoveFromDp(rm,dp,_destIdSet)
         &&rm.switch_day&&rm.load_start_day
         &&(['Planned','Confirmed','In Transit'].includes(rm.status||'')||
            (rm.status==='Proposed'&&rm.notes!=='Auto-generated by simulation')))
@@ -15252,7 +15296,7 @@ function _planRailShipments(rBase){
 
         DB.rail_movements.push({
           id:`rm_prop_${dp.id}_sw${switchDay}_${facId}`,
-          from_facility_id:S.facility_id,
+          from_facility_id:_railDpFacId(dp),
           to_facility_id:facId,
           from_dispatch_id:dp.id,
           to_berth_id:berthEl.id,
@@ -15658,6 +15702,7 @@ async function runSimulation(){
     // Pass 1 only exists to generate vessel proposals from the clean inventory
     // picture, so it is skipped entirely in Forecast mode (Auto-Propose OFF).
     _railClearAutoProposed(); // one-time cleanup of legacy auto-generated rail proposals
+    if(_railHealOrigins()) autoSave(); // pushes saved with the canvas facility as their origin
     // Auto-Propose toggle (logistics pages): when ON, the simulation proposes vessel
     // calls to cover projected shortfalls. When OFF ("Forecast mode"), it adds nothing
     // — it only projects inventory behaviour from the vessels/rail the user has already
@@ -15896,7 +15941,11 @@ function simulate(elements, connections, horizon, includeProposed=false){
       // receives only what the origin physically loaded & shipped. This makes unloading uniform
       // and mass-balanced for ALL statuses (status no longer changes how much is delivered);
       // pre-building planned tonnage was the source of phantom over-supply.
-      if(rm.from_facility_id===S.facility_id&&rm.to_berth_id){
+      // "From this canvas" = leaves from a dispatch point on it (or, for a manual movement with
+      // none, from the canvas facility) — not "stored origin is the canvas facility", which only
+      // held while every push stored that facility.
+      const _fromCanvas=rm.from_dispatch_id?elements.some(e=>e.id===rm.from_dispatch_id):rm.from_facility_id===S.facility_id;
+      if(_fromCanvas&&rm.to_berth_id){
         const departedBeforeSim=rm.departure_date&&rm.departure_date<S.simCfg.start_date;
         return (departedBeforeSim||st==='In Transit')&&elements.some(e=>e.id===rm.to_berth_id);
       }
@@ -15915,7 +15964,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
       transitQueue[arrivalDay].push({
         berthId,
         byProduct,
-        fromFacId:rm.from_facility_id,
+        fromFacId:_railMoveOriginFacId(rm),
         toFacId:rm.to_facility_id,
         fromPlannedRail:true,
         depDay:dateToDayOffset(rm.departure_date,S.simCfg.start_date)+1 // for in-transit tracking
@@ -16029,7 +16078,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
     // sim start date moves; departure_date is authoritative when present).
     const _dayOfDate=ds=>Math.round((new Date(ds+'T00:00:00')-new Date(S.simCfg.start_date+'T00:00:00'))/864e5)+1;
     DB.rail_movements
-      .filter(rm=>(rm.from_dispatch_id===dp.id||(rm.from_facility_id===S.facility_id&&dpDestIds.has(rm.to_facility_id)))
+      .filter(rm=>_railMoveFromDp(rm,dp,dpDestIds)
         &&rm.switch_day
         &&(rm.status||'Planned')!=='In Transit'
         &&(!rm.departure_date||rm.departure_date>=S.simCfg.start_date))
@@ -16432,7 +16481,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
   DB.rail_movements
     .filter(rm=>{
       const st=rm.status||'Planned';
-      return ['Planned','Confirmed'].includes(st)&&rm.from_facility_id===S.facility_id&&rm.from_dispatch_id;
+      return ['Planned','Confirmed'].includes(st)&&rm.from_dispatch_id;
     })
     .forEach(rm=>{
       const swDay=rm.switch_day||(rm.departure_date?dateToDayOffset(rm.departure_date,S.simCfg.start_date)+1:null);
@@ -16450,7 +16499,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
     .filter(rm=>{
       const st=rm.status||'Planned';
       if(rm.departure_date&&rm.departure_date<S.simCfg.start_date) return false;
-      return ['Planned','Confirmed','Proposed'].includes(st)&&rm.from_facility_id===S.facility_id
+      return ['Planned','Confirmed','Proposed'].includes(st)
         &&rm.from_dispatch_id&&rm.load_start_day&&rm.switch_day;
     })
     .forEach(rm=>{
@@ -17441,7 +17490,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
             dispatchByDest[p.toFacId]=(dispatchByDest[p.toFacId]||0)+cars;
             if(arrivalDay<=horizon){
               if(!transitQueue[arrivalDay]) transitQueue[arrivalDay]=[];
-              transitQueue[arrivalDay].push({berthId:p.berthId,byProduct:{[pid]:cars*carCap},fromFacId:S.facility_id,toFacId:p.toFacId,depDay:day});
+              transitQueue[arrivalDay].push({berthId:p.berthId,byProduct:{[pid]:cars*carCap},fromFacId:_railDpFacId(el),toFacId:p.toFacId,depDay:day});
               // Track as In Transit at the destination rail berth until scheduled arrival.
               const _dbs=state[p.berthId];
               if(_dbs&&_dbs.railTransitT) _dbs.railTransitT[pid]=(_dbs.railTransitT[pid]||0)+cars*carCap;
@@ -19173,7 +19222,7 @@ function renderResultsTable(){
     }
     // Outbound departures
     const depDay=dateToDayOffset(rm.departure_date||rm.date,S.simCfg.start_date)+1;
-    if(depDay>=1&&depDay<=horizon&&rm.from_facility_id===S.facility_id){
+    if(depDay>=1&&depDay<=horizon&&_railMoveOriginFacId(rm)===S.facility_id){
       if(!railDepsByDay[depDay]) railDepsByDay[depDay]=[];
       railDepsByDay[depDay].push(rm);
     }
@@ -19780,7 +19829,7 @@ function _pushBIBuildTables(){
       departure_date:rm.departure_date||rm.date||'',
       arrival_date:rm.departure_date
         ?_addDays(rm.departure_date,parseInt(rm.transit_days)||1):'',
-      from_facility_id:rm.from_facility_id||'',
+      from_facility_id:_railMoveOriginFacId(rm)||'',
       to_facility_id:rm.to_facility_id||'',
       dispatch_id:rm.from_dispatch_id||'',
       berth_id:rm.to_berth_id||'',
@@ -22087,8 +22136,11 @@ function _editRail(i){
   const pf='display:flex;flex-direction:column;gap:3px';
   const pl='font-family:var(--mono);font-size:8px;color:var(--text-dim);letter-spacing:.5px;text-transform:uppercase';
   const prods=DB.products.map(p=>`<option value="${p.id}" ${p.id===r.product_id?'selected':''}>${p.name}</option>`).join('');
-  const facOpts=DB.facilities.map(f=>`<option value="${f.id}" ${f.id===r.from_facility_id?'selected':''}>${f.name}</option>`).join('');
+  const _originFac=_railMoveOriginFacId(r);
+  const facOpts=DB.facilities.map(f=>`<option value="${f.id}" ${f.id===_originFac?'selected':''}>${f.name}</option>`).join('');
   const toOpts=DB.facilities.map(f=>`<option value="${f.id}" ${f.id===r.to_facility_id?'selected':''}>${f.name}</option>`).join('');
+  // A movement that names its dispatch point leaves from that point's facility — not editable here.
+  const _fromDis=(!locked&&r.from_dispatch_id&&getEl(r.from_dispatch_id))?`disabled title="Set by the dispatch point (${esc(getEl(r.from_dispatch_id).name||'')})"`:'';
   const statusOpts=TRANSPORT_STATUSES.map(s=>`<option value="${s.id}" ${s.id===(r.status||'Planned')?'selected':''}>${s.id}</option>`).join('');
   let h=`<div class="modal-hdr">
     <span class="modal-title">${locked?'🔒 View':'Edit'} Rail Movement</span>
@@ -22104,7 +22156,7 @@ function _editRail(i){
       <div style="${pf}"><div style="${pl}">Departure Date</div><input ${dis} style="${pi}" type="date" id="er-date" value="${r.departure_date||r.date||''}"></div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-      <div style="${pf}"><div style="${pl}">From Facility</div><select ${dis} style="${pi}" id="er-from">${facOpts}</select></div>
+      <div style="${pf}"><div style="${pl}">From Facility</div><select ${dis||_fromDis} style="${pi}" id="er-from">${facOpts}</select></div>
       <div style="${pf}"><div style="${pl}">To Facility</div><select ${dis} style="${pi}" id="er-to">${toOpts}</select></div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
@@ -22137,7 +22189,8 @@ function _saveEditRail(i){
     const c=parseFloat(document.getElementById('er-cap')?.value)||0;
     r.reference=document.getElementById('er-ref')?.value||r.reference;
     r.departure_date=document.getElementById('er-date')?.value||r.departure_date;
-    r.from_facility_id=document.getElementById('er-from')?.value||r.from_facility_id;
+    if(r.from_dispatch_id&&getEl(r.from_dispatch_id)) r.from_facility_id=_railMoveOriginFacId(r);   // set by its dispatch point
+    else r.from_facility_id=document.getElementById('er-from')?.value||r.from_facility_id;
     r.to_facility_id=document.getElementById('er-to')?.value||r.to_facility_id;
     r.product_id=document.getElementById('er-prod')?.value||r.product_id;
     r.transit_days=parseInt(document.getElementById('er-transit')?.value)||r.transit_days;
@@ -22321,19 +22374,27 @@ function saveFacility(){
   autoSave(); closeModal(); renderLocationTree(); statMsg(`Facility "${name}" created`);
 }
 
-function simCfgHTML(){
+// Simulation horizon presets as a day count from the start date, relative to today. The count
+// INCLUDES both ends: day 1 is the start date, so reaching end date d takes (d − start) + 1 days.
+// Counting the gap alone stopped every preset one day short — End of Year ended on Dec 30.
+// Shared by the preset tiles (simCfgHTML) and saveSimCfg, so saving applies what the tile shows.
+function _simHorizonPresets(startStr){
   const today=new Date();
-  const startDate=new Date((S.simCfg.start_date||today._ymd())+'T00:00:00');
+  const startDate=new Date((startStr||today._ymd())+'T00:00:00');
   const eom=new Date(today.getFullYear(),today.getMonth()+1,0);
   const e3m=new Date(today.getFullYear(),today.getMonth()+4,0);
   const eoy=new Date(today.getFullYear(),11,31);
-  const daysFromStart=d=>Math.max(1,Math.round((d-startDate)/(864e5)));
-  const presets=[
+  const daysFromStart=d=>Math.max(1,Math.round((d-startDate)/(864e5))+1);
+  return [
     {id:'eom',label:'End of Month',days:daysFromStart(eom),date:eom._ymd()},
     {id:'3m',label:'Next 3 Months',days:daysFromStart(e3m),date:e3m._ymd()},
     {id:'eoy',label:'End of Year',days:daysFromStart(eoy),date:eoy._ymd()},
     {id:'custom',label:'Custom',days:S.simCfg.horizon,date:null}
   ];
+}
+
+function simCfgHTML(){
+  const presets=_simHorizonPresets(S.simCfg.start_date);
   const cur=S.simCfg.horizonPreset||'3m';
   const activeRules=(DB.simulation_rules||[]).filter(r=>r.status!=='disabled');
   const tabSty=(active)=>`padding:7px 16px;font-family:var(--mono);font-size:10px;cursor:pointer;border:none;background:transparent;border-bottom:2px solid ${active?'var(--green)':'transparent'};color:${active?'var(--green)':'var(--text-dim)'};letter-spacing:.5px;text-transform:uppercase`;
@@ -22786,8 +22847,13 @@ function saveSimCfg(){
   const preset=S.simCfg.horizonPreset||'3m';
   if(preset==='custom'){
     S.simCfg.horizon=parseInt(document.getElementById('sc-horizon')?.value)||90;
+  } else if(S.simCfg.horizonPreset){
+    // Recompute from the saved start date: the count stored when the tile was last clicked goes
+    // stale once the start date changes (and older saves carry the old one-day-short count).
+    // Only for an explicitly chosen preset — a config without one keeps its stored horizon.
+    const p=_simHorizonPresets(S.simCfg.start_date).find(x=>x.id===preset);
+    if(p) S.simCfg.horizon=p.days;
   }
-  // horizon already set by selectHorizonPreset for non-custom
   S.simCfg.mode=document.getElementById('sc-mode')?.value||'planning';
   S.simCfg.conflict_resolution=document.getElementById('sc-conflict')?.value||'rolling_avg';
   document.getElementById('sim-date-lbl').textContent=`Day 0 / ${S.simCfg.horizon}`;
@@ -25159,7 +25225,10 @@ function _syncSecTab(view){
   // cfgpanel tabs are managed directly by _secTabClick — skip sync to avoid marking all three active
   if(view==='cfgpanel') return;
   document.querySelectorAll('#second-row .sec-tab').forEach(b=>{
-    b.classList.toggle('active', b.dataset.view===view);
+    // Vessel / Rail / Truck all open view 'schedules' and differ only by data-tab, so matching the
+    // view alone lit all three together — light only the one whose sub-tab is showing.
+    const tabOk=!b.dataset.tab||b.dataset.tab===S.activeSchedTab;
+    b.classList.toggle('active', b.dataset.view===view&&tabOk);
   });
 }
 
