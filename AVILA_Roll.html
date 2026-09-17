@@ -8373,6 +8373,8 @@ function _renderSupplyViewInner(wrap){
   // Date spine — filtered by active view range
   const {from:filterFrom, to:filterTo}=fltGetDateRange('sup');
   const allDates=[];
+  const _simDates=[];          // 0-based simulation day → date, whole horizon (see _dIdx)
+  const _simDayIdx=new Map();  // date in view → its 0-based simulation day (see _dIdx)
   // Advance by CALENDAR day (setDate), not by +24h in ms. On a DST fall-back day (e.g.
   // Nov 1) the local day has 25h, so adding 864e5 ms lands back on the same date and the
   // column appears twice. setDate keeps local midnight and always moves to the next date.
@@ -8380,7 +8382,8 @@ function _renderSupplyViewInner(wrap){
     const dt=new Date(simStart.getFullYear(),simStart.getMonth(),simStart.getDate());
     for(let d=0;d<horizon;d++){
       const ds=dt._ymd();
-      if(ds>=filterFrom&&ds<=filterTo) allDates.push(ds);
+      _simDates.push(ds);
+      if(ds>=filterFrom&&ds<=filterTo){ allDates.push(ds); _simDayIdx.set(ds,d); }
       dt.setDate(dt.getDate()+1);
     }
   }
@@ -8403,13 +8406,20 @@ function _renderSupplyViewInner(wrap){
 
   // ── Render-scope lookup maps ──────────────────────────────────────────────
   // This renderer touches every facility × section × product × day; the hot
-  // loops used to re-scan arrays for each cell (allDates.indexOf per day cell,
-  // DB.products.find per product label, a full element_product_capacities pass
-  // per element). Built once per render, these make each of those O(1). Keyed
-  // off the same sources, so behaviour is identical — including indexOf's -1
-  // for a date outside the visible range (see _dIdx).
-  const _dateIdx=new Map(allDates.map((ds,i)=>[ds,i]));
-  const _dIdx=ds=>{ const i=_dateIdx.get(ds); return i===undefined?-1:i; };
+  // loops used to re-scan arrays for each cell (DB.products.find per product label,
+  // a full element_product_capacities pass per element). Built once per render,
+  // these make each of those O(1).
+  //
+  // _dIdx(ds) → the SIMULATION day index of a date in view (0 = the simulation start
+  // date — every simResults array is indexed this way), or -1 for a date outside the
+  // visible range. _simDates is the reverse: a stop event's 1-based e.day is on
+  // _simDates[e.day-1]. Never index simulation data by a date's POSITION among the
+  // visible columns (allDates): that equals the simulation day only when the view starts
+  // on the simulation start date — true of the old ROM / ROY / Full Sim buttons, not of
+  // the time frames. Current month starts on the 1st, so every simulated inventory,
+  // production and unloading number showed a date months earlier (a silo with stock
+  // today showed 0 tomorrow) and stop-event hatches landed on the wrong days.
+  const _dIdx=ds=>{ const i=_simDayIdx.get(ds); return i===undefined?-1:i; };
   const _prodById=new Map(DB.products.map(p=>[p.id,p]));
   const _capsByEl=new Map();
   DB.element_product_capacities.forEach(c=>{ const a=_capsByEl.get(c.element_id); if(a) a.push(c); else _capsByEl.set(c.element_id,[c]); });
@@ -8861,13 +8871,17 @@ function _renderSupplyViewInner(wrap){
     //    demand; clinker = clinker consumed to make cement (via recipes). The number
     //    on a bar = that day's inventory ÷ that date's forward-14-day rate = how long
     //    the stock lasts against upcoming demand with no further production. ──
-    const _dIdx={}; allDates.forEach((d,i)=>_dIdx[d]=i);
     const _scopeDpEls=(scopeEls||getFacElements()).filter(e=>e.type==='demand_point');
     const _scopeDps=DB.demand_points.filter(dp=>_scopeDpEls.some(el=>el.id===dp.element_id));
-    // Per-product daily demand/consumption aligned to allDates (computed once).
+    // Per-product daily demand/consumption over the dates in view PLUS up to 13 simulated
+    // days past the last one, so a bar near the end of the time frame still averages a full
+    // 14 days — a date's cover must not depend on the time frame (computed once).
+    // _useIdx[ds] = a date's position in _useDates (NOT a simulation day).
+    const _useDates=allDates.concat(_simDates.slice(_simDayIdx.get(allDates[allDates.length-1])+1).slice(0,13));
+    const _useIdx={}; allDates.forEach((d,i)=>_useIdx[d]=i);
     const _dailyUse={};
     prodIds.forEach(pid=>{
-      _dailyUse[pid]=allDates.map(ds=>{
+      _dailyUse[pid]=_useDates.map(ds=>{
         if(cat!=='clinker'){ // cement + SCM = direct product demand
           return _scopeDps.filter(dp=>dp.products?.some(p=>p.product_id===pid))
             .reduce((s,dp)=>s+(_demandRate(dp.element_id,ds)||0),0);
@@ -8905,7 +8919,7 @@ function _renderSupplyViewInner(wrap){
         const bars=series.map(se=>{
           const v=inv[se.key][ds]||0; const hpx=v>0?Math.max(1,Math.round(v/gmax*H)):0;
           const ex=ext[se.key][ds]||0; const expx=ex>0?Math.max(1,Math.round(ex/gmax*H)):0;
-          const cd=_coverSe(se,_dIdx[ds],v);
+          const cd=_coverSe(se,_useIdx[ds],v);
           const lbl=cd!==''?`<div style="font-size:6px;line-height:1;color:${se.color};white-space:nowrap;margin-bottom:1px;font-family:var(--mono)">${cd}</div>`:'';
           const extBar=expx>0?`<div style="width:100%;height:${expx}px;background:${se.color};opacity:.35;border-top:1px dashed ${se.color};border-radius:1px 1px 0 0"></div>`:'';
           const ttl=ex>0?`${se.name}: ${Math.round(v).toLocaleString()} t available + ${Math.round(ex).toLocaleString()} t on rail (transit+yard) = ${Math.round(v+ex).toLocaleString()} t total · ${ds}${cd!==''?' · ~'+cd+'d cover (available)':''}`
@@ -9264,8 +9278,8 @@ function _renderSupplyViewInner(wrap){
             const maintDays=maintSetFor(el.id);
             // Days the mill couldn't produce despite needing to (no clinker) — an
             // UNPLANNED cement shortfall, flagged with a gray/red hatch below.
-            const starvedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='starved').map(e=>allDates[e.day-1]).filter(Boolean));
-            const blockedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='blocked').map(e=>allDates[e.day-1]).filter(Boolean)); // down: receiving silo full
+            const starvedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='starved').map(e=>_simDates[e.day-1]).filter(Boolean));
+            const blockedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='blocked').map(e=>_simDates[e.day-1]).filter(Boolean)); // down: receiving silo full
             const caps=(_capsByEl.get(el.id)||[]);
             const maxSingleCap=caps.length?Math.max(...caps.map(c=>parseFloat(c.capacity_tpd)||0)):0;
             h+=`<tr class="supsec-cementProd">
@@ -9349,7 +9363,8 @@ function _renderSupplyViewInner(wrap){
           // check that the per-mill product assignments add up.
           {
             const _cbp={}; // product_id -> { dateStr -> total t/d across mills }
-            allDates.forEach((ds,di)=>{
+            allDates.forEach(ds=>{
+              const di=_dIdx(ds);   // simulation day, not the column position
               cemEls.forEach(el=>{
                 resolveProductionAll(el,ds,di,maintSetFor(el.id)).forEach(p=>{
                   if(!(p.capacity_tpd>0)) return;
@@ -9516,8 +9531,8 @@ function _renderSupplyViewInner(wrap){
 
           node.packers.forEach(el=>{
             const maintDays=maintSetFor(el.id);
-            const starvedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='starved').map(e=>allDates[e.day-1]).filter(Boolean));
-            const blockedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='blocked').map(e=>allDates[e.day-1]).filter(Boolean)); // down: receiving silo full
+            const starvedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='starved').map(e=>_simDates[e.day-1]).filter(Boolean));
+            const blockedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='blocked').map(e=>_simDates[e.day-1]).filter(Boolean)); // down: receiving silo full
             const maxSingleCap=_packRated(el);
             h+=`<tr class="supsec-packProd">
               <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${packColor};font-size:9px" title="${esc(el.name)}">${_supLeafLabel(el.name)}
@@ -9618,7 +9633,8 @@ function _renderSupplyViewInner(wrap){
               const prods=railDpProducts(disp);
               const histArr=r?.railHistory?.[disp.id]||[];
               const byDate={};
-              allDates.forEach((ds,di)=>{
+              allDates.forEach(ds=>{
+                const di=_dIdx(ds);   // simulation day (working-day test + railHistory), not the column position
                 const realRows=(DB.real_rail_daily||[]).filter(rr=>rr.date===ds&&rr.facility_id===node.id&&rr.type==='loading');
                 if(realRows.length){
                   const by={}; realRows.forEach(rr=>{ const pid=rr.product_id||prods[0]; if(pid) by[pid]=(by[pid]||0)+(parseFloat(rr.cars)||0); });
@@ -9908,7 +9924,7 @@ function _renderSupplyViewInner(wrap){
 
           node.kilns.forEach(el=>{
             const maintDays=maintSetFor(el.id);
-            const blockedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='blocked').map(e=>allDates[e.day-1]).filter(Boolean)); // down: clinker silo full
+            const blockedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='blocked').map(e=>_simDates[e.day-1]).filter(Boolean)); // down: clinker silo full
             const defaultCap=(_capsByEl.get(el.id)||[])
               .reduce((s,c)=>s+(parseFloat(c.capacity_tpd)||0),0);
             h+=`<tr class="supsec-clinkerProd">
@@ -10432,8 +10448,8 @@ function _renderSupplyViewInner(wrap){
             h+=`</tr>`;
             _facPackers.forEach(el=>{
               const maintDays=maintSetFor(el.id);
-              const starvedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='starved').map(e=>allDates[e.day-1]).filter(Boolean));
-              const blockedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='blocked').map(e=>allDates[e.day-1]).filter(Boolean)); // down: receiving silo full
+              const starvedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='starved').map(e=>_simDates[e.day-1]).filter(Boolean));
+              const blockedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='blocked').map(e=>_simDates[e.day-1]).filter(Boolean)); // down: receiving silo full
               const maxSingleCap=_packRated(el);
               h+=`<tr class="supsec-packProd">
                 <td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${packColor};font-size:9px" title="${esc(el.name)}">${_supLeafLabel(el.name)}
