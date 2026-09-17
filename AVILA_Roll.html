@@ -650,7 +650,7 @@ select.pi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
 .col-group-hdr{padding:4px 10px;font-family:var(--mono);font-size:8px;letter-spacing:2px;text-transform:uppercase;position:sticky;top:0;z-index:3;background:var(--surface2);}
 
 /* ── VIEW WINDOW SELECTOR ── */
-#view-window-bar{background:var(--surface);border-bottom:1px solid var(--border);padding:6px 14px;display:flex;align-items:center;gap:6px;flex-shrink:0;}
+#view-window-bar{background:var(--surface);border-bottom:1px solid var(--border);padding:6px 14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex-shrink:0;}
 .vw-label{font-family:var(--mono);font-size:8px;color:var(--text-dim);letter-spacing:1px;text-transform:uppercase;margin-right:4px;}
 .vw-btn{padding:3px 10px;font-family:var(--mono);font-size:9px;color:var(--text-dim);background:var(--surface2);border:1px solid var(--border2);cursor:pointer;transition:all .15s;white-space:nowrap;}
 .vw-btn:hover{color:var(--text);border-color:var(--text-dim);}
@@ -683,6 +683,8 @@ select.pi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
 .sup-cb .swatch{width:7px;height:7px;flex-shrink:0;}
 .sup-cb.on{color:var(--green);border-color:var(--green);background:var(--green-faint);}
 .sup-cb.on .box{background:var(--green);border-color:var(--green);color:var(--bg);}
+/* A Process the current page doesn't have — still clickable, the choice is shared with other pages. */
+.sup-cb.na{opacity:.45;}
 /* Each group's ALL — set apart from the members it stands for. */
 .sup-cb.all{background:transparent;border-style:dashed;}
 .sup-cb.all.on{background:transparent;border-style:solid;}
@@ -711,9 +713,14 @@ select.pi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
 .sup-tok.k-fac{border-left:2px solid var(--green);}
 .sup-tok.k-proc{border-left:2px solid #b388ff;}
 .sup-tok.k-prod{border-left:2px solid var(--blue);}
-#vw-custom-wrap{display:flex;align-items:center;gap:4px;}
-#vw-custom-wrap input{background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:9px;padding:3px 6px;outline:none;width:110px;}
-.vw-fac-filter{display:flex;align-items:center;gap:4px;margin-left:12px;padding-left:12px;border-left:1px solid var(--border2);}
+/* Time frame: a single-choice list with a divider between past / this month / ahead / other. */
+.sup-tf-list{display:flex;flex-direction:column;align-items:stretch;gap:3px;}
+.sup-tf-sep{display:block;height:1px;background:var(--border);margin:3px 0;}
+.sup-tf-cust{display:none;flex-direction:column;gap:4px;margin-top:8px;padding-top:8px;border-top:1px solid var(--border);}
+.sup-tf-cust label{display:flex;align-items:center;justify-content:space-between;gap:8px;font-family:var(--mono);font-size:9px;color:var(--text-dim);}
+.sup-tf-cust input{padding:3px 6px;background:var(--surface3);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:9px;color-scheme:dark;}
+.sup-tok.k-tf{border-left:2px solid var(--text);}
+.sup-tok.k-tf:hover{border-color:var(--text-dim);border-left-color:var(--text);}
 .vw-fac-chip{padding:3px 10px;font-family:var(--mono);font-size:9px;cursor:pointer;border:1px solid var(--border2);color:var(--text-dim);background:var(--surface2);transition:all .15s;white-space:nowrap;}
 .vw-fac-chip.active{border-color:var(--blue);color:var(--blue);background:rgba(77,166,255,.08);}
 .vw-fac-chip.all-chip{border-color:var(--border2);}
@@ -1238,50 +1245,15 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
     </div>
 
     <!-- DASHBOARD VIEW -->
-    <!-- VIEW WINDOW BAR (shown on Dashboard, Analysis, Daily Results) -->
+    <!-- RESULTS FILTER BAR (Dashboard + Data Table) — the shared filter bar, built by
+         fltMount('res'); the selections are the same ones every planning page shows. -->
     <div id="view-window-bar" style="display:none">
-      <span class="vw-label">View</span>
-      <button class="vw-btn" onclick="setViewWindow('15d',this)">Next 15d</button>
-      <button class="vw-btn" onclick="setViewWindow('eom',this)">Rest of Month</button>
-      <button class="vw-btn" onclick="setViewWindow('3m',this)">Next 3 Months</button>
-      <button class="vw-btn" onclick="setViewWindow('eoy',this)">Rest of Year</button>
-      <button class="vw-btn active" onclick="setViewWindow('sim',this)">Full Simulation</button>
-      <button class="vw-btn" onclick="setViewWindow('custom',this)">Custom</button>
-      <div id="vw-custom-wrap" style="display:none">
-        <input type="date" id="vw-start" onchange="applyCustomWindow()">
-        <span style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">→</span>
-        <input type="date" id="vw-end" onchange="applyCustomWindow()">
-      </div>
-      <span class="vw-range-lbl" id="vw-range-lbl"></span>
-      <!-- ── FILTER DOCK ─── same three-panel dock as the Supply page: Facility,
-           Process (the data-tree groups) and the Family → Category → Product
-           cascade, each multi-select, summarised on the button face. -->
-      <div class="vw-fac-filter" id="vw-fac-filter">
-        <div class="sup-drop">
-          <button class="sup-drop-btn" id="res-btn-fac" aria-expanded="false" aria-haspopup="true" onclick="resToggleDock(event,'fac')">
-            <span class="k">Facility</span><span class="v" id="res-v-fac">All</span><span class="car">▼</span>
-          </button>
-          <div class="sup-panel" id="res-pan-fac" onclick="event.stopPropagation()"></div>
-        </div>
-        <div class="sup-drop">
-          <button class="sup-drop-btn" id="res-btn-proc" aria-expanded="false" aria-haspopup="true" onclick="resToggleDock(event,'proc')">
-            <span class="k">Process</span><span class="v" id="res-v-proc">All</span><span class="car">▼</span>
-          </button>
-          <div class="sup-panel" id="res-pan-proc" style="min-width:300px" onclick="event.stopPropagation()"></div>
-        </div>
-        <div class="sup-drop">
-          <button class="sup-drop-btn" id="res-btn-prod" aria-expanded="false" aria-haspopup="true" onclick="resToggleDock(event,'prod')">
-            <span class="k">Product</span><span class="v" id="res-v-prod">All</span><span class="car">▼</span>
-          </button>
-          <div class="sup-panel" id="res-pan-prod" style="min-width:540px" onclick="event.stopPropagation()"></div>
-        </div>
-        <button class="vw-btn" onclick="resClearAllFilters()">✕ Clear all</button>
-        <button class="vw-btn" id="res-export-btn" onclick="exportResultsFull()" style="margin-left:6px"
-                title="Every group, facility and element across the full simulation horizon — filters and collapse state are ignored">⤓ Export full data</button>
-      </div>
+      <div id="flt-res-bar" style="display:contents"></div>
+      <button class="vw-btn" id="res-export-btn" onclick="exportResultsFull()" style="margin-left:auto"
+              title="Every group, facility and element across the full simulation horizon — filters and collapse state are ignored">⤓ Export full data</button>
     </div>
     <!-- Active-filter tokens for the results views -->
-    <div id="res-tokens" class="sup-toks" style="display:none"></div>
+    <div id="flt-res-toks" class="sup-toks" style="display:none"></div>
 
     <!-- RESULTS → DASHBOARD (network health) -->
     <div id="dashboard-view" class="view-panel" style="overflow-y:auto;background:var(--bg)">
@@ -1371,27 +1343,10 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
           <button class="tb-btn" onclick="saveDemandValues()" style="background:var(--green);color:var(--bg)">↓ Save Forecast</button>
         </div>
       </div>
-      <!-- Demand filter bar — styled to match the Sales Performance filter bar -->
-      <div id="dem-filter-bar" style="flex-shrink:0;background:var(--surface);border-bottom:1px solid var(--border);padding:6px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-        <span class="sp-filter-label">Facility</span>
-        <select class="sp-fi" id="dem-fac-filter" style="width:150px" onchange="_demOnFacChange()">
-          <option value="">All Facilities</option>
-        </select>
-        <div style="width:1px;height:20px;background:var(--border2)"></div>
-        <span class="sp-filter-label">Family</span>
-        <select class="sp-fi" id="dem-fam-filter" style="width:130px" onchange="_demOnFamChange()">
-          <option value="">All Families</option>
-        </select>
-        <div style="width:1px;height:20px;background:var(--border2)"></div>
-        <span class="sp-filter-label">Category</span>
-        <select class="sp-fi" id="dem-cat-filter" style="width:150px" onchange="_demOnCatChange()">
-          <option value="">All Categories</option>
-        </select>
-        <div style="width:1px;height:20px;background:var(--border2)"></div>
-        <span class="sp-filter-label">Product</span>
-        <select class="sp-fi" id="dem-prod-filter" style="width:180px" onchange="_demOnProdChange()">
-          <option value="">All Products</option>
-        </select>
+      <!-- Demand filter bar — the shared filter bar (fltMount('dem'); the selections are the same ones
+           every planning page shows), then this page's own INT/EXT type chips and Show inactive. -->
+      <div id="dem-filter-bar" style="flex-shrink:0;background:var(--surface);border-bottom:1px solid var(--border);padding:6px 14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <div id="flt-dem-bar" style="display:contents"></div>
         <div style="width:1px;height:20px;background:var(--border2)"></div>
         <span class="sp-filter-label">Type</span>
         <div class="sp-chip green active" id="dem-type-all" onclick="_demOnTypeChange('all')">ALL</div>
@@ -1401,8 +1356,9 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
           <input type="checkbox" id="dem-show-inactive" onchange="window._demShowInactive=this.checked;renderDemandView()" style="width:14px;height:14px;accent-color:var(--green);cursor:pointer">
           <span>Show inactive</span>
         </label>
-        <button class="tb-btn sec" onclick="_demClearFilters()">✕ Clear</button>
       </div>
+      <!-- Active-filter tokens (shared filter bar) -->
+      <div id="flt-dem-toks" class="sup-toks"></div>
       <!-- Daily demand chart — mirrors the Sales page daily chart (actual+forecast bars,
            last-year area behind, working-day average guides) -->
       <div style="flex-shrink:0;background:var(--surface);border-bottom:1px solid var(--border)">
@@ -1454,55 +1410,11 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
 
       <!-- ── FILTER BAR ─────────────────────────────────────── -->
       <div id="sup-filter-bar" style="flex-shrink:0;background:var(--surface);border-bottom:1px solid var(--border);padding:6px 14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        <!-- Date presets -->
-        <div style="display:flex;gap:3px">
-          <button class="vw-btn active" id="sup-vw-rom"  onclick="supSetView('rom',this)">ROM</button>
-          <button class="vw-btn"        id="sup-vw-3m"   onclick="supSetView('3m',this)">Next 3M</button>
-          <button class="vw-btn"        id="sup-vw-roy"  onclick="supSetView('roy',this)">ROY</button>
-          <button class="vw-btn"        id="sup-vw-full" onclick="supSetView('full',this)">Full Sim</button>
-          <button class="vw-btn"        id="sup-vw-cust" onclick="supSetView('custom',this)">Custom</button>
-        </div>
-        <!-- Custom date range (hidden by default) -->
-        <div id="sup-custom-dates" style="display:none;gap:4px;align-items:center">
-          <span style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">From</span>
-          <input type="date" id="sup-from-date" style="padding:3px 6px;background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:9px" onchange="renderSupplyView()">
-          <span style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">To</span>
-          <input type="date" id="sup-to-date" style="padding:3px 6px;background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:9px" onchange="renderSupplyView()">
-        </div>
-        <div class="tb-div"></div>
-        <!-- ── FILTER DOCK ────────────────────────────────────────────────
-             Four summary buttons, each opening a panel of multi-select pills:
-             Sub-region (NFL, SFL, … — narrows the Facility list), Facility (which
-             plants/terminals), Process (which table sections), Product (the
-             Family → Category → Product cascade). Every panel group
-             leads with its own ALL pill. Selections are summarised on the button
-             face and spelled out as removable tokens in the strip below, so the
-             bar stays one row no matter how much the scenario grows. -->
-        <div class="sup-drop">
-          <button class="sup-drop-btn" id="sup-btn-sub" aria-expanded="false" aria-haspopup="true" onclick="supToggleDock(event,'sub')">
-            <span class="k">Sub-region</span><span class="v" id="sup-v-sub">All</span><span class="car">▼</span>
-          </button>
-          <div class="sup-panel" id="sup-pan-sub" onclick="event.stopPropagation()"></div>
-        </div>
-        <div class="sup-drop">
-          <button class="sup-drop-btn" id="sup-btn-fac" aria-expanded="false" aria-haspopup="true" onclick="supToggleDock(event,'fac')">
-            <span class="k">Facility</span><span class="v" id="sup-v-fac">All</span><span class="car">▼</span>
-          </button>
-          <div class="sup-panel" id="sup-pan-fac" onclick="event.stopPropagation()"></div>
-        </div>
-        <div class="sup-drop">
-          <button class="sup-drop-btn" id="sup-btn-proc" aria-expanded="false" aria-haspopup="true" onclick="supToggleDock(event,'proc')">
-            <span class="k">Process</span><span class="v" id="sup-v-proc">All</span><span class="car">▼</span>
-          </button>
-          <div class="sup-panel" id="sup-pan-proc" style="min-width:340px" onclick="event.stopPropagation()"></div>
-        </div>
-        <div class="sup-drop">
-          <button class="sup-drop-btn" id="sup-btn-prod" aria-expanded="false" aria-haspopup="true" onclick="supToggleDock(event,'prod')">
-            <span class="k">Product</span><span class="v" id="sup-v-prod">All</span><span class="car">▼</span>
-          </button>
-          <div class="sup-panel" id="sup-pan-prod" style="min-width:540px" onclick="event.stopPropagation()"></div>
-        </div>
-        <button class="tb-btn sec" style="font-size:9px;padding:3px 10px" onclick="supClearAllFilters()">✕ Clear all</button>
+        <!-- ── SHARED FILTER BAR ─────────────────────────────────────────────
+             Time frame · Sub-region · Facility · Process · Product · Clear all, built by
+             fltMount('sup'). The selections are shared by every planning page (window._flt),
+             so what is picked here is what Demand, Logistics and Results show too. -->
+        <div id="flt-sup-bar" style="display:contents"></div>
         <!-- Show inactive elements -->
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-family:var(--mono);font-size:9px;color:var(--text-dim);margin-left:auto;margin-right:8px">
           <input type="checkbox" id="sup-show-inactive" onchange="window._supShowInactive=this.checked;renderSupplyView()" style="width:14px;height:14px;accent-color:var(--green);cursor:pointer">
@@ -1513,7 +1425,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
       </div>
 
       <!-- Active-filter tokens — what is on right now; click a token's ✕ to drop it. -->
-      <div id="sup-tokens" class="sup-toks"></div>
+      <div id="flt-sup-toks" class="sup-toks"></div>
 
       <!-- ── KPI DASHBOARD ──────────────────────────────────── -->
       <div id="sup-kpi-bar" style="flex-shrink:0;background:var(--bg);border-bottom:2px solid var(--border2);padding:8px 14px;display:flex;gap:10px;align-items:stretch;flex-wrap:wrap">
@@ -1688,32 +1600,24 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
           <div class="sched-tab" onclick="setSchedTab('truck',this)">Truck Movements</div>
           <div class="sched-tab" onclick="setSchedTab('maintenance',this)">Maintenance Calendar</div>
         </div>
+        <!-- SHARED FILTER BAR (Vessel / Rail / Truck) — built by fltMount('logi'); the selections are
+             the same ones every planning page shows. Hidden on the Maintenance tab. -->
+        <div id="logi-filter-bar" style="display:flex;flex-direction:column">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:var(--surface);border:1px solid var(--border);padding:6px 10px">
+            <div id="flt-logi-bar" style="display:contents"></div>
+          </div>
+          <div id="flt-logi-toks" class="sup-toks" style="border:1px solid var(--border);border-top:none"></div>
+        </div>
         <div id="sched-vessels" class="sched-content active">
           <!-- ── VESSEL TRANSPORT PLANNER ──────────────────────── -->
           <div id="vessel-planner-wrap">
             <div class="tp-header">
               <div class="tp-header-left">
-                <span class="vw-label">View</span>
-                <button class="vw-btn active" onclick="vpSetView('sim',this)">Full Simulation</button>
-                <button class="vw-btn"         onclick="vpSetView('15d',this)">Next 15d</button>
-                <button class="vw-btn"         onclick="vpSetView('eom',this)">Rest of Month</button>
-                <button class="vw-btn"         onclick="vpSetView('3m',this)">Next 3 Months</button>
-                <button class="vw-btn"         onclick="vpSetView('eoy',this)">Rest of Year</button>
-                <span class="vw-range-lbl" id="vp-range-lbl"></span>
                 <button class="vw-btn logi-months-btn" onclick="_toggleLogiMonths()" title="Show/hide the monthly summary columns">Hide Monthly Totals</button>
                 <button class="vw-btn logi-sim-toggle" onclick="_toggleAutoPropose()" title="When ON, Run Simulation auto-proposes vessel calls to cover shortfalls. When OFF (Forecast mode), it only projects inventory from vessels/rail you have proposed — it adds nothing.">Auto-Propose: ON</button>
               </div>
-              <div class="tp-header-right" style="flex-direction:column;align-items:flex-end;gap:5px">
-                <div style="display:flex;align-items:center;gap:6px">
-                  <span class="vw-label">Destination</span>
-                  <div id="vp-dest-filter" style="display:flex;gap:3px;flex-wrap:wrap"></div>
-                </div>
-                <div style="display:flex;align-items:center;gap:6px">
-                  <span class="vw-label">Product</span>
-                  <div id="vp-prod-filter" style="display:flex;gap:3px;flex-wrap:wrap"></div>
-                </div>
-              </div>
             </div>
+            <div id="vp-empty" style="font-family:var(--mono);font-size:9px;color:var(--text-dim);padding:24px;text-align:center;display:none"></div>
             <div id="vp-charts-section" style="display:none;margin-bottom:16px">
               <div id="vp-charts-inner" style="display:grid;grid-template-columns:1fr 1fr;gap:10px"></div>
             </div>
@@ -1749,28 +1653,11 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
         <div id="sched-rail" class="sched-content">
           <!-- ── RAIL TRANSPORT PLANNER ─────────────────────────── -->
           <div id="rail-planner-wrap">
-            <!-- Header row: view controls + destination filter -->
+            <!-- Header row: planner toggles (dates and filters live in the shared bar above) -->
             <div class="tp-header">
               <div class="tp-header-left">
-                <span class="vw-label">View</span>
-                <button class="vw-btn active" id="rp-vw-sim"    onclick="rpSetView('sim',this)">Full Simulation</button>
-                <button class="vw-btn"         id="rp-vw-15d"    onclick="rpSetView('15d',this)">Next 15d</button>
-                <button class="vw-btn"         id="rp-vw-eom"    onclick="rpSetView('eom',this)">Rest of Month</button>
-                <button class="vw-btn"         id="rp-vw-3m"     onclick="rpSetView('3m',this)">Next 3 Months</button>
-                <button class="vw-btn"         id="rp-vw-eoy"    onclick="rpSetView('eoy',this)">Rest of Year</button>
-                <span class="vw-range-lbl" id="rp-range-lbl"></span>
                 <button class="vw-btn logi-months-btn" onclick="_toggleLogiMonths()" title="Show/hide the monthly summary columns">Hide Monthly Totals</button>
                 <button class="vw-btn logi-sim-toggle" onclick="_toggleAutoPropose()" title="When ON, Run Simulation auto-proposes vessel calls to cover shortfalls. When OFF (Forecast mode), it only projects inventory from vessels/rail you have proposed — it adds nothing.">Auto-Propose: ON</button>
-              </div>
-              <div class="tp-header-right" style="flex-direction:column;align-items:flex-end;gap:5px">
-                <div style="display:flex;align-items:center;gap:6px">
-                  <span class="vw-label">Destination</span>
-                  <div id="rp-dest-filter" style="display:flex;gap:3px;flex-wrap:wrap"></div>
-                </div>
-                <div style="display:flex;align-items:center;gap:6px">
-                  <span class="vw-label">Product</span>
-                  <div id="rp-prod-filter" style="display:flex;gap:3px;flex-wrap:wrap"></div>
-                </div>
               </div>
             </div>
             <!-- Exception banner: rail loading shortfalls + terminals below safety stock -->
@@ -1790,7 +1677,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
               </div>
             </div>
             <div id="rp-empty" style="font-family:var(--mono);font-size:9px;color:var(--text-dim);padding:24px;text-align:center;display:none">
-              Select a destination above to plan rail shipments
+              No rail lanes match the current filters
             </div>
           </div>
           <!-- Legacy table (collapsed, accessible via link) -->
@@ -2337,7 +2224,6 @@ const S = {
   activeCatalog:'products', activeSchedTab:'vessels',
   logiHideMonths:false,  // collapse monthly-summary columns in logistics planners
   selectedLocNode:null,  // { type, id } for location tree selection
-  viewWindow:{preset:'sim', customStart:null, customEnd:null}, // controls display range across all result views
   facFilter:null  // facility id to filter results, null = show all
 };
 
@@ -2796,15 +2682,15 @@ function getFacConnections(){ const cv=mainCanvasFacilityId(); return DB.connect
 // Get effective facility for an element — assigned_facility_id overrides facility_id for results/analysis
 function getElFacility(el){ return el.assigned_facility_id||el.facility_id; }
 
-// Get elements filtered by the Results filter dock (for results/analysis views).
+// Get elements filtered by the shared filter bar (for results/analysis views).
 // Start with canvas elements, then narrow by the selected facilities and, when a
 // product filter is on, drop elements that handle none of the allowed products.
 // Both selections are "empty means all", so an untouched dock changes nothing.
 function getResultElements(){
   const canvasEls=getFacElements();
-  const facs=resFacIdSet();
+  const facs=fltFacIdSet();
   let els=facs?canvasEls.filter(el=>facs.has(getElFacility(el))):canvasEls;
-  const pids=resAllowedProdIds();
+  const pids=fltAllowedProdIds();
   if(pids) els=els.filter(el=>resElementHandlesProduct(el,pids));
   return els;
 }
@@ -2812,8 +2698,8 @@ function getEl(id){ return DB.elements.find(e=>e.id===id); }
 
 function selectFacility(id){
   S.facility_id=id;
-  // The results facility filter is NOT cleared here — resNormalizeProdFilters()
-  // drops any facility that isn't on the new canvas, and the rest survives a reload.
+  // The shared facility filter is NOT cleared here — fltNormalize() drops any facility
+  // the scenario no longer has, and the rest survives a reload.
   const fac=getFacility();
   if(!fac) return;
   document.getElementById('stat-fac').textContent=fac.name;
@@ -6177,85 +6063,165 @@ function exportElementsCSV(){
 // SUPPLY VIEW — FILTER BAR + KPI DASHBOARD
 // ═══════════════════════════════════════════════════════════════
 
-// State for supply view filters.
-//   subIds / facIds / fams / cats / prodIds — arrays of selected ids; EMPTY MEANS "ALL", so a
-//     user who never opens a panel sees the whole page exactly as before. subIds narrows
-//     the facilities in view (and the Facility panel) to those sub-regions.
-//   procHidden — the section keys the Process filter has switched OFF (empty = every
-//     section shown). Stored as the off-list rather than the on-list so a section added
-//     to the table later is visible by default instead of silently filtered out.
-const SUP_FILTER_KEY='avila_sup_filters';
-if(!window._supView) window._supView={preset:'rom', fromDate:'', toDate:'',
+// ═══════════════════════════════════════════════════════════════════════════
+// SHARED FILTER BAR — one set of filter selections for every planning page
+// ═══════════════════════════════════════════════════════════════════════════
+// Supply → Production, Demand, Logistics (vessel / rail / truck) and Results (dashboard,
+// data table) all show the same bar: Time frame · Sub-region · Facility · Process ·
+// Product, then Clear all, with the "Active" token strip under it. The SELECTIONS live in
+// ONE object, window._flt, so whatever is picked on one page is exactly what every other
+// page shows when the user moves to it. Each page only decides what a selection MEANS for
+// its own rows, through its FLT_PAGES entry (registered next to that page's code): the
+// dates it has, which Process keys it can hide, and how it re-renders.
+//
+// _flt — arrays where EMPTY MEANS "ALL", so an untouched bar leaves every page as it was:
+//   preset / fromDate / toDate — the time frame (fltTfWanted). NOT persisted: every
+//     session opens on the current month.
+//   subIds     — sub-regions picked; pick-to-narrow (NFL lit = NFL only).
+//   facIds     — facilities kept; click-to-remove, [] = all.
+//   fams / cats / prodIds — the Family → Category → Product cascade.
+//   procHidden — SUP_PROCESSES keys switched OFF, stored as the off-list so a section
+//     added later shows by default.
+// The panels list the SAME facilities, sub-regions and products on every page, and picks
+// are pruned only against those app-wide lists — never against one page's rows — so
+// opening a page can't silently drop a selection made on another.
+const FLT_KEY='avila_filters';
+const FLT_TF_DEFAULT='cm';
+// Time frame presets in panel order; '-' is a divider. Each resolves relative to TODAY.
+const FLT_TF_PRESETS=[
+  {k:'mtd',n:'MTD'},{k:'ytd',n:'YTD'},'-',
+  {k:'cm',n:'Current month'},'-',
+  {k:'rom',n:'ROM'},{k:'n3m',n:'N3M'},{k:'roy',n:'ROY'},'-',
+  {k:'full',n:'Full simulation'},{k:'custom',n:'Custom'}
+];
+// What each page needs from the bar, filled in beside each page's code:
+//   bounds()   → {from,to}: the first/last day that page can show ('' = unknown)
+//   proc()     → the Process keys it can hide, or null to hide the Process button
+//   rerender() → repaint the page (and its bar) after a selection changes
+//   onClearAll → optional: page-only controls that Clear all should also reset
+const FLT_PAGES={};
+window._flt={preset:FLT_TF_DEFAULT, fromDate:'', toDate:'',
   subIds:[], facIds:[], fams:[], cats:[], prodIds:[], procHidden:[]};
-supLoadFilterPrefs();
+window._supView=window._flt;   // the Supply page's historical name for the same object
+fltLoad();
 
-// The filter selections outlive a reload (same pattern as avila_tbl_zoom). The date
-// preset is deliberately NOT persisted — it should reset to ROM each session.
-function supSaveFilterPrefs(){
-  const v=window._supView||{};
-  try{ localStorage.setItem(SUP_FILTER_KEY,JSON.stringify({
-    subIds:v.subIds||[], facIds:v.facIds||[], fams:v.fams||[], cats:v.cats||[], prodIds:v.prodIds||[], procHidden:v.procHidden||[]
-  })); }catch(e){}
+// Selections outlive a reload (same pattern as avila_tbl_zoom); the time frame doesn't.
+function fltSave(){
+  const v=window._flt;
+  try{ localStorage.setItem(FLT_KEY,JSON.stringify({subIds:v.subIds, facIds:v.facIds,
+    fams:v.fams, cats:v.cats, prodIds:v.prodIds, procHidden:v.procHidden})); }catch(e){}
 }
-function supLoadFilterPrefs(){
-  const v=window._supView; if(!v) return;
+function fltLoad(){
+  const v=window._flt;
   const arr=x=>Array.isArray(x)?x.filter(i=>typeof i==='string'):[];
   try{
-    const raw=localStorage.getItem(SUP_FILTER_KEY); if(!raw) return;
+    // The first run after the bar went app-wide starts from the Supply page's saved picks.
+    const raw=localStorage.getItem(FLT_KEY)||localStorage.getItem('avila_sup_filters'); if(!raw) return;
     const p=JSON.parse(raw)||{};
     v.subIds=arr(p.subIds); v.facIds=arr(p.facIds); v.fams=arr(p.fams); v.cats=arr(p.cats);
     v.prodIds=arr(p.prodIds); v.procHidden=arr(p.procHidden);
   }catch(e){}
 }
 
-function supSetView(preset, btn){
-  window._supView.preset=preset;
-  document.querySelectorAll('#sup-filter-bar .vw-btn').forEach(b=>b.classList.remove('active'));
-  if(btn) btn.classList.add('active');
-  const customDiv=document.getElementById('sup-custom-dates');
-  if(customDiv) customDiv.style.display=preset==='custom'?'flex':'none';
-  renderSupplyView();
+// ── TIME FRAME ─────────────────────────────────────────────────────────────
+// First and last simulated day, local YYYY-MM-DD ('' before dates are configured).
+// Calendar arithmetic, not +ms: adding 864e5 per day across the November DST change
+// lands at 23:00 the day before, which silently dropped the last day.
+function fltSimBounds(horizon){
+  if(!S.simCfg?.start_date) return {from:'',to:''};
+  const s=new Date(S.simCfg.start_date+'T00:00:00');
+  const n=horizon||S.simCfg.horizon||90;   // same default as the Supply table's date spine
+  return {from:s._ymd(), to:new Date(s.getFullYear(),s.getMonth(),s.getDate()+n-1)._ymd()};
+}
+function fltPageBounds(p){
+  const f=FLT_PAGES[p]?.bounds;
+  return (f&&f())||fltSimBounds();
 }
 
-
-
-// Product ids in scope for the Supply page at a given facility ('' = all facilities).
-// Two sources, unioned:
-//   1. TOPOLOGY - what the wiring says is produced/stored/demanded there (mills' and
-//      packers' element_product_capacities, terminal bulk silos, terminal demand points).
-//   2. CATALOG - products whose own facility_id ("Made At", set in the product form)
-//      names this facility. This is what makes the list grow on its own: a product the
-//      user creates and assigns to a plant is filterable immediately, before anyone has
-//      wired it into a mill's capacity table.
-function supScopeProductIds(facId){
-  const prodIds=new Set();
-  const inFac=e=>!facId||(e.assigned_facility_id===facId||e.facility_id===facId);
-  // Plant production products (kilns / finish mills / packing plants).
-  DB.elements.filter(e=>['kiln','finish_mill','packing_plant'].includes(e.type)).filter(inFac)
-    .forEach(el=>DB.element_product_capacities.filter(c=>c.element_id===el.id)
-      .forEach(c=>{ if(c.product_id) prodIds.add(c.product_id); }));
-  // Terminal-handled products — cement stored in silos + products demanded there —
-  // so the dropdown reflects what receiving facilities actually handle.
-  const termFacIds=new Set(DB.facilities.filter(f=>f.type==='terminal').map(f=>f.id));
-  const isTermEl=e=>termFacIds.has(e.assigned_facility_id||e.facility_id);
-  DB.elements.filter(e=>e.type==='bulk_silo').filter(inFac).filter(isTermEl)
-    .forEach(s=>getSiloProducts(s).forEach(p=>{ const pr=DB.products.find(x=>x.id===p);
-      if(pr&&(pr.category==='cement_bulk'||pr.category==='cement_packed')) prodIds.add(p); }));
-  DB.elements.filter(e=>e.type==='demand_point').filter(inFac).filter(isTermEl)
-    .forEach(el=>{ const dp=DB.demand_points.find(d=>d.element_id===el.id);
-      (dp?.products||[]).forEach(p=>{ if(p.product_id) prodIds.add(p.product_id); }); });
-  // Catalog-declared "Made At" products.
-  (DB.products||[]).forEach(p=>{ if(p.facility_id && (!facId||p.facility_id===facId)) prodIds.add(p.id); });
-  return prodIds;
+// The window a preset asks for, before a page cuts it to the days it has (b).
+function fltTfWanted(k,b){
+  const t=new Date(), y=t.getFullYear(), m=t.getMonth();
+  const today=new Date(y,m,t.getDate())._ymd();
+  const som=new Date(y,m,1)._ymd(), eom=new Date(y,m+1,0)._ymd();
+  switch(k){
+    case 'mtd':  return {from:som, to:today};
+    case 'ytd':  return {from:y+'-01-01', to:today};
+    case 'cm':   return {from:som, to:eom};
+    case 'rom':  return {from:today, to:eom};
+    case 'n3m':  return {from:today, to:new Date(y,m+4,0)._ymd()};   // rest of this month + 3 full months
+    case 'roy':  return {from:today, to:y+'-12-31'};
+    case 'custom': {
+      const v=window._flt;
+      return {from:v.fromDate||b.from, to:v.toDate||b.to};
+    }
+    default:     return {from:b.from, to:b.to};                       // 'full'
+  }
 }
 
+// The days page p shows: the time frame cut to that page's bounds. from > to means no
+// overlap. wanted = the uncut window; bounds = what the page has.
+function fltGetDateRange(p,bounds){
+  const b=bounds||fltPageBounds(p);
+  const wanted=fltTfWanted(window._flt.preset||FLT_TF_DEFAULT,b);
+  return {from:b.from&&wanted.from<b.from?b.from:wanted.from,
+          to:b.to&&wanted.to>b.to?b.to:wanted.to, wanted, bounds:b};
+}
+
+// The shared time frame as 1-indexed simulation days, for pages that index by day. `horizon`
+// overrides the configured one (the rail planner can run past it). No overlap comes back as
+// {startDay:1, endDay:0, empty:true}, so `endDay-startDay+1` is 0 and day loops run no days.
+function fltSimDayRange(p,horizon){
+  const r=fltGetDateRange(p,horizon?fltSimBounds(horizon):undefined);
+  if(!S.simCfg?.start_date||!r.from||!r.to||r.from>r.to) return {startDay:1, endDay:0, empty:true};
+  return {startDay:dateToDayOffset(r.from,S.simCfg.start_date)+1,
+          endDay:dateToDayOffset(r.to,S.simCfg.start_date)+1};
+}
+
+// Inclusive day count between two YYYY-MM-DD strings (rounding absorbs DST hours).
+function fltDaysIncl(a,b){ return Math.round((new Date(b+'T00:00:00')-new Date(a+'T00:00:00'))/864e5)+1; }
+
+// "Sep 17", or "Jan 15 '27" outside the current year.
+function fltFmt(ds){
+  if(!ds) return '';
+  const d=new Date(ds+'T00:00:00');
+  const s=d.toLocaleDateString('en',{month:'short',day:'numeric'});
+  return d.getFullYear()===new Date().getFullYear()?s:s+" '"+String(d.getFullYear()).slice(2);
+}
+
+function fltSetTimeFrame(p,k){
+  const v=window._flt;
+  if(k==='custom'&&v.preset!=='custom'){
+    // Seed the pickers with what is on screen, so Custom reads as "adjust this window".
+    const r=fltGetDateRange(p);
+    if(r.from&&r.to&&r.from<=r.to){ v.fromDate=r.from; v.toDate=r.to; }
+  }
+  v.preset=k;
+  if(k!=='custom') fltCloseDock();   // one choice, so close like a pull-down; Custom stays open for its dates
+  fltChanged(p);
+}
+
+// Custom From/To. Partial typing (year 0002…) is ignored, dates are held inside the page's
+// bounds, and moving one end past the other drags the other end along.
+function fltSetTfDate(p,which,val){
+  const v=window._flt, b=fltPageBounds(p);
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(val||'')||val<'1900') return;
+  if(b.from&&val<b.from) val=b.from;
+  if(b.to&&val>b.to) val=b.to;
+  const before=v.fromDate+'|'+v.toDate;
+  if(which==='from'){ v.fromDate=val; if(!v.toDate||v.toDate<val) v.toDate=val; }
+  else              { v.toDate=val;   if(!v.fromDate||v.fromDate>val) v.fromDate=val; }
+  if(v.fromDate+'|'+v.toDate!==before) fltChanged(p);
+}
+
+// ── UNIVERSES (the same on every page) ─────────────────────────────────────
 const SUP_CAT_LABELS={cement_bulk:'Cement Bulk',cement_packed:'Cement Packed',clinker:'Clinker',raw_meal:'Raw Material',additive:'SCM'};
 
-// ── PROCESS FILTER CATALOG ─────────────────────────────────────────────────
+// ── PROCESS CATALOG ────────────────────────────────────────────────────────
 // One entry per collapsible section of the Supply table. `key` is the section key
 // already stamped on every header (`data-seckey`) and child row (`supsec-<key>`) by
 // the render, so hiding a process is a CSS rule — no re-render, and no change needed
-// at the ~18 places that emit those rows.
+// at the ~18 places that emit those rows. Other pages map their own sections onto these
+// keys (their FLT_PAGES proc() lists which ones they have).
 //   n    — short label, read under its group heading in the panel ("Inventory › Cement")
 //   full — unambiguous name, used anywhere the group heading is not adjacent
 const SUP_PROCESSES=[
@@ -6276,104 +6242,78 @@ const SUP_PROCESSES=[
   {g:'Logistics',    c:'#e2eaf8', key:'truckLoad',    n:'Truck transfers',         full:'Truck transfers'}
 ];
 const SUP_PROC_GROUPS=['Inventory','Requirements','Production','Logistics'];
-function supProcHidden(){ return new Set(window._supView?.procHidden||[]); }
-function supProcOn(key){ return !(window._supView?.procHidden||[]).includes(key); }
+function fltProcOn(key){ return !(window._flt.procHidden||[]).includes(key); }
 
 // ── Selection-set helpers ──────────────────────────────────────────────────
 // Every filter uses the same convention: an empty array means "unrestricted".
-function _supSel(field){ const v=window._supView||{}; return v[field]||(v[field]=[]); }
-function _supHas(field,id){ const a=_supSel(field); return a.length===0||a.includes(id); }
-function _supToggle(field,id,universe){
-  const v=window._supView; let a=_supSel(field).slice();
+function _fltHas(field,id){ const a=window._flt[field]||[]; return a.length===0||a.includes(id); }
+function _fltToggle(field,id,universe){
+  const v=window._flt; let a=(v[field]||[]).slice();
   if(!a.length) a=universe.slice();          // make "all" explicit before subtracting
   a=a.includes(id)?a.filter(x=>x!==id):a.concat([id]);
   if(a.length===universe.length) a=[];       // back to unrestricted
   v[field]=a;
 }
 
-// Facilities that qualify for the Supply page: anything with a kiln / finish mill /
-// packing plant, plus terminals that own silos, demand points or berths.
-function supFilterableFacilities(){
-  const qual=new Set(
-    DB.elements.filter(e=>['kiln','finish_mill','packing_plant'].includes(e.type))
-      .map(e=>e.assigned_facility_id||e.facility_id).filter(Boolean)
-  );
-  const termEls=new Set(
-    DB.elements.filter(e=>['bulk_silo','demand_point','berth'].includes(e.type))
-      .map(e=>e.assigned_facility_id||e.facility_id).filter(Boolean)
-  );
-  DB.facilities.filter(f=>f.type==='terminal'&&termEls.has(f.id)).forEach(f=>qual.add(f.id));
-  return DB.facilities.filter(f=>qual.has(f.id));
+// Facilities any planning page can show: every facility that owns an element (by its
+// assigned facility — an element's own facility_id is the canvas it was drawn on).
+function fltFacilities(){
+  const ids=new Set(DB.elements.map(e=>e.assigned_facility_id||e.facility_id).filter(Boolean));
+  return DB.facilities.filter(f=>ids.has(f.id));
 }
-// Sub-regions that hold at least one Supply-page facility, in org-tree order.
-function supFilterableSubRegions(){
-  const ids=new Set(supFilterableFacilities().map(f=>f.sub_region_id).filter(Boolean));
+// Sub-regions holding at least one of those facilities, in org-tree order.
+function fltSubRegions(){
+  const ids=new Set(fltFacilities().map(f=>f.sub_region_id).filter(Boolean));
   return (DB.sub_regions||[]).filter(s=>ids.has(s.id));
 }
-// Supply-page facilities inside the selected sub-regions (all of them when none is picked).
-// This is the Facility panel's universe.
-function supSubScopedFacilities(){
-  const subs=window._supView?.subIds||[];
-  const all=supFilterableFacilities();
+// Facilities inside the picked sub-regions (all when none is picked) — the Facility panel.
+function fltSubScopedFacilities(){
+  const subs=window._flt.subIds||[];
+  const all=fltFacilities();
   return subs.length?all.filter(f=>subs.includes(f.sub_region_id)):all;
 }
-// The facilities currently in view, as a Set — null when unrestricted, so callers can
-// skip filtering entirely. Sub-region and Facility picks intersect.
-function supFacIdSet(){
-  const v=window._supView||{};
-  const subs=v.subIds||[], facs=v.facIds||[];
+// The facilities in view as a Set — null when unrestricted, so callers can skip
+// filtering entirely. Sub-region and Facility picks intersect.
+function fltFacIdSet(){
+  const v=window._flt, subs=v.subIds||[], facs=v.facIds||[];
   if(!subs.length) return facs.length?new Set(facs):null;
-  const scoped=supSubScopedFacilities().map(f=>f.id);
+  const scoped=fltSubScopedFacilities().map(f=>f.id);
   return new Set(facs.length?scoped.filter(id=>facs.includes(id)):scoped);
 }
-function supFacOk(facId, set){
-  const s=(set===undefined)?supFacIdSet():set;
-  return !s||s.has(facId);
-}
 
-// Product ids in scope for the Supply page at the selected facilities ([] = all).
-// Two sources, unioned:
-//   1. TOPOLOGY - what the wiring says is produced/stored/demanded there (mills' and
-//      packers' element_product_capacities, terminal bulk silos, terminal demand points).
-//   2. CATALOG - products whose own facility_id ("Made At", set in the product form)
-//      names one of these facilities. This is what makes the list grow on its own: a
-//      product the user creates and assigns to a plant is filterable immediately,
-//      before anyone has wired it into a mill's capacity table.
-function supScopeProductIds(facIds){
+// Products handled at the given facilities ([] = everywhere): what their elements produce
+// (capacity tables), store (silo contents) or are asked for (demand points), plus catalog
+// products "Made At" one of them — so a product created and assigned to a plant is
+// filterable before anyone wires it into a mill.
+function fltScopeProductIds(facIds){
   const fset=(facIds&&facIds.length)?new Set(facIds):null;
-  const prodIds=new Set();
-  const inFac=e=>!fset||fset.has(e.assigned_facility_id)||fset.has(e.facility_id);
-  // Plant production products (kilns / finish mills / packing plants).
-  DB.elements.filter(e=>['kiln','finish_mill','packing_plant'].includes(e.type)).filter(inFac)
-    .forEach(el=>DB.element_product_capacities.filter(c=>c.element_id===el.id)
-      .forEach(c=>{ if(c.product_id) prodIds.add(c.product_id); }));
-  // Terminal-handled products — cement stored in silos + products demanded there —
-  // so the list reflects what receiving facilities actually handle.
-  const termFacIds=new Set(DB.facilities.filter(f=>f.type==='terminal').map(f=>f.id));
-  const isTermEl=e=>termFacIds.has(e.assigned_facility_id||e.facility_id);
-  DB.elements.filter(e=>e.type==='bulk_silo').filter(inFac).filter(isTermEl)
-    .forEach(s=>getSiloProducts(s).forEach(p=>{ const pr=DB.products.find(x=>x.id===p);
-      if(pr&&(pr.category==='cement_bulk'||pr.category==='cement_packed')) prodIds.add(p); }));
-  DB.elements.filter(e=>e.type==='demand_point').filter(inFac).filter(isTermEl)
-    .forEach(el=>{ const dp=DB.demand_points.find(d=>d.element_id===el.id);
-      (dp?.products||[]).forEach(p=>{ if(p.product_id) prodIds.add(p.product_id); }); });
-  // Catalog-declared "Made At" products.
-  (DB.products||[]).forEach(p=>{ if(p.facility_id && (!fset||fset.has(p.facility_id))) prodIds.add(p.id); });
-  return prodIds;
+  const known=new Set((DB.products||[]).map(p=>p.id));
+  const out=new Set(), add=pid=>{ if(pid&&known.has(pid)) out.add(pid); };
+  const capBy=new Map();
+  DB.element_product_capacities.forEach(c=>{ const a=capBy.get(c.element_id); if(a) a.push(c.product_id); else capBy.set(c.element_id,[c.product_id]); });
+  const dpBy=new Map((DB.demand_points||[]).map(d=>[d.element_id,d]));
+  DB.elements.forEach(el=>{
+    if(fset&&!fset.has(el.assigned_facility_id||el.facility_id)) return;
+    if(el.type==='bulk_silo'||el.type==='packed_silo') (getSiloProducts(el)||[]).forEach(add);
+    else if(el.type==='demand_point') (dpBy.get(el.id)?.products||[]).forEach(x=>add(x.product_id));
+    else (capBy.get(el.id)||[]).forEach(add);
+  });
+  (DB.products||[]).forEach(p=>{ if(p.facility_id&&(!fset||fset.has(p.facility_id))) add(p.id); });
+  return out;
 }
 
-// Drop selections the current facility/family/category no longer allows, so the page
-// never filters on a combination the panels don't offer.
-function supNormalizeProdFilters(){
-  const v=window._supView; if(!v) return;
-  // A sub-region or facility that vanished from the topology — or a facility outside the
-  // picked sub-regions — shouldn't keep filtering the page. Done first: product scope reads it.
-  const subOk=new Set(supFilterableSubRegions().map(s=>s.id));
+// Drop picks the app no longer offers, so no page filters on a combination the panels
+// don't show. App-wide lists only (see the header) — and skipped while the database is
+// still empty at startup, so saved picks survive until the scenario has loaded.
+function fltNormalize(){
+  const v=window._flt;
+  if(!fltFacilities().length) return;
+  const subOk=new Set(fltSubRegions().map(s=>s.id));
   v.subIds=(v.subIds||[]).filter(id=>subOk.has(id));
-  const facOk=new Set(supSubScopedFacilities().map(f=>f.id));
+  const facOk=new Set(fltSubScopedFacilities().map(f=>f.id));
   v.facIds=(v.facIds||[]).filter(id=>facOk.has(id));
   if(v.facIds.length===facOk.size) v.facIds=[];
-  const scope=supScopeProductIds([...(supFacIdSet()||[])]);
+  const scope=fltScopeProductIds([...(fltFacIdSet()||[])]);
   const catOf=pid=>DB.products.find(p=>p.id===pid)?.category||'';
   const famOf=pid=>PRODUCT_FAMILY_OF[catOf(pid)]||'';
   // Families/categories must still exist somewhere in scope.
@@ -6384,14 +6324,15 @@ function supNormalizeProdFilters(){
   v.prodIds=(v.prodIds||[]).filter(pid=>scope.has(pid)
     &&(!v.fams.length||v.fams.includes(famOf(pid)))
     &&(!v.cats.length||v.cats.includes(catOf(pid))));
+  const procOk=new Set(SUP_PROCESSES.map(p=>p.key));
+  v.procHidden=(v.procHidden||[]).filter(k=>procOk.has(k));
 }
 
-// The set of product ids the page may currently show, or null for "no product
-// restriction". Callers use supProdOk(pid) rather than comparing against one selected
-// product, so Family / Category / Product all narrow the page through the same path.
-// Product beats Category beats Family — the most specific selection wins.
-function supAllowedProdIds(){
-  const v=window._supView||{};
+// The set of product ids pages may show, or null for "no product restriction". Pages
+// test membership rather than comparing against one picked product, so Family, Category
+// and Product all narrow through the same path. Product beats Category beats Family.
+function fltAllowedProdIds(){
+  const v=window._flt;
   const fams=v.fams||[], cats=v.cats||[], prods=v.prodIds||[];
   if(!fams.length && !cats.length && !prods.length) return null;
   if(prods.length) return new Set(prods);
@@ -6400,84 +6341,145 @@ function supAllowedProdIds(){
                 : fams.includes(PRODUCT_FAMILY_OF[p.category]||'')
   ).map(p=>p.id));
 }
-function supProdOk(pid, allowed){
-  const a=(allowed===undefined)?supAllowedProdIds():allowed;
-  return !a || a.has(pid);
+
+// ── BAR ────────────────────────────────────────────────────────────────────
+// A page hosts its bar in <div id="flt-<p>-bar" style="display:contents"> (the buttons
+// join the page's own toolbar row) and its strip in <div id="flt-<p>-toks" class="sup-toks">.
+function fltMount(p){
+  const host=document.getElementById('flt-'+p+'-bar');
+  if(!host||host.dataset.mounted) return;
+  host.dataset.mounted='1';
+  const dock=(w,label,panSty)=>
+    `<div class="sup-drop"><button type="button" class="sup-drop-btn" id="flt-${p}-btn-${w}" aria-expanded="false" aria-haspopup="true" onclick="fltToggleDock(event,'${p}','${w}')">`+
+    `<span class="k">${label}</span><span class="v">All</span><span class="car">▼</span></button>`+
+    `<div class="sup-panel" id="flt-${p}-pan-${w}"${panSty?` style="${panSty}"`:''} onclick="event.stopPropagation()"></div></div>`;
+  host.innerHTML=dock('tf','Time frame','min-width:0')+`<div class="tb-div"></div>`+
+    dock('sub','Sub-region')+dock('fac','Facility')+dock('proc','Process','min-width:340px')+dock('prod','Product','min-width:540px')+
+    `<button type="button" class="tb-btn sec" style="font-size:9px;padding:3px 10px" onclick="fltClearAll('${p}')">✕ Clear all</button>`;
 }
 
-// ── Panel rendering ────────────────────────────────────────────────────────
-// One checkbox pill. `swatch` tints it with the section's own colour so the Process
-// panel reads against the table below it.
-function _supPill(label,on,onclick,opt){
+// Repaints page p's bar from the shared state: prune impossible picks, rebuild the panels
+// in place (an open one stays open), then the button faces and the token strip.
+function fltRender(p){
+  fltMount(p);
+  fltNormalize();
+  _fltRenderTfPanel(p);
+  _fltRenderSubPanel(p);
+  _fltRenderFacPanel(p);
+  _fltRenderProcPanel(p);
+  _fltRenderProdPanel(p);
+  _fltRenderSummary(p);
+}
+
+// One checkbox pill. `swatch` tints it with the section's own colour; `na` dims a Process
+// the current page doesn't have (still clickable — the choice is shared with other pages).
+function fltPill(label,on,onclick,opt){
   const o=opt||{};
-  return `<button type="button" class="sup-cb${on?' on':''}${o.all?' all':''}" aria-pressed="${on}"`+
+  return `<button type="button" class="sup-cb${on?' on':''}${o.all?' all':''}${o.na?' na':''}" aria-pressed="${on}"`+
     (o.title?` title="${esc(o.title)}"`:'')+` onclick="${onclick}">`+
     `<i class="box">${on?'✓':''}</i>`+
     (o.swatch?`<i class="swatch" style="background:${o.swatch}"></i>`:'')+
     `<span>${esc(label)}</span></button>`;
 }
 
+// The list is rebuilt on every render; the date inputs are created once and only have
+// their values synced, so a picker the user is typing into never loses focus.
+function _fltRenderTfPanel(p){
+  const pan=document.getElementById(`flt-${p}-pan-tf`); if(!pan) return;
+  const cur=window._flt.preset||FLT_TF_DEFAULT;
+  let list=pan.querySelector('.sup-tf-list'), cust=pan.querySelector('.sup-tf-cust');
+  if(!list||!cust){
+    pan.innerHTML=`<div class="sup-tf-list"></div><div class="sup-tf-cust">`+
+      `<label>From <input type="date" data-w="from" onchange="fltSetTfDate('${p}','from',this.value)"></label>`+
+      `<label>To <input type="date" data-w="to" onchange="fltSetTfDate('${p}','to',this.value)"></label></div>`;
+    list=pan.querySelector('.sup-tf-list'); cust=pan.querySelector('.sup-tf-cust');
+  }
+  const b=fltPageBounds(p);
+  let h='';
+  FLT_TF_PRESETS.forEach(o=>{
+    if(o==='-'){ h+=`<i class="sup-tf-sep"></i>`; return; }
+    // Dates live in the tooltip only — nothing extra on screen.
+    const w=fltTfWanted(o.k,b);
+    const f=b.from&&w.from<b.from?b.from:w.from, t=b.to&&w.to>b.to?b.to:w.to;
+    const ok=f&&t&&f<=t;
+    let tip=ok?`${fltFmt(f)} → ${fltFmt(t)} · ${fltDaysIncl(f,t)} days`:'No days on this page in this window';
+    if(ok&&b.from&&w.from<b.from) tip+=` · this page starts ${fltFmt(b.from)}`;
+    if(ok&&b.to&&w.to>b.to)       tip+=` · this page ends ${fltFmt(b.to)}`;
+    h+=fltPill(o.n,cur===o.k,`fltSetTimeFrame('${p}','${o.k}')`,{title:tip});
+  });
+  list.innerHTML=h;
+  cust.style.display=cur==='custom'?'flex':'none';
+  const r=fltGetDateRange(p);
+  cust.querySelectorAll('input').forEach(inp=>{
+    inp.min=b.from||''; inp.max=b.to||'';
+    if(document.activeElement!==inp) inp.value=inp.dataset.w==='from'?r.from:r.to;
+  });
+}
+
 // Sub-region picks narrow the page (and the Facility panel). Like the product cascade, a
 // pill is lit only when picked and ALL is lit when nothing is — so clicking NFL means "NFL only".
-function _supRenderSubPanel(){
-  const pan=document.getElementById('sup-pan-sub'); if(!pan) return;
-  const v=window._supView||{};
-  const picked=v.subIds||[];
-  const subs=supFilterableSubRegions();
+function _fltRenderSubPanel(p){
+  const pan=document.getElementById(`flt-${p}-pan-sub`); if(!pan) return;
+  const picked=window._flt.subIds||[];
   let h=`<div class="sup-pan-hd"><span>Sub-region · narrows the Facility list</span></div>`;
   h+=`<div class="sup-grp"><div class="sup-grp-hd"><h4>Sub-regions</h4><i></i></div><div class="sup-chips">`;
-  h+=_supPill('All',!picked.length,`supClearSubs()`,{all:true,title:'Every sub-region'});
-  subs.forEach(s=>{ h+=_supPill(s.name,picked.includes(s.id),`supToggleSub('${s.id}')`); });
+  h+=fltPill('All',!picked.length,`fltClearSubs('${p}')`,{all:true,title:'Every sub-region'});
+  fltSubRegions().forEach(s=>{ h+=fltPill(s.name,picked.includes(s.id),`fltToggleSub('${p}','${s.id}')`); });
   h+=`</div></div>`;
   pan.innerHTML=h;
 }
 
-function _supRenderFacPanel(){
-  const pan=document.getElementById('sup-pan-fac'); if(!pan) return;
-  const facs=supSubScopedFacilities();
-  const groups=[['plant','Plants'],['terminal','Terminals']];
+function _fltRenderFacPanel(p){
+  const pan=document.getElementById(`flt-${p}-pan-fac`); if(!pan) return;
+  const facs=fltSubScopedFacilities();
   let h=`<div class="sup-pan-hd"><span>Facility · ALL flips a whole group</span></div>`;
-  groups.forEach(([type,label])=>{
+  [['plant','Plants'],['terminal','Terminals']].forEach(([type,label])=>{
     const inGrp=facs.filter(f=>(f.type||'plant')===type);
     if(!inGrp.length) return;
-    const allOn=inGrp.every(f=>_supHas('facIds',f.id));
+    const allOn=inGrp.every(f=>_fltHas('facIds',f.id));
     h+=`<div class="sup-grp"><div class="sup-grp-hd"><h4>${label}</h4><i></i></div><div class="sup-chips">`;
-    h+=_supPill('All',allOn,`supToggleFacGroup('${type}')`,{all:true,title:'Every '+label.toLowerCase()});
-    inGrp.forEach(f=>{ h+=_supPill(f.name,_supHas('facIds',f.id),`supToggleFac('${f.id}')`); });
+    h+=fltPill('All',allOn,`fltToggleFacGroup('${p}','${type}')`,{all:true,title:'Every '+label.toLowerCase()});
+    inGrp.forEach(f=>{ h+=fltPill(f.name,_fltHas('facIds',f.id),`fltToggleFac('${p}','${f.id}')`); });
     h+=`</div></div>`;
   });
   // Facilities that don't declare a type still need somewhere to live.
   const untyped=facs.filter(f=>!['plant','terminal'].includes(f.type||'plant'));
   if(untyped.length){
     h+=`<div class="sup-grp"><div class="sup-grp-hd"><h4>Other</h4><i></i></div><div class="sup-chips">`;
-    untyped.forEach(f=>{ h+=_supPill(f.name,_supHas('facIds',f.id),`supToggleFac('${f.id}')`); });
+    untyped.forEach(f=>{ h+=fltPill(f.name,_fltHas('facIds',f.id),`fltToggleFac('${p}','${f.id}')`); });
     h+=`</div></div>`;
   }
   pan.innerHTML=h;
 }
 
-function _supRenderProcPanel(){
-  const pan=document.getElementById('sup-pan-proc'); if(!pan) return;
+function _fltRenderProcPanel(p){
+  const pan=document.getElementById(`flt-${p}-pan-proc`); if(!pan) return;
+  const here=FLT_PAGES[p]?.proc?FLT_PAGES[p].proc():null;
+  // Pages without sections to hide don't show the button; the choice itself stays shared.
+  pan.parentElement.style.display=here?'':'none';
+  if(!here) return;
+  const hereSet=new Set(here);
   let h=`<div class="sup-pan-hd"><span>Process · ALL flips a whole group</span><div>`+
-    `<button class="sup-mini" onclick="supSetAllProcesses(true)">All</button>`+
-    `<button class="sup-mini" onclick="supSetAllProcesses(false)">None</button></div></div>`;
+    `<button class="sup-mini" onclick="fltSetAllProcesses('${p}',true)">All</button>`+
+    `<button class="sup-mini" onclick="fltSetAllProcesses('${p}',false)">None</button></div></div>`;
   SUP_PROC_GROUPS.forEach(g=>{
-    const items=SUP_PROCESSES.filter(p=>p.g===g);
+    const items=SUP_PROCESSES.filter(o=>o.g===g);
     if(!items.length) return;
-    const allOn=items.every(p=>supProcOn(p.key));
+    const allOn=items.every(o=>fltProcOn(o.key));
     h+=`<div class="sup-grp"><div class="sup-grp-hd"><h4>${g}</h4><i></i></div><div class="sup-chips">`;
-    h+=_supPill('All',allOn,`supToggleProcGroup('${g}')`,{all:true,title:'Every '+g.toLowerCase()+' section'});
-    items.forEach(p=>{ h+=_supPill(p.n,supProcOn(p.key),`supToggleProc('${p.key}')`,{swatch:p.c,title:p.full}); });
+    h+=fltPill('All',allOn,`fltToggleProcGroup('${p}','${g}')`,{all:true,title:'Every '+g.toLowerCase()+' section'});
+    items.forEach(o=>{ const na=!hereSet.has(o.key);
+      h+=fltPill(o.n,fltProcOn(o.key),`fltToggleProc('${p}','${o.key}')`,{swatch:o.c,na,title:o.full+(na?' · not on this page':'')}); });
     h+=`</div></div>`;
   });
   pan.innerHTML=h;
 }
 
-function _supRenderProdPanel(){
-  const pan=document.getElementById('sup-pan-prod'); if(!pan) return;
-  const v=window._supView||{};
-  const scope=[...supScopeProductIds([...(supFacIdSet()||[])])];
-  const catOf=pid=>DB.products.find(p=>p.id===pid)?.category||'';
+function _fltRenderProdPanel(p){
+  const pan=document.getElementById(`flt-${p}-pan-prod`); if(!pan) return;
+  const v=window._flt;
+  const scope=[...fltScopeProductIds([...(fltFacIdSet()||[])])];
+  const catOf=pid=>DB.products.find(x=>x.id===pid)?.category||'';
   const famOf=pid=>PRODUCT_FAMILY_OF[catOf(pid)]||'';
 
   const fams=[...new Set(scope.map(famOf).filter(Boolean))]
@@ -6496,75 +6498,91 @@ function _supRenderProdPanel(){
   // column's ALL is lit exactly when nothing in it is picked.
   const col=(title,allOn,allFn,body)=>
     `<div><h4>${title}</h4><div class="sup-chips">`+
-    _supPill('All',allOn,allFn,{all:true,title:'Every '+title.toLowerCase()})+body+`</div></div>`;
+    fltPill('All',allOn,allFn,{all:true,title:'Every '+title.toLowerCase()})+body+`</div></div>`;
 
   let h=`<div class="sup-pan-hd"><span>Family → Category → Product · each column narrows the next</span>`+
-    `<div><button class="sup-mini" onclick="supClearProdFilters()">Clear</button></div></div><div class="sup-mill">`;
-  h+=col('Family',!(v.fams||[]).length,`supClearProdField('fams')`,
-    fams.map(f=>_supPill(PRODUCT_FAMILY_LABELS[f]||f,(v.fams||[]).includes(f),`supToggleProdField('fams','${f}')`)).join(''));
-  h+=col('Category',!(v.cats||[]).length,`supClearProdField('cats')`,
-    cats.map(c=>_supPill(SUP_CAT_LABELS[c]||c,(v.cats||[]).includes(c),`supToggleProdField('cats','${c}')`)).join(''));
-  h+=col('Product',!(v.prodIds||[]).length,`supClearProdField('prodIds')`,
-    prods.map(o=>_supPill(o.name,(v.prodIds||[]).includes(o.pid),`supToggleProdField('prodIds','${o.pid}')`)).join(''));
+    `<div><button class="sup-mini" onclick="fltClearProdFilters('${p}')">Clear</button></div></div><div class="sup-mill">`;
+  h+=col('Family',!(v.fams||[]).length,`fltClearProdField('${p}','fams')`,
+    fams.map(f=>fltPill(PRODUCT_FAMILY_LABELS[f]||f,(v.fams||[]).includes(f),`fltToggleProdField('${p}','fams','${f}')`)).join(''));
+  h+=col('Category',!(v.cats||[]).length,`fltClearProdField('${p}','cats')`,
+    cats.map(c=>fltPill(SUP_CAT_LABELS[c]||c,(v.cats||[]).includes(c),`fltToggleProdField('${p}','cats','${c}')`)).join(''));
+  h+=col('Product',!(v.prodIds||[]).length,`fltClearProdField('${p}','prodIds')`,
+    prods.map(o=>fltPill(o.name,(v.prodIds||[]).includes(o.pid),`fltToggleProdField('${p}','prodIds','${o.pid}')`)).join(''));
   h+=`</div>`;
   pan.innerHTML=h;
 }
 
 // Button faces + the token strip: the whole filter state, readable without opening
-// anything.
-function _supRenderDockSummary(){
-  const v=window._supView||{};
-  const facs=supSubScopedFacilities();
-  const subs=supFilterableSubRegions();
+// anything — identical on every page except for the dates each page actually has.
+function _fltRenderSummary(p){
+  const v=window._flt;
+  const facs=fltSubScopedFacilities();
+  const subs=fltSubRegions();
   const nameOfFac=id=>DB.facilities.find(f=>f.id===id)?.name||id;
   const nameOfSub=id=>subs.find(s=>s.id===id)?.name||id;
-  const nameOfProd=id=>DB.products.find(p=>p.id===id)?.name||id;
+  const nameOfProd=id=>DB.products.find(x=>x.id===id)?.name||id;
 
-  const setBtn=(id,txt,on)=>{
-    const b=document.getElementById(id); if(!b) return;
+  const setBtn=(w,txt,on)=>{
+    const b=document.getElementById(`flt-${p}-btn-${w}`); if(!b) return;
     b.classList.toggle('set',!!on);
     const s=b.querySelector('.v'); if(s) s.textContent=txt;
   };
+  // Time frame: preset name + the dates this page shows; lit when it isn't the default.
+  const tfKey=v.preset||FLT_TF_DEFAULT;
+  const tfName=(FLT_TF_PRESETS.find(o=>o.k===tfKey)||{}).n||tfKey;
+  const rg=fltGetDateRange(p);
+  const rgOk=!!(rg.from&&rg.to&&rg.from<=rg.to);
+  setBtn('tf', tfName+(rgOk?' · '+fltFmt(rg.from)+' → '+fltFmt(rg.to):' · no days here'), tfKey!==FLT_TF_DEFAULT);
   const nSub=(v.subIds||[]).length;
-  setBtn('sup-btn-sub', nSub?nSub+' of '+subs.length:'All '+subs.length, nSub>0);
+  setBtn('sub', nSub?nSub+' of '+subs.length:'All '+subs.length, nSub>0);
   const nFac=(v.facIds||[]).length;
-  setBtn('sup-btn-fac', nFac?nFac+' of '+facs.length:'All '+facs.length, nFac>0);
+  setBtn('fac', nFac?nFac+' of '+facs.length:'All '+facs.length, nFac>0);
   const nOff=(v.procHidden||[]).length;
-  setBtn('sup-btn-proc', nOff?(SUP_PROCESSES.length-nOff)+' of '+SUP_PROCESSES.length:'All '+SUP_PROCESSES.length, nOff>0);
+  setBtn('proc', nOff?(SUP_PROCESSES.length-nOff)+' of '+SUP_PROCESSES.length:'All '+SUP_PROCESSES.length, nOff>0);
   const bits=[];
   if((v.fams||[]).length)    bits.push(v.fams.length+(v.fams.length>1?' fams':' fam'));
   if((v.cats||[]).length)    bits.push(v.cats.length+(v.cats.length>1?' cats':' cat'));
   if((v.prodIds||[]).length) bits.push(v.prodIds.length+(v.prodIds.length>1?' prods':' prod'));
-  setBtn('sup-btn-prod', bits.length?bits.join(' · '):'All', bits.length>0);
+  setBtn('prod', bits.length?bits.join(' · '):'All', bits.length>0);
 
-  const strip=document.getElementById('sup-tokens'); if(!strip) return;
+  const strip=document.getElementById(`flt-${p}-toks`); if(!strip) return;
   const tok=(kind,label,val,fn)=>
     `<button type="button" class="sup-tok k-${kind}" title="Remove this filter" onclick="${fn}">`+
     `<span style="opacity:.6">${label}</span><b>${esc(val)}</b><span class="x">✕</span></button>`;
   let h=`<span class="lbl">Active</span>`, n=0;
-  (v.subIds||[]).forEach(id=>{ n++; h+=tok('fac','Sub-region',nameOfSub(id),`supToggleSub('${id}')`); });
-  (v.facIds||[]).forEach(id=>{ n++; h+=tok('fac','Facility',nameOfFac(id),`supToggleFac('${id}')`); });
-  (v.procHidden||[]).forEach(k=>{ const p=SUP_PROCESSES.find(x=>x.key===k);
-    n++; h+=tok('proc','Hidden',p?p.full:k,`supToggleProc('${k}')`); });
-  (v.fams||[]).forEach(f=>{ n++; h+=tok('prod','Family',PRODUCT_FAMILY_LABELS[f]||f,`supToggleProdField('fams','${f}')`); });
-  (v.cats||[]).forEach(c=>{ n++; h+=tok('prod','Category',SUP_CAT_LABELS[c]||c,`supToggleProdField('cats','${c}')`); });
-  (v.prodIds||[]).forEach(p=>{ n++; h+=tok('prod','Product',nameOfProd(p),`supToggleProdField('prodIds','${p}')`); });
-  if(!n) h+=`<span class="none">no filters — showing everything</span>`;
+  // The window always leads the strip. No ✕ — there is always a time frame; clicking opens it.
+  let win='no days on this page';
+  if(rgOk){
+    const t=new Date(), today=t._ymd(), yday=new Date(t.getFullYear(),t.getMonth(),t.getDate()-1)._ymd();
+    const nd=fltDaysIncl(rg.from,rg.to);
+    const past=rg.from<today?fltDaysIncl(rg.from,rg.to<today?rg.to:yday):0;
+    win=`${fltFmt(rg.from)} → ${fltFmt(rg.to)} · ${nd} days · ${past} past · ${nd-past} from today`;
+  }
+  h+=`<button type="button" class="sup-tok k-tf" title="Change the time frame" onclick="fltToggleDock(event,'${p}','tf')">`+
+     `<span style="opacity:.6">Window</span><b>${esc(win)}</b></button>`;
+  (v.subIds||[]).forEach(id=>{ n++; h+=tok('fac','Sub-region',nameOfSub(id),`fltToggleSub('${p}','${id}')`); });
+  (v.facIds||[]).forEach(id=>{ n++; h+=tok('fac','Facility',nameOfFac(id),`fltToggleFac('${p}','${id}')`); });
+  (v.procHidden||[]).forEach(k=>{ const o=SUP_PROCESSES.find(x=>x.key===k);
+    n++; h+=tok('proc','Hidden',o?o.full:k,`fltToggleProc('${p}','${k}')`); });
+  (v.fams||[]).forEach(f=>{ n++; h+=tok('prod','Family',PRODUCT_FAMILY_LABELS[f]||f,`fltToggleProdField('${p}','fams','${f}')`); });
+  (v.cats||[]).forEach(c=>{ n++; h+=tok('prod','Category',SUP_CAT_LABELS[c]||c,`fltToggleProdField('${p}','cats','${c}')`); });
+  (v.prodIds||[]).forEach(x=>{ n++; h+=tok('prod','Product',nameOfProd(x),`fltToggleProdField('${p}','prodIds','${x}')`); });
+  if(!n) h+=`<span class="none">no other filters</span>`;
   strip.innerHTML=h;
 }
 
 // ── Panel open/close ───────────────────────────────────────────────────────
-function supCloseDock(){
-  document.querySelectorAll('.sup-panel.open').forEach(p=>p.classList.remove('open'));
+function fltCloseDock(){
+  document.querySelectorAll('.sup-panel.open').forEach(x=>x.classList.remove('open'));
   document.querySelectorAll('.sup-drop-btn').forEach(b=>b.setAttribute('aria-expanded','false'));
 }
-function supToggleDock(ev,which){
+function fltToggleDock(ev,p,which){
   if(ev) ev.stopPropagation();
-  const pan=document.getElementById('sup-pan-'+which);
-  const btn=document.getElementById('sup-btn-'+which);
+  const pan=document.getElementById(`flt-${p}-pan-${which}`);
+  const btn=document.getElementById(`flt-${p}-btn-${which}`);
   if(!pan||!btn) return;
   const wasOpen=pan.classList.contains('open');
-  supCloseDock();
+  fltCloseDock();
   if(wasOpen) return;
   pan.classList.add('open');
   btn.setAttribute('aria-expanded','true');
@@ -6573,132 +6591,99 @@ function supToggleDock(ev,which){
   const r=pan.getBoundingClientRect();
   if(r.right>window.innerWidth-8) pan.classList.add('flip');
 }
-document.addEventListener('click',()=>supCloseDock());
-document.addEventListener('keydown',e=>{ if(e.key==='Escape') supCloseDock(); });
+document.addEventListener('click',()=>fltCloseDock());
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') fltCloseDock(); });
 
 // ── Click handlers ─────────────────────────────────────────────────────────
-// Every one of these ends in _supFiltersChanged(), which re-renders the panels, the
-// summary, the section-visibility CSS and the table itself.
-function supToggleSub(subId){
-  const v=window._supView, a=(v.subIds||[]).slice();
+// Every one of these ends in fltChanged(p): save, then re-render the page the click came
+// from. Other pages repaint from the same state when they are next opened.
+function fltToggleSub(p,subId){
+  const v=window._flt, a=(v.subIds||[]).slice();
   const i=a.indexOf(subId);
   if(i>=0) a.splice(i,1); else a.push(subId);
   v.subIds=a;
-  supNormalizeProdFilters();   // also drops facility picks outside the new sub-regions
-  _supFiltersChanged();
+  fltNormalize();   // also drops facility picks outside the new sub-regions
+  fltChanged(p);
 }
-function supClearSubs(){
-  window._supView.subIds=[];
-  supNormalizeProdFilters();
-  _supFiltersChanged();
+function fltClearSubs(p){
+  window._flt.subIds=[];
+  fltNormalize();
+  fltChanged(p);
 }
-function supToggleFac(facId){
-  _supToggle('facIds',facId,supSubScopedFacilities().map(f=>f.id));
-  supNormalizeProdFilters();
-  _supFiltersChanged();
+function fltToggleFac(p,facId){
+  _fltToggle('facIds',facId,fltSubScopedFacilities().map(f=>f.id));
+  fltNormalize();
+  fltChanged(p);
 }
-function supToggleFacGroup(type){
-  const v=window._supView, all=supSubScopedFacilities();
+function fltToggleFacGroup(p,type){
+  const v=window._flt, all=fltSubScopedFacilities();
   const ids=all.filter(f=>(f.type||'plant')===type).map(f=>f.id);
-  const allOn=ids.every(id=>_supHas('facIds',id));
+  const allOn=ids.every(id=>_fltHas('facIds',id));
   let a=(v.facIds||[]).slice();
   if(!a.length) a=all.map(f=>f.id);          // make "all" explicit before subtracting
   a=allOn ? a.filter(id=>!ids.includes(id))
           : a.concat(ids.filter(id=>!a.includes(id)));
   v.facIds=(a.length===all.length)?[]:a;
-  supNormalizeProdFilters();
-  _supFiltersChanged();
+  fltNormalize();
+  fltChanged(p);
 }
-function supToggleProc(key){
-  const v=window._supView, off=(v.procHidden||[]).slice();
+function fltToggleProc(p,key){
+  const v=window._flt, off=(v.procHidden||[]).slice();
   const i=off.indexOf(key);
   if(i>=0) off.splice(i,1); else off.push(key);
   v.procHidden=off;
-  _supFiltersChanged();
+  fltChanged(p);
 }
-function supToggleProcGroup(g){
-  const v=window._supView;
-  const keys=SUP_PROCESSES.filter(p=>p.g===g).map(p=>p.key);
-  const allOn=keys.every(supProcOn);
+function fltToggleProcGroup(p,g){
+  const v=window._flt;
+  const keys=SUP_PROCESSES.filter(o=>o.g===g).map(o=>o.key);
+  const allOn=keys.every(fltProcOn);
   let off=(v.procHidden||[]).filter(k=>!keys.includes(k));
   if(allOn) off=off.concat(keys);
   v.procHidden=off;
-  _supFiltersChanged();
+  fltChanged(p);
 }
-function supSetAllProcesses(on){
-  window._supView.procHidden = on ? [] : SUP_PROCESSES.map(p=>p.key);
-  _supFiltersChanged();
+function fltSetAllProcesses(p,on){
+  window._flt.procHidden = on ? [] : SUP_PROCESSES.map(o=>o.key);
+  fltChanged(p);
 }
-function supToggleProdField(field,id){
-  const v=window._supView, a=(v[field]||[]).slice();
+function fltToggleProdField(p,field,id){
+  const v=window._flt, a=(v[field]||[]).slice();
   const i=a.indexOf(id);
   if(i>=0) a.splice(i,1); else a.push(id);
   v[field]=a;
-  supNormalizeProdFilters();
-  _supFiltersChanged();
+  fltNormalize();
+  fltChanged(p);
 }
-function supClearProdField(field){
-  window._supView[field]=[];
-  supNormalizeProdFilters();
-  _supFiltersChanged();
+function fltClearProdField(p,field){
+  window._flt[field]=[];
+  fltNormalize();
+  fltChanged(p);
 }
-// Clears the product cascade only — Facility and Process have their own controls.
-function supClearProdFilters(){
-  const v=window._supView; v.fams=[]; v.cats=[]; v.prodIds=[];
-  _supFiltersChanged();
+// Clears the product cascade only — the other filters have their own controls.
+function fltClearProdFilters(p){
+  const v=window._flt; v.fams=[]; v.cats=[]; v.prodIds=[];
+  fltChanged(p);
 }
-function supClearAllFilters(){
-  const v=window._supView;
+// Every filter except the time frame, plus any page-only controls the page names.
+function fltClearAll(p){
+  const v=window._flt;
   v.subIds=[]; v.facIds=[]; v.fams=[]; v.cats=[]; v.prodIds=[]; v.procHidden=[];
-  _supFiltersChanged();
+  FLT_PAGES[p]?.onClearAll?.();
+  fltChanged(p);
 }
-function _supFiltersChanged(){
-  supSaveFilterPrefs();
-  renderSupplyView();   // rebuilds panels + summary + section CSS + the table
-}
-
-// Called by renderSupplyView() on every pass: drop impossible selections, then repaint
-// the dock. The panels are rebuilt in place, so an open one stays open.
-function supInitFilters(){
-  if(!window._supView) window._supView={preset:'rom',fromDate:'',toDate:'',
-    subIds:[],facIds:[],fams:[],cats:[],prodIds:[],procHidden:[]};
-  supNormalizeProdFilters();
-  _supRenderSubPanel();
-  _supRenderFacPanel();
-  _supRenderProcPanel();
-  _supRenderProdPanel();
-  _supRenderDockSummary();
+function fltChanged(p){
+  fltSave();
+  FLT_PAGES[p]?.rerender?.();
 }
 
-function supGetDateRange(){
-  const v=window._supView||{preset:'rom'};
-  const today=new Date();
-  const simStart=new Date(S.simCfg.start_date+'T00:00:00');
-  const simEnd=new Date(simStart.getTime()+(S.simCfg.horizon||365)*864e5-864e5);
-
-  if(v.preset==='custom'){
-    const f=document.getElementById('sup-from-date')?.value||S.simCfg.start_date;
-    const t=document.getElementById('sup-to-date')?.value||simEnd._ymd();
-    return {from:f, to:t};
-  }
-  if(v.preset==='full'){
-    return {from:simStart._ymd(), to:simEnd._ymd()};
-  }
-  const todayStr=today._ymd();
-  const simStartStr=simStart._ymd();
-  const fromDate=simStartStr<todayStr?simStartStr:todayStr; // always start from sim start or today, whichever is earlier
-  if(v.preset==='rom'){
-    const eom=new Date(today.getFullYear(),today.getMonth()+1,0)._ymd();
-    return {from:fromDate, to:eom};
-  }
-  if(v.preset==='3m'){
-    const e3m=new Date(today.getFullYear(),today.getMonth()+3,0)._ymd();
-    return {from:fromDate, to:e3m};
-  }
-  // roy — rest of year
-  const eoy=new Date(today.getFullYear(),11,31)._ymd();
-  return {from:fromDate, to:eoy};
-}
+// ── SUPPLY → PRODUCTION ─────────────────────────────────────────────────────
+// The reference page: every Process key maps 1:1 onto a table section.
+FLT_PAGES.sup={
+  bounds:()=>fltSimBounds(),
+  proc:()=>SUP_PROCESSES.map(o=>o.key),
+  rerender:()=>renderSupplyView()
+};
 
 function renderSupplyKPIs(){
   const bar=document.getElementById('sup-kpi-bar'); if(!bar) return;
@@ -6708,10 +6693,10 @@ function renderSupplyKPIs(){
   const simStart=new Date(S.simCfg.start_date+'T00:00:00');
   // Same facility set the table uses (null = every facility), so the cards agree with
   // what is rendered below them.
-  const _kpiFacs=supFacIdSet();
+  const _kpiFacs=fltFacIdSet();
   // Same allowed-product set the table uses, so the KPI cards agree with what is
   // rendered below them under a Family or Category filter (not just a single product).
-  const _kpiPids=supAllowedProdIds();
+  const _kpiPids=fltAllowedProdIds();
   const pidOk=pid=>!_kpiPids||_kpiPids.has(pid);
 
   // Elements in scope
@@ -7318,6 +7303,7 @@ function saveProduct(){
 
 function renderDemandView(){
   const wrap=document.getElementById('demand-table-wrap'); if(!wrap) return;
+  fltRender('dem');
   let allDpEls=getFacElements().filter(e=>e.type==='demand_point');
   // Filter by active status unless user has toggled to show inactive
   if(!window._demShowInactive) allDpEls=allDpEls.filter(e=>e.is_active!==false);
@@ -7349,10 +7335,20 @@ function renderDemandView(){
   // Grid end = sim start + horizon (future forecast window)
   const simEnd = new Date(simStart.getTime() + horizon*864e5);
 
+  // Only the days of the shared time frame (cut to this grid's own span, _demGridSpan).
+  const _win=fltGetDateRange('dem');
   const allDates=[];
   // Advance by CALENDAR day, not +24h in ms — otherwise a DST fall-back day (25h) repeats.
   for(let dt=new Date(gridStart); dt<simEnd; dt.setDate(dt.getDate()+1)){
-    allDates.push(dt._ymd());
+    const ds=dt._ymd();
+    if(ds>=_win.from&&ds<=_win.to) allDates.push(ds);
+  }
+  if(!allDates.length){
+    wrap.innerHTML=`<div style="font-family:var(--mono);font-size:10px;color:var(--text-dim);padding:30px;text-align:center">`+
+      `No demand days in this time frame (${fltFmt(_win.wanted.from)} → ${fltFmt(_win.wanted.to)}). `+
+      `The grid runs ${fltFmt(_win.bounds.from)} → ${fltFmt(_win.bounds.to)}.</div>`;
+    renderDemandChart();
+    return;
   }
   // Group by month
   const months=[];
@@ -7364,104 +7360,27 @@ function renderDemandView(){
   });
 
   // Collapsed state — months keyed by ym, org groups keyed by id.
-  // Every month except the current one starts collapsed so the page opens compact.
-  // Gated on months.length so an early render (before the date range is synced) can't
-  // permanently lock in an empty collapsed set.
+  // Every month except the current one starts collapsed so the page opens compact — decided
+  // once per month, the first time the time frame brings it into view.
   if(!window._demColapsed) window._demColapsed=new Set();
-  if(!window._demColDefaultApplied&&months.length){
-    window._demColDefaultApplied=true;
-    months.filter(m=>m.ym!==todayStr.slice(0,7)).forEach(m=>window._demColapsed.add(m.ym));
-  }
+  if(!window._demColSeen) window._demColSeen=new Set();
+  months.forEach(m=>{ if(window._demColSeen.has(m.ym)) return; window._demColSeen.add(m.ym);
+    if(m.ym!==todayStr.slice(0,7)) window._demColapsed.add(m.ym); });
   if(!window._demGrpCol) window._demGrpCol=new Set(); // org group ids that are collapsed
   const collapsed=window._demColapsed;
   const grpCol=window._demGrpCol;
 
-  // ── Facility + family + category + product + cust-type filter (bidirectional) ──
-  if(!window._demFilter) window._demFilter={facId:'',prodId:'',cat:'',family:'',custType:'all'};
-  const _df=window._demFilter;
-  if(_df.cat===undefined) _df.cat='';
-  if(_df.family===undefined) _df.family='';
-  if(_df.custType===undefined) _df.custType='all';
-  if(_df.elId===undefined) _df.elId='';
-
-  // Category labels (mirrors the Product editor — Supply/Product page)
-  const _demCatLabels={cement_bulk:'Cement Bulk',cement_packed:'Cement Packed',clinker:'Clinker',raw_meal:'Raw Material',additive:'SCM'};
-
-  // Build per-facility product map (using the unfiltered allDpEls)
-  const _dfFacProdMap={}; // facId → Set<productId>
-  const _dfAllProdIds=new Set();
-  allDpEls.forEach(el=>{
-    const fId=_facForEl(el);
-    if(!_dfFacProdMap[fId]) _dfFacProdMap[fId]=new Set();
-    const dp=(DB.demand_points||[]).find(d=>d.element_id===el.id);
-    if(dp?.products?.length){
-      dp.products.forEach(p=>{ if(p.product_id){ _dfFacProdMap[fId].add(p.product_id); _dfAllProdIds.add(p.product_id); } });
-    } else if(el.props?.product_id){
-      _dfFacProdMap[fId].add(el.props.product_id); _dfAllProdIds.add(el.props.product_id);
-    }
-  });
-  const _demProdCat=pid=>DB.products.find(p=>p.id===pid)?.category||'';
-  const _demProdFam=pid=>getProductFamily(pid);
-
-  // Facility dropdown — narrows to facilities carrying the selected product (if any)
-  const _demFacSel=document.getElementById('dem-fac-filter');
-  if(_demFacSel){
-    const allFacIds=[...new Set(allDpEls.map(el=>_facForEl(el)))];
-    const shownFacIds=_df.prodId
-      ? allFacIds.filter(fId=>_dfFacProdMap[fId]?.has(_df.prodId))
-      : allFacIds;
-    const _dfFacs=shownFacIds.map(id=>DB.facilities.find(f=>f.id===id)).filter(Boolean)
-      .sort((a,b)=>a.name.localeCompare(b.name));
-    _demFacSel.innerHTML=`<option value="">All Facilities</option>`+
-      _dfFacs.map(f=>`<option value="${f.id}"${f.id===_df.facId?' selected':''}>${f.name}</option>`).join('');
-  }
-
-  // Family dropdown — families present among demand-point products (Cement groups
-  // bulk+packed, SCM groups ash+slag — see PRODUCT_FAMILY_OF/getProductFamily).
-  const _demFamSel=document.getElementById('dem-fam-filter');
-  if(_demFamSel){
-    const famIds=[...new Set([..._dfAllProdIds].map(_demProdFam).filter(Boolean))]
-      .sort((a,b)=>(PRODUCT_FAMILY_LABELS[a]||a).localeCompare(PRODUCT_FAMILY_LABELS[b]||b));
-    _demFamSel.innerHTML=`<option value="">All Families</option>`+
-      famIds.map(f=>`<option value="${f}"${f===_df.family?' selected':''}>${PRODUCT_FAMILY_LABELS[f]||f}</option>`).join('');
-  }
-
-  // Category dropdown — categories present among demand-point products, narrowed
-  // to the selected family (if any)
-  const _demCatSel=document.getElementById('dem-cat-filter');
-  if(_demCatSel){
-    let catProdIds=[..._dfAllProdIds];
-    if(_df.family) catProdIds=catProdIds.filter(id=>_demProdFam(id)===_df.family);
-    const catIds=[...new Set(catProdIds.map(_demProdCat).filter(Boolean))]
-      .sort((a,b)=>(_demCatLabels[a]||a).localeCompare(_demCatLabels[b]||b));
-    _demCatSel.innerHTML=`<option value="">All Categories</option>`+
-      catIds.map(c=>`<option value="${c}"${c===_df.cat?' selected':''}>${_demCatLabels[c]||c}</option>`).join('');
-  }
-
-  // Product dropdown — narrows to products at the selected facility and/or family/category
-  const _demProdSel=document.getElementById('dem-prod-filter');
-  if(_demProdSel){
-    let prodIds=_df.facId ? [...(_dfFacProdMap[_df.facId]||[])] : [..._dfAllProdIds];
-    if(_df.family) prodIds=prodIds.filter(id=>_demProdFam(id)===_df.family);
-    if(_df.cat) prodIds=prodIds.filter(id=>_demProdCat(id)===_df.cat);
-    const _dfProds=prodIds.map(id=>DB.products.find(p=>p.id===id)).filter(Boolean)
-      .sort((a,b)=>(a.name||a.id).localeCompare(b.name||b.id));
-    _demProdSel.innerHTML=`<option value="">All Products</option>`+
-      _dfProds.map(p=>`<option value="${p.id}"${p.id===_df.prodId?' selected':''}>${p.name||p.id}</option>`).join('');
-    _demProdSel.disabled=false; _demProdSel.style.opacity='1';
-  }
-
+  // ── Filters: the shared Facility/Sub-region and Product selections, plus this page's own
+  // INT/EXT type. A demand point matches a product pick when it carries ANY allowed product.
+  const _df=_demEnsureFilter();
   // Cust-type chips active state (INT/EXT — embedded in product/demand-point name)
   ['all','EXT','INT'].forEach(t=>{
     const el=document.getElementById('dem-type-'+(t==='all'?'all':t.toLowerCase()));
     if(el) el.classList.toggle('active', _df.custType===t);
   });
-
-  // Apply filters — reassign allDpEls to filtered subset for all table rendering below
-  if(_df.facId)  allDpEls=allDpEls.filter(el=>_facForEl(el)===_df.facId);
-  if(_df.family) allDpEls=allDpEls.filter(el=>_demElMatchesFam(el,_df.family));
-  if(_df.cat)    allDpEls=allDpEls.filter(el=>_demElMatchesCat(el,_df.cat));
-  if(_df.prodId) allDpEls=allDpEls.filter(el=>_demElMatchesProd(el,_df.prodId));
+  const _fs=fltFacIdSet(), _allowP=fltAllowedProdIds();
+  if(_fs)     allDpEls=allDpEls.filter(el=>_fs.has(_facForEl(el)));
+  if(_allowP) allDpEls=allDpEls.filter(el=>_demElProdIds(el).some(pid=>_allowP.has(pid)));
   if(_df.custType!=='all') allDpEls=allDpEls.filter(el=>_demElType(el)===_df.custType);
 
   const isWkend=ds=>{const d=new Date(ds+'T00:00:00').getDay();return d===0||d===6;};
@@ -7813,9 +7732,9 @@ function renderDemandChart(){
   let els=getFacElements().filter(e=>e.type==='demand_point');
   const df=_demEnsureFilter();
   const facFor=el=>el.assigned_facility_id||el.facility_id||S.facility_id;
-  if(df.facId)  els=els.filter(el=>facFor(el)===df.facId);
-  if(df.cat)    els=els.filter(el=>_demElMatchesCat(el,df.cat));
-  if(df.prodId) els=els.filter(el=>_demElMatchesProd(el,df.prodId));
+  const fs=fltFacIdSet(), allowP=fltAllowedProdIds();
+  if(fs)     els=els.filter(el=>fs.has(facFor(el)));
+  if(allowP) els=els.filter(el=>_demElProdIds(el).some(pid=>allowP.has(pid)));
   if(df.custType!=='all') els=els.filter(el=>_demElType(el)===df.custType);
   // A selected demand-point row overrides the dropdown filters — chart shows just it.
   if(df.elId){ const one=getFacElements().filter(e=>e.type==='demand_point'&&e.id===df.elId); if(one.length) els=one; }
@@ -7955,14 +7874,37 @@ function _demToggleGrp(id){
   else window._demGrpCol.add(id);
   renderDemandView();
 }
+// Demand-only controls: the INT/EXT type and the chart's selected row. Facility, sub-region,
+// product and the time frame are the shared filter bar's (window._flt).
 function _demEnsureFilter(){
-  if(!window._demFilter) window._demFilter={facId:'',prodId:'',cat:'',family:'',custType:'all',elId:''};
-  if(window._demFilter.cat===undefined) window._demFilter.cat='';
-  if(window._demFilter.family===undefined) window._demFilter.family='';
+  if(!window._demFilter) window._demFilter={custType:'all',elId:''};
   if(window._demFilter.custType===undefined) window._demFilter.custType='all';
   if(window._demFilter.elId===undefined) window._demFilter.elId='';
   return window._demFilter;
 }
+// The first and last day the Demand grid can show: from the earliest recorded actual (or the
+// simulation start, if earlier) to the end of the simulation — the same span renderDemandView's
+// date spine walks, so the time frame is cut to what the grid really has.
+function _demGridSpan(){
+  if(!S.simCfg.start_date) return {from:'',to:''};
+  const simStart=new Date(S.simCfg.start_date+'T00:00:00');
+  const horizon=S.simCfg.horizon||90;
+  let earliest=null;
+  (DB.demand_values||[]).forEach(v=>{ if(v.source==='actual'&&v.date&&(!earliest||v.date<earliest)) earliest=v.date; });
+  const from=earliest&&earliest<simStart._ymd()?earliest:simStart._ymd();
+  // The spine stops before simStart + horizon×24h; its last day is the last midnight before that.
+  const simEnd=new Date(simStart.getTime()+horizon*864e5);
+  const last=new Date(simEnd.getFullYear(),simEnd.getMonth(),simEnd.getDate());
+  if(last.getTime()>=simEnd.getTime()) last.setDate(last.getDate()-1);
+  return {from, to:last._ymd()};
+}
+FLT_PAGES.dem={
+  bounds:()=>_demGridSpan(),
+  proc:()=>null,   // the grid has no sections to hide
+  // Clear all also resets the page's own type chips and the chart's row selection.
+  onClearAll:()=>{ const f=_demEnsureFilter(); f.custType='all'; f.elId=''; },
+  rerender:()=>renderDemandView()
+};
 // Clicking a demand-point row selects it — the chart filters to just that point
 // (click again, or the ✕ chip on the chart, to clear). Mirrors Avila Sales.
 function _demSelectEl(elId){
@@ -7971,40 +7913,10 @@ function _demSelectEl(elId){
   renderDemandView();
 }
 function _demClearElSel(){ _demEnsureFilter().elId=''; renderDemandView(); }
-function _demOnFacChange(){
-  _demEnsureFilter().facId=document.getElementById('dem-fac-filter')?.value||'';
-  renderDemandView();
-}
-function _demOnFamChange(){
-  const f=_demEnsureFilter();
-  f.family=document.getElementById('dem-fam-filter')?.value||'';
-  // Drop a category/product selection that no longer fits the chosen family
-  if(f.family && f.cat && PRODUCT_FAMILY_OF[f.cat]!==f.family) f.cat='';
-  if(f.family && f.prodId && getProductFamily(f.prodId)!==f.family) f.prodId='';
-  renderDemandView();
-}
-function _demOnCatChange(){
-  const f=_demEnsureFilter();
-  f.cat=document.getElementById('dem-cat-filter')?.value||'';
-  // Drop a product selection that no longer fits the chosen category
-  if(f.cat && f.prodId && (DB.products.find(p=>p.id===f.prodId)?.category||'')!==f.cat) f.prodId='';
-  renderDemandView();
-}
-function _demOnProdChange(){
-  _demEnsureFilter().prodId=document.getElementById('dem-prod-filter')?.value||'';
-  renderDemandView();
-}
 function _demOnTypeChange(t){
   _demEnsureFilter().custType=t;
   renderDemandView();
 }
-function _demClearFilters(){
-  window._demFilter={facId:'',prodId:'',cat:'',family:'',custType:'all',elId:''};
-  renderDemandView();
-}
-
-
-
 function _demToggleMonth(ym){
   if(!window._demColapsed) window._demColapsed=new Set();
   if(window._demColapsed.has(ym)) window._demColapsed.delete(ym);
@@ -8017,6 +7929,7 @@ function demandScrollToday(){
   const wrap=document.getElementById('demand-table-wrap'); if(!wrap) return;
   const th=wrap.querySelector(`th[style*="border-left:2px solid var(--green)"]`);
   if(th) th.scrollIntoView({behavior:'smooth',inline:'center',block:'nearest'});
+  else statMsg('Today is outside the selected time frame (or its month is collapsed)');
 }
 
 // Every demand-writing path should end here. Demand values are shown on THREE pages —
@@ -8215,7 +8128,7 @@ const DOWNTIME_PRODUCTS = {'__down_repair__':'repair','__down_pm__':'pm'};
 // ═══════════════════════════════════════════════════════
 function renderSupplyView(){
   const wrap=document.getElementById('supply-table-wrap'); if(!wrap) return;
-  supInitFilters();
+  fltRender('sup');
   renderSupplyKPIs();
   _renderSupCampaignWarnings();
   _renderSupplyViewInner(wrap);
@@ -8231,7 +8144,7 @@ function _supApplySecStyle(){
   let css=[...window._supSecCol].map(k=>`.supsec-${k}{display:none!important}`).join('');
   // Filtered out by the Process filter = the header goes too. Same class hooks the
   // render already emits, so no section-rendering code has to know about this.
-  css+=(window._supView?.procHidden||[]).map(k=>
+  css+=(window._flt?.procHidden||[]).map(k=>
     `.supsec-${k},.sup-sec-hdr[data-seckey="${k}"]{display:none!important}`).join('');
   st.textContent=css;
 }
@@ -8451,7 +8364,7 @@ function _renderSupplyViewInner(wrap){
   const todayStr=new Date()._ymd();
 
   // Date spine — filtered by active view range
-  const {from:filterFrom, to:filterTo}=supGetDateRange();
+  const {from:filterFrom, to:filterTo}=fltGetDateRange('sup');
   const allDates=[];
   // Advance by CALENDAR day (setDate), not by +24h in ms. On a DST fall-back day (e.g.
   // Nov 1) the local day has 25h, so adding 864e5 ms lands back on the same date and the
@@ -8463,6 +8376,13 @@ function _renderSupplyViewInner(wrap){
       if(ds>=filterFrom&&ds<=filterTo) allDates.push(ds);
       dt.setDate(dt.getDate()+1);
     }
+  }
+  if(!allDates.length){
+    const {wanted,bounds:sim}=fltGetDateRange('sup');
+    wrap.innerHTML=`<div style="font-family:var(--mono);font-size:10px;color:var(--text-dim);padding:30px;text-align:center">`+
+      `No simulated days in this time frame (${fltFmt(wanted.from)} → ${fltFmt(wanted.to)}). `+
+      `The simulation runs ${fltFmt(sim.from)} → ${fltFmt(sim.to)}.</div>`;
+    return;
   }
 
   // Group by month
@@ -8488,14 +8408,16 @@ function _renderSupplyViewInner(wrap){
   DB.element_product_capacities.forEach(c=>{ const a=_capsByEl.get(c.element_id); if(a) a.push(c); else _capsByEl.set(c.element_id,[c]); });
 
   // Collapsed state — shared with demand view pattern but separate keys.
-  // Every month except the current one starts collapsed so the page opens compact.
-  // Gated on months.length so an early render (before the date range is synced) can't
-  // permanently lock in an empty collapsed set.
+  // A month BEFORE the current one starts collapsed (to its monthly total) the first time
+  // a time frame brings it into view; the current and later months start open. Decided
+  // once per month, so a month the user opened or closed keeps that across time frames.
   if(!window._supColapsed) window._supColapsed=new Set();
-  if(!window._supColDefaultApplied&&months.length){
-    window._supColDefaultApplied=true;
-    months.filter(m=>m.ym!==todayStr.slice(0,7)).forEach(m=>window._supColapsed.add(m.ym));
-  }
+  if(!window._supColSeen) window._supColSeen=new Set();
+  months.forEach(m=>{
+    if(window._supColSeen.has(m.ym)) return;
+    window._supColSeen.add(m.ym);
+    if(m.ym<todayStr.slice(0,7)) window._supColapsed.add(m.ym);
+  });
   if(!window._supGrpCol) window._supGrpCol=new Set();
   const collapsed=window._supColapsed;
   const grpCol=window._supGrpCol;
@@ -8661,12 +8583,12 @@ function _renderSupplyViewInner(wrap){
   // Collect all production elements (kilns + finish mills + packing plants) from current canvas
   // Apply facility and product filters from filter bar
   // Selected facilities as a Set — null when the Facility filter is unrestricted.
-  const _supFacFilter=supFacIdSet();
+  const _supFacFilter=fltFacIdSet();
   // Family / Category / Product collapse into ONE set of allowed product ids
   // (null = unrestricted). Everything product-scoped on the page tests against
   // _supProdAllows() so all three dropdowns narrow the view identically — a
   // Family or Category pick behaves like picking each of its products at once.
-  const _supAllowedPids=(typeof supAllowedProdIds==='function')?supAllowedProdIds():null;
+  const _supAllowedPids=fltAllowedProdIds();
   const _supProdAllows=pid=>!_supAllowedPids||_supAllowedPids.has(pid);
   let allEls=getFacElements();
   // Filter by active status unless user has toggled to show inactive
@@ -10791,6 +10713,7 @@ function supplyScrollToday(){
   const todayStr=new Date()._ymd();
   const th=wrap.querySelector(`th[style*="border-left:2px solid var(--green)"]`);
   if(th) th.scrollIntoView({behavior:'smooth',inline:'center',block:'nearest'});
+  else statMsg('Today is outside the selected time frame');
 }
 
 // ── Demand Builder modal ─────────────────────────────────
@@ -12026,6 +11949,51 @@ function getReachableProducts(elementId){
 // ═══════════════════════════════════════════════════════
 // SCHEDULES
 // ═══════════════════════════════════════════════════════
+// ── LOGISTICS FILTERS — the shared filter bar on the Vessel / Rail / Truck tabs ──
+// One bar above the three tabs (fltRender('logi')). What a selection means per tab:
+//   Vessel — ship-berth terminals in the Facility/Sub-region pick; allowed products' rows.
+//   Rail   — lanes with EITHER end picked (rpShownDests); an origin's push rows keep every
+//            destination and product and only hide the filtered ones (see rpRender).
+//   Truck  — movements with either end picked, an allowed product, overlapping the window.
+FLT_PAGES.logi={
+  // The rail simulation can run past the configured horizon, so the rail tab's days reach further.
+  bounds:()=>fltSimBounds(S.activeSchedTab==='rail'?(S.simResults?.simHorizon||S.simCfg.horizon||90):undefined),
+  // The shared Process keys each planner's rows answer to (_logiApplyProcStyle).
+  proc:()=>S.activeSchedTab==='rail'?['railLoad','termRail','cementInv','cementNeed']
+          :S.activeSchedTab==='vessels'?['termVessel','cementInv','cementNeed']:null,
+  rerender:()=>{
+    fltRender('logi'); _logiApplyProcStyle();
+    const t=S.activeSchedTab||'vessels';
+    if(t==='vessels'){ renderVesselTable(); vpRender(); }
+    else if(t==='rail'){ renderRailTable(); rpRender(); }
+    else if(t==='truck') renderTruckTable();
+  }
+};
+// Shows the bar on the tabs that use it and repaints it for the active one.
+function _logiFilterBarSync(){
+  const t=S.activeSchedTab||'vessels';
+  const on=['vessels','rail','truck'].includes(t);
+  const bar=document.getElementById('logi-filter-bar');
+  if(bar) bar.style.display=on?'flex':'none';
+  if(on){ fltRender('logi'); _logiApplyProcStyle(); }
+}
+// Process on the planners is a stylesheet rule, like the Supply page: the tree kit resets inline
+// display on every fold, so inline styles would not stick. Both planners stamp the same row
+// classes (rp-o = rail origin band, rp-d = destination rows). Rows the filters keep in the DOM
+// but out of sight — a rail origin's pushes to terminals outside the Facility pick — carry .flt-off.
+function _logiApplyProcStyle(){
+  let st=document.getElementById('logi-proc-style');
+  if(!st){ st=document.createElement('style'); st.id='logi-proc-style'; document.head.appendChild(st); }
+  const off=k=>!fltProcOn(k), hide=sel=>sel+'{display:none!important}';
+  let css=hide('#rp-rail-table tr.flt-off');
+  if(off('termVessel')) css+=hide('#vp-dest-table tr.tp-row-arrival,#vp-dest-table tr.tp-row-unload');
+  if(off('cementInv'))  css+=hide('#vp-dest-table tr.tp-row-inv,#rp-rail-table tr.rp-d.tp-row-inv');
+  if(off('cementNeed')) css+=hide('#vp-dest-table tr.tp-row-dem,#rp-rail-table tr.rp-d.tp-row-dem');
+  if(off('railLoad'))   css+=hide('#rp-rail-table tr.rp-o');
+  if(off('termRail'))   css+=hide('#rp-rail-table tr.rp-d.tp-row-arrival');
+  st.textContent=css;
+}
+
 function setSchedTab(tab,el){
   S.activeSchedTab=tab;
   document.querySelectorAll('.sched-tab').forEach(t=>t.classList.remove('active'));
@@ -12033,6 +12001,7 @@ function setSchedTab(tab,el){
   else document.querySelector(`.sched-tab[onclick*="'${tab}'"]`)?.classList.add('active');
   document.querySelectorAll('.sched-content').forEach(c=>c.classList.remove('active'));
   document.getElementById(`sched-${tab}`)?.classList.add('active');
+  _logiFilterBarSync();
   if(tab==='maintenance') renderMaintenanceCalendar();
   if(tab==='vessels'){renderVesselTable?.();vpRender();}
   if(tab==='rail'){renderRailTable?.();rpRender();}
@@ -12177,11 +12146,25 @@ function renderVesselTable(){
   // Track which split vessels are expanded
   if(!window._vcExpanded) window._vcExpanded=new Set();
 
-  const _vpProdFilter=_vp?.prodId||'';
-  const _vcVisible=DB.vessel_calls.map((v,i)=>({v,i}))
-    .filter(({v})=>!_vpProdFilter||v.product_id===_vpProdFilter);
+  // The shared filters: a call shows when one of its stops (the call itself, or each leg) is at a
+  // terminal in view, carries an allowed product and arrives inside the time frame. Stops with
+  // no berth or no date aren't excluded by those tests.
+  const _allowP=fltAllowedProdIds();
+  const _destIds=new Set(vpShownDests());
+  const _berthFac=id=>{ const b=id&&DB.elements.find(e=>e.id===id); return b?(b.assigned_facility_id||b.facility_id):null; };
+  const {startDay:_sd,endDay:_ed,empty:_noDays}=vpGetRange();
+  const _from=_noDays?'':vpDayDate(_sd), _to=_noDays?'':vpDayDate(_ed);
+  const _vcVisible=DB.vessel_calls.map((v,i)=>({v,i})).filter(({v})=>{
+    const stops=(v.legs&&v.legs.length)
+      ?v.legs.map(l=>({b:l.berth_element_id,d:l.arrival_date,p:l.product_id||v.product_id}))
+      :[{b:v.berth_element_id,d:v.arrival_date,p:v.product_id}];
+    return stops.some(s=>{ const f=_berthFac(s.b), d=String(s.d||'').slice(0,10);
+      return (!f||_destIds.has(f))
+        &&(!_allowP||_allowP.has(_pidCanon(s.p)))
+        &&(!d||(!_noDays&&d>=_from&&d<=_to)); });
+  });
   if(!_vcVisible.length){
-    tbody.innerHTML=`<tr><td colspan="9" style="color:var(--text-dim);text-align:center;padding:14px">No vessel calls match the current product filter</td></tr>`;
+    tbody.innerHTML=`<tr><td colspan="9" style="color:var(--text-dim);text-align:center;padding:14px">No vessel calls match the current filters</td></tr>`;
     return;
   }
   tbody.innerHTML=_vcVisible.map(({v,i})=>{
@@ -12272,11 +12255,6 @@ function advanceLegStatus(vesselId, legIdx){
 // ══════════════════════════════════════════════════════════════════
 // TRANSPORT PLANNER — Rail Schedule
 // ══════════════════════════════════════════════════════════════════
-const _rp={
-  view:'sim',        // current view preset
-  dests:[],          // selected destination facility IDs (multi)
-  prodId:'',         // selected product ID (single, '' = all)
-};
 const _rpCharts={};  // active Chart.js instances — destroyed and rebuilt on each rpRender()
 const _vpCharts={};  // active Chart.js instances for vessel planner
 
@@ -12397,26 +12375,10 @@ function _demElType(el){
 }
 
 // ── View range ────────────────────────────────────────────────────
-function rpSetView(preset,btn){
-  _rp.view=preset;
-  document.querySelectorAll('#rail-planner-wrap .vw-btn').forEach(b=>b.classList.remove('active'));
-  if(btn) btn.classList.add('active');
-  rpRender();
-  renderRailTable();
-}
-
+// The shared time frame as simulation days. The rail simulation can run past the configured
+// horizon, so its own horizon bounds the window.
 function rpGetRange(){
-  const horizon=S.simResults?.simHorizon||S.simCfg.horizon||90;
-  const simStart=new Date(S.simCfg.start_date+'T00:00:00');
-  const today=new Date();
-  const todayOff=todayDayOffset();
-  const preset=_rp.view;
-  if(preset==='sim') return {startDay:1,endDay:horizon};
-  if(preset==='15d') return {startDay:todayOff,endDay:Math.min(horizon,todayOff+14)};
-  if(preset==='eom'){const e=new Date(today.getFullYear(),today.getMonth()+1,0);return {startDay:todayOff,endDay:Math.min(horizon,Math.round((e-simStart)/864e5)+1)};}
-  if(preset==='3m'){const e=new Date(today.getFullYear(),today.getMonth()+4,0);return {startDay:todayOff,endDay:Math.min(horizon,Math.round((e-simStart)/864e5)+1)};}
-  if(preset==='eoy'){const e=new Date(today.getFullYear(),11,31);return {startDay:todayOff,endDay:Math.min(horizon,Math.round((e-simStart)/864e5)+1)};}
-  return {startDay:1,endDay:horizon};
+  return fltSimDayRange('logi', S.simResults?.simHorizon||S.simCfg.horizon||90);
 }
 
 function rpDayDate(d){
@@ -12434,78 +12396,40 @@ function rpIsSat(d){return _rpDow(d)===6;}
 function rpIsSun(d){return _rpDow(d)===0;}
 function rpIsSwitch(d,switchDays){return switchDays.includes((_rpDow(d)+6)%7);}
 
-// ── Destination filter ────────────────────────────────────────────
-function rpBuildDestFilter(){
-  const bar=document.getElementById('rp-dest-filter'); if(!bar) return;
-  const dests=rpGetRailDestinations();
-  // Auto-select all on first render so charts appear immediately
-  if(!_rp.dests.length&&dests.length) _rp.dests=dests.map(f=>f.id);
-  bar.innerHTML=dests.map(f=>`
-    <div class="tp-dest-chip ${_rp.dests.includes(f.id)?'active':''}"
-         onclick="rpToggleDest('${f.id}',event)">${f.name}</div>
-  `).join('');
-  if(!dests.length) bar.innerHTML='<span style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">No rail destinations in topology</span>';
+// ── Destinations in view ──────────────────────────────────────────
+// The shared Facility / Sub-region pick, read the rail way: a lane shows when EITHER end is
+// picked — the terminal itself, or a plant that ships to it. Picking BRS shows every terminal
+// BRS serves; picking JAX shows JAX and the origins that feed it.
+function rpShownDests(){
+  const fs=fltFacIdSet();
+  const all=rpGetRailDestinations().map(f=>f.id);
+  if(!fs) return all;
+  return all.filter(fid=>fs.has(fid)||rpGetOriginsForDest(fid).some(o=>fs.has(_railDpFacId(o.dp))));
 }
 
-function rpToggleDest(facId,ev){
-  if(ev?.ctrlKey||ev?.metaKey){
-    // multi-select
-    const idx=_rp.dests.indexOf(facId);
-    if(idx>=0) _rp.dests.splice(idx,1); else _rp.dests.push(facId);
-  } else {
-    // single select — if already only this one, deselect
-    _rp.dests=_rp.dests.length===1&&_rp.dests[0]===facId?[]:[facId];
-  }
-  rpBuildDestFilter();
-  rpBuildProdFilter();
-  rpRender();
-  renderRailTable();
-}
-
-// ── Rail product filter ───────────────────────────────────────────
-function rpGetRailProducts(){
-  // Only show products that are relevant to the currently-selected destination(s)
-  if(!_rp.dests.length) return [];
+// ── Rail products ─────────────────────────────────────────────────
+// Products that move by rail to the given destinations (default: the ones in view).
+function rpGetRailProducts(dests){
+  const destIds=dests||rpShownDests();
+  if(!destIds.length) return [];
   const allEls=getFacElements();
   const prodIds=new Set();
   // Source 1: accepted_products listed in dispatch point destination configs
   allEls.filter(e=>e.type==='dispatch_point'&&e.props?.dispatch_type==='Rail')
     .forEach(dp=>{
       (dp.props?.destinations||[])
-        .filter(d=>_rp.dests.includes(d.facility_id))
+        .filter(d=>destIds.includes(d.facility_id))
         .forEach(d=>(d.accepted_products||[]).forEach(pid=>{ if(pid) prodIds.add(pid); }));
     });
   // Source 2: products on existing rail movements going TO selected destinations
   DB.rail_movements
-    .filter(rm=>_rp.dests.includes(rm.to_facility_id))
+    .filter(rm=>destIds.includes(rm.to_facility_id))
     .forEach(rm=>{ if(rm.product_id) prodIds.add(rm.product_id); });
   return [...prodIds]
     .map(id=>DB.products.find(p=>p.id===id))
     .filter(Boolean)
     .filter((p,i,a)=>a.findIndex(x=>x.id===p.id)===i)
     .sort((a,b)=>(a.name||a.id).localeCompare(b.name||b.id));
-}
-
-function rpBuildProdFilter(){
-  const bar=document.getElementById('rp-prod-filter'); if(!bar) return;
-  const prods=rpGetRailProducts();
-  if(!prods.length){
-    bar.innerHTML='<span style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">—</span>';
-    return;
-  }
-  // If current selection no longer exists, clear it
-  if(_rp.prodId&&!prods.find(p=>p.id===_rp.prodId)) _rp.prodId='';
-  bar.innerHTML=prods.map(p=>`
-    <div class="tp-dest-chip tp-prod-chip ${_rp.prodId===p.id?'active-prod':''}"
-         onclick="rpToggleProd('${p.id}')">${p.name||p.id}</div>
-  `).join('');
-}
-
-function rpToggleProd(prodId){
-  _rp.prodId=_rp.prodId===prodId?'':prodId;
-  rpBuildProdFilter();
-  rpRender();
-  renderRailTable();
 }
 
 // ── Demand rate helper ────────────────────────────────────────────
@@ -12580,7 +12504,8 @@ function rpPlannedArrivalsForDest(destFacId,berthId,opts){
   const startDs=S.simCfg.start_date;
   if(!startDs) return map;
   const _dayOfDate=ds=>Math.round((new Date(ds+'T00:00:00')-new Date(startDs+'T00:00:00'))/864e5)+1;
-  const _pidOk=pid=>opts?.allProducts||!_rp.prodId||(pid||'')===_rp.prodId;
+  const _allowP=opts?.allProducts?null:fltAllowedProdIds();
+  const _pidOk=pid=>!_allowP||_allowP.has(pid||'');
   const _add=(arrDay,tonnes,status,productId,depDay,fromFacId,unmatched,fromDpId,rec)=>{
     // A 0-car push is a decision ("send nothing this switch"), not an arrival — it was
     // rendering as a phantom 0t cell on the arrival date.
@@ -13648,19 +13573,19 @@ function rpRender(){
     document.getElementById('rp-rail-section').style.display='none';
     return;
   }
-  rpBuildDestFilter();
-  rpBuildProdFilter();
   const {startDay,endDay}=rpGetRange();
   const days=[];
   for(let d=startDay;d<=endDay;d++) days.push(d);
 
-  // Update range label
-  const lbl=document.getElementById('rp-range-lbl');
-  if(lbl) lbl.textContent=`${rpDayDate(startDay).slice(5)} → ${rpDayDate(endDay).slice(5)} (${days.length}d)`;
-
-  const hasDests=_rp.dests.length>0;
+  // Lanes in view under the shared filters (rpShownDests) — and every rail destination, which
+  // an origin's push rows always carry (see myDests below).
+  const _shownDests=rpShownDests(), _shownDestSet=new Set(_shownDests);
+  const _allRailDestIds=rpGetRailDestinations().map(f=>f.id);
+  const _allowP=fltAllowedProdIds();
+  const hasDests=_shownDests.length>0&&days.length>0;
   document.getElementById('rp-rail-section').style.display=hasDests?'':'none';
   document.getElementById('rp-empty').style.display=hasDests?'none':'block';
+  if(!hasDests) document.getElementById('rp-empty').textContent=days.length?'No rail lanes match the current filters':'No simulated days in this time frame';
   if(!hasDests){
     rpDestroyCharts();
     document.getElementById('rp-charts-section').style.display='none';
@@ -13668,7 +13593,7 @@ function rpRender(){
   }
   // Rail-relevant products for the selected destinations (used to keep both the chart and the
   // destination rows focused on what actually moves by rail — no empty/non-cement berth silos).
-  const _railProdSet=new Set(rpGetRailProducts().map(p=>p.id));
+  const _railProdSet=new Set(rpGetRailProducts(_shownDests).map(p=>p.id));
   if(typeof _demGridVal==='function') _demGridVal._cache=null; // fresh demand-page values
   rpRenderCharts();
   rpRenderExceptions();
@@ -13676,14 +13601,12 @@ function rpRender(){
   // ── Month grouping + summary-column styling (shared with vessel planner) ──
   const todayStr=new Date()._ymd();
   const months=(()=>{const mons=[];days.forEach(d=>{const ds=rpDayDate(d);const ym=ds.slice(0,7);if(!mons.length||mons[mons.length-1].ym!==ym){const dt=new Date(ds+'T00:00:00');mons.push({ym,label:dt.toLocaleString('en-US',{month:'short',year:'2-digit'}),days:[]});}mons[mons.length-1].days.push(d);});return mons;})();
-  // Every month except the current one starts collapsed so the page opens compact.
-  // Gated on months.length so an early render (before the date range is synced) can't
-  // permanently lock in an empty collapsed set.
+  // Every month except the current one starts collapsed so the page opens compact — decided
+  // once per month, the first time the time frame brings it into view.
   if(!window._rpColapsed) window._rpColapsed=new Set();
-  if(!window._rpColDefaultApplied&&months.length){
-    window._rpColDefaultApplied=true;
-    months.filter(m=>m.ym!==todayStr.slice(0,7)).forEach(m=>window._rpColapsed.add(m.ym));
-  }
+  if(!window._rpColSeen) window._rpColSeen=new Set();
+  months.forEach(m=>{ if(window._rpColSeen.has(m.ym)) return; window._rpColSeen.add(m.ym);
+    if(m.ym!==todayStr.slice(0,7)) window._rpColapsed.add(m.ym); });
   const _mTdSty='background:var(--total-faint);border-left:2px solid var(--border2);font-weight:700;color:var(--total);text-align:right;padding:3px 8px;';
   const _tpTdSty=d=>{
     if(rpDayDate(d)===todayStr) return 'border-left:2px solid var(--green);border-right:2px solid var(--green);';
@@ -13722,7 +13645,7 @@ function rpRender(){
 
   // ── DESTINATION TABLE ─────────────────────────────────────────
   const destRows=[];
-  const _destShown=_rp.dests.filter(fid=>rpGetOriginsForDest(fid).length);
+  const _destShown=_shownDests.filter(fid=>rpGetOriginsForDest(fid).length);
   destRows.push(`${_tr('rp-band rp-d rp-hdr-blank',[],'dest')}${_lbl(0,`DESTINATIONS${_meta(`terminal inventory, arrivals &amp; demand · ${_destShown.length} terminal${_destShown.length===1?'':'s'}`)}`,{key:'dest'})}${_blankCells()}</tr>`);
   _destShown.forEach(destFacId=>{
     const destFac=DB.facilities.find(f=>f.id===destFacId);
@@ -13736,7 +13659,7 @@ function rpRender(){
     // actually moved by rail — skips empty/non-cement berth silos).
     const _termProdIds=[...new Set(destSilos.flatMap(s=>getSiloProducts(s)).filter(Boolean))]
       .filter(pid=>_railProdSet.size===0||_railProdSet.has(pid));
-    const _activeProdIds=_rp.prodId?_termProdIds.filter(pid=>pid===_rp.prodId):_termProdIds;
+    const _activeProdIds=_allowP?_termProdIds.filter(pid=>_allowP.has(pid)):_termProdIds;
 
     // Terminal header — names the origins that ship here, so both ends of a lane are readable.
     const tKey='d:'+destFacId;
@@ -13827,7 +13750,7 @@ function rpRender(){
     // simulation pulls here (no silo for it, e.g.) — within the Product filter.
     const _pulledPids=new Set();
     pulls.berths.forEach(b=>(S.simResults?.railPulledHistory?.[b.id]||[]).forEach(e=>Object.keys(e||{}).forEach(p=>_pulledPids.add(p))));
-    const _pullRowProds=[..._activeProdIds,..._pulledPids].filter((p,i,a)=>p&&a.indexOf(p)===i&&(!_rp.prodId||p===_rp.prodId));
+    const _pullRowProds=[..._activeProdIds,..._pulledPids].filter((p,i,a)=>p&&a.indexOf(p)===i&&(!_allowP||_allowP.has(p)));
     const _pullTotCells=months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
       const monC=mon.days.reduce((s,d)=>s+_pullRowProds.reduce((q,p)=>q+_carsOf(pulls.pulledT(p,d)),0),0);
       const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monC>0?monC+' cars':'—'}</td>`;
@@ -13887,11 +13810,11 @@ function rpRender(){
   // Product filter leaves with nothing to show (no product it loads, no silo holding it).
   const _origList=[];
   { const seenDp=new Set();
-    const _pOk=pid=>!_rp.prodId||pid===_rp.prodId;
+    const _pOk=pid=>!_allowP||_allowP.has(pid);
     const _hasRows=o=>railDpProducts(o.dp).some(_pOk)
-      ||(o.railSilo&&(!_rp.prodId||getSiloProducts(o.railSilo).includes(_rp.prodId)))
-      ||rpGetOriginProdSilos(o.dp).some(s=>!_rp.prodId||getSiloProducts(s).includes(_rp.prodId));
-    _rp.dests.forEach(destFacId=>rpGetOriginsForDest(destFacId).forEach(o=>{
+      ||(o.railSilo&&(!_allowP||getSiloProducts(o.railSilo).some(_pOk)))
+      ||rpGetOriginProdSilos(o.dp).some(s=>!_allowP||getSiloProducts(s).some(_pOk));
+    _shownDests.forEach(destFacId=>rpGetOriginsForDest(destFacId).forEach(o=>{
       if(seenDp.has(o.dp.id)) return;
       seenDp.add(o.dp.id);
       if(_hasRows(o)) _origList.push(o);
@@ -13904,8 +13827,12 @@ function rpRender(){
       const carsPerDay=(parseFloat(dp.props?.std_loading_cars_shift||dp.props?.std_loading_cars_day)||10)
                        *(parseFloat(dp.props?.shifts_per_day)||1);
 
-      // Get all selected destinations this dp serves
-      const myDests=_rp.dests.filter(fid=>(dp.props?.destinations||[]).find(d=>d.facility_id===fid));
+      // EVERY rail destination this dp serves — not narrowed by the filters. The push rows below
+      // are the plan: the suggested split, ✓ confirm and the over-allocation check all work on
+      // the full set exactly as on an unfiltered page, so a filter carried over from another page
+      // can never commit a partial or skewed plan. Filtered-out rows are only hidden (.flt-off).
+      const myDests=_allRailDestIds.filter(fid=>(dp.props?.destinations||[]).find(d=>d.facility_id===fid));
+      const _destOff=fid=>!_shownDestSet.has(fid);
       const _rpFacId=_railDpFacId(dp);
 
       // Dispatch-point header: origin facility + dispatch point, its switch days and loading
@@ -13919,7 +13846,7 @@ function rpRender(){
       // same mills. Both filtered by the selected product.
       const invKey=oKey+':inv';
       const silRows=[];
-      if(railSilo&&(!_rp.prodId||getSiloProducts(railSilo).includes(_rp.prodId))){
+      if(railSilo&&(!_allowP||getSiloProducts(railSilo).some(pid=>_allowP.has(pid)))){
         const railCells=months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
           const lastV=rpInv(railSilo.id,mon.days[mon.days.length-1]);
           const mTd=`<td class="logi-mcol" style="${_mTdSty}">${lastV!==null?Number(Math.round(lastV)).toLocaleString():'—'}</td>`;
@@ -13933,7 +13860,7 @@ function rpRender(){
         silRows.push(`${_tr('rp-leaf rp-o tp-row-inv tp-row-rail-silo',[...oP,invKey])}${_lbl(3,`${rp0?_pChip(rp0):''}${esc(railSilo.name)}<span class="rp-tag">rail silo</span>`,{hue:HUE_INV})}${railCells}</tr>`);
       }
       const prodSilos=rpGetOriginProdSilos(dp)
-        .filter(s=>!_rp.prodId||getSiloProducts(s).includes(_rp.prodId));
+        .filter(s=>!_allowP||getSiloProducts(s).some(pid=>_allowP.has(pid)));
       prodSilos.forEach(silo=>{
         const invCells=months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
           const lastV=rpInv(silo.id,mon.days[mon.days.length-1]);
@@ -13956,7 +13883,10 @@ function rpRender(){
       // Per product the dp loads: actual cars loaded/day (from the sim), the cars accumulated
       // & available at each switch, and one editable PUSH row per terminal (pre-filled).
       const rh=S.simResults?.railHistory?.[dp.id]||[];
-      const dpProducts=railDpProducts(dp).filter(pid=>!_rp.prodId||pid===_rp.prodId);
+      // Every product, for the same reason as myDests (✓ commits all of them); products outside
+      // the filter are hidden (.flt-off), not dropped.
+      const dpProducts=railDpProducts(dp);
+      const _prodOff=pid=>!!_allowP&&!_allowP.has(pid);
       const loadedOn=(pid,d)=>{ const e=rh[d-1]; return e?(e.carsLoadedByProduct?.[pid]||0):0; };
       // Cars available to push at switch S (shared with the backward planner).
       const availAtSwitch=(pid,S)=>_rpAvailAtSwitch(dp,pid,S);
@@ -13976,7 +13906,7 @@ function rpRender(){
         // Product header — its loaded / available / push rows fold under it. The chip colour
         // matches the product's rows in the destination blocks.
         const pKey=`${oKey}:p:${pid}`, pP=[...oP,pKey];
-        origRows.push(`${_tr('rp-sec rp-o rp-hdr-blank',oP,pKey)}${_lbl(2,`${_pChip(pid)}${esc(pName)}${_meta('rail cars')}`,{key:pKey,hue:_pCol(pid)})}${_blankCells()}</tr>`);
+        origRows.push(`${_tr('rp-sec rp-o rp-hdr-blank'+(_prodOff(pid)?' flt-off':''),oP,pKey)}${_lbl(2,`${_pChip(pid)}${esc(pName)}${_meta('rail cars')}`,{key:pKey,hue:_pCol(pid)})}${_blankCells()}</tr>`);
 
         // 1) Cars loaded per day. Click a cell to open the SAME rail loading popup the
         // Supply page uses (Forecast campaign -> rail_loading_plan · Real -> real_rail_daily
@@ -14007,7 +13937,7 @@ function rpRender(){
                                :'Forecast from the loading plan — click to set a loading campaign or record the real cars';
             return `<td class="tp-cell-clickable${sw?' tp-col-switch':''}"${sty?` style="cursor:pointer;${sty}"`:' style="cursor:pointer"'} title="${ttl}" onclick="showRailCampaignPopup(${args})">${c>0?c:'—'}</td>`; }).join('');
         }).join('');
-        origRows.push(`${_tr('rp-leaf rp-o tp-row-loading',pP)}${_lbl(3,`<span class="rp-glyph">↑</span>Loaded${_meta('cars/d')}`,{hue:HUE_RAIL,title:`${pName} cars loaded per day — click a cell to set the loading campaign or the real value. Same data as RAIL LOADING on the Supply page.`})}${loadCells}</tr>`);
+        origRows.push(`${_tr('rp-leaf rp-o tp-row-loading'+(_prodOff(pid)?' flt-off':''),pP)}${_lbl(3,`<span class="rp-glyph">↑</span>Loaded${_meta('cars/d')}`,{hue:HUE_RAIL,title:`${pName} cars loaded per day — click a cell to set the loading campaign or the real value. Same data as RAIL LOADING on the Supply page.`})}${loadCells}</tr>`);
 
         // 2) Cars accumulated in the yard and available to push at each switch. EDITABLE:
         // type the number that was really standing there when the railroad came and it is
@@ -14029,7 +13959,7 @@ function rpRender(){
                             :'Cars accumulated in the yard, available to push. Type the number that was really there to override the simulation.';
             return `<td class="tp-col-switch"${tSty?` style="${tSty}"`:''}><input type="number" min="0" step="1" value="${a>0?a:0}" data-dp="${dp.id}" data-fac="${_rpFacId}" data-pid="${pid}" data-ds="${ds}" data-sim="${a}" title="${ttl}" onchange="_rpAvailEdit(this)" class="rp-push-inp ${cls}"></td>`; }).join('');
         }).join('');
-        origRows.push(`${_tr('rp-leaf rp-o tp-row-avail',pP)}${_lbl(3,`<span class="rp-glyph">▣</span>Available at switch${_meta('cars')}`,{hue:HUE_RAIL,title:`${pName} cars in the yard at the switch. Editable — enter the real count to reconcile the simulation; blank it to undo.`})}${availCells}</tr>`);
+        origRows.push(`${_tr('rp-leaf rp-o tp-row-avail'+(_prodOff(pid)?' flt-off':''),pP)}${_lbl(3,`<span class="rp-glyph">▣</span>Available at switch${_meta('cars')}`,{hue:HUE_RAIL,title:`${pName} cars in the yard at the switch. Editable — enter the real count to reconcile the simulation; blank it to undo.`})}${availCells}</tr>`);
 
         // Pre-fill suggestion per switch: distribute ALL the cars available at that switch across
         // the terminals proportional to each terminal's demand over the days right after arrival.
@@ -14077,7 +14007,7 @@ function rpRender(){
               const avail=availAtSwitch(pid,d);
               return `<td class="tp-col-switch"${tSty?` style="${tSty}"`:''}><input type="number" min="0" step="1" value="${val}" data-dp="${dp.id}" data-sw="${d}" data-dest="${fid}" data-pid="${pid}" data-ds="${ds}" data-committed="${committed}" data-suggest="${sg}" data-real="${realVal!==null?realVal:''}" data-base="${base}" data-cls="${cls}" data-avail="${avail}" title="${ttl}" onchange="_rpPushEdit(this)" class="rp-push-inp ${shown}"></td>`; }).join('');
           }).join('');
-          origRows.push(`${_tr('rp-leaf rp-o tp-row-push',pP)}${_lbl(3,`<span class="rp-glyph">→</span>Push to ${esc(destFac?.name||fid)}${_meta(transitOf(fid)+'d transit')}`,{hue:HUE_PUSH,title:`${pName} cars sent from ${_oName} to ${destFac?.name||fid} at each switch — ${transitOf(fid)} day(s) in transit`})}${pushCells}</tr>`);
+          origRows.push(`${_tr('rp-leaf rp-o tp-row-push'+(_prodOff(pid)||_destOff(fid)?' flt-off':''),pP)}${_lbl(3,`<span class="rp-glyph">→</span>Push to ${esc(destFac?.name||fid)}${_meta(transitOf(fid)+'d transit')}`,{hue:HUE_PUSH,title:`${pName} cars sent from ${_oName} to ${destFac?.name||fid} at each switch — ${transitOf(fid)} day(s) in transit`})}${pushCells}</tr>`);
         });
       });
 
@@ -14155,17 +14085,18 @@ function rpRenderExceptions(){
   if(!r){ box.style.display='none'; box.innerHTML=''; return; }
   const {startDay,endDay}=rpGetRange();
   const facName=fid=>DB.facilities.find(f=>f.id===fid)?.name||fid;
+  const _shown=rpShownDests();
 
   // 1) Rail loading/shipping shortfalls within the visible range + selected destinations
   const shortfalls=(r.railShortfalls||[]).filter(s=>s.switchDay>=startDay&&s.switchDay<=endDay
-    &&(_rp.dests.length===0||_rp.dests.includes(s.toFacId)));
+    &&_shown.includes(s.toFacId));
   const shortByDest={};
   shortfalls.forEach(s=>{ shortByDest[s.toFacId]=(shortByDest[s.toFacId]||0)+s.shortCars; });
   const totalShortCars=shortfalls.reduce((a,s)=>a+s.shortCars,0);
 
   // 2) Terminal-days below safety stock for the selected destinations
   let stockoutDays=0; const stockoutByDest={};
-  _rp.dests.forEach(destFacId=>{
+  _shown.forEach(destFacId=>{
     const origins=rpGetOriginsForDest(destFacId);
     if(!origins.length) return;
     const berth=origins[0].berth;
@@ -14290,7 +14221,8 @@ function rpRenderCharts(){
   if(!section||!inner) return;
   inner.innerHTML='';
 
-  if(!S.simResults||!_rp.dests.length){section.style.display='none';return;}
+  const _shown=rpShownDests();
+  if(!S.simResults||!_shown.length){section.style.display='none';return;}
   section.style.display='';
 
   const {startDay,endDay}=rpGetRange();
@@ -14342,15 +14274,16 @@ function rpRenderCharts(){
     {line:'#22d3ee',fill:'rgba(34,211,238,.10)'},
     {line:'#f87171',fill:'rgba(248,113,113,.10)'},
   ];
-  const _railProdSet=new Set(rpGetRailProducts().map(p=>p.id));
+  const _railProdSet=new Set(rpGetRailProducts(_shown).map(p=>p.id));
+  const _allowP=fltAllowedProdIds();
   const dsAll=[]; let _ci=0;
-  _rp.dests.forEach(destFacId=>{
+  _shown.forEach(destFacId=>{
     const origins=rpGetOriginsForDest(destFacId); if(!origins.length) return;
     const {berth}=origins[0];
     const destFac=DB.facilities.find(f=>f.id===destFacId);
     const allDemEls=rpGetDestDemEls(destFacId);
-    const silos=rpGetDestSilos(berth).filter(s=>_rp.prodId
-      ? getSiloProducts(s).includes(_rp.prodId)
+    const silos=rpGetDestSilos(berth).filter(s=>_allowP
+      ? getSiloProducts(s).some(pid=>_allowP.has(pid))
       : getSiloProducts(s).some(pid=>_railProdSet.size===0||_railProdSet.has(pid)));
     silos.forEach(silo=>{
       const col=_palette[_ci%_palette.length]; _ci++;
@@ -14389,12 +14322,12 @@ function _rpToggleLegacy(){
 // ══════════════════════════════════════════════════════════════════
 // TRANSPORT PLANNER — Vessel Schedule
 // ══════════════════════════════════════════════════════════════════
-const _vp={view:'sim',dests:[],prodId:''};
 
 function vpPlannedArrivalsForBerth(berthId){
-  // Returns {day:[{tonnes,status,idx}]} — all vessel_calls at this berth, all statuses
+  // Returns {day:[{tonnes,status,idx,product_id}]} — all vessel_calls at this berth, all statuses
+  // and products (idx = the call's DB.vessel_calls index). Rows and charts narrow by product.
   const map={};
-  DB.vessel_calls.filter(vc=>!_vp.prodId||vc.product_id===_vp.prodId).forEach((vc,idx)=>{
+  DB.vessel_calls.forEach((vc,idx)=>{
     const st=vc.status||'Planned';
     if(vc.legs&&vc.legs.length>0){
       vc.legs.filter(l=>l.berth_element_id===berthId&&l.arrival_date&&S.simCfg.start_date).forEach(l=>{
@@ -14419,25 +14352,9 @@ function vpGetVesselDestinations(){
     .filter((f,i,a)=>a.findIndex(x=>x.id===f.id)===i);
 }
 
-function vpSetView(preset,btn){
-  _vp.view=preset;
-  document.querySelectorAll('#vessel-planner-wrap .vw-btn').forEach(b=>b.classList.remove('active'));
-  if(btn) btn.classList.add('active');
-  vpRender();
-}
-
+// The shared time frame as simulation days.
 function vpGetRange(){
-  const horizon=S.simCfg.horizon||90;
-  const simStart=new Date(S.simCfg.start_date+'T00:00:00');
-  const today=new Date();
-  const todayOff=todayDayOffset();
-  const preset=_vp.view;
-  if(preset==='sim') return {startDay:1,endDay:horizon};
-  if(preset==='15d') return {startDay:todayOff,endDay:Math.min(horizon,todayOff+14)};
-  if(preset==='eom'){const e=new Date(today.getFullYear(),today.getMonth()+1,0);return {startDay:todayOff,endDay:Math.min(horizon,Math.round((e-simStart)/864e5)+1)};}
-  if(preset==='3m'){const e=new Date(today.getFullYear(),today.getMonth()+4,0);return {startDay:todayOff,endDay:Math.min(horizon,Math.round((e-simStart)/864e5)+1)};}
-  if(preset==='eoy'){const e=new Date(today.getFullYear(),11,31);return {startDay:todayOff,endDay:Math.min(horizon,Math.round((e-simStart)/864e5)+1)};}
-  return {startDay:1,endDay:horizon};
+  return fltSimDayRange('logi', S.simCfg.horizon||90);
 }
 
 function vpDayDate(d){
@@ -14446,85 +14363,10 @@ function vpDayDate(d){
   return dt._ymd();
 }
 
-function vpBuildDestFilter(){
-  const bar=document.getElementById('vp-dest-filter'); if(!bar) return;
-  const dests=vpGetVesselDestinations();
-  // Auto-select all on first render so charts appear immediately
-  if(!_vp.dests.length&&dests.length) _vp.dests=dests.map(f=>f.id);
-  bar.innerHTML=dests.map(f=>`
-    <div class="tp-dest-chip ${_vp.dests.includes(f.id)?'active':''}"
-         onclick="vpToggleDest('${f.id}',event)">${f.name}</div>
-  `).join('');
-  if(!dests.length) bar.innerHTML='<span style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">No vessel destinations in topology</span>';
-}
-
-function vpToggleDest(facId,ev){
-  if(ev?.ctrlKey||ev?.metaKey){
-    const idx=_vp.dests.indexOf(facId);
-    if(idx>=0) _vp.dests.splice(idx,1); else _vp.dests.push(facId);
-  } else {
-    _vp.dests=_vp.dests.length===1&&_vp.dests[0]===facId?[]:[facId];
-  }
-  vpBuildDestFilter();
-  vpBuildProdFilter();
-  vpRender();
-}
-
-// ── Vessel product filter ─────────────────────────────────────────
-function vpGetVesselProducts(){
-  // Only show products that are relevant to the currently-selected destination(s)
-  if(!_vp.dests.length) return [];
-  const allEls=getFacElements();
-  const allConns=getFacConnections();
-  const prodIds=new Set();
-  // Berths assigned to the selected destination facilities (non-rail berths)
-  const destBerthIds=new Set(
-    allEls.filter(e=>e.type==='berth'&&
-      (e.props?.berth_type||'Ship Berth')==='Ship Berth'&&
-      _vp.dests.includes(e.assigned_facility_id||e.facility_id))
-    .map(e=>e.id)
-  );
-  if(!destBerthIds.size) return [];
-  // Source 1: products on existing vessel_calls at those berths
-  DB.vessel_calls.forEach(vc=>{
-    if(!vc.product_id) return;
-    const atBerth=destBerthIds.has(vc.berth_element_id)||
-      (vc.legs||[]).some(l=>destBerthIds.has(l.berth_element_id));
-    if(atBerth) prodIds.add(vc.product_id);
-  });
-  // Source 2: products from silos connected downstream of those berths
-  [...destBerthIds].forEach(berthId=>{
-    allConns.filter(c=>c.from_element_id===berthId).forEach(c=>{
-      const silo=allEls.find(e=>e.id===c.to_element_id&&e.type==='bulk_silo');
-      if(silo) getSiloProducts(silo).forEach(pid=>{ if(pid) prodIds.add(pid); });
-    });
-  });
-  return [...prodIds]
-    .map(id=>DB.products.find(p=>p.id===id))
-    .filter(Boolean)
-    .filter((p,i,a)=>a.findIndex(x=>x.id===p.id)===i)
-    .sort((a,b)=>(a.name||a.id).localeCompare(b.name||b.id));
-}
-
-function vpBuildProdFilter(){
-  const bar=document.getElementById('vp-prod-filter'); if(!bar) return;
-  const prods=vpGetVesselProducts();
-  if(!prods.length){
-    bar.innerHTML='<span style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">—</span>';
-    return;
-  }
-  if(_vp.prodId&&!prods.find(p=>p.id===_vp.prodId)) _vp.prodId='';
-  bar.innerHTML=prods.map(p=>`
-    <div class="tp-dest-chip tp-prod-chip ${_vp.prodId===p.id?'active-prod':''}"
-         onclick="vpToggleProd('${p.id}')">${p.name||p.id}</div>
-  `).join('');
-}
-
-function vpToggleProd(prodId){
-  _vp.prodId=_vp.prodId===prodId?'':prodId;
-  vpBuildProdFilter();
-  vpRender();
-  renderVesselTable();
+// Ship-berth terminals in view under the shared Facility / Sub-region pick.
+function vpShownDests(){
+  const fs=fltFacIdSet();
+  return vpGetVesselDestinations().map(f=>f.id).filter(id=>!fs||fs.has(id));
 }
 
 function _vpToggleMonth(ym){
@@ -14541,18 +14383,19 @@ function vpRender(){
     return;
   }
   if(typeof _demGridVal==='function') _demGridVal._cache=null; // mirror current Demand-page values
-  vpBuildDestFilter();
-  vpBuildProdFilter();
   const {startDay,endDay}=vpGetRange();
   const days=[];
   for(let d=startDay;d<=endDay;d++) days.push(d);
 
-  const lbl=document.getElementById('vp-range-lbl');
-  if(lbl) lbl.textContent=`${vpDayDate(startDay).slice(5)} → ${vpDayDate(endDay).slice(5)} (${days.length}d)`;
-
-  const hasDests=_vp.dests.length>0;
+  // Terminals in view under the shared filters; with no day in the window there is nothing to show.
+  const _shownDests=vpShownDests();
+  const _allowP=fltAllowedProdIds();
+  const hasDests=_shownDests.length>0&&days.length>0;
   document.getElementById('vp-dest-section').style.display=hasDests?'':'none';
   document.getElementById('vp-orig-section').style.display=hasDests?'':'none';
+  const _vpEmpty=document.getElementById('vp-empty');
+  if(_vpEmpty){ _vpEmpty.style.display=hasDests?'none':'block';
+    _vpEmpty.textContent=days.length?'No ship-berth terminals match the current filters':'No simulated days in this time frame'; }
   if(!hasDests){
     vpDestroyCharts();
     document.getElementById('vp-charts-section').style.display='none';
@@ -14562,14 +14405,12 @@ function vpRender(){
 
   const todayStr=new Date()._ymd();
   const months=(()=>{const mons=[];days.forEach(d=>{const ds=vpDayDate(d);const ym=ds.slice(0,7);if(!mons.length||mons[mons.length-1].ym!==ym){const dt=new Date(ds+'T00:00:00');mons.push({ym,label:dt.toLocaleString('en-US',{month:'short',year:'2-digit'}),days:[]});}mons[mons.length-1].days.push(d);});return mons;})();
-  // Every month except the current one starts collapsed so the page opens compact.
-  // Gated on months.length so an early render (before the date range is synced) can't
-  // permanently lock in an empty collapsed set.
+  // Every month except the current one starts collapsed so the page opens compact — decided
+  // once per month, the first time the time frame brings it into view.
   if(!window._vpColapsed) window._vpColapsed=new Set();
-  if(!window._vpColDefaultApplied&&months.length){
-    window._vpColDefaultApplied=true;
-    months.filter(m=>m.ym!==todayStr.slice(0,7)).forEach(m=>window._vpColapsed.add(m.ym));
-  }
+  if(!window._vpColSeen) window._vpColSeen=new Set();
+  months.forEach(m=>{ if(window._vpColSeen.has(m.ym)) return; window._vpColSeen.add(m.ym);
+    if(m.ym!==todayStr.slice(0,7)) window._vpColapsed.add(m.ym); });
   const _mTdSty='background:var(--total-faint);border-left:2px solid var(--border2);font-weight:700;color:var(--total);text-align:right;padding:3px 8px;';
   const _tpTdSty=d=>{
     if(vpDayDate(d)===todayStr) return 'border-left:2px solid var(--green);border-right:2px solid var(--green);';
@@ -14605,7 +14446,7 @@ function vpRender(){
   // Section hues — the same ones the Rail Schedule and Supply page use for the same data.
   const HUE_INV='#00d9a3', HUE_UNL='#7ec8e3', HUE_DEM='#4da6ff';
   const destRows=[];
-  _vp.dests.forEach(destFacId=>{
+  _shownDests.forEach(destFacId=>{
     const destFac=DB.facilities.find(f=>f.id===destFacId);
     const berths=getFacElements().filter(e=>e.type==='berth'&&
       (e.assigned_facility_id||e.facility_id)===destFacId&&
@@ -14624,7 +14465,7 @@ function vpRender(){
       // Vessel arrivals are now shown one row PER PRODUCT (no mixing) to avoid confusion.
       const _arrProdIds=[...new Set(Object.values(arrivals).flat().map(e=>_pidCanon(e.product_id)).filter(Boolean))];
       const _vtProdIds=[...new Set([...destSilos.flatMap(s=>getSiloProducts(s)).filter(Boolean),..._arrProdIds])];
-      const _vtActiveProdIds=_vp.prodId?_vtProdIds.filter(pid=>pid===_vp.prodId):_vtProdIds;
+      const _vtActiveProdIds=_allowP?_vtProdIds.filter(pid=>_allowP.has(pid)):_vtProdIds;
       const _vtShownDemIds=new Set();
 
       // Terminal + berth header line.
@@ -14784,7 +14625,8 @@ function vpRenderCharts(){
   if(!section||!inner) return;
   inner.innerHTML='';
 
-  if(!S.simResults||!_vp.dests.length){section.style.display='none';return;}
+  const _shown=vpShownDests(), _allowP=fltAllowedProdIds();
+  if(!S.simResults||!_shown.length){section.style.display='none';return;}
   section.style.display='';
 
   const {startDay,endDay}=vpGetRange();
@@ -14835,7 +14677,7 @@ function vpRenderCharts(){
     'Finished':  'rgba(142,154,184,.40)',
   };
 
-  _vp.dests.forEach((destFacId,di)=>{
+  _shown.forEach((destFacId,di)=>{
     const destFac=DB.facilities.find(f=>f.id===destFacId);
     const berths=getFacElements().filter(e=>e.type==='berth'&&
       (e.assigned_facility_id||e.facility_id)===destFacId&&
@@ -14843,14 +14685,16 @@ function vpRenderCharts(){
 
     berths.forEach((berth,bi)=>{
       const allDestSilos=rpGetDestSilos(berth);
-      const visibleSilos=_vp.prodId
-        ? allDestSilos.filter(s=>getSiloProducts(s).includes(_vp.prodId))
+      const visibleSilos=_allowP
+        ? allDestSilos.filter(s=>getSiloProducts(s).some(pid=>_allowP.has(pid)))
         : allDestSilos;
       const allDemEls=rpGetDestDemEls(destFacId);
       const _berthIdCopy=berth.id;
 
-      // Arrival bars — already filtered by _vp.prodId inside vpPlannedArrivalsForBerth
-      const arrivals=vpPlannedArrivalsForBerth(berth.id);
+      // Arrival bars — only the allowed products' vessels (arrivals come back unfiltered).
+      const _arrAll=vpPlannedArrivalsForBerth(berth.id);
+      const arrivals=_allowP?Object.fromEntries(Object.entries(_arrAll)
+        .map(([d,es])=>[d,es.filter(e=>_allowP.has(_pidCanon(e.product_id)))]).filter(([,es])=>es.length)):_arrAll;
       const arrData=days.map(d=>{
         const entries=arrivals[d]||[];
         return entries.length?entries.reduce((s,e)=>s+e.tonnes,0):null;
@@ -14923,7 +14767,7 @@ function vpRenderCharts(){
         responsive:true,maintainAspectRatio:false,
         plugins:{
           title:{display:true,
-            text:`VESSEL · ${destFac?.name||destFacId} / ${berth.name}${_vp.prodId?(' · '+(_vp.prodId)):''}`,
+            text:`VESSEL · ${destFac?.name||destFacId} / ${berth.name}${_allowP&&_allowP.size===1?(' · '+(DB.products.find(p=>_allowP.has(p.id))?.name||[..._allowP][0])):''}`,
             color:'#8e9ab8',font:{family:'Space Mono',size:8},padding:{top:0,bottom:4}},
           legend:{
             display:multiProd,position:'top',
@@ -14978,15 +14822,16 @@ function _vpToggleLegacy(){
 
 function renderRailTable(){
   const tbody=document.getElementById('rail-tbody'); if(!tbody) return;
-  // Apply logistics filters (terminal selection + date range)
-  const destFilter=_rp?.dests||[];
-  const {startDay,endDay}=rpGetRange();
-  const startDate=rpDayDate(startDay);
-  const endDate=rpDayDate(endDay);
-  const prodFilter=_rp?.prodId||'';
+  // The shared filters: lanes in view (either end picked), allowed products, the time frame.
+  const destFilter=rpShownDests();
+  const {startDay,endDay,empty}=rpGetRange();
+  const startDate=empty?'':rpDayDate(startDay);
+  const endDate=empty?'':rpDayDate(endDay);
+  const allowP=fltAllowedProdIds();
   const filtered=DB.rail_movements.map((r,i)=>({r,i})).filter(({r})=>{
-    if(destFilter.length&&!destFilter.includes(r.to_facility_id)) return false;
-    if(prodFilter&&r.product_id!==prodFilter) return false;
+    if(!destFilter.includes(r.to_facility_id)) return false;
+    if(allowP&&!allowP.has(r.product_id||'')) return false;
+    if(empty) return false;
     const dep=r.departure_date||r.date||'';
     if(dep&&dep<startDate) return false;
     if(dep&&dep>endDate) return false;
@@ -15032,7 +14877,20 @@ function renderTruckTable(){
     return;
   }
   const _dowNm=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
-  tbody.innerHTML=DB.truck_movements.map((t,i)=>{
+  // The shared filters: a movement shows when either end is a facility in view, it carries an
+  // allowed product, and its date range overlaps the time frame (no end date = open-ended).
+  // Rows keep their DB index — Edit and Del address DB.truck_movements by position.
+  const fs=fltFacIdSet(), allowP=fltAllowedProdIds(), rg=fltGetDateRange('logi',fltSimBounds());
+  const noDays=!rg.from||!rg.to||rg.from>rg.to;
+  const shown=DB.truck_movements.map((t,i)=>({t,i})).filter(({t})=>
+    (!fs||fs.has(t.from_facility_id)||fs.has(t.to_facility_id))
+    &&(!allowP||allowP.has(t.product_id||''))
+    &&!noDays&&(!t.date||t.date<=rg.to)&&(!t.end_date||t.end_date>=rg.from));
+  if(!shown.length){
+    tbody.innerHTML=`<tr><td colspan="9" style="color:var(--text-dim);text-align:center;padding:14px">No truck movements match the current filters</td></tr>`;
+    return;
+  }
+  tbody.innerHTML=shown.map(({t,i})=>{
     const fromFac=DB.facilities.find(f=>f.id===t.from_facility_id);
     const toFac=DB.facilities.find(f=>f.id===t.to_facility_id);
     const prod=DB.products.find(p=>p.id===t.product_id);
@@ -18530,7 +18388,8 @@ function _dashSet(x){ return x?(x instanceof Set?x:new Set(x)):null; }
 function _dashModel(){
   const r=S.simResults; if(!r) return null;
   const horizon=S.simCfg.horizon||0; if(!horizon) return null;
-  let {startDay,endDay}=getViewRange();
+  let {startDay,endDay,empty}=getViewRange();
+  if(empty) return null;   // no simulated days in the time frame
   startDay=Math.max(1,startDay||1); endDay=Math.min(horizon,Math.max(startDay,endDay||horizon));
   const days=[]; for(let d=startDay;d<=endDay;d++) days.push(d);
   const dates=days.map(d=>dayToDate(d));
@@ -18548,8 +18407,8 @@ function _dashModel(){
   const isCem=pid=>{const p=prodById.get(pid);return !!p&&(p.category==='cement_bulk'||p.category==='cement_packed');};
 
   const els=getResultElements();
-  const facSet=_dashSet(typeof resFacIdSet==='function'?resFacIdSet():null);
-  const allowP=_dashSet(typeof resAllowedProdIds==='function'?resAllowedProdIds():null);
+  const facSet=_dashSet(fltFacIdSet());
+  const allowP=_dashSet(fltAllowedProdIds());
 
   // ── Buckets: daily up to 70 days, else Monday-to-Sunday weeks ──
   const weekly=n>70;
@@ -20073,82 +19932,11 @@ function importJSON(input){
 
 
 // ═══════════════════════════════════════════════════════
-// RESULTS FILTER DOCK — same concept as the Supply page: three summary buttons that
-// open panels of multi-select pills, plus a token strip listing what is on. Keeps the
-// view-window bar to one row however many facilities/products the scenario holds.
-//   facIds / fams / cats / prodIds — empty array means "all", so an untouched dock
-//     leaves the page exactly as it was.
-//   procHidden — data-tree groups switched OFF (empty = every group shown). Stored as
-//     the off-list so a group added later shows by default.
+// RESULTS FILTERS — the shared filter bar (SHARED FILTER BAR, fltRender('res')) applied
+// to the Dashboard and the Data Table. Only the Results meaning of a selection lives here:
+// which elements a product pick keeps (getResultElements) and which data-tree groups a
+// Process key covers. The date window comes from getViewRange().
 // ═══════════════════════════════════════════════════════
-const RES_FILTER_KEY='avila_res_filters';
-if(!window._resView) window._resView={facIds:[],fams:[],cats:[],prodIds:[],procHidden:[]};
-resLoadFilterPrefs();
-
-function resSaveFilterPrefs(){
-  const v=window._resView||{};
-  try{ localStorage.setItem(RES_FILTER_KEY,JSON.stringify({
-    facIds:v.facIds||[], fams:v.fams||[], cats:v.cats||[], prodIds:v.prodIds||[], procHidden:v.procHidden||[]
-  })); }catch(e){}
-}
-function resLoadFilterPrefs(){
-  const v=window._resView; if(!v) return;
-  const arr=x=>Array.isArray(x)?x.filter(i=>typeof i==='string'):[];
-  try{
-    const raw=localStorage.getItem(RES_FILTER_KEY); if(!raw) return;
-    const p=JSON.parse(raw)||{};
-    v.facIds=arr(p.facIds); v.fams=arr(p.fams); v.cats=arr(p.cats);
-    v.prodIds=arr(p.prodIds); v.procHidden=arr(p.procHidden);
-  }catch(e){}
-}
-
-// ── PROCESS CATALOG ────────────────────────────────────────────────────────
-// One entry per level-0 group of the data tree. `match` decides which built group ids
-// belong to a process — Rail Transfers is one process covering every origin facility,
-// which each get their own `cem_rail_from_<id>` group.
-const RES_PROCESSES=[
-  {g:'Demand',     c:'#4da6ff', key:'demand_total', n:'Cement',   full:'CEM Demand',      match:id=>id==='demand_total'},
-  {g:'Demand',     c:'#ff9d5c', key:'clk_req',      n:'Clinker',  full:'CLK Demand',      match:id=>id==='clk_req'},
-  {g:'Inventory',  c:'#00d9a3', key:'cem_inv',      n:'Cement',   full:'CEM Inventory',   match:id=>id==='cem_inv'},
-  {g:'Inventory',  c:'#ff8c42', key:'clk_inv',      n:'Clinker',  full:'CLK Inventory',   match:id=>id==='clk_inv'},
-  {g:'Production', c:'#00ff9d', key:'cem_prod',     n:'Cement',   full:'CEM Production',  match:id=>id==='cem_prod'},
-  {g:'Production', c:'#ff8c42', key:'clk_prod',     n:'Clinker',  full:'CLK Production',  match:id=>id==='clk_prod'},
-  {g:'Logistics',  c:'#b388ff', key:'rail',         n:'Rail transfers', full:'Rail transfers', match:id=>id.startsWith('cem_rail_from_')},
-  {g:'Logistics',  c:'#b388ff', key:'imports',      n:'Imports',  full:'Imports',         match:id=>id==='cem_imports'}
-];
-const RES_PROC_GROUPS=['Demand','Inventory','Production','Logistics'];
-function resProcOn(key){ return !(window._resView?.procHidden||[]).includes(key); }
-// True when a built group belongs to a process the user has switched off.
-function resGroupHidden(groupId){
-  return RES_PROCESSES.some(p=>!resProcOn(p.key)&&p.match(groupId));
-}
-
-// ── Selection helpers (same convention as the Supply dock) ──────────────────
-function _resSel(field){ const v=window._resView||{}; return v[field]||(v[field]=[]); }
-function _resHas(field,id){ const a=_resSel(field); return a.length===0||a.includes(id); }
-
-// Facilities that can appear in the results tree: any facility owning an element on
-// the current canvas.
-function resFilterableFacilities(){
-  const ids=[...new Set(getFacElements().map(el=>getElFacility(el)).filter(Boolean))];
-  return ids.map(id=>DB.facilities.find(f=>f.id===id)).filter(Boolean)
-    .sort((a,b)=>(a.name||'').localeCompare(b.name||''));
-}
-function resFacIdSet(){
-  const a=window._resView?.facIds||[];
-  return a.length?new Set(a):null;
-}
-
-// Products the results tree can show, for the selected facilities.
-function resScopeProductIds(facIds){
-  const fset=(facIds&&facIds.length)?new Set(facIds):null;
-  const out=new Set();
-  getFacElements().forEach(el=>{
-    if(fset&&!fset.has(getElFacility(el))) return;
-    resProductsOfElement(el).forEach(p=>out.add(p));
-  });
-  return out;
-}
 // Which products an element handles — silos by contents, mills/kilns/packers by their
 // capacity table, demand points by what is demanded there.
 function resProductsOfElement(el){
@@ -20162,8 +19950,7 @@ function resProductsOfElement(el){
 }
 // Element types that declare the products they handle. Anything else (berths, rail
 // dispatch points, connectors) carries no product of its own and is left alone, so a
-// product filter never silently deletes the Imports / Rail Transfers groups — those
-// rows are narrowed by product further down, where the product is actually known.
+// product filter never silently deletes the Imports / Rail Transfers groups.
 const RES_PRODUCT_BEARING=['bulk_silo','packed_silo','kiln','finish_mill','raw_meal_mill','packing_plant','demand_point'];
 function resElementHandlesProduct(el,allowed){
   if(!RES_PRODUCT_BEARING.includes(el.type)) return true;
@@ -20172,245 +19959,40 @@ function resElementHandlesProduct(el,allowed){
   return resProductsOfElement(el).some(p=>allowed.has(p));
 }
 
-function resNormalizeProdFilters(){
-  const v=window._resView; if(!v) return;
-  const scope=resScopeProductIds(v.facIds||[]);
-  const catOf=pid=>DB.products.find(p=>p.id===pid)?.category||'';
-  const famOf=pid=>PRODUCT_FAMILY_OF[catOf(pid)]||'';
-  v.fams=(v.fams||[]).filter(f=>[...scope].some(id=>famOf(id)===f));
-  v.cats=(v.cats||[]).filter(c=>[...scope].some(id=>catOf(id)===c)
-    &&(!v.fams.length||v.fams.includes(PRODUCT_FAMILY_OF[c])));
-  v.prodIds=(v.prodIds||[]).filter(pid=>scope.has(pid)
-    &&(!v.fams.length||v.fams.includes(famOf(pid)))
-    &&(!v.cats.length||v.cats.includes(catOf(pid))));
-  const facOk=new Set(resFilterableFacilities().map(f=>f.id));
-  v.facIds=(v.facIds||[]).filter(id=>facOk.has(id));
-  if(facOk.size&&v.facIds.length===facOk.size) v.facIds=[];
+// Level-0 data-tree groups ↔ the shared Process keys. A group hides only when EVERY key it
+// covers is off — switching off "Cement inventory" alone leaves the tree's CEM Inventory
+// group up while "Packed inventory" is still on. Rail Transfers is one entry covering every
+// origin facility, which each get their own `cem_rail_from_<id>` group.
+const RES_PROC_MAP=[
+  {match:id=>id==='demand_total',              keys:['cementNeed','packedNeed']},
+  {match:id=>id==='clk_req',                   keys:['clinkerReq']},
+  {match:id=>id==='cem_inv',                   keys:['cementInv','packedInv']},
+  {match:id=>id==='clk_inv',                   keys:['clinkerInv']},
+  {match:id=>id==='cem_prod',                  keys:['cementProd','cementByProd']},
+  {match:id=>id==='clk_prod',                  keys:['clinkerProd']},
+  {match:id=>id.startsWith('cem_rail_from_'),  keys:['railLoad','termRail']},
+  {match:id=>id==='cem_imports',               keys:['termVessel']}
+];
+// True when a built group belongs to a process the user has switched off.
+function resGroupHidden(groupId){
+  const m=RES_PROC_MAP.find(x=>x.match(groupId));
+  return !!m&&m.keys.every(k=>!fltProcOn(k));
 }
 
-// Allowed product ids, or null for unrestricted. Product beats Category beats Family.
-function resAllowedProdIds(){
-  const v=window._resView||{};
-  const fams=v.fams||[], cats=v.cats||[], prods=v.prodIds||[];
-  if(!fams.length && !cats.length && !prods.length) return null;
-  if(prods.length) return new Set(prods);
-  return new Set((DB.products||[]).filter(p=>
-    cats.length ? cats.includes(p.category||'')
-                : fams.includes(PRODUCT_FAMILY_OF[p.category]||'')
-  ).map(p=>p.id));
-}
-
-// ── Panels ─────────────────────────────────────────────────────────────────
-function _resRenderFacPanel(){
-  const pan=document.getElementById('res-pan-fac'); if(!pan) return;
-  const facs=resFilterableFacilities();
-  let h=`<div class="sup-pan-hd"><span>Facility · ALL flips a whole group</span></div>`;
-  [['plant','Plants'],['terminal','Terminals']].forEach(([type,label])=>{
-    const inGrp=facs.filter(f=>(f.type||'plant')===type);
-    if(!inGrp.length) return;
-    const allOn=inGrp.every(f=>_resHas('facIds',f.id));
-    h+=`<div class="sup-grp"><div class="sup-grp-hd"><h4>${label}</h4><i></i></div><div class="sup-chips">`;
-    h+=_supPill('All',allOn,`resToggleFacGroup('${type}')`,{all:true,title:'Every '+label.toLowerCase()});
-    inGrp.forEach(f=>{ h+=_supPill(f.name,_resHas('facIds',f.id),`resToggleFac('${f.id}')`); });
-    h+=`</div></div>`;
-  });
-  const untyped=facs.filter(f=>!['plant','terminal'].includes(f.type||'plant'));
-  if(untyped.length){
-    h+=`<div class="sup-grp"><div class="sup-grp-hd"><h4>Other</h4><i></i></div><div class="sup-chips">`;
-    untyped.forEach(f=>{ h+=_supPill(f.name,_resHas('facIds',f.id),`resToggleFac('${f.id}')`); });
-    h+=`</div></div>`;
+FLT_PAGES.res={
+  bounds:()=>fltSimBounds(),
+  // Process hides data-tree groups, so it only means something on the Data Table.
+  proc:()=>S.view==='datatable'?[...new Set(RES_PROC_MAP.flatMap(m=>m.keys))]:null,
+  rerender:()=>{
+    fltRender('res');
+    if(S.simResults){
+      renderDtree(S.simResults);
+      renderDashCharts(S.simResults);
+      renderEvLog(S.simResults);
+      renderDashboard();
+    }
   }
-  pan.innerHTML=h;
-}
-
-function _resRenderProcPanel(){
-  const pan=document.getElementById('res-pan-proc'); if(!pan) return;
-  let h=`<div class="sup-pan-hd"><span>Process · ALL flips a whole group</span><div>`+
-    `<button class="sup-mini" onclick="resSetAllProcesses(true)">All</button>`+
-    `<button class="sup-mini" onclick="resSetAllProcesses(false)">None</button></div></div>`;
-  RES_PROC_GROUPS.forEach(g=>{
-    const items=RES_PROCESSES.filter(p=>p.g===g);
-    if(!items.length) return;
-    const allOn=items.every(p=>resProcOn(p.key));
-    h+=`<div class="sup-grp"><div class="sup-grp-hd"><h4>${g}</h4><i></i></div><div class="sup-chips">`;
-    h+=_supPill('All',allOn,`resToggleProcGroup('${g}')`,{all:true,title:'Every '+g.toLowerCase()+' group'});
-    items.forEach(p=>{ h+=_supPill(p.n,resProcOn(p.key),`resToggleProc('${p.key}')`,{swatch:p.c,title:p.full}); });
-    h+=`</div></div>`;
-  });
-  pan.innerHTML=h;
-}
-
-function _resRenderProdPanel(){
-  const pan=document.getElementById('res-pan-prod'); if(!pan) return;
-  const v=window._resView||{};
-  const scope=[...resScopeProductIds(v.facIds||[])];
-  const catOf=pid=>DB.products.find(p=>p.id===pid)?.category||'';
-  const famOf=pid=>PRODUCT_FAMILY_OF[catOf(pid)]||'';
-
-  const fams=[...new Set(scope.map(famOf).filter(Boolean))]
-    .sort((a,b)=>(PRODUCT_FAMILY_LABELS[a]||a).localeCompare(PRODUCT_FAMILY_LABELS[b]||b));
-  let catIds=scope.slice();
-  if((v.fams||[]).length) catIds=catIds.filter(id=>v.fams.includes(famOf(id)));
-  const cats=[...new Set(catIds.map(catOf).filter(Boolean))]
-    .sort((a,b)=>(SUP_CAT_LABELS[a]||a).localeCompare(SUP_CAT_LABELS[b]||b));
-  let prodIds=catIds.slice();
-  if((v.cats||[]).length) prodIds=prodIds.filter(id=>v.cats.includes(catOf(id)));
-  const prods=prodIds.map(pid=>({pid,name:DB.products.find(pr=>pr.id===pid)?.name||pid}))
-    .sort((a,b)=>a.name.localeCompare(b.name));
-
-  const col=(title,allOn,allFn,body)=>
-    `<div><h4>${title}</h4><div class="sup-chips">`+
-    _supPill('All',allOn,allFn,{all:true,title:'Every '+title.toLowerCase()})+body+`</div></div>`;
-
-  let h=`<div class="sup-pan-hd"><span>Family → Category → Product · each column narrows the next</span>`+
-    `<div><button class="sup-mini" onclick="resClearProdFilters()">Clear</button></div></div><div class="sup-mill">`;
-  h+=col('Family',!(v.fams||[]).length,`resClearProdField('fams')`,
-    fams.map(f=>_supPill(PRODUCT_FAMILY_LABELS[f]||f,(v.fams||[]).includes(f),`resToggleProdField('fams','${f}')`)).join(''));
-  h+=col('Category',!(v.cats||[]).length,`resClearProdField('cats')`,
-    cats.map(c=>_supPill(SUP_CAT_LABELS[c]||c,(v.cats||[]).includes(c),`resToggleProdField('cats','${c}')`)).join(''));
-  h+=col('Product',!(v.prodIds||[]).length,`resClearProdField('prodIds')`,
-    prods.map(o=>_supPill(o.name,(v.prodIds||[]).includes(o.pid),`resToggleProdField('prodIds','${o.pid}')`)).join(''));
-  h+=`</div>`;
-  pan.innerHTML=h;
-}
-
-function _resRenderDockSummary(){
-  const v=window._resView||{};
-  const facs=resFilterableFacilities();
-  const nameOfFac=id=>facs.find(f=>f.id===id)?.name||id;
-  const nameOfProd=id=>DB.products.find(p=>p.id===id)?.name||id;
-  const setBtn=(id,txt,on)=>{
-    const b=document.getElementById(id); if(!b) return;
-    b.classList.toggle('set',!!on);
-    const sp=b.querySelector('.v'); if(sp) sp.textContent=txt;
-  };
-  const nFac=(v.facIds||[]).length;
-  setBtn('res-btn-fac', nFac?nFac+' of '+facs.length:'All '+facs.length, nFac>0);
-  const nOff=(v.procHidden||[]).length;
-  setBtn('res-btn-proc', nOff?(RES_PROCESSES.length-nOff)+' of '+RES_PROCESSES.length:'All '+RES_PROCESSES.length, nOff>0);
-  const bits=[];
-  if((v.fams||[]).length)    bits.push(v.fams.length+(v.fams.length>1?' fams':' fam'));
-  if((v.cats||[]).length)    bits.push(v.cats.length+(v.cats.length>1?' cats':' cat'));
-  if((v.prodIds||[]).length) bits.push(v.prodIds.length+(v.prodIds.length>1?' prods':' prod'));
-  setBtn('res-btn-prod', bits.length?bits.join(' · '):'All', bits.length>0);
-
-  const strip=document.getElementById('res-tokens'); if(!strip) return;
-  const tok=(kind,label,val,fn)=>
-    `<button type="button" class="sup-tok k-${kind}" title="Remove this filter" onclick="${fn}">`+
-    `<span style="opacity:.6">${label}</span><b>${esc(val)}</b><span class="x">✕</span></button>`;
-  let h=`<span class="lbl">Active</span>`, n=0;
-  (v.facIds||[]).forEach(id=>{ n++; h+=tok('fac','Facility',nameOfFac(id),`resToggleFac('${id}')`); });
-  (v.procHidden||[]).forEach(k=>{ const p=RES_PROCESSES.find(x=>x.key===k);
-    n++; h+=tok('proc','Hidden',p?p.full:k,`resToggleProc('${k}')`); });
-  (v.fams||[]).forEach(f=>{ n++; h+=tok('prod','Family',PRODUCT_FAMILY_LABELS[f]||f,`resToggleProdField('fams','${f}')`); });
-  (v.cats||[]).forEach(c=>{ n++; h+=tok('prod','Category',SUP_CAT_LABELS[c]||c,`resToggleProdField('cats','${c}')`); });
-  (v.prodIds||[]).forEach(p=>{ n++; h+=tok('prod','Product',nameOfProd(p),`resToggleProdField('prodIds','${p}')`); });
-  if(!n) h+=`<span class="none">no filters — showing everything</span>`;
-  strip.innerHTML=h;
-}
-
-// ── Open / close ───────────────────────────────────────────────────────────
-function resCloseDock(){
-  document.querySelectorAll('#view-window-bar .sup-panel.open').forEach(p=>p.classList.remove('open'));
-  document.querySelectorAll('#view-window-bar .sup-drop-btn').forEach(b=>b.setAttribute('aria-expanded','false'));
-}
-function resToggleDock(ev,which){
-  if(ev) ev.stopPropagation();
-  const pan=document.getElementById('res-pan-'+which);
-  const btn=document.getElementById('res-btn-'+which);
-  if(!pan||!btn) return;
-  const wasOpen=pan.classList.contains('open');
-  resCloseDock();
-  if(wasOpen) return;
-  pan.classList.add('open');
-  btn.setAttribute('aria-expanded','true');
-  pan.classList.remove('flip');
-  if(pan.getBoundingClientRect().right>window.innerWidth-8) pan.classList.add('flip');
-}
-document.addEventListener('click',()=>resCloseDock());
-document.addEventListener('keydown',e=>{ if(e.key==='Escape') resCloseDock(); });
-
-// ── Click handlers ─────────────────────────────────────────────────────────
-function resToggleFac(facId){
-  const v=window._resView, all=resFilterableFacilities().map(f=>f.id);
-  let a=(v.facIds||[]).slice();
-  if(!a.length) a=all.slice();
-  a=a.includes(facId)?a.filter(x=>x!==facId):a.concat([facId]);
-  v.facIds=(a.length===all.length)?[]:a;
-  resNormalizeProdFilters();
-  _resFiltersChanged();
-}
-function resToggleFacGroup(type){
-  const v=window._resView, all=resFilterableFacilities();
-  const ids=all.filter(f=>(f.type||'plant')===type).map(f=>f.id);
-  const allOn=ids.every(id=>_resHas('facIds',id));
-  let a=(v.facIds||[]).slice();
-  if(!a.length) a=all.map(f=>f.id);
-  a=allOn ? a.filter(id=>!ids.includes(id))
-          : a.concat(ids.filter(id=>!a.includes(id)));
-  v.facIds=(a.length===all.length)?[]:a;
-  resNormalizeProdFilters();
-  _resFiltersChanged();
-}
-function resToggleProc(key){
-  const v=window._resView, off=(v.procHidden||[]).slice();
-  const i=off.indexOf(key);
-  if(i>=0) off.splice(i,1); else off.push(key);
-  v.procHidden=off;
-  _resFiltersChanged();
-}
-function resToggleProcGroup(g){
-  const v=window._resView;
-  const keys=RES_PROCESSES.filter(p=>p.g===g).map(p=>p.key);
-  const allOn=keys.every(resProcOn);
-  let off=(v.procHidden||[]).filter(k=>!keys.includes(k));
-  if(allOn) off=off.concat(keys);
-  v.procHidden=off;
-  _resFiltersChanged();
-}
-function resSetAllProcesses(on){
-  window._resView.procHidden = on ? [] : RES_PROCESSES.map(p=>p.key);
-  _resFiltersChanged();
-}
-function resToggleProdField(field,id){
-  const v=window._resView, a=(v[field]||[]).slice();
-  const i=a.indexOf(id);
-  if(i>=0) a.splice(i,1); else a.push(id);
-  v[field]=a;
-  resNormalizeProdFilters();
-  _resFiltersChanged();
-}
-function resClearProdField(field){
-  window._resView[field]=[]; resNormalizeProdFilters(); _resFiltersChanged();
-}
-function resClearProdFilters(){
-  const v=window._resView; v.fams=[]; v.cats=[]; v.prodIds=[]; _resFiltersChanged();
-}
-function resClearAllFilters(){
-  const v=window._resView;
-  v.facIds=[]; v.fams=[]; v.cats=[]; v.prodIds=[]; v.procHidden=[];
-  _resFiltersChanged();
-}
-function _resFiltersChanged(){
-  resSaveFilterPrefs();
-  resInitFilters();
-  if(S.simResults){
-    renderDtree(S.simResults);
-    renderDashCharts(S.simResults);
-    renderEvLog(S.simResults);
-    renderDashboard();
-  }
-}
-
-// Repaints the dock. Called on every results render, so an open panel stays open.
-function resInitFilters(){
-  if(!window._resView) window._resView={facIds:[],fams:[],cats:[],prodIds:[],procHidden:[]};
-  resNormalizeProdFilters();
-  _resRenderFacPanel();
-  _resRenderProcPanel();
-  _resRenderProdPanel();
-  _resRenderDockSummary();
-}
+};
 
 // ── EXPORT DESTINATIONS ─────────────────────────────────────────────────────
 // Both spreadsheet exports write the SAME file name into the SAME user-chosen folder,
@@ -20662,85 +20244,14 @@ async function exportResultsFull(){
 }
 
 // ═══════════════════════════════════════════════════════
-// VIEW WINDOW — controls display range across all result views
+// RESULTS DATE WINDOW — the shared time frame, as simulation days
 // ═══════════════════════════════════════════════════════
-// The facility chip bar became the three-panel filter dock; this repaints it.
 // Kept under the old name because every results render already calls it.
-function updateFacFilterBar(){
-  if(document.getElementById('vw-fac-filter')) resInitFilters();
-}
+function updateFacFilterBar(){ fltRender('res'); }
 
-function setViewWindow(preset, btn){
-  S.viewWindow.preset=preset;
-  document.querySelectorAll('.vw-btn').forEach(b=>b.classList.remove('active'));
-  if(btn) btn.classList.add('active');
-  const cw=document.getElementById('vw-custom-wrap');
-  if(cw) cw.style.display=preset==='custom'?'flex':'none';
-  if(preset!=='custom') applyCustomWindow();
-}
-
-function getViewRange(){
-  // Returns {startDay, endDay} (1-indexed) within the simulation horizon
-  const horizon=S.simCfg.horizon;
-  const simStart=new Date(S.simCfg.start_date+'T00:00:00');
-  const today=new Date();
-  const preset=S.viewWindow.preset||'sim';
-
-  if(preset==='sim') return {startDay:1, endDay:horizon};
-
-  const todayOffset=todayDayOffset();
-
-  if(preset==='15d'){
-    return {startDay:todayOffset, endDay:Math.min(horizon,todayOffset+14)};
-  }
-  if(preset==='eom'){
-    const eom=new Date(today.getFullYear(),today.getMonth()+1,0);
-    const eomDay=Math.round((eom-simStart)/(864e5))+1;
-    return {startDay:todayOffset, endDay:Math.min(horizon,eomDay)};
-  }
-  if(preset==='3m'){
-    const e3m=new Date(today.getFullYear(),today.getMonth()+4,0);
-    const e3mDay=Math.round((e3m-simStart)/(864e5))+1;
-    return {startDay:todayOffset, endDay:Math.min(horizon,e3mDay)};
-  }
-  if(preset==='eoy'){
-    const eoy=new Date(today.getFullYear(),11,31);
-    const eoyDay=Math.round((eoy-simStart)/(864e5))+1;
-    return {startDay:todayOffset, endDay:Math.min(horizon,eoyDay)};
-  }
-  if(preset==='custom'){
-    const cs=S.viewWindow.customStart;
-    const ce=S.viewWindow.customEnd;
-    const sd=cs?Math.max(1,Math.round((new Date(cs)-simStart)/(864e5))+1):1;
-    const ed=ce?Math.min(horizon,Math.round((new Date(ce)-simStart)/(864e5))+1):horizon;
-    return {startDay:sd, endDay:ed};
-  }
-  return {startDay:1, endDay:horizon};
-}
-
-function applyCustomWindow(){
-  if(S.viewWindow.preset==='custom'){
-    S.viewWindow.customStart=document.getElementById('vw-start')?.value||null;
-    S.viewWindow.customEnd=document.getElementById('vw-end')?.value||null;
-  }
-  updateViewRangeLabel();
-  if(S.simResults){
-    renderDtree(S.simResults);
-    renderDashCharts(S.simResults);
-    renderResultsTable();
-    renderDashboard();
-  }
-}
-
-function updateViewRangeLabel(){
-  const {startDay,endDay}=getViewRange();
-  const simStart=new Date(S.simCfg.start_date+'T00:00:00');
-  const sd=new Date(simStart); sd.setDate(sd.getDate()+startDay-1);
-  const ed=new Date(simStart); ed.setDate(ed.getDate()+endDay-1);
-  const fmt=d=>d._ymd();
-  const lbl=document.getElementById('vw-range-lbl');
-  if(lbl) lbl.textContent=`${fmt(sd)} → ${fmt(ed)} (${endDay-startDay+1}d)`;
-}
+// {startDay, endDay}, 1-indexed simulation days of the shared time frame cut to the
+// simulation — {startDay:1, endDay:0, empty:true} when they don't overlap (fltSimDayRange).
+function getViewRange(){ return fltSimDayRange('res'); }
 
 function dayToDate(day){
   const d=new Date(S.simCfg.start_date+'T00:00:00');
@@ -21106,6 +20617,7 @@ function renderDtree(r){
   _demandCacheInvalidate();
 
   const {startDay,endDay}=getViewRange();
+  if(endDay<startDay){wrap.innerHTML='<div style="font-family:var(--mono);font-size:9px;color:var(--text-dim);padding:14px">No simulated days in this time frame.</div>';return;}
   const fac=getResultElements();
   const simStart=new Date(S.simCfg.start_date+'T00:00:00');
 
@@ -21149,13 +20661,15 @@ function renderDtree(r){
   });
   const monCol=(window._dtreeMonCol=window._dtreeMonCol||new Set());
   // Every month except the current one starts collapsed so the page opens compact.
-  // Gated on monthsD.length so an early render (before the date range is synced) can't
-  // permanently lock in an empty collapsed set.
-  if(!window._dtreeMonColDefaultApplied&&monthsD.length){
-    window._dtreeMonColDefaultApplied=true;
-    const curYm=new Date()._ymd().slice(0,7);
-    monthsD.filter(m=>m.ym!==curYm).forEach(m=>monCol.add(m.ym));
-  }
+  // Decided once per month, the first time the time frame brings it into view — so a
+  // month the user opened or closed keeps that state when the time frame changes.
+  const _monSeen=(window._dtreeMonSeen=window._dtreeMonSeen||new Set());
+  const curYm=new Date()._ymd().slice(0,7);
+  monthsD.forEach(m=>{
+    if(_monSeen.has(m.ym)) return;
+    _monSeen.add(m.ym);
+    if(m.ym!==curYm) monCol.add(m.ym);
+  });
   const isLevelId=id=>/_inv\b|_inv_|inventor/i.test(id||''); // inventory rows summarize as end-of-month, others as monthly total
   // Year boundaries: a Σ YYYY column follows the last month of each year (inventory
   // years read the last snapshot; flows sum). yearEndIdx[i]=true if month i ends its year.
@@ -21533,6 +21047,7 @@ function _drawClinkerChart(id, r){
 
   const {startDay,endDay}=getViewRange();
   const days=endDay-startDay+1;
+  if(days<1) return;   // no simulated days in the time frame — leave the canvas blank
   const fac=getResultElements();
 
   const prodCols=['#00ff9d','#ff3d5a','#ff8c42','#4da6ff','#cc7aff','#ffb830'];
@@ -21785,6 +21300,7 @@ function _drawProdBarChart(id,r,type){
   const {cv,ctx,W,H,P,cW,cH}=g;
   const {startDay,endDay}=getViewRange();
   const days=endDay-startDay+1;
+  if(days<1) return;   // no simulated days in the time frame — leave the canvas blank
   const fac=getResultElements();
   const cols=['#00ff9d','#ff8c42','#4da6ff','#ff3d5a','#cc7aff','#ffb830'];
 
@@ -21861,7 +21377,7 @@ function _drawProdBarChart(id,r,type){
     const simBase=new Date(S.simCfg.start_date+'T00:00:00');
     DB.demand_points.filter(dp=>{
       const dpEl=DB.elements.find(e=>e.id===dp.element_id); if(!dpEl) return false;
-      const _rf=resFacIdSet();
+      const _rf=fltFacIdSet();
       if(_rf) return _rf.has(dpEl.assigned_facility_id);
       return dp.facility_id===S.facility_id&&(!dpEl.assigned_facility_id||dpEl.assigned_facility_id===S.facility_id);
     }).forEach((dp,di)=>{
@@ -21874,7 +21390,7 @@ function _drawProdBarChart(id,r,type){
           data.push(_demandRate(dpEl.id,dt._ymd()));
         }
         const facName=DB.facilities.find(f=>f.id===(dpEl.assigned_facility_id||S.facility_id))?.name||'';
-        const facPrefix=!resFacIdSet()&&facName?`${facName} — `:'';
+        const facPrefix=!fltFacIdSet()&&facName?`${facName} — `:'';
         demSeries.push({label:`${facPrefix}${prod?.name||pp.product_id}`,data,col:demCols[(di*2+pi)%demCols.length]});
       });
     });
@@ -25581,7 +25097,7 @@ function switchTopSection(section){
     logistics:[
       {label:'Vessel Schedule',view:'schedules',tab:'vessels'},
       {label:'Rail Schedule',view:'schedules',tab:'rail'},
-      {label:'Truck Movements',view:'schedules',tab:'trucks'}
+      {label:'Truck Movements',view:'schedules',tab:'truck'}
     ],
     demand:[
       {label:'Demand',view:'demand'},
@@ -25665,11 +25181,11 @@ function switchView(view){
   if(view==='demand') renderDemandView();
   if(view==='salesperf') renderSalesPerfView();
   if(view==='supply') renderSupplyView();
-  if(view==='schedules'){renderVesselTable();renderRailTable();renderTruckTable();renderMaintenanceCalendar();}
+  if(view==='schedules'){_logiFilterBarSync();renderVesselTable();renderRailTable();renderTruckTable();renderMaintenanceCalendar();}
   // Show view window bar on result views
   const vwViews=['dashboard','datatable','analysis'];
   const vwBar=document.getElementById('view-window-bar');
-  const vwTok=document.getElementById('res-tokens');
+  const vwTok=document.getElementById('flt-res-toks');
   const onResults=vwViews.includes(view);
   if(vwBar) vwBar.style.display=onResults?'flex':'none';
   if(vwTok) vwTok.style.display=onResults?'flex':'none';
