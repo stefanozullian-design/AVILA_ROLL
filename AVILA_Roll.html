@@ -7991,22 +7991,29 @@ function _demCellHtml(el, ds, monYm, tdStyStr, dayCls){
   </td>`;
 }
 
+// "↓ Save Forecast". Every cell already saves itself the moment it changes (saveDemandCell),
+// so this only commits cells whose value differs from what the grid last rendered — an edit
+// whose change event never fired — then refreshes the page showing demand.
+// It must never again:
+//   • read inputs outside the Demand grid. The Supply page renders the same .dem-cell inputs
+//     (_demCellHtml) and keeps them in the DOM while hidden — and stale, since a cell edit
+//     doesn't redraw Supply. A page-wide query wrote them AFTER the Demand grid's, so Save
+//     reverted the edit just made here; and Supply shows a ship-to split day as ONE ship-to's
+//     share (_demandRate), so that day's total shrank to it.
+//   • rewrite cells nobody edited. That collapsed ship-to split rows into one row and deleted
+//     the forecast kept behind non-working days. (Actual days render as divs, not inputs.)
 function saveDemandValues(){
   if(!DB.demand_values) DB.demand_values=[];
-  // Note: actual cells (source='actual') are rendered as divs not inputs, so they
-  // won't appear in querySelectorAll('.dem-cell') — no extra guard needed.
-  const inputs=document.querySelectorAll('.dem-cell');
-  inputs.forEach(inp=>{
-    const elId=inp.dataset.el, ds=inp.dataset.date;
-    const v=parseFloat(inp.value)||0;
-    const isNwd=_isNWD(ds);
-    DB.demand_values=DB.demand_values.filter(r=>!(r.element_id===elId&&r.date===ds));
-    if(v>0) DB.demand_values.push(isNwd?{element_id:elId, date:ds, value_t:v, nwd_manual:true}:{element_id:elId, date:ds, value_t:v});
+  let n=0;
+  document.querySelectorAll('#demand-table-wrap input.dem-cell').forEach(inp=>{
+    if((parseFloat(inp.value)||0)===(parseFloat(inp.defaultValue)||0)) return;
+    saveDemandCell(inp);            // exactly what editing the cell does
+    inp.defaultValue=inp.value;
+    n++;
   });
   autoSave();
-  _demandCacheInvalidate();
-  statMsg('Demand forecast saved');
-  renderDemandView();
+  statMsg(n?`Demand forecast saved (${n} edited cell${n===1?'':'s'})`:'Demand forecast saved');
+  _demandChanged(n>0);              // redraw; re-run the simulation only if something changed
 }
 
 // ── Month-total column → END-of-month position (post-render DOM pass) ──
