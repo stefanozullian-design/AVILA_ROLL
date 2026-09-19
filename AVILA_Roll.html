@@ -8647,10 +8647,14 @@ function _demCellHtml(el, ds, monYm, tdStyStr, dayCls){
   const isActual=_dedupRealProd(el.id, ds).length>0;
   const v=_demandRate(el.id, ds);
   const isNwd=_isNWD(ds);
-  const cellBg=isNwd?'rgba(var(--red-rgb),.08)':isActual?'rgba(var(--green-rgb),.06)':'transparent';
-  const cellColor=isNwd?'rgba(var(--red-rgb),.4)':isActual?'var(--real)':'var(--simulated)';
+  // Supply page: imported actual sales read as actual too (the Demand grid keeps its own look).
+  const act=isActual||(dayCls==='sup-day-'&&_dmdIsActual(el.id,ds));
+  const cellBg=isNwd?'rgba(var(--red-rgb),.08)':act?'rgba(var(--green-rgb),.06)':'transparent';
+  const cellColor=isNwd?'rgba(var(--red-rgb),.4)':act?'var(--real)':'var(--simulated)';
   const nm=(el.name||'').replace(/"/g,'&quot;');
-  return `<td class="${dayCls||'dem-day-'}${monYm}" ondblclick="openDemandBuilder('${el.id}','${ds}')" title="Double-click to open the Forecast Builder for ${nm} starting ${ds}" style="cursor:cell;padding:1px 2px;border-bottom:1px solid var(--border);border-right:1px solid rgba(var(--hi-rgb),.03);${tdStyStr}">
+  // On the Supply page the cell carries its source like every other Supply number.
+  const src=dayCls==='sup-day-'&&v>0?(act?' cell-real':(ds<new Date()._ymd()?' cell-gap':'')):'';
+  return `<td class="${dayCls||'dem-day-'}${monYm}${src}" ondblclick="openDemandBuilder('${el.id}','${ds}')" title="Double-click to open the Forecast Builder for ${nm} starting ${ds}" style="cursor:cell;padding:1px 2px;border-bottom:1px solid var(--border);border-right:1px solid rgba(var(--hi-rgb),.03);${tdStyStr}">
     ${isActual
       ? `<div style="width:50px;font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;color:${cellColor};background:${cellBg}" title="Actual shipment data — double-click for Forecast Builder">${v?Math.round(v*10)/10:''}</div>`
       : `<input class="dem-cell" data-el="${el.id}" data-date="${ds}"${isNwd?' data-nwd="1"':''} value="${v||''}" onchange="saveDemandCell(this)"
@@ -8923,7 +8927,7 @@ function _supDpnRows(dpts, months, collapsedMonths, tdSty, depth, base, stickyLe
       const mt=mon.dates.reduce((s,ds)=>s+(ex.valFn(ds)||0),0);
       hh+=`<td style="border-left:2px solid rgba(var(--hi-rgb),.05);font-size:8px;color:${ex.color};text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
       if(!isCol) mon.dates.forEach(ds=>{ const v=ex.valFn(ds)||0;
-        hh+=`<td class="sup-day-${mon.ym}" style="font-size:8px;color:${ex.color};text-align:right;padding:3px 4px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
+        hh+=`<td class="sup-day-${mon.ym} ${ex.srcFn?ex.srcFn(ds,v):''}" style="font-size:8px;color:${ex.color};text-align:right;padding:3px 4px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
     });
     hh+=`</tr>`;
   });
@@ -9289,6 +9293,17 @@ function _renderSupplyViewInner(wrap){
     const single=resolveProduction(el, ds, dayIdx, maintDays);
     return (single.product_id&&single.capacity_tpd>0)?[single]:[];
   };
+  // Source of a number DERIVED from other inputs (requirements, clinker need, by-product output,
+  // totals): 'cell-real' when every input contributing that day is actual, 'cell-gap' on a past
+  // day when any is not, '' otherwise (forecast days get cell-fc later). Same classes as the
+  // inventory / production cells, so a derived number always reads like the data it comes from.
+  const _srcCls=(ds,v,acts)=>!(v>0)?'':(acts.length&&acts.every(Boolean))?'cell-real':(ds<todayStr?'cell-gap':'');
+  const _dmdActs=(dpts,ds)=>dpts.filter(dp=>(_demandRate(dp.element_id,ds)||0)>0).map(dp=>_dmdIsActual(dp.element_id,ds));
+  const _swapInActs=(dpts,ds)=>(DB.demand_substitutions||[]).filter(sb=>dpts.some(dp=>dp.element_id===sb.to_element_id))
+    .map(sb=>_dmdIsActual(sb.from_element_id,ds));
+  const _prodActs=(els,ds,pid)=>els.flatMap(el=>resolveProductionAll(el,ds,_dIdx(ds),maintSetFor(el.id))
+    .filter(p=>!pid||p.product_id===pid).map(p=>!!p.isActual));
+  const _railReal=(facId,ds)=>(DB.real_rail_daily||[]).some(x=>x.date===ds&&x.facility_id===facId&&x.type==='loading');
 
   // For group totals — sum daily output across all elements
   const grpDailyTotal=(els,ds,dayIdx)=>
@@ -9496,7 +9511,7 @@ function _renderSupplyViewInner(wrap){
     if(!isCol) mon.dates.forEach(ds=>{
       const dayIdx=_dIdx(ds);
       const v=grpDailyTotal(prodEls,ds,dayIdx);
-      h+=`<td class="sup-day-${mon.ym}" style="background:rgba(var(--blue-rgb),.07);font-size:9px;font-weight:700;color:var(--blue);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border2);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
+      h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_prodActs(prodEls,ds))}" style="background:rgba(var(--blue-rgb),.07);font-size:9px;font-weight:700;color:var(--blue);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border2);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
     });
   });
   h+=`</tr>`;
@@ -9852,7 +9867,7 @@ function _renderSupplyViewInner(wrap){
               const _dpnExtra=allDates.some(ds=>_railLoadT(prodId,ds)>0)
                 ? [{label:'🚂 rail loading (to terminals)', color:'var(--purple)',
                     title:'Tonnes of this product loaded onto rail cars for shipment to terminals — counted in the requirement above, but not local demand-point demand.',
-                    valFn:ds=>_railLoadT(prodId,ds)}]
+                    valFn:ds=>_railLoadT(prodId,ds), srcFn:(ds,v)=>_srcCls(ds,v,[_railReal(node.id,ds)])}]
                 : [];
               h+=`<tr class="supsec-cementNeed">
                 <td ondblclick="_openSwapForProduct('${prodId}','')" title="Double-click to cover part of this material's demand with a substitute" style="cursor:pointer;${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${prodReqColor};font-size:9px">${esc(prodName)}${(_dpnDpts.length||_dpnExtra.length)?_supDpnArrow(_dpnBase,_dpnDpts.length,_dpnExtra.length):''}</td>`;
@@ -9862,7 +9877,8 @@ function _renderSupplyViewInner(wrap){
                 h+=`<td ondblclick="_openSwapForProduct('${prodId}','${mon.dates[0]||''}')" title="Double-click to swap part of this demand to another material" style="cursor:pointer;border-left:2px solid rgba(var(--blue-rgb),.1);font-size:9px;color:${prodReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
                 if(!isCol) mon.dates.forEach(ds=>{
                   const v=totalNeed(prodId,ds);
-                  h+=`<td class="sup-day-${mon.ym}" ondblclick="_openSwapForProduct('${prodId}','${ds}')" title="Double-click to swap part of this demand to another material" style="cursor:pointer;font-size:9px;color:${v>0?prodReqColor:'rgba(var(--blue-rgb),calc(var(--zero-k)*.3))'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
+                  const _acts=_dmdActs(_dpnDpts,ds); if(_railLoadT(prodId,ds)>0) _acts.push(_railReal(node.id,ds));
+                  h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_acts)}" ondblclick="_openSwapForProduct('${prodId}','${ds}')" title="Double-click to swap part of this demand to another material" style="cursor:pointer;font-size:9px;color:${v>0?prodReqColor:'rgba(var(--blue-rgb),calc(var(--zero-k)*.3))'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
                 });
               });
               h+=`</tr>`;
@@ -9874,22 +9890,23 @@ function _renderSupplyViewInner(wrap){
               const hasOut=outArr.some(v=>v>0), hasIn=inArr.some(v=>v>0);
               if(hasOut||hasIn){
                 const idxOf={}; allDates.forEach((ds,i)=>idxOf[ds]=i);
-                const swapChild=(label,color,bg,valFn)=>{
+                const swapChild=(label,color,bg,valFn,actsFn)=>{
                   let rr=`<tr class="supsec-cementNeed sup-sub-row" style="background:${bg}"><td style="${stickyLeft('var(--surface)',node.depth+3,'border-bottom:1px solid var(--border),')}color:${color};font-size:8px;font-style:italic">${label}</td>`;
                   months.forEach(mon=>{
                     const isCol=collapsed.has(mon.ym);
                     const mt=mon.dates.reduce((s,ds)=>s+valFn(ds),0);
                     rr+=`<td style="border-left:2px solid rgba(var(--hi-rgb),.05);font-size:8px;color:${color};text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
-                    if(!isCol) mon.dates.forEach(ds=>{ const v=valFn(ds); rr+=`<td class="sup-day-${mon.ym}" style="font-size:8px;color:${color};text-align:right;padding:3px 4px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
+                    if(!isCol) mon.dates.forEach(ds=>{ const v=valFn(ds); rr+=`<td class="sup-day-${mon.ym} ${actsFn?_srcCls(ds,v,actsFn(ds)):''}" style="font-size:8px;color:${color};text-align:right;padding:3px 4px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
                   });
                   return rr+`</tr>`;
                 };
                 const ownFn=ds=>{ const i=idxOf[ds]; return Math.max(0,totalNeed(prodId,ds)-(outArr[i]||0)); };
-                h+=swapChild('↳ '+prodName+' · own','var(--green)','rgba(76,175,80,.03)',ownFn);
-                if(hasOut) h+=swapChild('↳ ⇄ swapped out → '+(_outTargets(prodId)||'substitute'),'var(--amber)','rgba(var(--amber-rgb),.05)',ds=>outArr[idxOf[ds]]||0);
+                const ownActs=ds=>_dmdActs(_dpnDpts,ds), inActs=ds=>_swapInActs(_dpnDpts,ds);
+                h+=swapChild('↳ '+prodName+' · own','var(--green)','rgba(76,175,80,.03)',ownFn,ownActs);
+                if(hasOut) h+=swapChild('↳ ⇄ swapped out → '+(_outTargets(prodId)||'substitute'),'var(--amber)','rgba(var(--amber-rgb),.05)',ds=>outArr[idxOf[ds]]||0,ownActs);
                 if(hasIn){
-                  h+=swapChild('↳ ⇄ swapped in ← '+(_inSources(prodId)||'other demand'),'var(--cyan)','rgba(var(--cyan-rgb),.06)',ds=>inArr[idxOf[ds]]||0);
-                  h+=swapChild('↳ = to produce (own+in)','var(--blue)','rgba(var(--blue-rgb),.06)',ds=>{ const i=idxOf[ds]; return ownFn(ds)+(inArr[i]||0); });
+                  h+=swapChild('↳ ⇄ swapped in ← '+(_inSources(prodId)||'other demand'),'var(--cyan)','rgba(var(--cyan-rgb),.06)',ds=>inArr[idxOf[ds]]||0,inActs);
+                  h+=swapChild('↳ = to produce (own+in)','var(--blue)','rgba(var(--blue-rgb),.06)',ds=>{ const i=idxOf[ds]; return ownFn(ds)+(inArr[i]||0); },ds=>[...ownActs(ds),...inActs(ds)]);
                 }
               }
             });
@@ -10088,7 +10105,7 @@ function _renderSupplyViewInner(wrap){
                 const barTxt=(downKind==='starved')?(_thRule('down')==='grey'?'NO FEED':''):(downKind?(_DOWN_LABEL[downKind]||''):(v>0?`${lblName} · ${Math.round(v).toLocaleString()}${isCamp?' 🔒':''}`:''));
                 const label=(isRunStart&&barTxt)?`<span style="position:absolute;left:5px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:9px;font-weight:700;color:${downKind?'var(--bar-lbl-down)':isGap?'var(--simulated)':'var(--bar-lbl)'};text-shadow:0 0 2px var(--bar-lbl-halo),0 0 2px var(--bar-lbl-halo);pointer-events:none">${barTxt}</span>`:'';
                 const zpos=isRunStart?'position:relative;z-index:2;':'';
-                h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="${zpos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barBg};${campMark}">${label}</div></td>`;
+                h+=`<td class="sup-day-${mon.ym}${isGap?' src-gap':''}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="${zpos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barBg};${campMark}">${label}</div></td>`;
               });
             });
             h+=`</tr>`;
@@ -10134,7 +10151,7 @@ function _renderSupplyViewInner(wrap){
                   const mt=mon.dates.reduce((s,ds)=>s+(_cbp[pid][ds]||0),0);
                   h+=`<td style="border-left:2px solid rgba(var(--green-rgb),.15);font-size:9px;color:${pColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
                   if(!isCol) mon.dates.forEach(ds=>{ const v=_cbp[pid][ds]||0;
-                    h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${v>0?pColor:'rgba(var(--green-rgb),calc(var(--zero-k)*.3))'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+                    h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_prodActs(cemEls,ds,pid))}" style="font-size:9px;color:${v>0?pColor:'rgba(var(--green-rgb),calc(var(--zero-k)*.3))'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
                 });
                 h+=`</tr>`;
               });
@@ -10235,7 +10252,7 @@ function _renderSupplyViewInner(wrap){
                   const mt=mon.dates.reduce((s,ds)=>s+pkDemand(pid,ds),0);
                   h+=`<td style="border-left:2px solid rgba(var(--blue-rgb),.1);font-size:9px;color:${pkColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
                   if(!isCol) mon.dates.forEach(ds=>{ const v=pkDemand(pid,ds);
-                    h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${v>0?pkColor:'rgba(var(--blue-rgb),calc(var(--zero-k)*.3))'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+                    h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_dmdActs(_dpnDpts,ds))}" style="font-size:9px;color:${v>0?pkColor:'rgba(var(--blue-rgb),calc(var(--zero-k)*.3))'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
                 });
                 h+=`</tr>`;
                 h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, node.depth+3, _dpnBase, stickyLeft);
@@ -10336,7 +10353,7 @@ function _renderSupplyViewInner(wrap){
                 const barTxt=(downKind==='starved')?(_thRule('down')==='grey'?'NO FEED':''):(downKind?(_DOWN_LABEL[downKind]||''):(v>0?`${lblName} · ${Math.round(v).toLocaleString()}${isCamp?' 🔒':''}`:''));
                 const label=(isRunStart&&barTxt)?`<span style="position:absolute;left:5px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:9px;font-weight:700;color:${downKind?'var(--bar-lbl-down)':isGap?'var(--simulated)':'var(--bar-lbl)'};text-shadow:0 0 2px var(--bar-lbl-halo),0 0 2px var(--bar-lbl-halo);pointer-events:none">${barTxt}</span>`:'';
                 const zpos=isRunStart?'position:relative;z-index:2;':'';
-                h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="${zpos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barBg};${campMark}">${label}</div></td>`;
+                h+=`<td class="sup-day-${mon.ym}${isGap?' src-gap':''}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="${zpos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barBg};${campMark}">${label}</div></td>`;
               });
             });
             h+=`</tr>`;
@@ -10455,7 +10472,7 @@ function _renderSupplyViewInner(wrap){
                   const cellVal=isStarved?Math.round(e.plan):(e.cars>0?Math.round(e.cars):'');
                   const editPid=e.pid||_fallbackPid;
                   const editTitle=cellTitle+' \u2014 type to set this day, dbl-click for the campaign popup';
-                  rr+=`<td class="sup-day-${mon.ym}" title="${editTitle}" ondblclick="event.stopPropagation();${clickFn}" style="cursor:cell;padding:1px 2px;border-bottom:1px solid var(--border);${campMark}${shortMark}${tdSty(ds)}">`
+                  rr+=`<td class="sup-day-${mon.ym} ${ds<todayStr&&e.cars>0?'cell-gap':''}" title="${editTitle}" ondblclick="event.stopPropagation();${clickFn}" style="cursor:cell;padding:1px 2px;border-bottom:1px solid var(--border);${campMark}${shortMark}${tdSty(ds)}">`
                     +(editPid
                       ? `<input class="rail-load-cell" data-dp="${disp.id}" data-date="${ds}" data-pid="${editPid}" value="${cellVal}" onchange="saveRailLoadCell(this)" style="width:34px;background:transparent;border:none;color:${numCol};font-family:var(--mono);font-size:9px;text-align:right;padding:3px 2px;outline:none">`
                       : `<div style="width:34px;font-family:var(--mono);font-size:9px;text-align:right;padding:3px 2px;color:${numCol}">${cellVal}</div>`)
@@ -10546,7 +10563,9 @@ function _renderSupplyViewInner(wrap){
                 if(!isCol){
                   mon.dates.forEach(ds=>{
                     const totalReq=_clkReqDay(ds,clinkerProdId);
-                    h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${totalReq>0?clinkerReqColor:'rgba(var(--peach-rgb),calc(var(--zero-k)*.3))'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${totalReq>0?Math.round(totalReq).toLocaleString():''}</td>`;
+                    const _acts=_clkFinishMills.flatMap(m=>resolveProductionAll(m,ds,_dIdx(ds),maintSetFor(m.id))
+                      .filter(res=>DB.recipes.some(rc=>rc.product_id===res.product_id&&rc.material_id===clinkerProdId)).map(res=>!!res.isActual));
+                    h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,totalReq,_acts)}" style="font-size:9px;color:${totalReq>0?clinkerReqColor:'rgba(var(--peach-rgb),calc(var(--zero-k)*.3))'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${totalReq>0?Math.round(totalReq).toLocaleString():''}</td>`;
                   });
                 }
               });
@@ -10732,7 +10751,7 @@ function _renderSupplyViewInner(wrap){
         if(!isCol) mon.dates.forEach(ds=>{
           const dayIdx=_dIdx(ds);
           const v=grpDailyTotal(node.els,ds,dayIdx);
-          h+=`<td class="sup-day-${mon.ym}" style="background:rgba(var(--hi-rgb),.03);font-size:9px;font-weight:700;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border2);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
+          h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_prodActs(node.els,ds))}" style="background:rgba(var(--hi-rgb),.03);font-size:9px;font-weight:700;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border2);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
         });
       });
       h+=`</tr>`;
@@ -11131,7 +11150,7 @@ function _renderSupplyViewInner(wrap){
                 const mt=mon.dates.reduce((a,ds)=>a+totalNeed(pid,ds),0);
                 h+=`<td style="border-left:2px solid rgba(var(--blue-rgb),.1);font-size:9px;color:${reqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
                 if(!isCol) mon.dates.forEach(ds=>{ const v=totalNeed(pid,ds);
-                  h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${v>0?reqColor:'rgba(var(--blue-rgb),calc(var(--zero-k)*.3))'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+                  h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_dmdActs(_dpnDpts,ds))}" style="font-size:9px;color:${v>0?reqColor:'rgba(var(--blue-rgb),calc(var(--zero-k)*.3))'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
               });
               h+=`</tr>`;
               h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, depth+3, _dpnBase, stickyLeft);
@@ -11143,22 +11162,23 @@ function _renderSupplyViewInner(wrap){
               const _hasSO=_soArr.some(v=>v>0), _hasSI=_siArr.some(v=>v>0);
               if(_hasSO||_hasSI){
                 const _ix={}; allDates.forEach((ds,i)=>_ix[ds]=i);
-                const _swapChild=(label,color,bg,valFn)=>{
+                const _swapChild=(label,color,bg,valFn,actsFn)=>{
                   let rr=`<tr class="supsec-${reqSeckey} sup-sub-row" style="background:${bg}"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${color};font-size:8px;font-style:italic">${label}</td>`;
                   months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
                     const mt=mon.dates.reduce((a,ds)=>a+valFn(ds),0);
                     rr+=`<td style="border-left:2px solid rgba(var(--hi-rgb),.05);font-size:8px;color:${color};text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
                     if(!isCol) mon.dates.forEach(ds=>{ const v=valFn(ds);
-                      rr+=`<td class="sup-day-${mon.ym}" style="font-size:8px;color:${color};text-align:right;padding:3px 4px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
+                      rr+=`<td class="sup-day-${mon.ym} ${actsFn?_srcCls(ds,v,actsFn(ds)):''}" style="font-size:8px;color:${color};text-align:right;padding:3px 4px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
                   });
                   return rr+`</tr>`;
                 };
                 const _ownFn=ds=>Math.max(0,totalNeed(pid,ds)-(_soArr[_ix[ds]]||0));
-                h+=_swapChild('↳ '+_pNameOf(pid)+' · own','var(--green)','rgba(76,175,80,.03)',_ownFn);
-                if(_hasSO) h+=_swapChild('↳ ⇄ swapped out → '+(_tOutTargets(pid)||'substitute'),'var(--amber)','rgba(var(--amber-rgb),.05)',ds=>_soArr[_ix[ds]]||0);
+                const _tOwnActs=ds=>_dmdActs(_dpnDpts,ds), _tInActs=ds=>_swapInActs(_dpnDpts,ds);
+                h+=_swapChild('↳ '+_pNameOf(pid)+' · own','var(--green)','rgba(76,175,80,.03)',_ownFn,_tOwnActs);
+                if(_hasSO) h+=_swapChild('↳ ⇄ swapped out → '+(_tOutTargets(pid)||'substitute'),'var(--amber)','rgba(var(--amber-rgb),.05)',ds=>_soArr[_ix[ds]]||0,_tOwnActs);
                 if(_hasSI){
-                  h+=_swapChild('↳ ⇄ swapped in ← '+(_tInSources(pid)||'other demand'),'var(--cyan)','rgba(var(--cyan-rgb),.06)',ds=>_siArr[_ix[ds]]||0);
-                  h+=_swapChild('↳ = required here (own+in)','var(--blue)','rgba(var(--blue-rgb),.06)',ds=>_ownFn(ds)+(_siArr[_ix[ds]]||0));
+                  h+=_swapChild('↳ ⇄ swapped in ← '+(_tInSources(pid)||'other demand'),'var(--cyan)','rgba(var(--cyan-rgb),.06)',ds=>_siArr[_ix[ds]]||0,_tInActs);
+                  h+=_swapChild('↳ = required here (own+in)','var(--blue)','rgba(var(--blue-rgb),.06)',ds=>_ownFn(ds)+(_siArr[_ix[ds]]||0),ds=>[..._tOwnActs(ds),..._tInActs(ds)]);
                 }
               }
             });
@@ -11253,7 +11273,7 @@ function _renderSupplyViewInner(wrap){
                   const barTxt=(downKind==='starved')?(_thRule('down')==='grey'?'NO FEED':''):(downKind?(_DOWN_LABEL[downKind]||''):(v>0?`${lblName} · ${Math.round(v).toLocaleString()}${isCamp?' 🔒':''}`:''));
                   const label=(isRunStart&&barTxt)?`<span style="position:absolute;left:5px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:9px;font-weight:700;color:${downKind?'var(--bar-lbl-down)':isGap?'var(--simulated)':'var(--bar-lbl)'};text-shadow:0 0 2px var(--bar-lbl-halo),0 0 2px var(--bar-lbl-halo);pointer-events:none">${barTxt}</span>`:'';
                   const zpos=isRunStart?'position:relative;z-index:2;':'';
-                  h+=`<td class="sup-day-${mon.ym}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="${zpos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barBg};${campMark}">${label}</div></td>`;
+                  h+=`<td class="sup-day-${mon.ym}${isGap?' src-gap':''}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="${zpos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barBg};${campMark}">${label}</div></td>`;
                 });
               });
               h+=`</tr>`;
@@ -11380,7 +11400,7 @@ function _renderSupplyViewInner(wrap){
                     h+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''}" ${dbl} title="${esc(ttl)}" style="cursor:cell;padding:1px 2px;border-bottom:1px solid var(--border);${info.short>0?'box-shadow:inset 0 -2px 0 var(--red);':''}${tdSty(ds)}"><input class="rail-pull-cell" data-dest="${fac.id}" data-pid="${pid}" data-day="${d}" data-base="${cars}" value="${cars}" onchange="_rpPullTarget(this)" style="width:34px;background:transparent;border:none;color:${col};font-family:var(--mono);font-size:9px;text-align:right;padding:3px 2px;outline:none;font-weight:${isReal?'700':'400'}"></td>`;
                     return;
                   }
-                  h+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''}" ${dbl} title="${esc(ttl)}" style="cursor:cell;font-size:9px;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${isReal?'700':'400'};${tdSty(ds)}">${cars>0?cars:0}</td>`; });
+                  h+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':(ds<todayStr&&t>0?'cell-gap':'')}" ${dbl} title="${esc(ttl)}" style="cursor:cell;font-size:9px;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${isReal?'700':'400'};${tdSty(ds)}">${cars>0?cars:0}</td>`; });
               });
               h+=`</tr>`;
             });
@@ -11468,11 +11488,14 @@ function _supMarkHeaderSource(wrap){
   for(let r=0;r<trs.length;r++){
     const hdr=trs[r]; if(!hdr.classList.contains('sup-sec-hdr')) continue;
     const cls='supsec-'+hdr.dataset.seckey, leaves=[];
-    for(let q=r+1;q<trs.length&&trs[q].classList.contains(cls);q++) if(!trs[q].classList.contains('sup-chart-row')) leaves.push(trs[q]);
+    // the section runs to the next section header; breakdown lines (demand points, swaps) sit
+    // between its rows with their own classes and are skipped, not treated as the end
+    for(let q=r+1;q<trs.length&&!trs[q].classList.contains('sup-sec-hdr')&&/(^|\s)supsec-/.test(trs[q].className);q++)
+      if(trs[q].classList.contains(cls)&&!trs[q].classList.contains('sup-chart-row')&&!trs[q].classList.contains('sup-sub-row')) leaves.push(trs[q]);
     if(!leaves.length) continue;
     for(let i=1;i<hdr.cells.length;i++){
       let real=false, gap=false;
-      leaves.forEach(lf=>{ const c=lf.cells[i]; if(!c) return; if(c.classList.contains('cell-gap')) gap=true; else if(c.classList.contains('cell-real')) real=true; });
+      leaves.forEach(lf=>{ const c=lf.cells[i]; if(!c) return; if(c.classList.contains('cell-gap')||c.classList.contains('src-gap')) gap=true; else if(c.classList.contains('cell-real')) real=true; });
       if(gap) hdr.cells[i].classList.add('cell-gap'); else if(real) hdr.cells[i].classList.add('cell-real');
     }
   }
@@ -11489,7 +11512,7 @@ function _supMarkForecastCells(wrap){
   wrap.querySelectorAll('tr.sup-sec-hdr, tr[class*="supsec-"]').forEach(tr=>{
     if(tr.classList.contains('sup-chart-row')) return;
     for(let i=1;i<tr.cells.length;i++){
-      const td=tr.cells[i], nz=/[1-9]/.test(td.textContent);
+      const td=tr.cells[i], nz=/[1-9]/.test(td.textContent+(td.querySelector('input')?.value||''));   // editable cells hold the number in an input
       if(td.classList.contains('cell-real')||td.classList.contains('cell-gap')){ if(!nz) td.classList.add('cell-z'); continue; }
       if(fut[i]&&nz&&!td.querySelector('div')) td.classList.add('cell-fc');
     }
@@ -15937,8 +15960,12 @@ function _demandRate(elId, dateStr){
   // No fallback - demand must be explicitly defined in demand_values
   return 0;
 }
+// A demand point's day is ACTUAL when real shipments are recorded for it (real_production_daily)
+// or its demand_values row came in as actual sales (source:'actual', the sales import).
+function _dmdActIdx(){ return _dmdActIdx._c || (_dmdActIdx._c=new Set((DB.demand_values||[]).filter(v=>v.source==='actual').map(v=>v.element_id+'|'+v.date))); }
+function _dmdIsActual(elId,ds){ return _dmdActIdx().has(elId+'|'+ds)||_dedupRealProd(elId,ds).length>0; }
 // Invalidate cache whenever demand_values changes
-function _demandCacheInvalidate(){ _demandRate._cache={}; _nwdSet._c=null; if(typeof _demGridVal==='function') _demGridVal._cache=null; if(typeof SP!=='undefined') SP._demIdx=null; }
+function _demandCacheInvalidate(){ _demandRate._cache={}; _nwdSet._c=null; _dmdActIdx._c=null; if(typeof _demGridVal==='function') _demGridVal._cache=null; if(typeof SP!=='undefined') SP._demIdx=null; }
 
 // ── Monthly demand total for an element (for dashboard summaries) ──
 
