@@ -3109,9 +3109,10 @@ function renderLocDetail(type,id){
         <input class="loc-field-input" id="ld-name" value="${record.name}"></div>`;
 
   if(type==='facility'){
-    // Plant # — the company's own plant number (text: may hold letters); blank until set.
-    h+=`<div class="loc-field"><div class="loc-field-label">Plant #</div>
-        <input class="loc-field-input" id="ld-plant-no" value="${String(record.plant_no??'').replace(/"/g,'&quot;')}" placeholder="e.g. 1042"></div>`;
+    // Plant # — the company's own plant numbers (text: may hold letters). A facility can
+    // carry several, one per material or pickup type; the first one is the primary.
+    h+=`<div class="loc-field" style="grid-column:1/-1"><div class="loc-field-label">Plant # / codes</div>
+        ${plantCodesEditorHTML('ld',facPlantCodes(record))}</div>`;
     h+=`<div class="loc-field"><div class="loc-field-label">Type</div>
       <select class="loc-field-input" id="ld-fac-type">
         <option value="plant" ${record.type==='plant'?'selected':''}>Plant</option>
@@ -3133,6 +3134,76 @@ function renderLocDetail(type,id){
   panel.innerHTML=h;
 }
 
+// ── Facility plant codes ─────────────────────────────────────────
+// One facility can answer to several plant numbers — SUT is 4930 or 5052 depending on the
+// material picked up. The codes live in facility.plant_nos as {code,label} rows; plant_no
+// keeps the first code so older scenarios and any reader expecting one number still work.
+function facPlantCodes(fac){
+  if(!fac) return [];
+  const out=[], seen=new Set();
+  const push=(code,label)=>{
+    const c=String(code??'').trim(); if(!c) return;
+    const k=c.toUpperCase(); if(seen.has(k)) return; seen.add(k);
+    out.push({code:c,label:String(label??'').trim()});
+  };
+  (Array.isArray(fac.plant_nos)?fac.plant_nos:[]).forEach(r=>{ if(r&&typeof r==='object') push(r.code,r.label); else push(r,''); });
+  push(fac.plant_no,'');   // legacy single field — also the only code on un-migrated data
+  return out;
+}
+function facPlantCodeStr(fac){ return facPlantCodes(fac).map(c=>c.label?`${c.code} (${c.label})`:c.code).join(' · '); }
+// Which facility does a raw plant number belong to? The hook for cataloguing a delivery
+// from source data onto a demand point.
+function facilityByPlantCode(code){
+  const c=String(code??'').trim().toUpperCase(); if(!c) return null;
+  return DB.facilities.find(f=>facPlantCodes(f).some(p=>p.code.toUpperCase()===c))||null;
+}
+function setFacPlantCodes(fac,list){
+  const rows=[], seen=new Set();
+  (list||[]).forEach(r=>{
+    const code=String(r&&r.code!=null?r.code:'').trim(); if(!code) return;
+    const k=code.toUpperCase(); if(seen.has(k)) return; seen.add(k);
+    rows.push({code,label:String(r.label??'').trim()});
+  });
+  fac.plant_nos=rows;
+  fac.plant_no=rows.length?rows[0].code:'';
+}
+// A code must point at one facility only, or a delivery can't be catalogued from it.
+function plantCodeConflicts(list,selfId){
+  const hits=[];
+  (list||[]).forEach(r=>{
+    const code=String(r&&r.code!=null?r.code:'').trim(); if(!code) return;
+    const other=DB.facilities.find(f=>f.id!==selfId&&facPlantCodes(f).some(p=>p.code.toUpperCase()===code.toUpperCase()));
+    if(other) hits.push(`${code} → ${other.name}`);
+  });
+  return hits;
+}
+// Repeating code editor, shared by the Organization detail panel ('ld') and Add Facility ('fac').
+function plantCodeRowHTML(prefix,r,i){
+  const esc=v=>String(v??'').replace(/"/g,'&quot;');
+  const cls=prefix==='fac'?'fi':'loc-field-input';
+  return `<div class="plant-code-row" style="display:grid;grid-template-columns:90px 1fr 16px;gap:6px;align-items:center;margin-bottom:4px">
+    <input class="${cls}" data-pc="code" value="${esc(r&&r.code)}" placeholder="e.g. 4930">
+    <input class="${cls}" data-pc="label" value="${esc(r&&r.label)}" placeholder="what it covers — e.g. cement pickups">
+    <span class="tbl-act del" style="margin:0;text-align:center" onclick="removePlantCodeRow('${prefix}',${i})">✕</span></div>`;
+}
+function plantCodesEditorHTML(prefix,list){
+  const rows=(list&&list.length)?list:[{code:'',label:''}];
+  return `<div id="${prefix}-plant-codes">${rows.map((r,i)=>plantCodeRowHTML(prefix,r,i)).join('')}</div>
+    <span class="tbl-act" style="margin:0" onclick="addPlantCodeRow('${prefix}')">+ Add code</span>`;
+}
+function readPlantCodeRows(prefix){
+  const box=document.getElementById(prefix+'-plant-codes'); if(!box) return null;
+  return [...box.querySelectorAll('.plant-code-row')].map(row=>({
+    code:row.querySelector('[data-pc="code"]')?.value||'',
+    label:row.querySelector('[data-pc="label"]')?.value||''}));
+}
+function _redrawPlantCodes(prefix,rows){
+  const box=document.getElementById(prefix+'-plant-codes'); if(!box) return;
+  box.innerHTML=(rows.length?rows:[{code:'',label:''}]).map((r,i)=>plantCodeRowHTML(prefix,r,i)).join('');
+}
+function addPlantCodeRow(prefix){ const rows=readPlantCodeRows(prefix)||[]; rows.push({code:'',label:''}); _redrawPlantCodes(prefix,rows); }
+function removePlantCodeRow(prefix,i){ const rows=readPlantCodeRows(prefix)||[]; rows.splice(i,1); _redrawPlantCodes(prefix,rows); }
+
 function saveLocNode(type,id){
   const name=document.getElementById('ld-name')?.value?.trim(); if(!name) return;
   const notes=document.getElementById('ld-notes')?.value||'';
@@ -3150,13 +3221,15 @@ function saveLocNode(type,id){
   }
   rec.name=name; rec.notes=notes;
   if(type==='facility'){
-    const pn=document.getElementById('ld-plant-no'); if(pn) rec.plant_no=pn.value.trim();
+    const pcs=readPlantCodeRows('ld');
+    if(pcs){ setFacPlantCodes(rec,pcs); var pcClash=plantCodeConflicts(pcs,rec.id); }
     rec.type=document.getElementById('ld-fac-type')?.value||rec.type;
     rec.status=document.getElementById('ld-fac-status')?.value||rec.status;
   }
   const moved=!!newParent&&rec[fk]!==newParent;
   if(newParent) rec[fk]=newParent;
   autoSave(); renderLocationTree();
+  if(typeof pcClash!=='undefined'&&pcClash&&pcClash.length){ statMsg(`Saved — but these codes are also on another facility: ${pcClash.join(', ')}`); return; }
   statMsg(moved?`Saved — moved to ${LOC_LEVELS[li-1].label} ${(DB[LOC_LEVELS[li-1].table]||[]).find(r=>r.id===newParent)?.name||''}`:'Saved');
 }
 
@@ -3177,8 +3250,9 @@ function renderFacilitiesForNode(type,id){
   tbody.innerHTML=facs.map(f=>{
     const elCount=DB.elements.filter(e=>(e.assigned_facility_id||e.facility_id)===f.id).length;
     const subr=DB.sub_regions.find(s=>s.id===f.sub_region_id);
+    const codes=facPlantCodeStr(f);
     return `<tr onclick="openFacilityInTopology('${f.id}',null)">
-      <td style="color:${f.type==='plant'?'var(--green)':'var(--blue)'};font-weight:700">${f.name}</td>
+      <td style="color:${f.type==='plant'?'var(--green)':'var(--blue)'};font-weight:700">${f.name}${codes?`<span style="font-family:var(--mono);font-size:9px;font-weight:400;color:var(--text-dim);margin-left:6px">${codes}</span>`:''}</td>
       <td><span class="fac-badge ${f.type==='plant'?'badge-green':'badge-blue'}">${f.type}</span></td>
       <td style="font-family:var(--mono)">${elCount}</td>
       <td><span class="fac-badge ${f.status==='active'?'badge-green':f.status==='construction'?'badge-amber':'badge-grey'}">${f.status||'active'}</span></td>
@@ -23270,8 +23344,10 @@ function facilityHTML(){
   return `
   <div class="modal-hdr"><span class="modal-title">Add Facility — facilities</span><span class="modal-close" onclick="closeModal()">✕</span></div>
   <div class="modal-body">
-    <div class="fr"><div class="ff"><div class="fl">Facility Name</div><input class="fi" id="fac-name" placeholder="e.g. Cairo Plant"></div>
-      <div class="ff"><div class="fl">Plant #</div><input class="fi" id="fac-plant-no" placeholder="e.g. 1042"></div></div>
+    <div class="fr s1"><div class="ff"><div class="fl">Facility Name</div><input class="fi" id="fac-name" placeholder="e.g. Cairo Plant"></div></div>
+    <div class="fr s1"><div class="ff"><div class="fl">Plant # / codes</div>
+      ${plantCodesEditorHTML('fac',[])}
+      <div class="fhint">A facility can answer to several codes — add one per material or pickup type (SUT: 4930 and 5052).</div></div></div>
     <div class="fr"><div class="ff"><div class="fl">Type</div><select class="fi" id="fac-type"><option value="plant">Plant</option><option value="terminal">Terminal</option></select></div></div>
     <div class="fr s1"><div class="ff"><div class="fl">Location (Sub-Region)</div>
       <select class="fi" id="fac-sub">${subOpts}</select>
@@ -23288,14 +23364,18 @@ function facilityHTML(){
 function saveFacility(){
   const name=document.getElementById('fac-name')?.value?.trim(); if(!name) return;
   const id=`fac_${Date.now()}`;
-  DB.facilities.push({id, name,
-    plant_no:document.getElementById('fac-plant-no')?.value?.trim()||'',
+  const codeRows=readPlantCodeRows('fac')||[];
+  const clash=plantCodeConflicts(codeRows,id);
+  const fac={id, name, plant_no:'', plant_nos:[],
     type:document.getElementById('fac-type')?.value||'plant',
     sub_region_id:document.getElementById('fac-sub')?.value||null,
     status:document.getElementById('fac-status')?.value||'active',
-    notes:document.getElementById('fac-notes')?.value||''});
+    notes:document.getElementById('fac-notes')?.value||''};
+  setFacPlantCodes(fac,codeRows);
+  DB.facilities.push(fac);
   S._newFacSubRegion=null;
-  autoSave(); closeModal(); renderLocationTree(); statMsg(`Facility "${name}" created`);
+  autoSave(); closeModal(); renderLocationTree();
+  statMsg(clash.length?`Facility "${name}" created — but these codes are also on another facility: ${clash.join(', ')}`:`Facility "${name}" created`);
 }
 
 // Simulation horizon presets as a day count from the start date, relative to today. The count
