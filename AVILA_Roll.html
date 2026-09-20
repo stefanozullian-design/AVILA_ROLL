@@ -311,6 +311,8 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
 .lvl-facility .tree-label{color:var(--green);}
 .lvl-facility.terminal .tree-diamond{color:var(--blue);}
 .lvl-facility.terminal .tree-label{color:var(--blue);}
+.lvl-facility.purchased .tree-diamond{color:var(--purple);}
+.lvl-facility.purchased .tree-label{color:var(--purple);}
 
 /* Detail panel for selected node */
 .loc-detail{background:var(--surface);border:1px solid var(--border);padding:16px;min-height:120px;}
@@ -341,6 +343,7 @@ select.loc-field-input{appearance:none;cursor:pointer;background-image:url("data
 .fac-badge{display:inline-block;padding:2px 7px;font-size:8px;border:1px solid;margin:1px;}
 .badge-green{color:var(--green);border-color:var(--green);}
 .badge-blue{color:var(--blue);border-color:var(--blue);}
+.badge-purple{color:var(--purple);border-color:var(--purple);}
 .badge-amber{color:var(--amber);border-color:var(--amber);}
 .badge-red{color:var(--red);border-color:var(--red);}
 .badge-grey{color:var(--grey);border-color:var(--grey);}
@@ -2625,7 +2628,7 @@ const DB = {
   countries:        [],  // { id, macro_region_id, name, notes }
   regions:          [],  // { id, country_id, name, notes }
   sub_regions:      [],  // { id, region_id, name, notes }
-  facilities:       [],  // { id, sub_region_id, name, type:'plant'|'terminal', status, notes }
+  facilities:       [],  // { id, sub_region_id, name, type:'plant'|'terminal'|'purchased', status, notes }
 
   // Element catalog
   elements:         [],  // { id, facility_id, assigned_facility_id, type, name, x, y, props:{}, state }
@@ -2971,7 +2974,7 @@ function renderLocationTree(){
             <div class="tree-children ${facs.length?'':'hidden'}" id="sr-${sub.id}">`;
           facs.forEach(f=>{
             const elCount=DB.elements.filter(e=>(e.assigned_facility_id||e.facility_id)===f.id).length;
-            h+=`<div class="tree-row lvl-facility ${f.type==='terminal'?'terminal':''} ${S.selectedLocNode?.id===f.id?'selected':''}" onclick="selectLocNode('facility','${f.id}',event)">
+            h+=`<div class="tree-row lvl-facility ${f.type==='terminal'?'terminal':f.type==='purchased'?'purchased':''} ${S.selectedLocNode?.id===f.id?'selected':''}" onclick="selectLocNode('facility','${f.id}',event)">
               <span class="tree-expand leaf"></span>
               <span class="tree-diamond">◆</span>
               <span class="tree-label">${f.name}</span>
@@ -3118,6 +3121,7 @@ function renderLocDetail(type,id){
       <select class="loc-field-input" id="ld-fac-type">
         <option value="plant" ${record.type==='plant'?'selected':''}>Plant</option>
         <option value="terminal" ${record.type==='terminal'?'selected':''}>Terminal</option>
+        <option value="purchased" ${record.type==='purchased'?'selected':''}>Purchased</option>
       </select></div>
     <div class="loc-field"><div class="loc-field-label">Status</div>
       <select class="loc-field-input" id="ld-fac-status">
@@ -3125,6 +3129,15 @@ function renderLocDetail(type,id){
         <option ${record.status==='inactive'?'selected':''}>inactive</option>
         <option ${record.status==='construction'?'selected':''}>construction</option>
       </select></div>`;
+  }
+
+  // Contracted limits — the only "capacity" a purchased source has. Blank means
+  // no limit; the Supply page flags days and months that go past them.
+  if(type==='facility'&&record.type==='purchased'){
+    h+=`<div class="loc-field"><div class="loc-field-label">Max per day (t)</div>
+        <input class="loc-field-input" id="ld-max-daily" value="${String(record.max_daily_t??'')}" placeholder="no limit"></div>
+      <div class="loc-field"><div class="loc-field-label">Contract per month (t)</div>
+        <input class="loc-field-input" id="ld-contract-month" value="${String(record.contract_monthly_t??'')}" placeholder="no limit"></div>`;
   }
 
   h+=`<div class="loc-field" style="grid-column:1/-1"><div class="loc-field-label">Notes</div>
@@ -3139,6 +3152,15 @@ function renderLocDetail(type,id){
 // One facility can answer to several plant numbers — SUT is 4930 or 5052 depending on the
 // material picked up. The codes live in facility.plant_nos as {code,label} rows; plant_no
 // keeps the first code so older scenarios and any reader expecting one number still work.
+// A PURCHASED facility is a supplier's own position, not ours. We never hold
+// stock there, so it has no silos, no capacity and no days of cover — the only
+// thing worth planning is how much we buy from it each day, usually because a
+// swap sent demand its way. Everything that treats a facility as a place we
+// store things asks this first.
+function isPurchasedFac(f){
+  const fac=(typeof f==='string')?(DB.facilities||[]).find(x=>x.id===f):f;
+  return !!fac&&fac.type==='purchased';
+}
 function facPlantCodes(fac){
   if(!fac) return [];
   const out=[], seen=new Set();
@@ -3224,8 +3246,17 @@ function saveLocNode(type,id){
   if(type==='facility'){
     const pcs=readPlantCodeRows('ld');
     if(pcs){ setFacPlantCodes(rec,pcs); var pcClash=plantCodeConflicts(pcs,rec.id); }
+    const typeWas=rec.type;
     rec.type=document.getElementById('ld-fac-type')?.value||rec.type;
     rec.status=document.getElementById('ld-fac-status')?.value||rec.status;
+    const _num=id=>{ const el=document.getElementById(id); if(!el) return undefined;
+      const v=el.value.trim(); return v===''?'':Math.max(0,parseFloat(v)||0); };
+    const md=_num('ld-max-daily'), cm=_num('ld-contract-month');
+    if(md!==undefined) rec.max_daily_t=md;
+    if(cm!==undefined) rec.contract_monthly_t=cm;
+    // Switching to (or away from) Purchased changes which fields exist — redraw
+    // the panel so the contract fields appear without a click elsewhere first.
+    if(typeWas!==rec.type) setTimeout(()=>renderLocDetail(type,id),0);
   }
   const moved=!!newParent&&rec[fk]!==newParent;
   if(newParent) rec[fk]=newParent;
@@ -3253,8 +3284,8 @@ function renderFacilitiesForNode(type,id){
     const subr=DB.sub_regions.find(s=>s.id===f.sub_region_id);
     const codes=facPlantCodeStr(f);
     return `<tr onclick="openFacilityInTopology('${f.id}',null)">
-      <td style="color:${f.type==='plant'?'var(--green)':'var(--blue)'};font-weight:700">${f.name}${codes?`<span style="font-family:var(--mono);font-size:9px;font-weight:400;color:var(--text-dim);margin-left:6px">${codes}</span>`:''}</td>
-      <td><span class="fac-badge ${f.type==='plant'?'badge-green':'badge-blue'}">${f.type}</span></td>
+      <td style="color:${f.type==='plant'?'var(--green)':f.type==='purchased'?'var(--purple)':'var(--blue)'};font-weight:700">${f.name}${codes?`<span style="font-family:var(--mono);font-size:9px;font-weight:400;color:var(--text-dim);margin-left:6px">${codes}</span>`:''}</td>
+      <td><span class="fac-badge ${f.type==='plant'?'badge-green':f.type==='purchased'?'badge-purple':'badge-blue'}">${f.type}</span></td>
       <td style="font-family:var(--mono)">${elCount}</td>
       <td><span class="fac-badge ${f.status==='active'?'badge-green':f.status==='construction'?'badge-amber':'badge-grey'}">${f.status||'active'}</span></td>
       <td><span class="tbl-act" onclick="event.stopPropagation();openFacilityInTopology('${f.id}',null)">Open →</span>
@@ -9431,7 +9462,9 @@ function _renderSupplyViewInner(wrap){
   // Collected here so the empty-topology guard below also allows terminal-only
   // scenarios. Rendered as their own group AFTER the plant tree (see below).
   const _termHasEls=f=>allEls.some(e=>(e.assigned_facility_id||e.facility_id)===f.id&&(e.type==='bulk_silo'||e.type==='packed_silo'||e.type==='demand_point'||e.type==='berth'||e.type==='packing_plant'));
-  let _termFacs=DB.facilities.filter(f=>f.type==='terminal').filter(_termHasEls);
+  // Purchased facilities ride the same path: same demand maths, fewer sections
+  // (see _isPurch below — no inventory, no arrivals, no capacity).
+  let _termFacs=DB.facilities.filter(f=>f.type==='terminal'||f.type==='purchased').filter(_termHasEls);
   if(_supFacFilter) _termFacs=_termFacs.filter(f=>_supFacFilter.has(f.id));
   if(_supAllowedPids) _termFacs=_termFacs.filter(f=>{
     const fe=allEls.filter(e=>(e.assigned_facility_id||e.facility_id)===f.id);
@@ -9508,7 +9541,7 @@ function _renderSupplyViewInner(wrap){
             tree.push({type:'fac',id:fac.id,name:fac.name,depth:subDepth,ftype:fac.type,els:facEls,kilns,mills,packers,parents:subPath});
           });
           _termRender.filter(f=>inSub(f.id)).forEach(fac=>{
-            tree.push({type:'fac',term:true,id:fac.id,name:fac.name,depth:subDepth,ftype:'terminal',els:[],parents:subPath});
+            tree.push({type:'fac',term:true,id:fac.id,name:fac.name,depth:subDepth,ftype:fac.type||'terminal',els:[],parents:subPath});
           });
         });
       });
@@ -10898,11 +10931,18 @@ function _renderSupplyViewInner(wrap){
         const demandEls=facEls.filter(e=>e.type==='demand_point');
         const demandPoints=DB.demand_points.filter(dp=>demandEls.some(el=>el.id===dp.element_id));
         const _facCol=grpCol.has(fac.id);
+        // PURCHASED: a supplier's position. We hold no stock there, so this block
+        // drops inventory, arrivals and transfers and keeps one thing — what we
+        // buy here per day. Contracted limits are the only ceiling that applies.
+        const _isPurch=isPurchasedFac(fac);
+        const _purchMaxDay=parseFloat(fac.max_daily_t)||0;
+        const _purchMaxMon=parseFloat(fac.contract_monthly_t)||0;
 
         // ── Terminal header (amber) — no numbers, same as a plant's facility line ──
         h+=`<tr class="sup-grp-hdr" onclick="_supToggleGrp('${fac.id}')" style="cursor:pointer;background:rgba(var(--amber-rgb),.04);border-top:1px solid var(--border2)">
           <td style="${stickyLeft('var(--surface2)',depth,'border-bottom:1px solid var(--border),')}color:var(--amber);font-weight:700;font-size:9px">
             <span class="sup-chev">${_facCol?'▶':'▼'}</span>${esc(fac.name)}
+            ${_isPurch?`<span style="color:var(--purple);font-size:7px;letter-spacing:1px;margin-left:6px;font-weight:400">PURCHASED${_purchMaxDay>0?' · max '+Math.round(_purchMaxDay).toLocaleString()+' t/d':''}${_purchMaxMon>0?' · '+Math.round(_purchMaxMon).toLocaleString()+' t/mo':''}</span>`:''}
           </td>`;
         months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
           h+=`<td style="background:rgba(var(--amber-rgb),.06);border-left:2px solid rgba(var(--amber-rgb),.2);font-size:9px;font-weight:700;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)"></td>`;
@@ -11139,7 +11179,7 @@ function _renderSupplyViewInner(wrap){
         ].filter(gr=>gr.pids.length);
 
         if(!_groupsDef.length){
-          h+=`<tr><td style="${stickyLeft('var(--surface)',depth+1)}color:var(--text-dim);font-size:8px;font-style:italic">no products configured for this terminal</td>${_blankCells()}</tr>`;
+          h+=`<tr><td style="${stickyLeft('var(--surface)',depth+1)}color:var(--text-dim);font-size:8px;font-style:italic">${_isPurch?'nothing bought from this source yet — wire a demand point or a swap to it':'no products configured for this terminal'}</td>${_blankCells()}</tr>`;
         }
 
         _groupsDef.forEach(gr=>{
@@ -11165,10 +11205,10 @@ function _renderSupplyViewInner(wrap){
           // component the plants use). Rail-fed products additionally stack the
           // tonnage still on rail (transit + rail yard + local yard) as the
           // lighter dashed top segment, per product.
-          h+=_invChartRow(gr.label.replace(' PRODUCTS','')+' inventory',gr.chartCat,accent,facEls,depth+1,gr.pids,(_railBerths.length&&gr.key==='bulk')?_railPendT:null,invSeckey);
+          if(!_isPurch) h+=_invChartRow(gr.label.replace(' PRODUCTS','')+' inventory',gr.chartCat,accent,facEls,depth+1,gr.pids,(_railBerths.length&&gr.key==='bulk')?_railPendT:null,invSeckey);
 
           // 2) STARTING INVENTORY (BULK|PACKED) — one row per product-silo.
-          const _invPids=gr.pids.filter(pid=>_grSilosOf(pid).length);
+          const _invPids=_isPurch?[]:gr.pids.filter(pid=>_grSilosOf(pid).length);
           if(_invPids.length){
             const _invDay=ds=>_invPids.reduce((t,pid)=>t+_grSilosOf(pid).reduce((s,si)=>s+getInv(si.id,ds,_grStartOf(si)).value,0),0);
             h+=`<tr class="sup-sec-hdr" data-seckey="${invSeckey}" onclick="_supToggleSec('${invSeckey}')" style="cursor:pointer;background:rgba(${rgba},.05);border-top:1px solid rgba(${rgba},.3)">
@@ -11206,15 +11246,21 @@ function _renderSupplyViewInner(wrap){
           // 3) PRODUCT REQUIREMENT (BULK|PACKED) — one row per product with local demand.
           const _reqPids=gr.pids.filter(pid=>_demProdIds.has(pid));
           if(_reqPids.length){
-            const reqColor='var(--blue)';
+            const reqColor=_isPurch?'var(--purple)':'var(--blue)';
+            const reqRgb=_isPurch?'var(--purple-rgb)':'var(--blue-rgb)';
+            const reqLabel=_isPurch?'PURCHASES':'PRODUCT REQUIREMENT';
+            const reqTitle=_isPurch?'What we buy from this source per day — its own demand plus anything swapped in':'Local demand per product';
             const _reqDay=ds=>_reqPids.reduce((s,pid)=>s+totalNeed(pid,ds),0);
-            h+=`<tr class="sup-sec-hdr" data-seckey="${reqSeckey}" onclick="_supToggleSec('${reqSeckey}')" style="cursor:pointer;background:rgba(var(--blue-rgb),.05);border-top:1px solid rgba(var(--blue-rgb),.3)">
-              <td title="Local demand per product" style="${stickyLeft('var(--surface)',depth+1,'border-bottom:1px solid var(--border),')}color:${reqColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow(reqSeckey)}</span> PRODUCT REQUIREMENT ${suffix} <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>`;
+            h+=`<tr class="sup-sec-hdr" data-seckey="${reqSeckey}" onclick="_supToggleSec('${reqSeckey}')" style="cursor:pointer;background:rgba(${reqRgb},.05);border-top:1px solid rgba(${reqRgb},.3)">
+              <td title="${reqTitle}" style="${stickyLeft('var(--surface)',depth+1,'border-bottom:1px solid var(--border),')}color:${reqColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow(reqSeckey)}</span> ${reqLabel} ${suffix} <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>`;
             months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
               const mt=mon.dates.reduce((a,ds)=>a+_reqDay(ds),0);
-              h+=`<td style="border-left:2px solid rgba(var(--blue-rgb),.2);font-size:9px;font-weight:700;color:${reqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+              // A purchase past its contract is the one thing that can go wrong here.
+              const monOver=_purchMaxMon>0&&mt>_purchMaxMon+.5;
+              h+=`<td ${monOver?`title="${Math.round(mt).toLocaleString()} t bought — past the ${Math.round(_purchMaxMon).toLocaleString()} t contracted for the month"`:''} style="border-left:2px solid rgba(${reqRgb},.2);font-size:9px;font-weight:700;color:${monOver?'var(--red)':reqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}${monOver?' ⚠':''}</td>`;
               if(!isCol) mon.dates.forEach(ds=>{ const v=_reqDay(ds);
-                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${v>0?reqColor:'rgba(var(--blue-rgb),calc(var(--zero-k)*.3))'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+                const dayOver=_purchMaxDay>0&&v>_purchMaxDay+.5;
+                h+=`<td class="sup-day-${mon.ym}" ${dayOver?`title="${Math.round(v).toLocaleString()} t — past the ${Math.round(_purchMaxDay).toLocaleString()} t/d we can buy here"`:''} style="font-size:9px;font-weight:700;color:${dayOver?'var(--red)':(v>0?reqColor:`rgba(${reqRgb},calc(var(--zero-k)*.3))`)};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
             });
             h+=`</tr>`;
             _reqPids.forEach(pid=>{
@@ -11223,9 +11269,9 @@ function _renderSupplyViewInner(wrap){
               h+=`<tr class="supsec-${reqSeckey}"><td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${reqColor};font-size:9px">${_pChip(pid)}${_pNameOf(pid)}${_dpnDpts.length?_supDpnArrow(_dpnBase,_dpnDpts.length):''}</td>`;
               months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
                 const mt=mon.dates.reduce((a,ds)=>a+totalNeed(pid,ds),0);
-                h+=`<td style="border-left:2px solid rgba(var(--blue-rgb),.1);font-size:9px;color:${reqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                h+=`<td style="border-left:2px solid rgba(${reqRgb},.1);font-size:9px;color:${reqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
                 if(!isCol) mon.dates.forEach(ds=>{ const v=totalNeed(pid,ds);
-                  h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_dmdActs(_dpnDpts,ds))}" style="font-size:9px;color:${v>0?reqColor:'rgba(var(--blue-rgb),calc(var(--zero-k)*.3))'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+                  h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_dmdActs(_dpnDpts,ds))}" style="font-size:9px;color:${v>0?reqColor:`rgba(${reqRgb},calc(var(--zero-k)*.3))`};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
               });
               h+=`</tr>`;
               h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, depth+3, _dpnBase, stickyLeft);
@@ -11253,7 +11299,7 @@ function _renderSupplyViewInner(wrap){
                 if(_hasSO) h+=_swapChild('↳ ⇄ swapped out → '+(_tOutTargets(pid)||'substitute'),'var(--amber)','rgba(var(--amber-rgb),.05)',ds=>_soArr[_ix[ds]]||0,_tOwnActs);
                 if(_hasSI){
                   h+=_swapChild('↳ ⇄ swapped in ← '+(_tInSources(pid)||'other demand'),'var(--cyan)','rgba(var(--cyan-rgb),.06)',ds=>_siArr[_ix[ds]]||0,_tInActs);
-                  h+=_swapChild('↳ = required here (own+in)','var(--blue)','rgba(var(--blue-rgb),.06)',ds=>_ownFn(ds)+(_siArr[_ix[ds]]||0),ds=>[..._tOwnActs(ds),..._tInActs(ds)]);
+                  h+=_swapChild(_isPurch?'↳ = bought here (own+in)':'↳ = required here (own+in)',reqColor,`rgba(${reqRgb},.06)`,ds=>_ownFn(ds)+(_siArr[_ix[ds]]||0),ds=>[..._tOwnActs(ds),..._tInActs(ds)]);
                 }
               }
             });
@@ -11262,7 +11308,7 @@ function _renderSupplyViewInner(wrap){
           // 3b) PACKING PLANT PRODUCTION — terminals can pack too (e.g. PEVPACK01).
           // Same gantt component the plants use: real days show actual tonnage,
           // forecast days a product-coloured bar; click opens the Campaign popup.
-          if(gr.key==='packed'&&_facPackers.length){
+          if(gr.key==='packed'&&_facPackers.length&&!_isPurch){
             const packColor='var(--blue)';
             const _packRated=el=>{ const ls=(_capsByEl.get(el.id)||[]).filter(c=>_isPackingRow(c));
               return ls.length?Math.max(...ls.map(_packLineCapT)):0; };
@@ -11355,7 +11401,9 @@ function _renderSupplyViewInner(wrap){
             });
           }
 
-          // 4) TRANSFERS — split by arrival mode.
+          // 4) TRANSFERS — split by arrival mode. A purchased source receives
+          // nothing of ours, so the whole arrivals/transfers tail is skipped.
+          if(_isPurch) return;
           const rc='var(--purple)', rcReal='var(--teal)';
 
           // ⚓ VESSEL ARRIVALS — ONE line per product: the gantt bar / real-values row.
@@ -18995,6 +19043,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
     // silos (bulk then packed). Returns tonnes actually pulled. `relaxed` drops the
     // facility/topology scope so any cement silo of the product qualifies — used for
     // demand-swap coverage, which is a deliberate manager re-source of the material.
+    const _purchasedFacIds=new Set((DB.facilities||[]).filter(f=>f.type==='purchased').map(f=>f.id));
     const _pullDemand=(productIds, qty, topoSilos, facilityId, relaxed)=>{
       let remaining=qty, pulled=0;
       const scoped=e=> relaxed || topoSilos.has(e.id) ||
@@ -19046,7 +19095,11 @@ function simulate(elements, connections, horizon, includeProposed=false){
         products=[...topoProds];
       }
 
-      const _served=_pullDemand(products, effective, topoSilos, dp.facilityId, false);
+      // A purchased source has no stock of ours to draw down: what the plan says
+      // we buy, we buy. It can never be short, and it never touches a silo.
+      const _served=_purchasedFacIds.has(dp.facilityId)
+        ? effective
+        : _pullDemand(products, effective, topoSilos, dp.facilityId, false);
       if(effective>0){
         let df=r.demandFill[dp.id];
         if(!df) df=r.demandFill[dp.id]={name:dp.name, facilityId:dp.facilityId, products:products.slice(), requested:0, served:0, shortDays:0, reqDaily:[], servDaily:[]};
@@ -23349,7 +23402,7 @@ function facilityHTML(){
     <div class="fr s1"><div class="ff"><div class="fl">Plant # / codes</div>
       ${plantCodesEditorHTML('fac',[])}
       <div class="fhint">A facility can answer to several codes — add one per material or pickup type (SUT: 4930 and 5052).</div></div></div>
-    <div class="fr"><div class="ff"><div class="fl">Type</div><select class="fi" id="fac-type"><option value="plant">Plant</option><option value="terminal">Terminal</option></select></div></div>
+    <div class="fr"><div class="ff"><div class="fl">Type</div><select class="fi" id="fac-type"><option value="plant">Plant</option><option value="terminal">Terminal</option><option value="purchased">Purchased</option></select></div></div>
     <div class="fr s1"><div class="ff"><div class="fl">Location (Sub-Region)</div>
       <select class="fi" id="fac-sub">${subOpts}</select>
       <div class="fhint">Location hierarchy is managed under Organization → macro_regions → countries → regions → sub_regions</div>
@@ -25059,6 +25112,7 @@ const DS_SLOTS = [
   // NOTE: the former 'topology' slot is retired — topology persistence is now
   // owned by the Scenario system (each scenario is its own JSON file). See scInit().
   { id:'realSales',      label:'Real Sales',       description:'IR_RealSales.xlsx — actual shipment records', handler:'spIngestFile',  dbKey:'real_shipments_daily' },
+  { id:'demandSales',    label:'Demand — SAP Sales', description:'The sales export behind demand (columns A–AC: Ship Pt, Material, Sold-To, Ship Type, Delivery Date, Report Qty …). Bind it once — a SharePoint folder synced to this machine is re-read on every refresh. Rows are translated by Configuration → Demand Mapping and shown there as a preview; nothing is written until you apply it.', handler:'dsIngestDemandSales', dbKey:'' },
   { id:'realProduction', label:'Real Production',  description:'ProductionReal.xlsx — SAP export with DATE, EQUIPMENT, MATERIAL CODE, PRODUCTION columns. EQUIPMENT must match element names (e.g. BROSFM01, BROSKL02). MATERIAL CODE matched via product material_code field.', handler:'dsIngestProduction', dbKey:'real_production_daily' },
   { id:'transportCost',  label:'Transport Cost',   description:'Freight and logistics cost matrix',            handler:'dsIngestTransport',  dbKey:'transport_costs' },
   { id:'custom',         label:'Custom',           description:'User-defined data file',                       handler:'dsIngestCustom',     dbKey:'custom_data' },
@@ -25630,6 +25684,163 @@ async function spIngestFile(buf, fileName){
 }
 
 // ── Topology JSON handler ─────────────────────────────
+// ── Demand source file (SAP sales export) ────────────────────────────────────
+// Reads the export and runs every row through the demand mapping (Configuration
+// → Demand Mapping). The result is kept in memory as a PREVIEW — what would land
+// on which demand point, and what could not be placed and why. Nothing is
+// written to demand_values here; that is the Apply step, and it stays a separate
+// decision so a bad rule can never quietly rewrite history.
+//
+// The file is bound once through the picker and remembered (handle in IndexedDB),
+// so a SharePoint library synced to this machine is re-read on every refresh
+// without asking again.
+function _dsSalesYmd(v){
+  if(v instanceof Date) return new Date(v.getFullYear(),v.getMonth(),v.getDate())._ymd();
+  if(typeof v==='number'&&isFinite(v)){
+    // Excel serial → calendar date. Built from UTC parts, never by adding
+    // milliseconds to a local midnight (that loses or gains a day across DST).
+    const d=new Date(Math.round((v-25569)*86400000));
+    return new Date(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate())._ymd();
+  }
+  const s=String(v||'').trim();
+  if(/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0,10);
+  const d=new Date(s);
+  return isNaN(d)?'':new Date(d.getFullYear(),d.getMonth(),d.getDate())._ymd();
+}
+async function dsIngestDemandSales(buf,name){
+  await loadLib('xlsx'); // pinned version + SRI — see LIBS
+  const wb=XLSX.read(buf,{type:'array',cellDates:true});
+  const ws=wb.Sheets[wb.SheetNames[0]];
+  if(!ws) throw new Error('The workbook has no sheets');
+  const rows=XLSX.utils.sheet_to_json(ws,{raw:true,defval:''});
+  if(!rows.length) throw new Error('The first sheet has no rows');
+
+  // Columns are found by header name, so column order and any extra columns
+  // (INV_ROLL_NAME, SalesRep, …) do not matter.
+  const keys=Object.keys(rows[0]);
+  const pick=(...names)=>{ for(const n of names){
+      const k=keys.find(k=>String(k).trim().toLowerCase()===n.toLowerCase()); if(k) return k; } return null; };
+  const cShip=pick('Ship Pt','ShipPt','Ship Point','Shipping Point');
+  const cMat =pick('Material','Material Code','Material Number');
+  const cSold=pick('Sold-To','Sold To','SoldTo','Sold-to');
+  const cType=pick('Ship Type','ShipType','Shipment Type');
+  const cDate=pick('Delivery Date','DeliveryDate','Delivery date');
+  const cQty =pick('Report Qty','Report Quantity','Quantity Delivered','Qty');
+  const missing=[['Ship Pt',cShip],['Material',cMat],['Sold-To',cSold],['Ship Type',cType],
+                 ['Delivery Date',cDate],['Report Qty',cQty]].filter(p=>!p[1]).map(p=>p[0]);
+  if(missing.length) throw new Error('Columns not found in the first sheet: '+missing.join(', '));
+
+  if(!XLMAP) xlmapLoad();
+  const agg=new Map();          // demand point name → Map(date → tonnes)
+  const reasons=new Map();      // why a row could not be placed → {rows, t}
+  const memo=new Map();         // the same four codes translate the same way every time
+  let mappedRows=0, mappedT=0, parkedRows=0, parkedT=0, ignoredRows=0, ignoredT=0;
+  let noDate=0, dateMin='', dateMax='';
+
+  for(const row of rows){
+    const qty=parseFloat(row[cQty])||0;
+    const key=row[cShip]+'|'+row[cMat]+'|'+row[cSold]+'|'+row[cType];
+    let res=memo.get(key);
+    if(!res){
+      res=xlmapTranslate({ship_pt:row[cShip],material:row[cMat],sold_to:row[cSold],ship_type:row[cType]});
+      memo.set(key,res);
+    }
+    if(res.missing.length){
+      res.missing.forEach(m=>{ const r=reasons.get(m)||{rows:0,t:0}; r.rows++; r.t+=qty; reasons.set(m,r); });
+      continue;
+    }
+    if(res.action==='park'){   parkedRows++;  parkedT+=qty;  continue; }
+    if(res.action==='ignore'){ ignoredRows++; ignoredT+=qty; continue; }
+    const ds=_dsSalesYmd(row[cDate]);
+    if(!ds){ noDate++; const r=reasons.get('no delivery date on the row')||{rows:0,t:0}; r.rows++; r.t+=qty; reasons.set('no delivery date on the row',r); continue; }
+    if(!dateMin||ds<dateMin) dateMin=ds;
+    if(!dateMax||ds>dateMax) dateMax=ds;
+    let byDate=agg.get(res.finalName);
+    if(!byDate){ byDate=new Map(); agg.set(res.finalName,byDate); }
+    byDate.set(ds,(byDate.get(ds)||0)+qty);
+    mappedRows++; mappedT+=qty;
+  }
+
+  const points=[...agg].map(([nm,byDate])=>({
+    name:nm, dp:xlmapFindDp(nm)?.id||null, days:byDate.size,
+    t:[...byDate.values()].reduce((a,b)=>a+b,0)
+  })).sort((a,b)=>Math.abs(b.t)-Math.abs(a.t));
+  const matched=points.filter(p=>p.dp).length;
+
+  window._dsDemandPreview={
+    file:name, at:Date.now(), rows:rows.length, mappedRows, mappedT, dateMin, dateMax, points,
+    reasons:[...reasons].map(([reason,v])=>({reason,...v})).sort((a,b)=>Math.abs(b.t)-Math.abs(a.t)),
+    parked:{rows:parkedRows,t:parkedT}, ignored:{rows:ignoredRows,t:ignoredT},
+    dayRows:[...agg].reduce((n,[,m])=>n+m.size,0)
+  };
+  if(document.getElementById('cfg-panel-demandmap')) xlmapRender();
+
+  const warnings=[];
+  const unplaced=[...reasons.values()].reduce((n,v)=>n+v.rows,0);
+  if(unplaced) warnings.push(`${unplaced.toLocaleString()} row${unplaced===1?'':'s'} could not be placed — see Configuration → Demand Mapping`);
+  const noDp=points.length-matched;
+  if(noDp) warnings.push(`${noDp} demand point${noDp===1?'':'s'} in the file do not exist in this scenario yet`);
+  return {rowCount:rows.length, matched, dateMin, dateMax, warnings};
+}
+
+// The preview card shown in Configuration → Demand Mapping.
+function _xlSourceBody(){
+  const p=window._dsDemandPreview;
+  const meta=(typeof DS!=='undefined'&&DS.meta)?DS.meta.demandSales:null;
+  const pick=`<span class="tbl-act" style="margin:0" onclick="dsPickFile('demandSales')">${meta&&meta.fileName?'Change file…':'Pick the export…'}</span>`;
+  const reload=meta&&meta.fileName?`<span class="tbl-act" onclick="dsRefreshSlot('demandSales',true)">Re-read</span>`:'';
+  const head=`<div style="padding:9px 12px;display:flex;gap:10px;align-items:center;border-bottom:1px solid var(--border)">
+      <span style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">
+        ${meta&&meta.fileName?esc(meta.fileName)+(meta.lastLoaded?' · read '+esc(meta.lastLoaded):''):'No file bound yet — pick it once and it is remembered, including a SharePoint folder synced to this machine.'}
+      </span>
+      <span style="margin-left:auto;display:flex;gap:10px">${reload}${pick}</span>
+    </div>`;
+  if(!p) return head+`<div style="padding:14px 12px;font-family:var(--mono);font-size:9px;color:var(--text-dim);text-align:center">
+      Nothing read yet. The file is only previewed here — no demand value is written until you apply it.</div>`;
+  const n=v=>Math.round(v).toLocaleString();
+  const stat=(l,v,c)=>`<div style="flex:1;min-width:110px"><div style="font-family:var(--mono);font-size:8px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase">${l}</div>
+    <div style="font-family:var(--mono);font-size:13px;font-weight:700;color:${c||'var(--text)'}">${v}</div></div>`;
+  const noDp=p.points.filter(x=>!x.dp);
+  let h=head+`<div style="padding:10px 12px;display:flex;gap:14px;flex-wrap:wrap;border-bottom:1px solid var(--border)">
+    ${stat('Rows read',n(p.rows))}
+    ${stat('Placed',n(p.mappedRows),'var(--green)')}
+    ${stat('Tonnes',n(p.mappedT),'var(--green)')}
+    ${stat('Demand points',p.points.length)}
+    ${stat('Daily records',n(p.dayRows))}
+    ${stat('Range',(p.dateMin||'—')+' → '+(p.dateMax||'—'))}
+  </div>`;
+  if(p.reasons.length){
+    h+=`<div style="padding:9px 12px;border-bottom:1px solid var(--border)">
+      <div style="font-family:var(--mono);font-size:8px;letter-spacing:1px;color:var(--amber);text-transform:uppercase;margin-bottom:4px">Could not be placed — biggest first</div>
+      ${p.reasons.slice(0,14).map(r=>`<div style="font-family:var(--mono);font-size:9px;color:var(--text);margin:2px 0">
+        <span style="color:var(--amber)">⚠</span> ${esc(r.reason)}
+        <span style="color:var(--text-dim)"> · ${n(r.rows)} rows · ${n(r.t)} t</span></div>`).join('')}
+      ${p.reasons.length>14?`<div style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">· and ${p.reasons.length-14} more</div>`:''}
+    </div>`;
+  }
+  if(p.parked.rows||p.ignored.rows){
+    h+=`<div style="padding:7px 12px;font-family:var(--mono);font-size:9px;color:var(--text-dim);border-bottom:1px solid var(--border)">
+      ${p.parked.rows?`Parked by a movement rule: ${n(p.parked.rows)} rows · ${n(p.parked.t)} t. `:''}
+      ${p.ignored.rows?`Ignored by an alias: ${n(p.ignored.rows)} rows · ${n(p.ignored.t)} t.`:''}</div>`;
+  }
+  if(noDp.length){
+    h+=`<div style="padding:9px 12px;border-bottom:1px solid var(--border)">
+      <div style="font-family:var(--mono);font-size:8px;letter-spacing:1px;color:var(--amber);text-transform:uppercase;margin-bottom:4px">In the file, no demand point here yet — ${noDp.length}</div>
+      ${noDp.slice(0,14).map(x=>`<div style="font-family:var(--mono);font-size:9px;margin:2px 0">${esc(x.name)}
+        <span style="color:var(--text-dim)"> · ${n(x.t)} t · ${x.days} days</span></div>`).join('')}
+      ${noDp.length>14?`<div style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">· and ${noDp.length-14} more</div>`:''}
+    </div>`;
+  }
+  h+=`<div style="padding:9px 12px">
+    <div style="font-family:var(--mono);font-size:8px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase;margin-bottom:4px">Lands on — biggest first</div>
+    ${p.points.slice(0,20).map(x=>`<div style="font-family:var(--mono);font-size:9px;margin:2px 0;color:${x.dp?'var(--text)':'var(--amber)'}">
+      ${x.dp?'<span style="color:var(--green)">✓</span>':'<span style="color:var(--amber)">+</span>'} ${esc(x.name)}
+      <span style="color:var(--text-dim)"> · ${n(x.t)} t · ${x.days} days</span></div>`).join('')}
+    ${p.points.length>20?`<div style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">· and ${p.points.length-20} more</div>`:''}
+  </div>`;
+  return h;
+}
+
 async function dsIngestTopology(buf, name){
   try{
     const text = new TextDecoder().decode(buf);
@@ -25921,7 +26132,7 @@ function dsBuildSlotHTML(slot){
 // reproduces today's INV_ROLL_NAME formula before any edit is made.
 const XLMAP_KEY='avila_demand_map';
 let XLMAP=null;
-const _xlUi={open:{ship:true,mat:false,cls:true,mov:true,ali:true},filter:{},test:{}};
+const _xlUi={open:{src:true,ship:true,mat:false,cls:true,mov:true,ali:true},filter:{},test:{}};
 
 function xlmapDefaults(){
   return {
@@ -26384,6 +26595,7 @@ function xlmapPanelHTML(){
       ${chk.length>12?`<div style="font-family:var(--mono);font-size:9px;color:var(--text-dim);margin-top:3px">· and ${chk.length-12} more</div>`:''}
     </div>`:''}
 
+    ${_xlCard('src','Source file','the SAP sales export this reads, and what it would land',(window._dsDemandPreview?Number(window._dsDemandPreview.rows).toLocaleString()+' rows':'not bound'),_xlSourceBody())}
     ${_xlCard('test','Test a row','type a row from the export and see what an import would do',nDp+' demand points',_xlTestBody())}
     ${_xlCard('ship','Ship points','which facility a sale shipped from',(XLMAP.ship_points||[]).length,_xlShipBody())}
     ${_xlCard('mat','Materials','material code → product and pack',(XLMAP.materials||[]).length,_xlMatBody())}
