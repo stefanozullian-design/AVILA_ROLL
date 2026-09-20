@@ -1110,6 +1110,7 @@ select.fi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
 #cfgpanel-view .cfg-page-wrap{display:flex;flex-direction:column;height:100%;overflow:hidden;}
 #cfgpanel-view .modal-body{flex:1;overflow-y:auto;max-height:none!important;}
 #cfgpanel-view .modal-footer{border-top:1px solid var(--border);padding:12px 16px;display:flex;gap:8px;justify-content:flex-end;flex-shrink:0;}
+#cfgpanel-view #cfg-panel-demandmap{flex:1;max-height:none!important;}
 /* Panel overlay close button */
 .panel-close-btn{font-size:14px;color:var(--text-dim);cursor:pointer;padding:2px 6px;border:none;background:transparent;line-height:1;transition:color .1s;}
 .panel-close-btn:hover{color:var(--text);}
@@ -23414,6 +23415,7 @@ function simCfgHTML(){
       Rules <span style="background:${activeRules.length?'var(--amber)':'var(--border2)'};color:var(--bg);font-size:8px;padding:1px 5px;border-radius:8px;margin-left:4px">${activeRules.length}</span>
     </button>
     <button style="${tabSty(false)}" id="cfg-tab-datasources" onclick="_cfgTab('datasources')">Data Sources</button>
+    <button style="${tabSty(false)}" id="cfg-tab-demandmap" onclick="_cfgTab('demandmap')">Demand Mapping</button>
     <button style="${tabSty(false)}" id="cfg-tab-ai" onclick="_cfgTab('ai')">AI Agent</button>
   </div>
 
@@ -23478,6 +23480,11 @@ function simCfgHTML(){
     ${dsCfgPanelHTML()}
   </div>
 
+  <!-- DEMAND MAPPING PANEL -->
+  <div id="cfg-panel-demandmap" style="display:none;max-height:480px;overflow-y:auto">
+    ${xlmapPanelHTML()}
+  </div>
+
   <!-- AI AGENT PANEL -->
   <div id="cfg-panel-ai" style="display:none;max-height:480px;overflow-y:auto">
     ${aiCfgPanelHTML()}
@@ -23496,12 +23503,14 @@ function _cfgTab(tab){
   document.getElementById('cfg-panel-settings-footer').style.display=tab==='settings'?'':'none';
   document.getElementById('cfg-panel-rules').style.display=tab==='rules'?'':'none';
   document.getElementById('cfg-panel-datasources').style.display=tab==='datasources'?'':'none';
+  document.getElementById('cfg-panel-demandmap').style.display=tab==='demandmap'?'':'none';
   document.getElementById('cfg-panel-ai').style.display=tab==='ai'?'':'none';
   const tabStyActive=`padding:7px 16px;font-family:var(--mono);font-size:10px;cursor:pointer;border:none;background:transparent;border-bottom:2px solid var(--green);color:var(--green);letter-spacing:.5px;text-transform:uppercase`;
   const tabStyInactive=`padding:7px 16px;font-family:var(--mono);font-size:10px;cursor:pointer;border:none;background:transparent;border-bottom:2px solid transparent;color:var(--text-dim);letter-spacing:.5px;text-transform:uppercase`;
   document.getElementById('cfg-tab-settings').style.cssText=tab==='settings'?tabStyActive:tabStyInactive;
   document.getElementById('cfg-tab-rules').style.cssText=tab==='rules'?tabStyActive:tabStyInactive;
   document.getElementById('cfg-tab-datasources').style.cssText=tab==='datasources'?tabStyActive:tabStyInactive;
+  document.getElementById('cfg-tab-demandmap').style.cssText=tab==='demandmap'?tabStyActive:tabStyInactive;
   document.getElementById('cfg-tab-ai').style.cssText=tab==='ai'?tabStyActive:tabStyInactive;
 }
 
@@ -25896,6 +25905,498 @@ function dsBuildSlotHTML(slot){
   </div>`;
 }
 
+// ═══════════════════════════════════════════════════════
+// DEMAND MAPPING — translation layer: SAP sales rows → demand points
+// ═══════════════════════════════════════════════════════
+// The SAP export is the truth; these tables say how one of its rows becomes a
+// demand point. Nothing here is hard-coded — not the codes, not the rules, not
+// even the name format — so a surprise in the data is a row to fix, not a
+// release to wait for.
+//
+// SHARED ACROSS SCENARIOS: the tables describe SAP, not a plan, so they live in
+// their own localStorage key and never travel inside DB or a scenario file.
+// Switching or importing a scenario leaves the translation untouched.
+//
+// Seeded from the index tab of the source workbook, so a fresh install
+// reproduces today's INV_ROLL_NAME formula before any edit is made.
+const XLMAP_KEY='avila_demand_map';
+let XLMAP=null;
+const _xlUi={open:{ship:true,mat:false,cls:true,mov:true,ali:true},filter:{},test:{}};
+
+function xlmapDefaults(){
+  return {
+    version:1,
+    template:'{source}/{movement}/{product}/{presentation}/{class}',
+    fallback_class:'UNK',
+    ship_points:[
+    {code:"4802",source:"BRS",note:""},
+    {code:"4805",source:"JAX",note:""},
+    {code:"4808",source:"MIA",note:""},
+    {code:"4809",source:"PEV",note:"PEV cement"},
+    {code:"4810",source:"WPB",note:""},
+    {code:"4922",source:"ORL",note:""},
+    {code:"4930",source:"SUT",note:"SUT cement pickups"},
+    {code:"5052",source:"SUT",note:"SUT slag pickups"},
+    {code:"5054",source:"PEV",note:"PEV slag"},
+    {code:"5056",source:"WPB",note:"WPB slag"},
+    {code:"9001",source:"EXT",note:""},
+    {code:"9026",source:"TITAN S",note:""},
+    {code:"9055",source:"EXT",note:""},
+    {code:"9063",source:"PEV",note:"PEV white cement"},
+    {code:"9084",source:"TITAN N",note:""},
+    {code:"9295",source:"HEI",note:"HEI location — index sample says Port Everglades (confirm)"},
+    {code:"9296",source:"HEI",note:"HEI location — index sample says Port Canaveral (confirm)"},
+    {code:"9298",source:"HEI",note:"HEI location — index sample says Jacksonville (confirm)"},
+    {code:"9451",source:"SUT",note:"SUT ash (BOW)"},
+    {code:"9456",source:"SUW",note:""},
+    {code:"9457",source:"PTAGODA",note:""},
+    {code:"9459",source:"PALTKA",note:""},
+    {code:"9460",source:"ORL",note:"ORL ash + slag"},
+    {code:"9462",source:"SUT",note:"SUT ash (GEN)"},
+    {code:"9465",source:"CSTRIVER",note:""},
+    {code:"9466",source:"JAX",note:"JAX ash"},
+    {code:"9468",source:"OUC",note:""}],
+    materials:[
+    {code:"1019253",product:"MIA_SPC",pres:"PAK",note:""},
+    {code:"1019254",product:"MIA_SPC",pres:"PAK",note:""},
+    {code:"1035909",product:"CLK",pres:"BLK",note:""},
+    {code:"1175764",product:"TAM_WHT",pres:"PAK",note:""},
+    {code:"1227347",product:"BRS_SPC",pres:"PAK",note:""},
+    {code:"1410819",product:"BRS_SPC",pres:"PAK",note:""},
+    {code:"1425050",product:"BRS_SPC",pres:"BLK",note:""},
+    {code:"1425053",product:"BRS_I/II",pres:"BLK",note:""},
+    {code:"1425057",product:"MIA_SPC",pres:"BLK",note:""},
+    {code:"1425060",product:"MIA_SPC",pres:"BLK",note:""},
+    {code:"1425063",product:"MIA_I/II",pres:"BLK",note:""},
+    {code:"1508707",product:"GEN_ASH",pres:"BLK",note:""},
+    {code:"1508712",product:"BOW_ASH",pres:"BLK",note:""},
+    {code:"1509453",product:"GEN_ASH",pres:"BLK",note:""},
+    {code:"1518201",product:"TAM_WHT",pres:"BLK",note:""},
+    {code:"1522203",product:"BRS_SPC",pres:"PAK",note:""},
+    {code:"1545723",product:"MIA_SPC",pres:"PAK",note:""},
+    {code:"1567060",product:"MED_I-II",pres:"BLK",note:""},
+    {code:"1582005",product:"MED_I-II",pres:"BLK",note:""},
+    {code:"1588324",product:"TAM_IL(11)",pres:"BLK",note:""},
+    {code:"1595185",product:"MED_I-II",pres:"BLK",note:""},
+    {code:"1599749",product:"RIZ_SLG",pres:"BLK",note:""},
+    {code:"1601023",product:"JAP_SLG",pres:"BLK",note:""},
+    {code:"1601141",product:"GEN_ASH",pres:"BLK",note:""},
+    {code:"1601494",product:"GEN_ASH",pres:"BLK",note:""},
+    {code:"1603742",product:"NUH_I-II",pres:"BLK",note:""},
+    {code:"1604869",product:"GEN_ASH",pres:"BLK",note:""},
+    {code:"1605823",product:"TAM_IL(11)",pres:"BLK",note:""},
+    {code:"1606504",product:"BRS_IL(12)",pres:"BLK",note:""},
+    {code:"1606958",product:"GEN_ASH",pres:"BLK",note:""},
+    {code:"1614488",product:"GEN_ASH",pres:"BLK",note:""},
+    {code:"1614500",product:"GEN_ASH",pres:"BLK",note:""},
+    {code:"1615297",product:"KNK_I-II",pres:"BLK",note:""},
+    {code:"1618090",product:"TAM_WHT",pres:"PAK",note:""},
+    {code:"1621011",product:"CRH_IL(BF)",pres:"BLK",note:""},
+    {code:"1621478",product:"CLI_IL(11)",pres:"BLK",note:""},
+    {code:"1622450",product:"MIA_IL(11)",pres:"BLK",note:""},
+    {code:"1623645",product:"TITAN_IL(14)",pres:"BLK",note:""},
+    {code:"1624948",product:"TAM_IL(11)",pres:"BLK",note:""},
+    {code:"1625902",product:"TITAN_IL(12)",pres:"BLK",note:""},
+    {code:"1626129",product:"GEN_ASH",pres:"BLK",note:""},
+    {code:"1626244",product:"GEN_ASH",pres:"BLK",note:""},
+    {code:"1626560",product:"MIA_IL",pres:"PAK",note:""},
+    {code:"1627136",product:"MED_I-II",pres:"BLK",note:""},
+    {code:"1627648",product:"GEN_ASH",pres:"BLK",note:""},
+    {code:"1629814",product:"GEN_ASH",pres:"BLK",note:""},
+    {code:"1632781",product:"GEN_ASH",pres:"BLK",note:""},
+    {code:"1634026",product:"TITAN_IL(13)",pres:"BLK",note:""},
+    {code:"1634047",product:"GEN_ASH",pres:"BLK",note:""},
+    {code:"1635289",product:"",pres:"PAK",note:"no product in the index — set one"},
+    {code:"1635510",product:"BRS_SPC",pres:"PAK",note:""},
+    {code:"1636395",product:"MIA_IL(08)",pres:"BLK",note:""},
+    {code:"1636650",product:"TITAN_IL(10)",pres:"BLK",note:""}],
+    class_rules:[
+      {type:'exact', match:'3181635', value:'IND',  note:'OZINGA SOUTH FLORIDA INC'},
+      {type:'exact', match:'3004229', value:'IND',  note:'CONTINENTAL CEMENT CO OF FLA'},
+      {type:'exact', match:'3165216', value:'IND',  note:'TITAN AMERICA LLC'},
+      {type:'exact', match:'1132',    value:'LKHT', note:'ORLANDO FL (LOCKHART) READYMIX'},
+      {type:'length', match:'4', value:'INT', note:'4-digit Sold-To = internal'},
+      {type:'length', match:'7', value:'EXT', note:'7-digit Sold-To = external'}
+    ],
+    movements:[
+      {ship_type:'SALES', movement:'DEM', action:'import', note:''},
+      {ship_type:'TRANS', movement:'TRF', action:'park',   note:'transfers — phase 2'}
+    ],
+    aliases:[]
+  };
+}
+
+function xlmapLoad(){
+  try{
+    const raw=localStorage.getItem(XLMAP_KEY);
+    XLMAP=raw?JSON.parse(raw):xlmapDefaults();
+  }catch(e){ console.warn('demand map load',e); XLMAP=xlmapDefaults(); }
+  // Shape guard: a hand-edited or older file must never break the panel.
+  const d=xlmapDefaults();
+  ['ship_points','materials','class_rules','movements','aliases'].forEach(k=>{
+    if(!Array.isArray(XLMAP[k])) XLMAP[k]=d[k];
+  });
+  if(!XLMAP.template) XLMAP.template=d.template;
+  if(!XLMAP.fallback_class) XLMAP.fallback_class=d.fallback_class;
+  return XLMAP;
+}
+function xlmapSave(msg){
+  try{ localStorage.setItem(XLMAP_KEY, JSON.stringify(XLMAP)); }
+  catch(e){ console.warn('demand map save',e); statMsg('Could not save the demand mapping'); return; }
+  statMsg(msg||'Demand mapping saved');
+}
+const _xlNorm=s=>String(s??'').trim().toUpperCase().replace(/\s+/g,'');
+
+// ── The engine ────────────────────────────────────────────────────────────
+// One SAP row in, one demand point name out — plus a trace of every rule that
+// fired and a plain-language reason for anything that could not be resolved.
+// The importer, the preview and the test bench all read this one function, so
+// what you test is exactly what an import will do.
+function xlmapClassify(soldTo){
+  const s=String(soldTo??'').trim();
+  for(const r of (XLMAP.class_rules||[])){
+    if(r.disabled) continue;
+    const m=String(r.match??'').trim(); if(!m||!r.value) continue;
+    let hit=false;
+    if(r.type==='exact')       hit = s.toUpperCase()===m.toUpperCase();
+    else if(r.type==='length') hit = s.length===parseInt(m,10);
+    else if(r.type==='prefix') hit = s.toUpperCase().startsWith(m.toUpperCase());
+    else if(r.type==='regex'){ try{ hit=new RegExp(m).test(s); }catch(e){ hit=false; } }
+    if(hit) return {value:r.value, rule:`${r.type} "${m}" → ${r.value}`};
+  }
+  return {value:XLMAP.fallback_class||'UNK', rule:`no rule matched → ${XLMAP.fallback_class||'UNK'}`};
+}
+function xlmapName(parts){
+  return String(XLMAP.template||'{source}/{movement}/{product}/{presentation}/{class}')
+    .replace(/\{(\w+)\}/g,(_,k)=>parts[k]??'');
+}
+function xlmapTranslate(row){
+  if(!XLMAP) xlmapLoad();
+  const trace=[], missing=[];
+  const spCode=String(row.ship_pt??'').trim();
+  const sp=(XLMAP.ship_points||[]).find(r=>_xlNorm(r.code)===_xlNorm(spCode));
+  if(sp&&sp.source) trace.push({t:'Ship point', r:`${spCode} → ${sp.source}`});
+  else missing.push(sp?`ship point ${spCode} has no source set`:`ship point ${spCode||'(blank)'} is not in the ship-point table`);
+
+  const mCode=String(row.material??'').trim();
+  const mat=(XLMAP.materials||[]).find(r=>String(r.code??'').trim()===mCode);
+  if(mat&&mat.product) trace.push({t:'Material', r:`${mCode} → ${mat.product}${mat.pres?' / '+mat.pres:''}`});
+  else missing.push(mat?`material ${mCode} has no product set`:`material ${mCode||'(blank)'} is not in the material table`);
+
+  const stCode=String(row.ship_type??'').trim();
+  const mov=(XLMAP.movements||[]).find(r=>_xlNorm(r.ship_type)===_xlNorm(stCode));
+  if(mov) trace.push({t:'Movement', r:`${stCode} → ${mov.movement}${mov.action==='park'?' (parked)':''}`});
+  else missing.push(`ship type ${stCode||'(blank)'} is not in the movement table`);
+
+  const cls=xlmapClassify(row.sold_to);
+  trace.push({t:'Class', r:`Sold-To ${String(row.sold_to??'').trim()||'(blank)'}: ${cls.rule}`});
+
+  const parts={source:sp?sp.source:'', movement:mov?mov.movement:'', product:mat?mat.product:'',
+               presentation:mat?mat.pres:'', class:cls.value};
+  const name=xlmapName(parts);
+  let finalName=name, action=mov?(mov.action||'import'):'import';
+  const alias=(XLMAP.aliases||[]).find(a=>_xlNorm(a.from)===_xlNorm(name));
+  if(alias){
+    if(alias.action==='ignore'){ action='ignore'; trace.push({t:'Alias', r:`${name} → ignored`}); }
+    else if(alias.to){ finalName=alias.to; trace.push({t:'Alias', r:`${name} → ${alias.to}`}); }
+  }
+  return {name, finalName, parts, trace, missing, action, mapped:!missing.length};
+}
+// Does a demand point with this name exist in the scenario that is open?
+function xlmapFindDp(name){
+  const n=_xlNorm(name); if(!n) return null;
+  return (DB.elements||[]).find(e=>e.type==='demand_point'&&_xlNorm(e.name)===n)||null;
+}
+
+// ── Panel ─────────────────────────────────────────────────────────────────
+function _xlCard(key,title,sub,count,body){
+  const open=_xlUi.open[key]!==false;
+  return `<div style="border:1px solid var(--border);margin-bottom:10px;background:var(--surface)">
+    <div onclick="_xlToggle('${key}')" style="display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;border-bottom:${open?'1px solid var(--border)':'none'}">
+      <span style="font-family:var(--mono);font-size:9px;color:var(--text-dim);width:10px">${open?'▾':'▸'}</span>
+      <span style="font-family:var(--mono);font-size:10px;font-weight:700;color:var(--text);letter-spacing:.5px;text-transform:uppercase">${title}</span>
+      <span style="font-family:var(--mono);font-size:8px;background:var(--border2);color:var(--text);padding:1px 6px;border-radius:8px">${count}</span>
+      <span style="font-family:var(--mono);font-size:9px;color:var(--text-dim);margin-left:4px">${sub}</span>
+    </div>
+    <div id="xl-card-${key}" style="display:${open?'block':'none'}">${body}</div>
+  </div>`;
+}
+function _xlToggle(key){
+  _xlUi.open[key]=_xlUi.open[key]===false;
+  xlmapRender();
+}
+const _xlInp=(table,i,field,val,ph,w)=>
+  `<input class="fi" style="${w?'width:'+w+';':''}padding:3px 6px;font-size:9px" value="${esc(val??'')}" placeholder="${esc(ph||'')}"
+     onchange="_xlSet('${table}',${i},'${field}',this.value)">`;
+
+function _xlSet(table,i,field,val){
+  const rows=XLMAP[table]; if(!rows||!rows[i]) return;
+  rows[i][field]=String(val??'').trim();
+  _xlUi.check=null;              // an edit makes the last check stale
+  xlmapSave();
+  if(table==='ship_points'||table==='materials') _xlDupWarn(table);
+  // The alias target is only editable when the alias actually maps somewhere.
+  if(table==='aliases'&&field==='action') xlmapRender();
+}
+function _xlAdd(table,rec){ (XLMAP[table]=XLMAP[table]||[]).push(rec); _xlUi.check=null; xlmapSave('Row added'); xlmapRender(); }
+function _xlDel(table,i){ XLMAP[table].splice(i,1); _xlUi.check=null; xlmapSave('Row deleted'); xlmapRender(); }
+function _xlMove(table,i,d){
+  const rows=XLMAP[table], j=i+d; if(j<0||j>=rows.length) return;
+  [rows[i],rows[j]]=[rows[j],rows[i]]; xlmapSave('Order changed'); xlmapRender();
+}
+// Re-render, then put the cursor back where it was — a filter box you cannot
+// type more than one letter into is worse than no filter box.
+function _xlFilter(key,val){
+  _xlUi.filter[key]=val; xlmapRender();
+  const el=document.querySelector(`#cfg-panel-demandmap [data-xlfilter="${key}"]`);
+  if(el){ el.focus(); try{ el.setSelectionRange(el.value.length,el.value.length); }catch(e){} }
+}
+function _xlDupWarn(table){
+  const seen=new Set(), dups=new Set();
+  (XLMAP[table]||[]).forEach(r=>{ const k=_xlNorm(r.code); if(!k) return; if(seen.has(k)) dups.add(k); seen.add(k); });
+  if(dups.size) statMsg(`Duplicate code${dups.size>1?'s':''}: ${[...dups].join(', ')} — the first one wins`);
+}
+const _xlHit=(key,...vals)=>{
+  const f=String(_xlUi.filter[key]||'').trim().toLowerCase();
+  return !f||vals.some(v=>String(v??'').toLowerCase().includes(f));
+};
+const _xlFilterBox=(key,ph)=>`<input class="fi" data-xlfilter="${key}" style="width:200px;padding:3px 6px;font-size:9px" placeholder="${esc(ph)}"
+   value="${esc(_xlUi.filter[key]||'')}" oninput="_xlFilter('${key}',this.value)">`;
+const _xlHdr=cols=>`<tr>${cols.map(c=>`<th style="text-align:left;font-family:var(--mono);font-size:8px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase;padding:5px 8px;border-bottom:1px solid var(--border);font-weight:400">${c}</th>`).join('')}</tr>`;
+const _xlTd=(h,w)=>`<td style="padding:3px 8px;border-bottom:1px solid var(--border);${w?'width:'+w+';':''}">${h}</td>`;
+const _xlTbl=inner=>`<table style="width:100%;border-collapse:collapse">${inner}</table>`;
+const _xlAddBtn=(label,onclick)=>`<div style="padding:7px 12px"><span class="tbl-act" style="margin:0" onclick="${onclick}">+ ${label}</span></div>`;
+
+function _xlShipBody(){
+  const rows=(XLMAP.ship_points||[]).map((r,i)=>({r,i})).filter(({r})=>_xlHit('ship',r.code,r.source,r.note));
+  return `<div style="padding:8px 12px;border-bottom:1px solid var(--border)">${_xlFilterBox('ship','filter code or source…')}</div>
+  <div id="xl-body-ship">${_xlTbl(_xlHdr(['Ship Pt','Source','Note',''])+rows.map(({r,i})=>`<tr>
+      ${_xlTd(_xlInp('ship_points',i,'code',r.code,'4802'),'90px')}
+      ${_xlTd(_xlInp('ship_points',i,'source',r.source,'BRS'),'150px')}
+      ${_xlTd(_xlInp('ship_points',i,'note',r.note,'optional'))}
+      ${_xlTd(`<span class="tbl-act del" style="margin:0" onclick="_xlDel('ship_points',${i})">✕</span>`,'24px')}
+    </tr>`).join(''))}</div>
+  ${_xlAddBtn('Add ship point',`_xlAdd('ship_points',{code:'',source:'',note:''})`)}`;
+}
+function _xlMatBody(){
+  const rows=(XLMAP.materials||[]).map((r,i)=>({r,i})).filter(({r})=>_xlHit('mat',r.code,r.product,r.pres,r.note));
+  return `<div style="padding:8px 12px;border-bottom:1px solid var(--border)">${_xlFilterBox('mat','filter code or product…')}</div>
+  <div id="xl-body-mat">${_xlTbl(_xlHdr(['Material','Product','Pack',''])+rows.map(({r,i})=>`<tr>
+      ${_xlTd(_xlInp('materials',i,'code',r.code,'1606504'),'100px')}
+      ${_xlTd(`<input class="fi" list="xl-prodlist" style="padding:3px 6px;font-size:9px" value="${esc(r.product??'')}" placeholder="BRS_IL(12)" onchange="_xlSet('materials',${i},'product',this.value)">`,'190px')}
+      ${_xlTd(`<input class="fi" list="xl-preslist" style="padding:3px 6px;font-size:9px" value="${esc(r.pres??'')}" placeholder="BLK" onchange="_xlSet('materials',${i},'pres',this.value)">`,'80px')}
+      ${_xlTd(_xlInp('materials',i,'note',r.note,'optional'))}
+      ${_xlTd(`<span class="tbl-act del" style="margin:0" onclick="_xlDel('materials',${i})">✕</span>`,'24px')}
+    </tr>`).join(''))}</div>
+  ${_xlAddBtn('Add material',`_xlAdd('materials',{code:'',product:'',pres:'BLK',note:''})`)}`;
+}
+function _xlClsBody(){
+  const rows=XLMAP.class_rules||[];
+  const typeSel=(i,v)=>`<select class="fi" style="padding:3px 6px;font-size:9px" onchange="_xlSet('class_rules',${i},'type',this.value)">
+    ${['exact','length','prefix','regex'].map(t=>`<option value="${t}" ${v===t?'selected':''}>${t}</option>`).join('')}</select>`;
+  return `<div style="padding:7px 12px;font-family:var(--mono);font-size:9px;color:var(--text-dim);border-bottom:1px solid var(--border)">
+      Checked top to bottom — the first rule that matches wins. Drag order with ▲▼.
+    </div>
+  ${_xlTbl(_xlHdr(['#','Test','Match','Class','Note',''])+rows.map((r,i)=>`<tr>
+      ${_xlTd(`<span style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">${i+1}</span>
+        <span class="tbl-act" style="margin-left:4px" onclick="_xlMove('class_rules',${i},-1)">▲</span>
+        <span class="tbl-act" style="margin-left:2px" onclick="_xlMove('class_rules',${i},1)">▼</span>`,'74px')}
+      ${_xlTd(typeSel(i,r.type),'90px')}
+      ${_xlTd(_xlInp('class_rules',i,'match',r.match,'4'),'110px')}
+      ${_xlTd(_xlInp('class_rules',i,'value',r.value,'INT'),'90px')}
+      ${_xlTd(_xlInp('class_rules',i,'note',r.note,'optional'))}
+      ${_xlTd(`<span class="tbl-act del" style="margin:0" onclick="_xlDel('class_rules',${i})">✕</span>`,'24px')}
+    </tr>`).join(''))}
+  <div style="padding:8px 12px;border-top:1px solid var(--border);display:flex;align-items:center;gap:8px">
+    <span style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">No rule matched →</span>
+    <input class="fi" style="width:90px;padding:3px 6px;font-size:9px" value="${esc(XLMAP.fallback_class||'')}"
+      onchange="XLMAP.fallback_class=this.value.trim();xlmapSave('Fallback class saved')">
+    <span class="tbl-act" style="margin-left:auto" onclick="_xlAdd('class_rules',{type:'exact',match:'',value:'',note:''})">+ Add rule</span>
+  </div>`;
+}
+function _xlMovBody(){
+  const rows=XLMAP.movements||[];
+  const actSel=(i,v)=>`<select class="fi" style="padding:3px 6px;font-size:9px" onchange="_xlSet('movements',${i},'action',this.value)">
+    ${[['import','import as demand'],['park','park (keep, do not use)'],['ignore','ignore']].map(([k,l])=>`<option value="${k}" ${(v||'import')===k?'selected':''}>${l}</option>`).join('')}</select>`;
+  return _xlTbl(_xlHdr(['Ship Type','Movement','What we do with it','Note',''])+rows.map((r,i)=>`<tr>
+      ${_xlTd(_xlInp('movements',i,'ship_type',r.ship_type,'SALES'),'110px')}
+      ${_xlTd(_xlInp('movements',i,'movement',r.movement,'DEM'),'90px')}
+      ${_xlTd(actSel(i,r.action),'190px')}
+      ${_xlTd(_xlInp('movements',i,'note',r.note,'optional'))}
+      ${_xlTd(`<span class="tbl-act del" style="margin:0" onclick="_xlDel('movements',${i})">✕</span>`,'24px')}
+    </tr>`).join(''))
+  +_xlAddBtn('Add ship type',`_xlAdd('movements',{ship_type:'',movement:'',action:'import',note:''})`);
+}
+function _xlAliBody(){
+  const rows=(XLMAP.aliases||[]).map((r,i)=>({r,i})).filter(({r})=>_xlHit('ali',r.from,r.to,r.note));
+  const actSel=(i,v)=>`<select class="fi" style="padding:3px 6px;font-size:9px" onchange="_xlSet('aliases',${i},'action',this.value)">
+    ${[['map','send to'],['ignore','ignore it']].map(([k,l])=>`<option value="${k}" ${(v||'map')===k?'selected':''}>${l}</option>`).join('')}</select>`;
+  const body=rows.length
+    ? _xlTbl(_xlHdr(['Composed name','','Demand point','Note',''])+rows.map(({r,i})=>`<tr>
+        ${_xlTd(_xlInp('aliases',i,'from',r.from,'MIA/DEM/MIA_IL(08)/BLK/IND'))}
+        ${_xlTd(actSel(i,r.action),'110px')}
+        ${_xlTd(`<input class="fi" list="xl-dplist" style="padding:3px 6px;font-size:9px" value="${esc(r.to??'')}" placeholder="MIA/DEM/MIA_IL(8)/BLK/IND" ${r.action==='ignore'?'disabled':''} onchange="_xlSet('aliases',${i},'to',this.value)">`)}
+        ${_xlTd(_xlInp('aliases',i,'note',r.note,'optional'),'160px')}
+        ${_xlTd(`<span class="tbl-act del" style="margin:0" onclick="_xlDel('aliases',${i})">✕</span>`,'24px')}
+      </tr>`).join(''))
+    : `<div style="padding:14px 12px;font-family:var(--mono);font-size:9px;color:var(--text-dim);text-align:center">
+        No aliases. A composed name that already matches a demand point needs none — add one only where the app's name drifted from the data.</div>`;
+  return `<div style="padding:8px 12px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center">
+      ${_xlFilterBox('ali','filter…')}
+      <span style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">Used when the composed name and the demand point's name differ.</span>
+    </div><div id="xl-body-ali">${body}</div>
+  ${_xlAddBtn('Add alias',`_xlAdd('aliases',{from:'',to:'',action:'map',note:''})`)}`;
+}
+
+// Test bench — type a row from the export, see exactly what an import would do.
+function _xlTestBody(){
+  const t=_xlUi.test||{};
+  const f=(k,ph,w)=>`<div><div class="fl" style="font-size:8px">${ph}</div>
+    <input class="fi" id="xl-t-${k}" style="padding:4px 7px;font-size:10px${w?';width:'+w:''}" value="${esc(t[k]??'')}" placeholder="${esc(ph)}"></div>`;
+  return `<div style="padding:10px 12px">
+    <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+      ${f('ship_pt','Ship Pt','90px')}${f('material','Material','110px')}${f('sold_to','Sold-To','110px')}${f('ship_type','Ship Type','100px')}
+      <button class="btn-pri" style="padding:5px 12px;font-size:9px" onclick="_xlRunTest()">Translate</button>
+      <span class="tbl-act" onclick="_xlSampleTest()">use a real row</span>
+    </div>
+    <div id="xl-test-out" style="margin-top:10px">${_xlUi.testOut||''}</div>
+  </div>`;
+}
+function _xlSampleTest(){
+  _xlUi.open.test=true;
+  _xlUi.test={ship_pt:'9296',material:'1601023',sold_to:'3165216',ship_type:'SALES'};
+  xlmapRender(); _xlRunTest();
+}
+function _xlRunTest(){
+  if(!document.getElementById('xl-t-ship_pt')) return;   // test card is folded away
+  const g=k=>document.getElementById('xl-t-'+k)?.value||'';
+  const row={ship_pt:g('ship_pt'),material:g('material'),sold_to:g('sold_to'),ship_type:g('ship_type')};
+  _xlUi.test=row;
+  const res=xlmapTranslate(row);
+  const dp=res.action==='ignore'?null:xlmapFindDp(res.finalName);
+  const line=(l,v,c)=>`<div style="font-family:var(--mono);font-size:9px;margin:2px 0"><span style="color:var(--text-dim);display:inline-block;width:78px">${l}</span><span style="color:${c||'var(--text)'}">${esc(v)}</span></div>`;
+  let h=`<div style="border:1px solid var(--border2);background:var(--surface2);padding:10px 12px">`;
+  h+=`<div style="font-family:var(--mono);font-size:12px;font-weight:700;color:${res.mapped?'var(--green)':'var(--amber)'};margin-bottom:8px">${esc(res.finalName)||'(nothing composed)'}</div>`;
+  res.trace.forEach(t=>h+=line(t.t,t.r));
+  if(res.name!==res.finalName) h+=line('composed',res.name,'var(--text-dim)');
+  if(res.action==='park')   h+=line('action','parked — kept out of demand (movement rule)','var(--amber)');
+  if(res.action==='ignore') h+=line('action','ignored (alias rule)','var(--amber)');
+  if(res.missing.length){
+    h+=`<div style="margin-top:8px;padding-top:7px;border-top:1px solid var(--border)">`;
+    res.missing.forEach(m=>h+=`<div style="font-family:var(--mono);font-size:9px;color:var(--amber)">⚠ ${esc(m)}</div>`);
+    h+=`</div>`;
+  }
+  h+=`<div style="margin-top:8px;padding-top:7px;border-top:1px solid var(--border);font-family:var(--mono);font-size:9px;color:${dp?'var(--green)':'var(--amber)'}">
+      ${dp?`✓ demand point exists in this scenario — ${esc(dp.id)}`:(res.action==='ignore'?'— not looked up (ignored)':'⚠ no demand point with this name in the scenario that is open')}</div>`;
+  h+=`</div>`;
+  _xlUi.testOut=h;
+  const out=document.getElementById('xl-test-out'); if(out) out.innerHTML=h;
+}
+
+// Check the tables against the scenario that is open. Nothing here blocks an
+// import — it is a to-do list, sorted so the big problems are the first ones.
+function _xlCheck(){
+  const out=[];
+  const dup=(tbl,label)=>{ const seen=new Set();
+    (XLMAP[tbl]||[]).forEach(r=>{ const k=_xlNorm(r.code); if(!k) return;
+      if(seen.has(k)) out.push({lvl:'bad',t:`${label} ${r.code} appears more than once — the first row wins`}); seen.add(k); }); };
+  dup('ship_points','Ship point'); dup('materials','Material');
+  (XLMAP.materials||[]).forEach(r=>{ if(!r.product) out.push({lvl:'bad',t:`Material ${r.code} has no product — its rows cannot be placed`}); });
+  (XLMAP.ship_points||[]).forEach(r=>{ if(!r.source) out.push({lvl:'bad',t:`Ship point ${r.code} has no source`}); });
+  // The catalog keeps product and pack in one name ("MIA_SPC/PAK"); the material
+  // table keeps them apart. Compare both ways, or the check cries wolf 30 times.
+  const prodNames=[...new Set((DB.products||[]).map(p=>_xlNorm(p.name)))];
+  const prodKnown=(prod,pres)=>{ const n=_xlNorm(prod); if(!n) return true;
+    return prodNames.some(x=>x===n||x===n+'/'+_xlNorm(pres)||x.startsWith(n+'/')); };
+  const badProd=[...new Set((XLMAP.materials||[]).filter(r=>r.product&&!prodKnown(r.product,r.pres))
+    .map(r=>r.product+(r.pres?'/'+r.pres:'')))];
+  badProd.forEach(p=>out.push({lvl:'info',t:`Product "${p}" is not in this scenario's catalog`}));
+  const facNames=new Set((DB.facilities||[]).map(f=>_xlNorm(f.name)));
+  const badSrc=[...new Set((XLMAP.ship_points||[]).map(r=>r.source).filter(s=>s&&!facNames.has(_xlNorm(s))))];
+  badSrc.forEach(s=>out.push({lvl:'info',t:`Source "${s}" is not a facility in this scenario`}));
+  (XLMAP.aliases||[]).forEach(a=>{ if(a.action!=='ignore'&&a.to&&!xlmapFindDp(a.to))
+    out.push({lvl:'bad',t:`Alias target "${a.to}" is not a demand point in this scenario`}); });
+  const rank={bad:0,info:1};
+  out.sort((a,b)=>rank[a.lvl]-rank[b.lvl]);
+  _xlUi.check=out.length?out:[{lvl:'ok',t:'Nothing to fix against the scenario that is open.'}];
+  xlmapRender();
+}
+function _xlExport(){
+  const blob=new Blob([JSON.stringify(XLMAP,null,1)],{type:'application/json'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob); a.download='avila_demand_map.json'; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+  statMsg('Demand mapping exported');
+}
+function _xlImport(){
+  const inp=document.createElement('input'); inp.type='file'; inp.accept='.json';
+  inp.onchange=async()=>{
+    const f=inp.files&&inp.files[0]; if(!f) return;
+    try{
+      const obj=JSON.parse(await f.text());
+      if(!obj||typeof obj!=='object') throw new Error('not a mapping file');
+      localStorage.setItem(XLMAP_KEY, JSON.stringify(obj));
+      xlmapLoad(); xlmapRender(); statMsg(`Demand mapping loaded from ${f.name}`);
+    }catch(e){ statMsg('That file is not a demand mapping'); }
+  };
+  inp.click();
+}
+function _xlReset(){
+  if(!confirm('Reset every mapping table to the values seeded from the source workbook? Your edits are lost.')) return;
+  XLMAP=xlmapDefaults(); xlmapSave('Demand mapping reset'); xlmapRender();
+}
+
+function xlmapPanelHTML(){
+  if(!XLMAP) xlmapLoad();
+  const nDp=(DB.elements||[]).filter(e=>e.type==='demand_point').length;
+  const chk=_xlUi.check||[];
+  const chkColor=l=>l==='bad'?'var(--amber)':l==='ok'?'var(--green)':'var(--text-dim)';
+  return `
+  <datalist id="xl-prodlist">${(DB.products||[]).map(p=>`<option value="${esc(p.name)}">`).join('')}</datalist>
+  <datalist id="xl-preslist"><option value="BLK"><option value="PAK"></datalist>
+  <datalist id="xl-dplist">${(DB.elements||[]).filter(e=>e.type==='demand_point').map(e=>`<option value="${esc(e.name)}">`).join('')}</datalist>
+  <div style="padding:14px 16px">
+    <div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:12px">
+      <div style="flex:1">
+        <div style="font-family:var(--mono);font-size:10px;color:var(--text);font-weight:700;letter-spacing:.5px;margin-bottom:3px">SAP SALES → DEMAND POINTS</div>
+        <div style="font-family:var(--mono);font-size:9px;color:var(--text-dim);line-height:1.5">
+          The export is the truth; these tables are the translation. Shared across every scenario — editing them here changes nothing in the scenario file.
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;white-space:nowrap">
+        <span class="tbl-act" onclick="_xlCheck()">Check against this scenario</span>
+        <span class="tbl-act" onclick="_xlExport()">Export</span>
+        <span class="tbl-act" onclick="_xlImport()">Import</span>
+        <span class="tbl-act del" onclick="_xlReset()">Reset</span>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;padding:9px 12px;border:1px solid var(--border);background:var(--surface)">
+      <span style="font-family:var(--mono);font-size:8px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase">Name format</span>
+      <input class="fi" style="flex:1;padding:4px 7px;font-size:10px" value="${esc(XLMAP.template||'')}"
+        onchange="XLMAP.template=this.value;xlmapSave('Name format saved');_xlRunTest()">
+      <span style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">{source} {movement} {product} {presentation} {class}</span>
+    </div>
+
+    ${chk.length?`<div style="border:1px solid var(--border);background:var(--surface);margin-bottom:12px;padding:9px 12px">
+      <div style="font-family:var(--mono);font-size:8px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase;margin-bottom:5px">Check — ${chk.filter(c=>c.lvl==='bad').length} to fix</div>
+      ${chk.slice(0,12).map(c=>`<div style="font-family:var(--mono);font-size:9px;color:${chkColor(c.lvl)};margin:2px 0">${c.lvl==='bad'?'⚠':c.lvl==='ok'?'✓':'·'} ${esc(c.t)}</div>`).join('')}
+      ${chk.length>12?`<div style="font-family:var(--mono);font-size:9px;color:var(--text-dim);margin-top:3px">· and ${chk.length-12} more</div>`:''}
+    </div>`:''}
+
+    ${_xlCard('test','Test a row','type a row from the export and see what an import would do',nDp+' demand points',_xlTestBody())}
+    ${_xlCard('ship','Ship points','which facility a sale shipped from',(XLMAP.ship_points||[]).length,_xlShipBody())}
+    ${_xlCard('mat','Materials','material code → product and pack',(XLMAP.materials||[]).length,_xlMatBody())}
+    ${_xlCard('cls','Customer class','how the Sold-To becomes INT / EXT / IND / LKHT',(XLMAP.class_rules||[]).length,_xlClsBody())}
+    ${_xlCard('mov','Movement','what each ship type means',(XLMAP.movements||[]).length,_xlMovBody())}
+    ${_xlCard('ali','Demand point aliases','when the composed name and the demand point differ',(XLMAP.aliases||[]).length,_xlAliBody())}
+  </div>`;
+}
+function xlmapRender(){
+  const p=document.getElementById('cfg-panel-demandmap');
+  if(p) p.innerHTML=xlmapPanelHTML();
+}
+
 // ── Data Sources panel HTML (injected into Configure modal) ──
 function dsCfgPanelHTML(){
   const supported = ('showOpenFilePicker' in window);
@@ -26202,7 +26703,8 @@ function switchTopSection(section){
       {label:'Organization',view:'location'},
       {label:'Settings',view:'cfgpanel',tab:'settings'},
       {label:'Simulation Rules',view:'cfgpanel',tab:'rules'},
-      {label:'Data Sources',view:'cfgpanel',tab:'datasources'}
+      {label:'Data Sources',view:'cfgpanel',tab:'datasources'},
+      {label:'Demand Mapping',view:'cfgpanel',tab:'demandmap'}
     ]
   };
   const items=tabs[section]||[];
