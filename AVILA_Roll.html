@@ -485,6 +485,12 @@ select.pi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
 
 /* ── SCHEDULES ── */
 #schedules-view{overflow-y:auto;background:var(--bg);}
+/* The Logistics page scrolls as a whole, so its filter bar is pinned instead of
+   sitting outside the scroller the way Supply and Demand do it. */
+#logi-filter-bar{position:sticky;top:0;z-index:20;background:var(--bg);padding-top:6px;margin-top:-6px;box-shadow:0 4px 6px -4px rgba(0,0,0,.35);}
+/* Charts can be folded away for room (Hide Charts, per viewer). */
+body.logi-hide-charts #vp-charts-section,
+body.logi-hide-charts #rp-charts-section{display:none!important;}
 .sched-inner{padding:16px;display:flex;flex-direction:column;gap:14px;}
 /* ── Transport Planner ───────────────────────────────────── */
 .tp-header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--border2);}
@@ -1801,18 +1807,14 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
     <!-- SCHEDULES VIEW -->
     <div id="schedules-view" class="view-panel">
       <div class="sched-inner">
-        <div style="display:flex;align-items:center;justify-content:space-between">
+        <!-- The Vessel / Rail / Truck sub-tabs live in the top menu (Logistics) and the
+             Maintenance Calendar in Supply's — no second tab strip here. -->
+        <div id="logi-sched-hdr" style="display:flex;align-items:center;justify-content:space-between">
           <div style="font-family:var(--mono);font-size:10px;letter-spacing:2px;color:var(--text);text-transform:uppercase">Schedules</div>
           <div style="display:flex;gap:6px">
             <button class="tb-btn amber" onclick="showModal('vessel-modal')">+ Vessel Call</button>
             <button class="tb-btn blue" onclick="showModal('rail-modal')">+ Rail Movement</button>
           </div>
-        </div>
-        <div style="display:flex;gap:2px">
-          <div class="sched-tab active" onclick="setSchedTab('vessels',this)">Vessel Schedule</div>
-          <div class="sched-tab" onclick="setSchedTab('rail',this)">Rail Schedule</div>
-          <div class="sched-tab" onclick="setSchedTab('truck',this)">Truck Movements</div>
-          <div class="sched-tab" onclick="setSchedTab('maintenance',this)">Maintenance Calendar</div>
         </div>
         <!-- SHARED FILTER BAR (Vessel / Rail / Truck) — built by fltMount('logi'); the selections are
              the same ones every planning page shows. Hidden on the Maintenance tab. -->
@@ -1827,6 +1829,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
           <div id="vessel-planner-wrap">
             <div class="tp-header">
               <div class="tp-header-left">
+                <button class="vw-btn logi-charts-btn" onclick="_toggleLogiCharts()" title="Show/hide the inventory charts to give the tables more room">Hide Charts</button>
                 <button class="vw-btn logi-months-btn" onclick="_toggleLogiMonths()" title="Show/hide the monthly summary columns">Hide Monthly Totals</button>
                 <button class="vw-btn logi-sim-toggle" onclick="_toggleAutoPropose()" title="When ON, Run Simulation auto-proposes vessel calls to cover shortfalls. When OFF (Forecast mode), it only projects inventory from vessels/rail you have proposed — it adds nothing.">Auto-Propose: ON</button>
               </div>
@@ -1870,6 +1873,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
             <!-- Header row: planner toggles (dates and filters live in the shared bar above) -->
             <div class="tp-header">
               <div class="tp-header-left">
+                <button class="vw-btn logi-charts-btn" onclick="_toggleLogiCharts()" title="Show/hide the inventory charts to give the tables more room">Hide Charts</button>
                 <button class="vw-btn logi-months-btn" onclick="_toggleLogiMonths()" title="Show/hide the monthly summary columns">Hide Monthly Totals</button>
                 <button class="vw-btn logi-sim-toggle" onclick="_toggleAutoPropose()" title="When ON, Run Simulation auto-proposes vessel calls to cover shortfalls. When OFF (Forecast mode), it only projects inventory from vessels/rail you have proposed — it adds nothing.">Auto-Propose: ON</button>
               </div>
@@ -5625,7 +5629,7 @@ function showCampaignPopup(elId, dateStr, runStart, runEnd, runProduct){
         <span id="camp-clear-real-wrap" style="display:none">${existingReal.length?`<button onclick="_campClearReal('${elId}','${dateStr}')"
           style="padding:5px 10px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid rgba(var(--red-rgb),.5);color:var(--red);cursor:pointer;border-radius:2px">
           ✕ Clear Real Value</button>`:''}</span>
-        <button onclick="closeCampaignPopup();switchView('schedules');setSchedTab('maintenance');" title="Open the Maintenance Calendar to coordinate downtime for this equipment"
+        <button onclick="closeCampaignPopup();switchView('maintenance');" title="Open the Maintenance Calendar to coordinate downtime for this equipment"
           style="padding:5px 10px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid var(--amber);color:var(--amber);cursor:pointer;border-radius:2px">📅 Maintenance Calendar</button>
       </div>
       <div style="display:flex;gap:6px">
@@ -12921,6 +12925,8 @@ function _logiFilterBarSync(){
   const on=['vessels','rail','truck'].includes(t);
   const bar=document.getElementById('logi-filter-bar');
   if(bar) bar.style.display=on?'flex':'none';
+  const hdr=document.getElementById('logi-sched-hdr');
+  if(hdr) hdr.style.display=t==='maintenance'?'none':'flex';
   if(on){ fltRender('logi'); _logiApplyProcStyle(); }
 }
 // Process on the planners is a stylesheet rule, like the Supply page: the tree kit resets inline
@@ -12955,6 +12961,30 @@ function setSchedTab(tab,el){
   if(tab==='rail'){renderRailTable?.();rpRender();}
   if(tab==='truck') renderTruckTable?.();
 }
+
+// Fold the inventory charts away on both planners (vessel + rail). A per-viewer
+// convenience, so it lives in localStorage and never in the scenario.
+function _logiChartsApply(){
+  const hide=!!S.logiHideCharts;
+  document.body.classList.toggle('logi-hide-charts',hide);
+  document.querySelectorAll('.logi-charts-btn').forEach(b=>{
+    b.textContent=hide?'Show Charts':'Hide Charts';
+    b.classList.toggle('active',hide);
+  });
+}
+function _toggleLogiCharts(){
+  S.logiHideCharts=!S.logiHideCharts;
+  try{ localStorage.setItem('avila_logi_hide_charts',S.logiHideCharts?'1':'0'); }catch(e){}
+  _logiChartsApply();
+  // Charts drawn while hidden have no size — redraw them on the way back.
+  if(!S.logiHideCharts){
+    if(S.activeSchedTab==='vessels'&&typeof vpRenderCharts==='function') vpRenderCharts();
+    if(S.activeSchedTab==='rail'&&typeof rpRenderCharts==='function') rpRenderCharts();
+  }
+}
+try{ S.logiHideCharts=localStorage.getItem('avila_logi_hide_charts')==='1'; }catch(e){ S.logiHideCharts=false; }
+document.addEventListener('DOMContentLoaded',_logiChartsApply);
+if(document.readyState!=='loading') setTimeout(_logiChartsApply,0);
 
 // Collapse / expand the monthly-summary columns in the logistics planners (rail + vessel).
 function _toggleLogiMonths(){
@@ -27102,6 +27132,7 @@ function switchTopSection(section){
       {label:'Production',view:'supply'},
       {label:'Products',view:'catalog'},
       {label:'Elements',view:'elements'},
+      {label:'Maintenance Calendar',view:'maintenance'},
       {label:'⚙ Mill Policies',view:'millpolicy'}
     ],
     logistics:[
