@@ -25392,7 +25392,10 @@ async function dsPickFile(id){
       ? [{ description:'Topology JSON', accept:{'application/json':['.json']} }]
       : [{ description:'Excel / CSV', accept:{'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':['.xlsx'],
           'application/vnd.ms-excel':['.xls'],'text/csv':['.csv']} }];
-    const [handle] = await window.showOpenFilePicker({ types, multiple:false });
+    const [handle] = await window.showOpenFilePicker({
+      id: ('avila-'+id).slice(0,32),      // browser remembers a directory per id
+      startIn: DS.handles[id] || undefined, // …or reopen beside the file bound now
+      types, multiple:false });
     DS.handles[id] = handle;
     await dsSaveHandle(id, handle);
     if(!DS.meta[id]) DS.meta[id]={};
@@ -25787,11 +25790,14 @@ async function dsIngestDemandSales(buf,name){
 function _xlSourceBody(){
   const p=window._dsDemandPreview;
   const meta=(typeof DS!=='undefined'&&DS.meta)?DS.meta.demandSales:null;
-  const pick=`<span class="tbl-act" style="margin:0" onclick="dsPickFile('demandSales')">${meta&&meta.fileName?'Change file…':'Pick the export…'}</span>`;
+  const pick=`<span class="tbl-act" style="margin:0" onclick="dsPickFile('demandSales')">${meta&&meta.fileName?'Choose another file…':'Choose the file…'}</span>`;
   const reload=meta&&meta.fileName?`<span class="tbl-act" onclick="dsRefreshSlot('demandSales',true)">Re-read</span>`:'';
   const head=`<div style="padding:9px 12px;display:flex;gap:10px;align-items:center;border-bottom:1px solid var(--border)">
-      <span style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">
-        ${meta&&meta.fileName?esc(meta.fileName)+(meta.lastLoaded?' · read '+esc(meta.lastLoaded):''):'No file bound yet — pick it once and it is remembered, including a SharePoint folder synced to this machine.'}
+      <span style="font-family:var(--mono);font-size:9px;color:${meta&&meta.error?'var(--amber)':'var(--text-dim)'}">
+        ${meta&&meta.error?'⚠ '+esc(meta.error):
+          meta&&meta.fileName
+            ? '<span style="color:var(--text)">'+esc(meta.fileName)+'</span>'+(meta.lastLoaded?' · read '+esc(meta.lastLoaded):'')+(meta.fileSize?' · '+Math.round(meta.fileSize/1048576)+' MB':'')
+            : 'No file chosen yet. Pick any file, anywhere — a SharePoint library synced to this machine works — and the app remembers it and re-reads it on every refresh.'}
       </span>
       <span style="margin-left:auto;display:flex;gap:10px">${reload}${pick}</span>
     </div>`;
