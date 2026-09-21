@@ -26465,36 +26465,137 @@ function _xlAliBody(){
   ${_xlAddBtn('Add alias',`_xlAdd('aliases',{from:'',to:'',action:'map',note:''})`)}`;
 }
 
-// Test bench — type a row from the export, see exactly what an import would do.
+// Build a demand point — pick by name, never by code. The codes are what SAP
+// sends and what the tables translate; nobody should have to remember them to
+// answer "what would a JAX slag sale land on?". Everything here runs through
+// the same xlmapTranslate an import uses, so what you see is what you get.
+
+// Which facility is this source? The ship-point code wins (it is the binding we
+// already keep on the facility), then a plain name match.
+function _xlFacForSource(src,code){
+  return (code&&typeof facilityByPlantCode==='function'&&facilityByPlantCode(code))
+      || (DB.facilities||[]).find(f=>_xlNorm(f.name)===_xlNorm(src))
+      || null;
+}
+// Products the topology actually associates with a facility: what its silos hold
+// and what its demand points already ask for. Returns null when the source has
+// no facility here, which means "do not narrow the list".
+function _xlProductsAtFacility(fac){
+  if(!fac) return null;
+  const els=(DB.elements||[]).filter(e=>(e.assigned_facility_id||e.facility_id)===fac.id);
+  const names=new Set();
+  const add=pid=>{ const p=(DB.products||[]).find(x=>x.id===pid); if(p&&p.name) names.add(_xlNorm(p.name)); };
+  els.forEach(e=>{
+    if(e.type==='bulk_silo'||e.type==='packed_silo'){
+      (typeof getSiloProducts==='function'?getSiloProducts(e)||[]:[]).forEach(add);
+    }
+    if(e.type==='demand_point'){
+      const dp=(DB.demand_points||[]).find(d=>d.element_id===e.id);
+      (dp?.products||[]).forEach(p=>add(p.product_id));
+    }
+  });
+  return names.size?names:null;
+}
+// One option per product+pack in the material table, carrying its codes.
+function _xlMaterialOptions(){
+  const by=new Map();
+  (XLMAP.materials||[]).forEach(m=>{
+    if(!m.product) return;
+    const label=m.product+(m.pres?'/'+m.pres:'');
+    const e=by.get(label)||{label,product:m.product,pres:m.pres||'',codes:[]};
+    e.codes.push(String(m.code||'').trim());
+    by.set(label,e);
+  });
+  return [...by.values()].sort((a,b)=>a.label.localeCompare(b.label));
+}
+// One option per outcome the class rules can produce, named the way a person
+// thinks of it — the customer for an exception, "any 4-digit" for a length rule.
+function _xlClassOptions(){
+  const out=[];
+  (XLMAP.class_rules||[]).forEach(r=>{
+    const m=String(r.match||'').trim(); if(!m||!r.value) return;
+    if(r.type==='exact')       out.push({value:m, label:(r.note||m)+' → '+r.value});
+    else if(r.type==='length') out.push({value:'1'.repeat(Math.max(1,parseInt(m,10)||1)), label:`any ${m}-digit Sold-To → ${r.value}`});
+    else                       out.push({value:m, label:`${r.type} "${m}" → ${r.value}`});
+  });
+  out.push({value:'?', label:`anything else → ${XLMAP.fallback_class||'UNK'}`});
+  return out;
+}
 function _xlTestBody(){
-  const t=_xlUi.test||{};
-  const f=(k,ph,w)=>`<div><div class="fl" style="font-size:8px">${ph}</div>
-    <input class="fi" id="xl-t-${k}" style="padding:4px 7px;font-size:10px${w?';width:'+w:''}" value="${esc(t[k]??'')}" placeholder="${esc(ph)}"></div>`;
+  if(!XLMAP) xlmapLoad();
+  const t=_xlUi.test||(_xlUi.test={});
+  const sources=[...new Set((XLMAP.ship_points||[]).map(r=>r.source).filter(Boolean))].sort();
+  if(!t.source&&sources.length) t.source=sources[0];
+  const codes=(XLMAP.ship_points||[]).filter(r=>r.source===t.source);
+  if(!codes.some(c=>c.code===t.code)) t.code=codes[0]?.code||'';
+  const fac=_xlFacForSource(t.source,t.code);
+  const atFac=_xlProductsAtFacility(fac);
+  const allMats=_xlMaterialOptions();
+  const narrowed=atFac?allMats.filter(m=>atFac.has(_xlNorm(m.label))||atFac.has(_xlNorm(m.product))):null;
+  const useNarrow=!t.showAll&&narrowed&&narrowed.length;
+  const mats=useNarrow?narrowed:allMats;
+  if(!mats.some(m=>m.codes.includes(t.material))) t.material=mats[0]?.codes[0]||'';
+  const classes=_xlClassOptions();
+  if(!classes.some(c=>c.value===t.sold_to)) t.sold_to=classes[0]?.value||'';
+  const movs=(XLMAP.movements||[]);
+  if(!movs.some(m=>m.ship_type===t.ship_type)) t.ship_type=movs[0]?.ship_type||'';
+
+  const sel=(k,opts,w)=>`<select class="fi" style="padding:4px 7px;font-size:10px;${w?'width:'+w:''}" onchange="_xlTestSet('${k}',this.value)">
+    ${opts.map(o=>`<option value="${esc(o.v)}" ${String(o.v)===String(t[k])?'selected':''}>${esc(o.l)}</option>`).join('')}</select>`;
+  const fld=(label,inner)=>`<div><div class="fl" style="font-size:8px">${label}</div>${inner}</div>`;
+
   return `<div style="padding:10px 12px">
     <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
-      ${f('ship_pt','Ship Pt','90px')}${f('material','Material','110px')}${f('sold_to','Sold-To','110px')}${f('ship_type','Ship Type','100px')}
-      <button class="btn-pri" style="padding:5px 12px;font-size:9px" onclick="_xlRunTest()">Translate</button>
-      <span class="tbl-act" onclick="_xlSampleTest()">use a real row</span>
+      ${fld('Source',sel('source',sources.map(s=>({v:s,l:s})),'150px'))}
+      ${codes.length>1?fld('Shipped from',sel('code',codes.map(c=>({v:c.code,l:c.code+(c.note?' · '+c.note:'')})),'210px')):''}
+      ${fld(useNarrow?'Product (at this facility)':'Product',sel('material',mats.map(m=>({v:m.codes[0],l:m.label})),'190px'))}
+      ${fld('Customer',sel('sold_to',classes.map(c=>({v:c.value,l:c.label})),'250px'))}
+      ${fld('Movement',sel('ship_type',movs.map(m=>({v:m.ship_type,l:m.ship_type+' → '+m.movement})),'150px'))}
     </div>
-    <div id="xl-test-out" style="margin-top:10px">${_xlUi.testOut||''}</div>
+    <div style="margin-top:5px;font-family:var(--mono);font-size:8px;color:var(--text-dim)">
+      ${fac?`Source resolves to facility <span style="color:var(--text)">${esc(fac.name)}</span>${atFac?` · ${narrowed.length} of ${allMats.length} products are wired to it`:' · nothing wired to it yet, showing every product'}`
+           :`No facility named <span style="color:var(--amber)">${esc(t.source||'—')}</span> in this scenario — showing every product`}
+      ${narrowed&&narrowed.length?`<span class="tbl-act" onclick="_xlTestSet('showAll',${t.showAll?'false':'true'})">${t.showAll?'show only what is wired here':'show every product'}</span>`:''}
+    </div>
+    <div id="xl-test-out" style="margin-top:10px">${_xlTestOutHTML()}</div>
   </div>`;
 }
-function _xlSampleTest(){
-  _xlUi.open.test=true;
-  _xlUi.test={ship_pt:'9296',material:'1601023',sold_to:'3165216',ship_type:'SALES'};
-  xlmapRender(); _xlRunTest();
+function _xlTestSet(k,v){
+  _xlUi.test=_xlUi.test||{};
+  _xlUi.test[k]=(v==='true')?true:(v==='false')?false:v;
+  if(k==='source') _xlUi.test.code='';      // the code list depends on the source
+  xlmapRender();
 }
-function _xlRunTest(){
-  if(!document.getElementById('xl-t-ship_pt')) return;   // test card is folded away
-  const g=k=>document.getElementById('xl-t-'+k)?.value||'';
-  const row={ship_pt:g('ship_pt'),material:g('material'),sold_to:g('sold_to'),ship_type:g('ship_type')};
-  _xlUi.test=row;
+function _xlRunTest(){ const o=document.getElementById('xl-test-out'); if(o) o.innerHTML=_xlTestOutHTML(); }
+function _xlSampleTest(){ _xlUi.open.test=true; xlmapRender(); }
+
+function _xlTestOutHTML(){
+  if(!XLMAP) xlmapLoad();
+  const t=_xlUi.test||{};
+  if(!t.source) return '';
+  const row={ship_pt:t.code,material:t.material,sold_to:t.sold_to,ship_type:t.ship_type};
   const res=xlmapTranslate(row);
   const dp=res.action==='ignore'?null:xlmapFindDp(res.finalName);
+  const fac=_xlFacForSource(t.source,t.code);
   const line=(l,v,c)=>`<div style="font-family:var(--mono);font-size:9px;margin:2px 0"><span style="color:var(--text-dim);display:inline-block;width:78px">${l}</span><span style="color:${c||'var(--text)'}">${esc(v)}</span></div>`;
   let h=`<div style="border:1px solid var(--border2);background:var(--surface2);padding:10px 12px">`;
-  h+=`<div style="font-family:var(--mono);font-size:12px;font-weight:700;color:${res.mapped?'var(--green)':'var(--amber)'};margin-bottom:8px">${esc(res.finalName)||'(nothing composed)'}</div>`;
-  res.trace.forEach(t=>h+=line(t.t,t.r));
+  // The demand point itself — in names, then the codes that produced it.
+  h+=`<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:3px">
+    <span style="font-family:var(--mono);font-size:13px;font-weight:700;color:${res.mapped?'var(--green)':'var(--amber)'}">${esc(res.finalName)||'(nothing composed)'}</span>
+    ${dp?`<span title="This demand point is already in the topology" style="font-family:var(--mono);font-size:10px;color:var(--green)">✓ in the topology</span>`
+        :(res.action==='ignore'?'':`<span style="font-family:var(--mono);font-size:10px;color:var(--amber)">✗ not in the topology</span>`)}
+    <span class="tbl-act" title="Copy the name, ready to paste into the topology" onclick="_xlCopyName('${esc(res.finalName).replace(/'/g,"\\'")}')">⧉ copy</span>
+    ${(!dp&&fac&&res.mapped&&res.action!=='ignore')?`<span class="tbl-act" style="color:var(--green)" title="Add this demand point to the topology at ${esc(fac.name)}" onclick="_xlCreateInTopology()">+ create at ${esc(fac.name)}</span>`:''}
+    ${fac?`<span class="tbl-act" onclick="openFacilityInTopology('${fac.id}',${dp?`'${dp.id}'`:'null'})">open ${esc(fac.name)} in topology →</span>`:''}
+  </div>`;
+  h+=`<div style="font-family:var(--mono);font-size:9px;color:var(--text-dim);margin-bottom:${(!dp&&fac&&res.mapped&&res.action!=='ignore')?'3':'8'}px">
+    in codes: ${esc([t.code||'—',t.material||'—',t.sold_to||'—',t.ship_type||'—'].join('  ·  '))}</div>`;
+  if(!dp&&fac&&res.mapped&&res.action!=='ignore'){
+    const spot=_xlSpotFor(fac);
+    h+=`<div style="font-family:var(--mono);font-size:9px;color:var(--text-dim);margin-bottom:8px">
+      create puts it ${esc(spot.where)} — the canvas jumps there with it selected and ringed${_xlProductIdFor(t.material)?', product already set':', no catalog product matches it yet'}. Connecting it to a silo stays yours.</div>`;
+  }
+  res.trace.forEach(x=>h+=line(x.t,x.r));
   if(res.name!==res.finalName) h+=line('composed',res.name,'var(--text-dim)');
   if(res.action==='park')   h+=line('action','parked — kept out of demand (movement rule)','var(--amber)');
   if(res.action==='ignore') h+=line('action','ignored (alias rule)','var(--amber)');
@@ -26503,13 +26604,106 @@ function _xlRunTest(){
     res.missing.forEach(m=>h+=`<div style="font-family:var(--mono);font-size:9px;color:var(--amber)">⚠ ${esc(m)}</div>`);
     h+=`</div>`;
   }
-  h+=`<div style="margin-top:8px;padding-top:7px;border-top:1px solid var(--border);font-family:var(--mono);font-size:9px;color:${dp?'var(--green)':'var(--amber)'}">
-      ${dp?`✓ demand point exists in this scenario — ${esc(dp.id)}`:(res.action==='ignore'?'— not looked up (ignored)':'⚠ no demand point with this name in the scenario that is open')}</div>`;
-  h+=`</div>`;
-  _xlUi.testOut=h;
-  const out=document.getElementById('xl-test-out'); if(out) out.innerHTML=h;
+  if(dp){
+    const dfac=(DB.facilities||[]).find(f=>f.id===(dp.assigned_facility_id||dp.facility_id));
+    h+=`<div style="margin-top:8px;padding-top:7px;border-top:1px solid var(--border);font-family:var(--mono);font-size:9px;color:var(--green)">
+      ✓ ${esc(dp.id)}${dfac?' at '+esc(dfac.name):''} — an import would land here</div>`;
+  }
+  return h+`</div>`;
 }
-
+function _xlCopyName(name){
+  const done=()=>statMsg('Copied — paste it as the demand point name in the topology');
+  try{
+    if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(name).then(done,()=>_xlCopyFallback(name,done)); }
+    else _xlCopyFallback(name,done);
+  }catch(e){ _xlCopyFallback(name,done); }
+}
+// Where a new demand point would land. Said out loud BEFORE the button is
+// pressed, because an element that appears somewhere unknown on a canvas this
+// size is an element you have lost.
+function _xlSpotFor(fac){
+  const canvas=(typeof mainCanvasFacilityId==='function')?mainCanvasFacilityId():null;
+  const placed=e=>typeof e.x==='number'&&typeof e.y==='number';
+  const all=(DB.elements||[]).filter(e=>e.facility_id===canvas&&placed(e));
+  const mine=(DB.elements||[]).filter(e=>(e.assigned_facility_id||e.facility_id)===fac.id&&placed(e));
+  const free=(x,y)=>!all.some(e=>Math.abs(e.x-x)<60&&Math.abs(e.y-y)<50);
+  const settle=(x,y,where)=>{ let n=0; while(!free(x,y)&&n<40){ x+=90; n++; } return {x,y,where}; };
+  const dps=mine.filter(e=>e.type==='demand_point');
+  if(dps.length){ const low=dps.reduce((a,b)=>b.y>a.y?b:a);
+    return settle(low.x,low.y+80,`under ${fac.name}'s other demand points`); }
+  if(mine.length){ const low=mine.reduce((a,b)=>b.y>a.y?b:a);
+    return settle(low.x,low.y+90,`just below the ${fac.name} elements`); }
+  if(all.length){ const right=all.reduce((a,b)=>b.x>a.x?b:a);
+    return settle(right.x+150,150,`to the right of everything on the canvas — ${fac.name} has nothing on it yet`); }
+  return {x:220,y:200,where:'on the empty canvas'};
+}
+// The catalog product behind a material code, matched the way the check is: the
+// catalog keeps product and pack in one name, the material table keeps them apart.
+function _xlProductIdFor(materialCode){
+  const m=(XLMAP.materials||[]).find(r=>String(r.code||'').trim()===String(materialCode||'').trim());
+  if(!m||!m.product) return null;
+  const want=_xlNorm(m.product), packed=_xlNorm(m.product+'/'+(m.pres||''));
+  const ps=DB.products||[];
+  return (ps.find(p=>_xlNorm(p.name)===packed)||ps.find(p=>_xlNorm(p.name)===want)
+        ||ps.find(p=>_xlNorm(p.name).startsWith(want+'/')))?.id||null;
+}
+function _xlCenterOn(el){
+  const svg=document.getElementById('topo-svg'); if(!svg||!S.topoView) return;
+  const r=svg.getBoundingClientRect(); if(!r.width) return;
+  const k=Math.max(0.6,Math.min(1.4,S.topoView.k||1));
+  S.topoView={k, x:r.width/2-el.x*k, y:r.height/2-el.y*k};
+  _applyTopoView();
+}
+// A ring that pulses three times where the element landed.
+function _xlFlash(el){
+  const layer=document.getElementById('el-layer'); if(!layer) return;
+  const c=document.createElementNS('http://www.w3.org/2000/svg','circle');
+  c.setAttribute('cx',el.x); c.setAttribute('cy',el.y); c.setAttribute('r','22');
+  c.setAttribute('fill','none'); c.setAttribute('stroke','var(--green)'); c.setAttribute('stroke-width','2');
+  c.style.pointerEvents='none';
+  const a=document.createElementNS('http://www.w3.org/2000/svg','animate');
+  a.setAttribute('attributeName','r'); a.setAttribute('values','18;42;18');
+  a.setAttribute('dur','1.1s'); a.setAttribute('repeatCount','3');
+  c.appendChild(a); layer.appendChild(c);
+  setTimeout(()=>c.remove(),3600);
+}
+// Create the demand point the bench just built, at its facility, and take the
+// user to it: selected, centred, ringed. Connecting it to a silo stays manual —
+// that is the one decision the mapping cannot make.
+function _xlCreateInTopology(){
+  const t=_xlUi.test||{}; if(!t.source) return;
+  const res=xlmapTranslate({ship_pt:t.code,material:t.material,sold_to:t.sold_to,ship_type:t.ship_type});
+  if(!res.mapped){ statMsg('Fill the gaps in the tables first — this row cannot be placed yet'); return; }
+  if(res.action==='ignore'){ statMsg('An alias rule ignores this name — nothing to create'); return; }
+  if(xlmapFindDp(res.finalName)){ statMsg('That demand point is already in the topology'); return; }
+  const fac=_xlFacForSource(t.source,t.code);
+  if(!fac){ statMsg(`No facility named ${t.source} here — add it first in Configuration → Organization`); return; }
+  const spot=_xlSpotFor(fac);
+  const id=`el_${++S.elCounter}`;
+  const el={id, facility_id:(typeof mainCanvasFacilityId==='function')?mainCanvasFacilityId():S.facility_id,
+    assigned_facility_id:fac.id, type:'demand_point', x:spot.x, y:spot.y, name:res.finalName,
+    props:{}, state:'idle', maintenanceEvents:[], productCapacities:[], is_active:true};
+  DB.elements.push(el);
+  const pid=_xlProductIdFor(t.material);
+  (DB.demand_points=DB.demand_points||[]).push({
+    id:`dp_el_${id}`, facility_id:fac.id, element_id:id, element_name:res.finalName,
+    products:pid?[{product_id:pid,priority:1}]:[], mode:'Fixed Daily', daily_tonnage:0,
+    objective:'Meet Demand Only', rolling_days:30});
+  autoSave();
+  // A facility filtered out of the canvas would hide the thing we just made.
+  if(S.topoFacFilter&&S.topoFacFilter.size&&!S.topoFacFilter.has(fac.id)) S.topoFacFilter.add(fac.id);
+  switchView('topology');
+  if(typeof renderTopoCanvas==='function') renderTopoCanvas();
+  setTimeout(()=>{ _xlCenterOn(el); if(typeof selectEl==='function') selectEl(id); _xlFlash(el); },60);
+  statMsg(`${res.finalName} created at ${fac.name}, ${spot.where}${pid?'':' — no catalog product matched, set one in the panel'}`);
+}
+function _xlCopyFallback(name,done){
+  const ta=document.createElement('textarea');
+  ta.value=name; ta.style.cssText='position:fixed;opacity:0';
+  document.body.appendChild(ta); ta.select();
+  try{ document.execCommand('copy'); done(); }catch(e){ statMsg('Could not copy — the name is '+name); }
+  ta.remove();
+}
 // Check the tables against the scenario that is open. Nothing here blocks an
 // import — it is a to-do list, sorted so the big problems are the first ones.
 function _xlCheck(){
@@ -26602,7 +26796,7 @@ function xlmapPanelHTML(){
     </div>`:''}
 
     ${_xlCard('src','Source file','the SAP sales export this reads, and what it would land',(window._dsDemandPreview?Number(window._dsDemandPreview.rows).toLocaleString()+' rows':'not bound'),_xlSourceBody())}
-    ${_xlCard('test','Test a row','type a row from the export and see what an import would do',nDp+' demand points',_xlTestBody())}
+    ${_xlCard('test','Build a demand point','pick by name and see the code, the rules, and whether it exists',nDp+' demand points',_xlTestBody())}
     ${_xlCard('ship','Ship points','which facility a sale shipped from',(XLMAP.ship_points||[]).length,_xlShipBody())}
     ${_xlCard('mat','Materials','material code → product and pack',(XLMAP.materials||[]).length,_xlMatBody())}
     ${_xlCard('cls','Customer class','how the Sold-To becomes INT / EXT / IND / LKHT',(XLMAP.class_rules||[]).length,_xlClsBody())}
