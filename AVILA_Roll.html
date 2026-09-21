@@ -26531,9 +26531,9 @@ function _xlTestBody(){
   const fac=_xlFacForSource(t.source,t.code);
   const atFac=_xlProductsAtFacility(fac);
   const allMats=_xlMaterialOptions();
-  const narrowed=atFac?allMats.filter(m=>atFac.has(_xlNorm(m.label))||atFac.has(_xlNorm(m.product))):null;
-  const useNarrow=!t.showAll&&narrowed&&narrowed.length;
-  const mats=useNarrow?narrowed:allMats;
+  const wired=atFac?allMats.filter(m=>atFac.has(_xlNorm(m.label))||atFac.has(_xlNorm(m.product))):[];
+  const rest=allMats.filter(m=>!wired.includes(m));
+  const mats=[...wired,...rest];
   if(!mats.some(m=>m.codes.includes(t.material))) t.material=mats[0]?.codes[0]||'';
   const classes=_xlClassOptions();
   if(!classes.some(c=>c.value===t.sold_to)) t.sold_to=classes[0]?.value||'';
@@ -26548,17 +26548,24 @@ function _xlTestBody(){
     <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
       ${fld('Source',sel('source',sources.map(s=>({v:s,l:s})),'150px'))}
       ${codes.length>1?fld('Shipped from',sel('code',codes.map(c=>({v:c.code,l:c.code+(c.note?' · '+c.note:'')})),'210px')):''}
-      ${fld(useNarrow?'Product (at this facility)':'Product',sel('material',mats.map(m=>({v:m.codes[0],l:m.label})),'190px'))}
+      ${fld('Product',_xlProductSelect(wired,rest,t.material,fac))}
       ${fld('Customer',sel('sold_to',classes.map(c=>({v:c.value,l:c.label})),'250px'))}
       ${fld('Movement',sel('ship_type',movs.map(m=>({v:m.ship_type,l:m.ship_type+' → '+m.movement})),'150px'))}
     </div>
     <div style="margin-top:5px;font-family:var(--mono);font-size:8px;color:var(--text-dim)">
-      ${fac?`Source resolves to facility <span style="color:var(--text)">${esc(fac.name)}</span>${atFac?` · ${narrowed.length} of ${allMats.length} products are wired to it`:' · nothing wired to it yet, showing every product'}`
-           :`No facility named <span style="color:var(--amber)">${esc(t.source||'—')}</span> in this scenario — showing every product`}
-      ${narrowed&&narrowed.length?`<span class="tbl-act" onclick="_xlTestSet('showAll',${t.showAll?'false':'true'})">${t.showAll?'show only what is wired here':'show every product'}</span>`:''}
+      ${fac?`Source resolves to facility <span style="color:var(--text)">${esc(fac.name)}</span>${wired.length?` · ${wired.length} product${wired.length===1?'':'s'} wired to it, listed first`:' · nothing wired to it yet'} · ${allMats.length} products in the material table`
+           :`No facility named <span style="color:var(--amber)">${esc(t.source||'—')}</span> in this scenario — every product listed`}
     </div>
     <div id="xl-test-out" style="margin-top:10px">${_xlTestOutHTML()}</div>
   </div>`;
+}
+function _xlProductSelect(wired,rest,cur,fac){
+  const opt=m=>`<option value="${esc(m.codes[0])}" ${m.codes.includes(cur)?'selected':''}>${esc(m.label)}</option>`;
+  const body=wired.length
+    ? `<optgroup label="wired to ${esc(fac?fac.name:'this facility')}">${wired.map(opt).join('')}</optgroup>`
+      +(rest.length?`<optgroup label="── everything else">${rest.map(opt).join('')}</optgroup>`:'')
+    : rest.map(opt).join('');
+  return `<select class="fi" style="padding:4px 7px;font-size:10px;width:200px" onchange="_xlTestSet('material',this.value)">${body}</select>`;
 }
 function _xlTestSet(k,v){
   _xlUi.test=_xlUi.test||{};
