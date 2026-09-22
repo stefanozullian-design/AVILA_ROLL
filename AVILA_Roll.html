@@ -1352,7 +1352,7 @@ td.camp-drag-cut>div:first-child{opacity:.3}
     <div class="nav-sec">
       <div class="nav-sec-hdr">Planning</div>
       <div class="nav-cat" onclick="switchView('demand')">Demand Input</div>
-      <div class="nav-cat" onclick="location.href='AVILA_Sales.html'">Sales Detail</div>
+      <div class="nav-cat" onclick="_openPageTab('AVILA_Sales.html','avila_sales','Sales Detail')" title="Opens in its own browser tab">Sales Detail</div>
       <div class="nav-cat" onclick="switchView('schedules')">Vessel & Rail Schedules</div>
     </div>
     <div class="nav-sec">
@@ -2601,6 +2601,99 @@ function thEdCancel(){
 function thCloseMenu(){ const m=document.getElementById('th-menu'); if(m) m.style.display='none'; }
 document.addEventListener('click',e=>{ if(!e.target.closest||!e.target.closest('#th-ctl')) thCloseMenu(); });
 document.addEventListener('keydown',e=>{ if(e.key==='Escape') thCloseMenu(); });
+
+// ═══════════════════════════════════════════════════════
+// SALES PAGE LINK — the Sales page (its own tab) works on one of these scenarios
+// ═══════════════════════════════════════════════════════
+// Catalog: after every save, the active scenario's facilities, sub-regions, products and
+// demand points are published to localStorage 'avila_sc_catalog' as {activeId, byId:{id:cat}}.
+// The Sales page lists these scenarios in its selector, builds its filters from them and
+// maps its sales rows onto their demand points. One entry per scenario, kept until replaced,
+// so a scenario shows up there once it has been opened here. No scenario file → '__local'.
+// Handoff: the Sales page's "Push forecast" writes 'avila_forecast_handoff'
+// {scenarioId, scenarioName, pushed_at, from, to, values:[{element_id,date,value_t}]}.
+// Nothing changes until the user presses Apply on the banner here.
+const SC_CATALOG_KEY='avila_sc_catalog', FC_HANDOFF_KEY='avila_forecast_handoff';
+let _rollCatTimer=null;
+function _rollScId(){ return (typeof SC!=='undefined'&&SC.activeId)||'__local'; }
+function _rollPublishCatalogSoon(){ clearTimeout(_rollCatTimer); _rollCatTimer=setTimeout(_rollPublishCatalog,1200); }
+function _rollPublishCatalog(){
+  try{
+    if(!DB||!Array.isArray(DB.facilities)||!DB.facilities.length) return;
+    const id=_rollScId(), m=(typeof SC!=='undefined'&&SC.meta&&SC.meta[id])||null;
+    const dpBy=new Map((DB.demand_points||[]).map(d=>[d.element_id,d]));
+    const cat={ id, name:m?m.name:'This browser (no scenario file)', file:m?(m.fileName||''):'',
+      publishedAt:new Date().toISOString(),
+      famOf:PRODUCT_FAMILY_OF, famLabels:PRODUCT_FAMILY_LABELS, catLabels:SUP_CAT_LABELS,
+      facilities:DB.facilities.map(f=>({id:f.id,name:f.name,type:f.type||'plant',sub_region_id:f.sub_region_id||null})),
+      sub_regions:(DB.sub_regions||[]).map(x=>({id:x.id,name:x.name})),
+      products:(DB.products||[]).map(p=>({id:p.id,name:p.name,category:p.category||'',facility_id:p.facility_id||null})),
+      dps:DB.elements.filter(e=>e.type==='demand_point').map(e=>({element_id:e.id,name:e.name||'',
+        dp_code:e.props?.dp_code||'', facility_id:e.assigned_facility_id||e.facility_id||null,
+        products:(dpBy.get(e.id)?.products||[]).map(x=>x.product_id).filter(Boolean)}))
+    };
+    let all={}; try{ all=JSON.parse(localStorage.getItem(SC_CATALOG_KEY)||'{}')||{}; }catch(e){}
+    all.byId=all.byId||{}; all.byId[id]=cat; all.activeId=id;
+    localStorage.setItem(SC_CATALOG_KEY,JSON.stringify(all));
+  }catch(e){ console.warn('Sales catalog publish failed',e); }
+}
+
+// ── pushed forecast from the Sales page ──
+function _rollReadHandoff(){ try{ const h=JSON.parse(localStorage.getItem(FC_HANDOFF_KEY)||'null'); return h&&Array.isArray(h.values)?h:null; }catch(e){ return null; } }
+function _rollCheckHandoff(){
+  const h=_rollReadHandoff(); document.getElementById('fc-handoff-banner')?.remove();
+  if(!h) return;
+  const here=h.scenarioId===_rollScId();
+  const dps=new Set(h.values.map(v=>v.element_id)).size;
+  const b=document.createElement('div'); b.id='fc-handoff-banner';
+  b.style.cssText='position:fixed;top:56px;left:50%;transform:translateX(-50%);z-index:9500;display:flex;align-items:center;gap:10px;'+
+    'padding:9px 14px;background:var(--bn-info-bg);color:var(--bn-info-fg);border:1px solid var(--blue);border-radius:6px;'+
+    'font-family:var(--mono);font-size:10px;box-shadow:0 8px 26px rgba(0,0,0,.45);max-width:760px';
+  b.innerHTML=here
+    ? `<span>📈 <b>Sales Detail</b> pushed a forecast for <b>${esc(h.scenarioName||'this scenario')}</b>: ${dps} demand point${dps===1?'':'s'}, ${esc(h.from||'')} → ${esc(h.to||'')}. `+
+      `Applying replaces the forecast (not the actuals) of those points on those days.</span>`+
+      `<button class="tb-btn" style="padding:4px 10px" onclick="_rollApplyHandoff()">Apply</button>`+
+      `<button class="tb-btn sec" style="padding:4px 10px" onclick="_rollDismissHandoff()">Discard</button>`
+    : `<span>📈 <b>Sales Detail</b> pushed a forecast for scenario <b>${esc(h.scenarioName||h.scenarioId)}</b> — open that scenario here to apply it.</span>`+
+      `<button class="tb-btn sec" style="padding:4px 10px" onclick="document.getElementById('fc-handoff-banner').remove()">Later</button>`;
+  document.body.appendChild(b);
+}
+function _rollDismissHandoff(){ try{ localStorage.removeItem(FC_HANDOFF_KEY); }catch(e){} document.getElementById('fc-handoff-banner')?.remove(); statMsg('Pushed forecast discarded'); }
+function _rollApplyHandoff(){
+  const h=_rollReadHandoff(); if(!h||h.scenarioId!==_rollScId()){ _rollCheckHandoff(); return; }
+  if(!DB.demand_values) DB.demand_values=[];
+  const known=new Set(DB.elements.filter(e=>e.type==='demand_point').map(e=>e.id));
+  const vals=h.values.filter(v=>known.has(v.element_id)&&/^\d{4}-\d{2}-\d{2}$/.test(v.date||''));
+  const touched=new Set(vals.map(v=>v.element_id+'|'+v.date));
+  // Actual days are never replaced; every other row on a pushed point/day is.
+  const actual=new Set(DB.demand_values.filter(v=>v.source==='actual').map(v=>v.element_id+'|'+v.date));
+  DB.demand_values=DB.demand_values.filter(v=>v.source==='actual'||!touched.has(v.element_id+'|'+v.date));
+  let n=0;
+  vals.forEach(v=>{ const k=v.element_id+'|'+v.date; if(actual.has(k)) return; const t=Math.round((+v.value_t||0)*10)/10;
+    if(t>0){ DB.demand_values.push({element_id:v.element_id,date:v.date,value_t:t,source:'forecast'}); n++; } });
+  try{ localStorage.removeItem(FC_HANDOFF_KEY); }catch(e){}
+  document.getElementById('fc-handoff-banner')?.remove();
+  _demandChanged(); autoSave();
+  statMsg(`Sales forecast applied — ${n} day values on ${new Set(vals.map(v=>v.element_id)).size} demand points`);
+}
+window.addEventListener('storage',e=>{
+  if(e.key===FC_HANDOFF_KEY) _rollCheckHandoff();
+});
+window.addEventListener('load',()=>setTimeout(()=>{ _rollPublishCatalog(); _rollCheckHandoff(); },1500));
+
+// Sister pages live in their OWN named browser tab: 'avila_roll' / 'avila_sales'. window.open('',name)
+// hands back that tab when it is already open, or a fresh blank one. Chrome never lets a page bring
+// another EXISTING tab to the front (focus() is ignored), so an already-open tab is only reported.
+// Popup blocked → the old same-tab link.
+function _openPageTab(url,name,label){
+  let w=null; try{ w=window.open('',name); }catch(e){}
+  if(!w||w===window){ location.href=url; return false; }
+  let blank=false; try{ blank=!w.location.href||w.location.href==='about:blank'; }catch(e){}   // another page's origin → it is loaded
+  if(blank){ w.location.href=url; try{ w.focus(); }catch(e){} }
+  else if(typeof statMsg==='function') statMsg(`${label||'That page'} is already open in its own browser tab — switch to it in the tab bar`);
+  return false;
+}
+try{ window.name='avila_roll'; }catch(e){}   // always: a tab keeps its name across navigation, so claim ours — lets the sister page find this tab
 
 // ═══════════════════════════════════════════════════════
 // THIRD-PARTY LIBRARIES — single pinned loader
@@ -27330,7 +27423,7 @@ function switchTopSection(section){
   const items=tabs[section]||[];
   row.innerHTML=items.map(t=>
     t.link
-    ? `<button class="sec-tab" onclick="location.href='${t.link}'">${t.label}</button>`
+    ? `<button class="sec-tab" onclick="_openPageTab('${t.link}','avila_sales','Sales Detail')" title="Opens in its own browser tab">${t.label} ↗</button>`
     : `<button class="sec-tab" data-view="${t.view}" ${t.tab?`data-tab="${t.tab}"`:''}
       onclick="_secTabClick(this,'${t.view}'${t.tab?`,'${t.tab}'`:''})">${t.label}</button>`
   ).join('');
@@ -29115,6 +29208,7 @@ function hideTyping(){if(typingEl){typingEl.remove();typingEl=null;}}
 // beforeunload flushes a pending save so closing the tab never loses an edit.
 let _autoSaveTimer=null;
 function autoSave(){
+  _rollPublishCatalogSoon();   // keep the Sales page's copy of this scenario's catalog current
   clearTimeout(_autoSaveTimer);
   _autoSaveTimer=setTimeout(()=>{_autoSaveTimer=null;autoSaveNow();},500);
 }
@@ -29941,6 +30035,7 @@ function scAfterLoad(){
   const dl=document.getElementById('sim-date-lbl'); if(dl) dl.textContent=`Day 0 / ${S.simCfg.horizon}`;
   switchTopSection(DB.facilities.length?'production':'configuration');
   scUpdatePill(); scRenderDropdown();
+  _rollPublishCatalog(); _rollCheckHandoff();   // Sales page link: this scenario is now the active one
 }
 
 // ── Load a scenario file into the DB ──
