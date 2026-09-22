@@ -17732,7 +17732,9 @@ function simulate(elements, connections, horizon, includeProposed=false){
     if(DB.real_inventory_daily?.length){
       const prevAnchorDate=new Date(simStartDate.getTime()+(day-2)*864e5);
       const prevAnchorStr=prevAnchorDate._ymd();
-      elements.filter(e=>e.type==='bulk_silo').forEach(el=>{
+      // Packed silos too (tonnes, like the Supply page shows them) — a real packed inventory
+      // from the Daily Data form or the Supply page used to be displayed but never anchored.
+      elements.filter(e=>e.type==='bulk_silo'||e.type==='packed_silo').forEach(el=>{
         const realInv=DB.real_inventory_daily.find(ri=>ri.date===prevAnchorStr&&ri.silo_id===el.id);
         if(realInv){
           const realVal=parseFloat(realInv.eod_volume_t)||0;
@@ -27541,6 +27543,57 @@ function rdListSection(title, subtitle, colLabels, rows, unit){
   return h;
 }
 
+// ── Daily Data form: what a facility's form offers, derived ONLY from its topology ─────────
+// Shared by renderRealDataSections and the form audit. Rules, for any facility present or future:
+//  • An element's products = its capacity rows (any category — white/slag are 'additive').
+//    With no capacity rows yet, the products held by the silos it FEEDS — never "every
+//    product of the category" (that fallback offered BRS_IL/PAK at PEV).
+//  • Inventory = every (silo, product) pair the facility's silos hold, read through
+//    getSiloProducts (so a silo configured with a single product_id, or legacy
+//    "id=category" entries, is included). Clinker / bulk / packed are split by silo type.
+//  • Rail loading = products of the silos feeding the rail dispatch point(s).
+//  • Shipping = every non-clinker product the facility stores or makes.
+//  • Receiving = per berth, products of the silos that berth feeds.
+function _rdFacilityModel(facId){
+  const facEls=DB.elements.filter(e=>(e.assigned_facility_id||e.facility_id)===facId);
+  const P=id=>DB.products.find(x=>x.id===id)||null;
+  const isClk=pid=>P(pid)?.category==='clinker';
+  const isSilo=e=>e&&(e.type==='bulk_silo'||e.type==='packed_silo');
+  const downSilos=el=>DB.connections.filter(c=>c.from_element_id===el.id).map(c=>getEl(c.to_element_id)).filter(isSilo);
+  const upSilos=el=>DB.connections.filter(c=>c.to_element_id===el.id).map(c=>getEl(c.from_element_id)).filter(isSilo);
+  const uniq=ids=>{ const seen=new Set(), out=[]; ids.forEach(id=>{ const p=P(id); if(p&&!seen.has(p.id)){ seen.add(p.id); out.push(p); } }); return out; };
+  const siloProds=s=>uniq(getSiloProducts(s));
+  const capIds=el=>DB.element_product_capacities.filter(c=>c.element_id===el.id).map(c=>c.product_id).filter(P);
+  const elProdIds=el=>{ const c=capIds(el); return new Set(c.length?c:downSilos(el).flatMap(getSiloProducts).filter(P)); };
+  const colProds=els=>uniq(els.flatMap(el=>[...elProdIds(el)]));
+  const kilns=facEls.filter(e=>e.type==='kiln');
+  const finishMills=facEls.filter(e=>e.type==='finish_mill');
+  const packingPlants=facEls.filter(e=>e.type==='packing_plant');
+  const bulkSilos=facEls.filter(e=>e.type==='bulk_silo');
+  const packedSilos=facEls.filter(e=>e.type==='packed_silo');
+  const railDps=facEls.filter(e=>e.type==='dispatch_point'&&e.props?.dispatch_type==='Rail');
+  let railProds=[];
+  if(railDps.length){
+    railProds=uniq(railDps.flatMap(dp=>upSilos(dp).flatMap(getSiloProducts))).filter(p=>!isClk(p.id));
+    if(!railProds.length) railProds=uniq(bulkSilos.flatMap(getSiloProducts)).filter(p=>!isClk(p.id));
+  }
+  const shipProds=uniq([...bulkSilos,...packedSilos].flatMap(getSiloProducts)
+    .concat(finishMills.flatMap(el=>[...elProdIds(el)]), packingPlants.flatMap(el=>[...elProdIds(el)]))).filter(p=>!isClk(p.id));
+  const berths=facEls.filter(e=>e.type==='berth').map(b=>{
+    const type=b.props?.berth_type||'Ship Berth';
+    const mode=type==='Rail Receiving'?'rail':(type==='Truck Receiving'?'truck':'ship');
+    // A berth not wired to any silo gets NO fields: the simulation can't unload through it,
+    // and offering every product of the facility is exactly the "unrelated fields" problem.
+    const prods=uniq(downSilos(b).flatMap(getSiloProducts));
+    return {berth:b, type, mode, prods, unwired:!prods.length};
+  });
+  const noCaps=[...kilns,...finishMills,...packingPlants].filter(el=>!capIds(el).length);
+  // Purchased facilities hold no inventory (see facility.type 'purchased') — no inventory fields.
+  const purchased=(DB.facilities.find(x=>x.id===facId)||{}).type==='purchased';
+  return {facEls, purchased, P, isClk, kilns, finishMills, packingPlants, bulkSilos, packedSilos, railDps, railProds,
+    shipProds, berths, siloProds, elProdIds, colProds, noCaps};
+}
+
 function renderRealDataSections(){
   const facId=S.realDataFacilityId||S.facility_id;
   const container=document.getElementById('rd-sections-container');
@@ -27550,50 +27603,17 @@ function renderRealDataSections(){
   }
   const dateStr=S.realDataSelectedDate||'';
   const facElements=DB.elements.filter(e=>(e.assigned_facility_id||e.facility_id)===facId);
-  const kilns=facElements.filter(e=>e.type==='kiln');
-  const silos=facElements.filter(e=>e.type==='bulk_silo'||e.type==='packed_silo');
-  const finishMills=facElements.filter(e=>e.type==='finish_mill');
-  const packingPlants=facElements.filter(e=>e.type==='packing_plant');
-
-  const clinkerSilos=silos.filter(s=>s.props?.products?.some(p=>{
-    const pr=DB.products.find(x=>x.id===p); return pr?.category==='clinker';
-  }));
-  const cementSilos=silos.filter(s=>s.props?.products?.some(p=>{
-    const pr=DB.products.find(x=>x.id===p); return pr?.category==='cement_bulk';
-  }));
-
-  // Per-element product capability (topology constraint). Returns a Set of product ids the
-  // element can actually produce. Uses element_product_capacities; only when an element has
-  // NO capacities configured does it fall back to all products of the section's categories.
-  const elProdIdSet=(elId,cats)=>{
-    const cats_=Array.isArray(cats)?cats:[cats];
-    const fromCap=getRealDataElementProducts(elId,cats_).map(p=>p.id);
-    if(fromCap.length) return new Set(fromCap);
-    return new Set(DB.products.filter(p=>cats_.includes(p.category)).map(p=>p.id));
-  };
-  // Deduplicated union of products across a set of elements → matrix columns
-  const colProds=(elements,cats)=>{
-    const seen=new Set(), result=[];
-    elements.forEach(el=>[...elProdIdSet(el.id,cats)].forEach(pid=>{
-      if(!seen.has(pid)){ const p=DB.products.find(x=>x.id===pid); if(p){seen.add(pid);result.push(p);} }
-    }));
-    return result;
-  };
-  // Products a silo actually holds, restricted to a category set
-  const siloProds=(silo,cats)=>{
-    const cats_=Array.isArray(cats)?cats:[cats];
-    return (silo.props?.products||[]).map(pid=>DB.products.find(x=>x.id===pid))
-      .filter(p=>p&&cats_.includes(p.category));
-  };
+  const m=_rdFacilityModel(facId);
+  const {kilns, finishMills, packingPlants, bulkSilos, packedSilos, P, isClk}=m;
 
   // A constraint-driven production matrix: columns = union of products, but a cell is rendered
   // ONLY where that element can produce that product (others are blank, not an input).
-  const prodSection=(title,elements,cats,unit)=>{
+  const prodSection=(title,elements,unit)=>{
     if(!elements.length) return '';
-    const cols=colProds(elements,cats);
+    const cols=m.colProds(elements);
     if(!cols.length) return '';
     const rows=elements.map(el=>{
-      const mine=elProdIdSet(el.id,cats);
+      const mine=m.elProdIds(el);
       return {label:el.name,cells:cols.map(p=>(mine.has(p.id)?{
         elemId:el.id,prodId:p.id,type:'production',
         value:(DB.real_production_daily||[]).find(r=>r.date===dateStr&&r.element_id===el.id&&r.product_id===p.id)?.volume_t??''
@@ -27603,9 +27623,9 @@ function renderRealDataSections(){
   };
 
   // Per-silo/product ending-inventory list (NOT a matrix): one row per (silo, product it holds).
-  const invSection=(title,siloSet,cats)=>{
+  const invSection=(title,siloSet,keep)=>{
     const rows=[];
-    siloSet.forEach(s=>siloProds(s,cats).forEach(p=>rows.push({
+    siloSet.forEach(s=>m.siloProds(s).filter(p=>keep(p.id)).forEach(p=>rows.push({
       labels:[s.name,p.name],
       cell:{elemId:s.id,prodId:p.id,type:'inventory',
         value:(DB.real_inventory_daily||[]).find(r=>r.date===dateStr&&r.silo_id===s.id&&r.product_id===p.id)?.eod_volume_t??''}
@@ -27614,32 +27634,29 @@ function renderRealDataSections(){
     return rdListSection(title,`ENDING (${dateStr}) → BEGINNING (${nextDate})`,['SILO','PRODUCT'],rows,'STn');
   };
 
-  const nextDate=dateStr?(()=>{const nd=new Date(dateStr+'T00:00:00');nd.setDate(nd.getDate()+1);return nd._ymd();})():'';
+  const nextDate=dateStr?_addDays(dateStr,1):'';
   let html='';
 
   // ── 1. KILNS PRODUCTION ─────────────────────────────────────────────────────
-  html+=prodSection('KILNS PRODUCTION',kilns,'clinker','STn');
+  html+=prodSection('KILNS PRODUCTION',kilns,'STn');
 
   // ── 2. CLINKER ENDING INVENTORY (per silo/product) ──────────────────────────
-  html+=invSection('CLINKER ENDING INVENTORY',clinkerSilos,'clinker');
+  if(!m.purchased) html+=invSection('CLINKER ENDING INVENTORY',bulkSilos,isClk);
 
   // ── 3. CEMENT PRODUCTION ─────────────────────────────────────────────────────
-  html+=prodSection('CEMENT PRODUCTION',finishMills,['cement_bulk','cement_packed'],'STn');
+  html+=prodSection('CEMENT PRODUCTION',finishMills,'STn');
 
   // ── 4. PACKING PRODUCTION ────────────────────────────────────────────────────
-  html+=prodSection('PACKING PRODUCTION',packingPlants,'cement_packed','Pallets');
+  html+=prodSection('PACKING PRODUCTION',packingPlants,'Pallets');
 
   // ── 5. CEMENT TRANSFERING (Rail) — only if rail dispatch exists in the topology ──
-  {
-    const railDispatch=facElements.some(e=>e.type==='dispatch_point'&&e.props?.dispatch_type==='Rail');
-    const prods=DB.products.filter(p=>p.category==='cement_bulk'&&cementSilos.some(s=>s.props?.products?.includes(p.id)));
-    if(railDispatch&&prods.length){
-      html+=rdSectionTable('CEMENT TRANSFERING (Rail Loading)',null,prods.map(p=>p.name),
-        [{label:'RAIL LOADING',cells:prods.map(p=>({
-          elemId:facId,prodId:p.id,type:'transfer',subtype:'loading',
-          value:(DB.real_rail_daily||[]).find(r=>r.date===dateStr&&r.facility_id===facId&&r.product_id===p.id&&r.type==='loading')?.cars??''
-        }))}],'RAILCARS');
-    }
+  if(m.railProds.length){
+    const prods=m.railProds;
+    html+=rdSectionTable('CEMENT TRANSFERING (Rail Loading)',null,prods.map(p=>p.name),
+      [{label:'RAIL LOADING',cells:prods.map(p=>({
+        elemId:facId,prodId:p.id,type:'transfer',subtype:'loading',
+        value:(DB.real_rail_daily||[]).find(r=>r.date===dateStr&&r.facility_id===facId&&r.product_id===p.id&&r.type==='loading')?.cars??''
+      }))}],'RAILCARS');
   }
 
   // ── 5b. CEMENT TRANSFERING (Truck) — one row per outbound truck campaign ─────
@@ -27661,52 +27678,33 @@ function renderRealDataSections(){
     }
   }
 
-  // ── 6. CEMENT SHIPPING (ALL CEMENTITIOUS) ────────────────────────────────────
-  {
-    const prods=DB.products.filter(p=>(p.category==='cement_bulk'||p.category==='cement_packed')&&
-      (cementSilos.some(s=>s.props?.products?.includes(p.id))||
-       finishMills.some(fm=>elProdIdSet(fm.id,['cement_bulk','cement_packed']).has(p.id))));
-    if(prods.length){
-      html+=rdSectionTable('CEMENT SHIPPING (ALL CEMENTITIOUS)',null,['STn'],
-        prods.map(p=>({label:p.name,cells:[{
-          elemId:facId,prodId:p.id,type:'shipping',
-          value:(DB.real_shipping_daily||[]).find(r=>r.date===dateStr&&r.facility_id===facId&&r.product_id===p.id)?.volume_t??''
-        }]})),null);
-    }
+  // ── 6. SHIPPING — every non-clinker product the facility stores or makes ────
+  if(m.shipProds.length){
+    html+=rdSectionTable('CEMENT SHIPPING (ALL CEMENTITIOUS)',null,['STn'],
+      m.shipProds.map(p=>({label:p.name,cells:[{
+        elemId:facId,prodId:p.id,type:'shipping',
+        value:(DB.real_shipping_daily||[]).find(r=>r.date===dateStr&&r.facility_id===facId&&r.product_id===p.id)?.volume_t??''
+      }]})),null);
   }
 
-  // ── 7. BULK CEMENT ENDING INVENTORY (per silo/product) ──────────────────────
-  html+=invSection('BULK CEMENT ENDING INVENTORY',cementSilos,'cement_bulk');
+  // ── 7. BULK ENDING INVENTORY (cement, slag, white, additives — per silo/product) ──
+  if(!m.purchased) html+=invSection('BULK ENDING INVENTORY',bulkSilos,pid=>!isClk(pid));
+
+  // ── 7b. PACKED ENDING INVENTORY (packed silos, tonnes) ──────────────────────
+  if(!m.purchased) html+=invSection('PACKED ENDING INVENTORY',packedSilos,()=>true);
 
   // ── 8. RECEIVING / UNLOADING — one section per berth (ship / rail / truck) ───
-  // Facilities with a Berth (import/receiving point) capture how much was unloaded.
-  {
-    const berths=facElements.filter(e=>e.type==='berth');
-    berths.forEach(b=>{
-      const bt=b.props?.berth_type||'Ship Berth';
-      const mode=bt==='Rail Receiving'?'rail':(bt==='Truck Receiving'?'truck':'ship');
-      const unit=mode==='rail'?'RAILCARS':'STn';
-      const unitCode=mode==='rail'?'cars':'t';
-      // Products this berth receives = products held by the silos it feeds (downstream connections);
-      // fall back to all products held by the facility's silos.
-      const downIds=DB.connections.filter(c=>c.from_element_id===b.id).map(c=>c.to_element_id);
-      const seen=new Set(); let prods=[];
-      downIds.forEach(id=>{
-        const sil=silos.find(s=>s.id===id);
-        (sil?.props?.products||[]).forEach(pid=>{ if(!seen.has(pid)){const p=DB.products.find(x=>x.id===pid); if(p){seen.add(pid);prods.push(p);}} });
-      });
-      if(!prods.length){
-        silos.forEach(s=>(s.props?.products||[]).forEach(pid=>{ if(!seen.has(pid)){const p=DB.products.find(x=>x.id===pid); if(p){seen.add(pid);prods.push(p);}} }));
-      }
-      if(!prods.length) return;
-      const rows=prods.map(p=>({
-        labels:[p.name],
-        cell:{elemId:b.id,prodId:p.id,type:'unloading',subtype:mode,unit:unitCode,
-          value:(DB.real_unloading_daily||[]).find(r=>r.date===dateStr&&r.berth_id===b.id&&r.product_id===p.id)?.value??''}
-      }));
-      html+=rdListSection(`RECEIVING — ${b.name} (${bt})`,`Unloaded at this berth on ${dateStr}`,['PRODUCT'],rows,unit);
-    });
-  }
+  m.berths.forEach(({berth:b, type:bt, mode, prods})=>{
+    if(!prods.length) return;
+    const unit=mode==='rail'?'RAILCARS':'STn';
+    const unitCode=mode==='rail'?'cars':'t';
+    const rows=prods.map(p=>({
+      labels:[p.name],
+      cell:{elemId:b.id,prodId:p.id,type:'unloading',subtype:mode,unit:unitCode,
+        value:(DB.real_unloading_daily||[]).find(r=>r.date===dateStr&&r.berth_id===b.id&&r.product_id===p.id)?.value??''}
+    }));
+    html+=rdListSection(`RECEIVING — ${b.name} (${bt})`,`Unloaded at this berth on ${dateStr}`,['PRODUCT'],rows,unit);
+  });
 
   if(!html) html='<div class="rd-data-empty">No elements to configure</div>';
   else{
@@ -27830,25 +27828,41 @@ function processDataSubmission(facId, dateStr, clearFormAfter){
   const updates=[];
   const now=new Date().toISOString();
 
-  // STEP 1: Delete all existing entries for this date/facility
-  const initialProdCount=DB.real_production_daily.filter(r=>r.date===dateStr&&r.facility_id===facId).length;
-  const initialInvCount=DB.real_inventory_daily.filter(r=>r.date===dateStr&&r.facility_id===facId).length;
+  // STEP 1: Delete the existing entries for this date/facility that the form SHOWS (they are
+  // re-added from the inputs below). Records with no field on the form — e.g. an inventory
+  // typed on the Supply page for a product the form didn't list — are left alone; clearing
+  // everything for the day used to wipe them silently.
+  const _k=(inputs,fn)=>new Set([...inputs].map(fn));
+  const kProd=_k(productionInputs,i=>i.dataset.elem+'|'+i.dataset.prod);
+  const kInv=_k(inventoryInputs,i=>i.dataset.elem+'|'+i.dataset.prod);
+  const kRail=_k(transferInputs,i=>i.dataset.prod);
+  const kShip=_k(shippingInputs,i=>i.dataset.prod);
+  const kUnl=_k(unloadingInputs,i=>i.dataset.elem+'|'+i.dataset.prod);
+  const kTruck=_k(truckTransferInputs,i=>i.dataset.dest+'|'+i.dataset.prod);
+  const onProd=r=>r.date===dateStr&&r.facility_id===facId&&kProd.has(r.element_id+'|'+r.product_id);
+  const onInv=r=>r.date===dateStr&&r.facility_id===facId&&kInv.has(r.silo_id+'|'+r.product_id);
+  const onRail=r=>r.date===dateStr&&r.facility_id===facId&&r.type==='loading'&&kRail.has(r.product_id);
+  const onShip=r=>r.date===dateStr&&r.facility_id===facId&&kShip.has(r.product_id);
+  const onUnl=r=>r.date===dateStr&&r.facility_id===facId&&kUnl.has(r.berth_id+'|'+r.product_id);
+  const onTruck=r=>r.date===dateStr&&r.mode==='truck'&&r.origin_facility_id===facId&&kTruck.has(r.dest_facility_id+'|'+r.product_id);
+  const initialProdCount=DB.real_production_daily.filter(onProd).length;
+  const initialInvCount=DB.real_inventory_daily.filter(onInv).length;
   // The form only shows RAIL LOADING. Yard counts, dispatches and terminal counts for the same
   // day are entered on the Rail Schedule / reconcile popup — a Daily Data save used to delete them.
-  const initialRailCount=(DB.real_rail_daily||[]).filter(r=>r.date===dateStr&&r.facility_id===facId&&r.type==='loading').length;
+  const initialRailCount=(DB.real_rail_daily||[]).filter(onRail).length;
   _railLoadingEdited(_railDpsOfFac(facId),[dateStr]);
-  const initialShipCount=(DB.real_shipping_daily||[]).filter(r=>r.date===dateStr&&r.facility_id===facId).length;
-  const initialUnloadCount=(DB.real_unloading_daily||[]).filter(r=>r.date===dateStr&&r.facility_id===facId).length;
+  const initialShipCount=(DB.real_shipping_daily||[]).filter(onShip).length;
+  const initialUnloadCount=(DB.real_unloading_daily||[]).filter(onUnl).length;
 
-  DB.real_production_daily=DB.real_production_daily.filter(r=>!(r.date===dateStr&&r.facility_id===facId));
-  DB.real_inventory_daily=DB.real_inventory_daily.filter(r=>!(r.date===dateStr&&r.facility_id===facId));
-  DB.real_rail_daily=(DB.real_rail_daily||[]).filter(r=>!(r.date===dateStr&&r.facility_id===facId&&r.type==='loading'));
-  DB.real_shipping_daily=(DB.real_shipping_daily||[]).filter(r=>!(r.date===dateStr&&r.facility_id===facId));
-  DB.real_unloading_daily=(DB.real_unloading_daily||[]).filter(r=>!(r.date===dateStr&&r.facility_id===facId));
+  DB.real_production_daily=DB.real_production_daily.filter(r=>!onProd(r));
+  DB.real_inventory_daily=DB.real_inventory_daily.filter(r=>!onInv(r));
+  DB.real_rail_daily=(DB.real_rail_daily||[]).filter(r=>!onRail(r));
+  DB.real_shipping_daily=(DB.real_shipping_daily||[]).filter(r=>!onShip(r));
+  DB.real_unloading_daily=(DB.real_unloading_daily||[]).filter(r=>!onUnl(r));
   // Truck transfer actuals are keyed by ORIGIN facility (mode 'truck'); clear only those
   // for this origin/date so rail transfers and other origins are untouched.
-  const initialTruckTransferCount=(DB.real_transfers_daily||[]).filter(r=>r.date===dateStr&&r.mode==='truck'&&r.origin_facility_id===facId).length;
-  DB.real_transfers_daily=(DB.real_transfers_daily||[]).filter(r=>!(r.date===dateStr&&r.mode==='truck'&&r.origin_facility_id===facId));
+  const initialTruckTransferCount=(DB.real_transfers_daily||[]).filter(onTruck).length;
+  DB.real_transfers_daily=(DB.real_transfers_daily||[]).filter(r=>!onTruck(r));
 
   deletedCount=initialProdCount+initialInvCount+initialRailCount+initialShipCount+initialUnloadCount+initialTruckTransferCount;
 
