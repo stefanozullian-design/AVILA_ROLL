@@ -9284,12 +9284,25 @@ function _siloMaxT(el){ return el&&el.type==='packed_silo' ? (parseFloat(el.prop
 // real_production_daily may hold several rows per element/day. We group by product and, for the
 // SAME product recorded from two sources (e.g. Excel 'file' + a manual 'actual'), keep one — the
 // 'actual' — instead of summing, so duplicates don't double-count. Returns [{product_id, volume_t}].
+// Tonnes of a real PACKING record, or null when it can't be trusted yet. Packing is entered in
+// pallets (rec.pallets); tonnes = pallets × the machine's packing line tonnes_per_pallet as
+// configured NOW (so a factor set after the entry still applies), else the factor saved with
+// the record. No factor anywhere → null: the simulation ignores the entry (guard) instead of
+// moving pallets as if they were tonnes. A record without a pallet count (import / older
+// entry) is already in tonnes.
+function _realPackT(rec){
+  if(!rec) return null;
+  if(rec.pallets==null) return rec.tpp_missing?null:(parseFloat(rec.volume_t)||0);
+  const line=DB.element_product_capacities.find(c=>c.element_id===rec.element_id&&c.product_id===rec.product_id&&c.packing_input_id);
+  const tpp=parseFloat(line?.tonnes_per_pallet)||parseFloat(rec.tonnes_per_pallet)||0;
+  return tpp>0?(parseFloat(rec.pallets)||0)*tpp:null;
+}
 function _dedupRealProd(elId, ds){
   const rows=(DB.real_production_daily||[]).filter(r=>r.date===ds&&r.element_id===elId);
   if(!rows.length) return [];
   const byProd={};
   rows.forEach(r=>{
-    const pid=r.product_id; const v=parseFloat(r.volume_t)||0;
+    const pid=r.product_id; const pt=r.pallets!=null?_realPackT(r):null; const v=pt!=null?pt:(parseFloat(r.volume_t)||0);
     if(!(pid in byProd) || (r.source==='actual'&&byProd[pid].source!=='actual')) byProd[pid]={product_id:pid, volume_t:v, source:r.source};
   });
   return Object.values(byProd);
@@ -18491,9 +18504,32 @@ function simulate(elements, connections, horizon, includeProposed=false){
       // Packed-silo space (tonnes) toward the 98% stop level, net of same-day inflow.
       const _packSpace=(outSilos)=>outSilos.reduce((a,si)=>a+Math.max(0,(state[si.id].maxCap||Infinity)*0.98-(state[si.id].inventory||0)-(siloInflow[si.id]||0)),0);
 
+      const packDate=new Date(simStartDate.getTime()+(day-1)*864e5)._ymd();
+
+      // ── REAL PACKING (Tier 0 — same idea as kilns / finish mills) ─────────────
+      // An actual entered for this machine+day replaces the simulator's own choice: the real
+      // tonnes are drawn from the line's sourcing bulk silo (× bulk-per-output ratio) and put in
+      // its packed silo. GUARD: only for a product that has a configured packing line AND a
+      // tonnes-per-pallet (_realPackT ≠ null) — until then the entry is shown but ignored here,
+      // so pallets are never moved as if they were tonnes. Several products the same day all run.
+      {
+        const _real=(realProdMap[el.id]?.[packDate]||[]).map(rp=>({rp, line:lines.find(l=>l.product_id===rp.product_id), t:_realPackT(rp)}))
+          .filter(x=>x.line&&x.t!=null&&x.t>0);
+        if(_real.length){
+          let top=null;
+          _real.forEach(({line,t})=>{
+            const outPid=line.product_id, inPid=line.packing_input_id;
+            _runLine(outPid,inPid,_packLineRatio(line),t,packInSiloMap[el.id][inPid]||[],packOutSiloMap[el.id][outPid]||[]);
+            if(!top||t>top.t) top={outPid,t};
+          });
+          s.status='running'; s.runDays++; s.currentProduct=top.outPid;
+          r.packProductHistory[el.id].push(top.outPid);
+          return;
+        }
+      }
+
       // ── MANAGER CAMPAIGN OVERRIDE ────────────────────
       // A locked campaign forces this machine to pack a specific product at a set rate.
-      const packDate=new Date(simStartDate.getTime()+(day-1)*864e5)._ymd();
       const camp=(DB.production_campaigns||[]).find(c=>
         c.element_id===el.id && packDate>=c.start_date && packDate<=c.end_date);
       if(camp){
