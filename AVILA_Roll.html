@@ -1271,6 +1271,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
 .camp-grip{position:absolute;top:0;bottom:0;width:7px;cursor:ew-resize;z-index:4;opacity:0;transition:opacity .12s}
 .camp-grip.s{left:-2px}.camp-grip.e{right:-2px}
 .camp-grip::after{content:'';position:absolute;top:2px;bottom:2px;left:2px;width:3px;border-radius:2px;background:var(--plan)}
+.camp-grip.sim::after{background:transparent;border-left:2px dashed var(--plan);width:0}
 tr:hover .camp-grip,body.camp-dragging .camp-grip{opacity:1}
 body.camp-dragging,body.camp-dragging *{cursor:ew-resize!important;user-select:none!important}
 td.camp-drag-pv{box-shadow:inset 0 2px 0 var(--plan),inset 0 -2px 0 var(--plan);background:var(--plan-faint)!important}
@@ -6370,6 +6371,52 @@ function _campGrips(store,c,ds){
   if(ds===c.end_date)   g+=`<div class="camp-grip e" data-store="${store}" data-camp="${id}" data-edge="end" title="Drag to move the campaign end (${c.end_date})"></div>`;
   return g;
 }
+// Grips on a SIMULATION-proposed run (no campaign behind it). run = {key, val, s, e, pv, nv}:
+// key = element id / vessel call id, val = product / vessel action, s..e = the run's full
+// extent over the horizon, pv / nv = what runs on the day just before / after it (for the
+// changeover rule in _campApplySim). Dragging one turns it into the user's own campaign.
+function _simGrips(store,run,ds){
+  if(!run) return '';
+  const a=`data-store="${store}" data-key="${esc(run.key)}" data-val="${esc(run.val)}" data-s="${run.s}" data-e="${run.e}" data-pv="${esc(run.pv||'')}" data-nv="${esc(run.nv||'')}"`;
+  let g='';
+  if(ds===run.s) g+=`<div class="camp-grip s sim" ${a} data-edge="start" title="Simulation proposal — drag to move its start (${run.s}); it becomes your campaign"></div>`;
+  if(ds===run.e) g+=`<div class="camp-grip e sim" ${a} data-edge="end" title="Simulation proposal — drag to move its end (${run.e}); it becomes your campaign"></div>`;
+  return g;
+}
+// Contiguous runs over the whole horizon from a per-day value array (null = no run):
+// returns runAt[date] = {key, val, s, e, pv, nv}; neighbourOf(i) = what day i runs ('' = nothing).
+function _simRunsFrom(dates, vals, key, neighbourOf){
+  const runAt={}; let i0=-1;
+  const close=i1=>{ if(i0<0) return;
+    const run={key, val:vals[i0], s:dates[i0], e:dates[i1], pv:i0>0?neighbourOf(i0-1):'', nv:i1<dates.length-1?neighbourOf(i1+1):''};
+    for(let k=i0;k<=i1;k++) runAt[dates[k]]=run; i0=-1; };
+  vals.forEach((v,i)=>{ if(i0>=0&&v!==vals[i0]) close(i-1); if(v!=null&&i0<0) i0=i; });
+  close(vals.length-1);
+  return runAt;
+}
+// Drop of a dragged SIMULATION run. The run's new [s, e] becomes a campaign of its own
+// product/action. Shrinking it moves the changeover: the freed days go to whatever runs on
+// the far side (pv / nv), also as a campaign — otherwise the simulator would simply pick the
+// same product again for them. Everything created here is an ordinary campaign, so deleting
+// it from the popup hands those days back to the simulation.
+function _campApplySim(d){
+  const vessel=d.store==='simvessel';
+  const st=_CAMP_STORES[vessel?'vessel':'prod'];
+  const same=vessel?(x=>x.vessel_call_id===d.sim.key):(x=>x.element_id===d.sim.key);
+  const mk=(val,s,e)=>{ const id=(vessel?'vcamp_':'camp_')+Date.now()+'_'+Math.random().toString(36).slice(2,6);
+    return vessel?{id, vessel_call_id:d.sim.key, action:val, start_date:s, end_date:e}
+                 :{id, element_id:d.sim.key, product_id:val, start_date:s, end_date:e, rate_tpd:0, notes:'from simulation (dragged)'}; };
+  const adds=[[d.sim.val, d.s, d.e]];
+  if(d.edge==='end'&&d.e<d.c.end_date&&d.sim.nv) adds.push([d.sim.nv, _addDays(d.e,1), d.c.end_date]);
+  if(d.edge==='start'&&d.s>d.c.start_date&&d.sim.pv) adds.push([d.sim.pv, d.c.start_date, _addDays(d.s,-1)]);
+  let list=DB[st.key]||[];
+  adds.forEach(([v,s1,e1])=>{ list=_campSplice(list, same, s1, e1); list.push(mk(v,s1,e1)); });
+  DB[st.key]=list;
+  autoSave();
+  renderSupplyView();
+  statMsg(`Simulation run locked as your campaign ${d.s} → ${d.e}${adds.length>1?' (changeover moved)':''} — delete it in the popup to return to the simulation · running simulation…`);
+  scheduleSimulation();
+}
 let _campDrag=null;
 function _campDragCells(row){ return [...row.querySelectorAll('td[data-ds]')]; }
 function _campDragPaint(){
@@ -6408,7 +6455,7 @@ function _campDragEnd(cancel){
     document.addEventListener('click',eat,true); setTimeout(()=>document.removeEventListener('click',eat,true),0);
   }
   if(cancel||!d.moved||(d.s===d.c.start_date&&d.e===d.c.end_date)) return;
-  _campApplyDates(d.store,d.c.id,d.s,d.e);
+  if(d.sim) _campApplySim(d); else _campApplyDates(d.store,d.c.id,d.s,d.e);
 }
 function _campDragUp(){ _campDragEnd(false); }
 function _campDragKey(e){ if(e.key==='Escape') _campDragEnd(true); }
@@ -6429,14 +6476,17 @@ function _campApplyDates(store,id,s,e){
 }
 document.addEventListener('mousedown',e=>{
   const g=e.target.closest&&e.target.closest('.camp-grip'); if(!g||e.button!==0) return;
-  const st=_CAMP_STORES[g.dataset.store]; if(!st) return;
-  const c=(DB[st.key]||[]).find(x=>x.id===g.dataset.camp); if(!c) return;
+  const gd=g.dataset, isSim=gd.store==='simprod'||gd.store==='simvessel';
+  let c, sim=null;
+  if(isSim){ c={id:null, start_date:gd.s, end_date:gd.e}; sim={key:gd.key, val:gd.val, pv:gd.pv, nv:gd.nv}; }
+  else { const st=_CAMP_STORES[gd.store]; if(!st) return;
+    c=(DB[st.key]||[]).find(x=>x.id===gd.camp); if(!c) return; }
   e.preventDefault(); e.stopPropagation();
   const row=g.closest('tr'); const td=g.closest('td[data-ds]');
   const tip=document.createElement('div'); tip.className='camp-drag-tip';
   tip.style.left=(e.clientX+12)+'px'; tip.style.top=(e.clientY+14)+'px';
   document.body.appendChild(tip);
-  _campDrag={store:g.dataset.store, c:{...c}, edge:g.dataset.edge, row, cells:_campDragCells(row),
+  _campDrag={store:gd.store, sim, c:{...c}, edge:gd.edge, row, cells:_campDragCells(row),
     orig:td?td.dataset.ds:null, s:c.start_date, e:c.end_date, moved:false, tip};
   document.body.classList.add('camp-dragging');
   document.addEventListener('mousemove',_campDragMove);
@@ -9048,6 +9098,23 @@ const _DOWN_HATCH = {
   repair:  'repeating-linear-gradient(45deg,var(--h-repair-a),var(--h-repair-a) 3px,var(--h-repair-b) 3px,var(--h-repair-b) 6px)', // manual "Down For Repairs"
   pm:      'repeating-linear-gradient(45deg,var(--h-pm-a),var(--h-pm-a) 3px,var(--h-pm-b) 3px,var(--h-pm-b) 6px)', // manual "Down PM Day"
 };
+// Run-start label on a Gantt bar: small and clipped to ONE day cell (never spills into the next).
+const _BAR_LBL_FIT='position:absolute;left:2px;right:1px;top:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:7px;font-weight:700;';
+// Where a Gantt run's label goes: the MIDDLE day of each run. keys[i] = run identity of
+// day i (null = no labelled run), vis[i] = that day's cell is on screen. A run whose middle
+// is off screen (time frame / collapsed month) is labelled at the middle of its visible part.
+// Returns the Set of indexes that carry a label.
+function _midLabelIdx(keys, vis){
+  const out=new Set(); let i0=-1;
+  const close=i1=>{ if(i0<0) return;
+    const mid=Math.floor((i0+i1)/2);
+    if(vis[mid]) out.add(mid);
+    else { const v=[]; for(let k=i0;k<=i1;k++) if(vis[k]) v.push(k); if(v.length) out.add(v[Math.floor((v.length-1)/2)]); }
+    i0=-1; };
+  keys.forEach((k,i)=>{ if(i0>=0&&k!==keys[i0]) close(i-1); if(k!=null&&i0<0) i0=i; });
+  close(keys.length-1);
+  return out;
+}
 const _DOWN_LABEL = {maint:'MAINT', blocked:'FULL', repair:'REPAIRS', pm:'PM DAY'};
 const _DOWN_TIP = {
   blocked:'⛔ Blocked — receiving silo full, so the element had to stop',
@@ -9579,6 +9646,20 @@ function _renderSupplyViewInner(wrap){
     const starvedTip=isPack?'⚠ Unplanned shortfall — packer could not run (no bulk cement)':'⚠ Unplanned shortfall — mill could not produce (no clinker)';
     const myCamps=(DB.production_campaigns||[]).filter(c=>c.element_id===el.id);
     const campAt=ds=>myCamps.find(c=>ds>=c.start_date&&ds<=c.end_date)||null;
+    // Simulation-proposed product runs over the WHOLE horizon (so a grip marks a run's true
+    // start/end even where the time frame clips it). Not kilns: one product for months.
+    let simRunAt={}, lblIdx=new Set();
+    if(!isKiln){
+      const rrs=_simDates.map((ds,i)=>maintDays.has(ds)?null:resolveProduction(el,ds,i,maintDays));
+      if(hasSim){
+        const prodOf=i=>{ const x=rrs[i]; return (x&&x.capacity_tpd>0&&!x.downtime)?x.product_id:''; };
+        const vals=rrs.map(x=>(x&&x.capacity_tpd>0&&!x.downtime&&!x.isActual&&!x.isCampaign)?x.product_id:null);
+        simRunAt=_simRunsFrom(_simDates, vals, el.id, prodOf);
+      }
+      // Product label in the middle of each forecast production run (real days carry numbers).
+      const visDs=new Set(); months.forEach(m=>{ if(!collapsed.has(m.ym)) m.dates.forEach(d=>visDs.add(d)); });
+      lblIdx=_midLabelIdx(rrs.map(x=>(x&&x.capacity_tpd>0&&!x.downtime&&!x.isActual)?x.product_id:null), _simDates.map(d=>visDs.has(d)));
+    }
     let h=`<tr class="supsec-${o.sec}">
               <td style="${stickyLeft('var(--surface)',o.depth,'border-bottom:1px solid var(--border),')}color:${o.color};font-size:9px" title="${esc(el.name)}">${_supLeafLabel(el.name)}
                 <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${rated>0?rated.toLocaleString()+' t/d rated':''}</span>
@@ -9610,7 +9691,7 @@ function _renderSupplyViewInner(wrap){
         const isMaint=maintDays.has(ds);
         const isCamp=res.isCampaign;
         const dt=res.downtime; // 'repair' | 'pm' from a downtime campaign
-        const grips=_campGrips('prod',campAt(ds),ds);
+        const grips=_campGrips('prod',campAt(ds),ds)||(isKiln?'':_simGrips('simprod',simRunAt[ds],ds));
         const gPos=grips?'position:relative;':'';
         const run=_runByDate[ds];
         const campArgs=run?`'${el.id}','${ds}','${run.start}','${run.end}','${run.product}'`:`'${el.id}','${ds}'`;
@@ -9662,7 +9743,12 @@ function _renderSupplyViewInner(wrap){
         const campMark=_edges.length?`box-shadow:${_edges.join(',')};`:'';
         const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?_DOWN_TIP[dt]+(v>0?` · ${prod?.name?esc(prod.name)+' ':''}${Math.round(v).toLocaleString()} t`:''):isBlocked?_DOWN_TIP.blocked:isStarved?starvedTip:(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name?`${esc(prod.name)} · ${Math.round(v)} t/d`:'Idle')));
         const zpos=isRunStart?'position:relative;z-index:2;':gPos;
-        h+=`<td ${dAttr} class="sup-day-${mon.ym}${isGap?' src-gap':''}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="${zpos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barBg};${campMark}"></div>${grips}</td>`;
+        // Product name only (no rate) in the middle of each production run — small, without the
+        // plant prefix ("BRS_IL(12)/BLK" → "IL(12)/BLK") and clipped to its own day cell; the
+        // tooltip has the full name.
+        const lblName=((typeof spShortProd==='function')?spShortProd(prod?.name||''):(prod?.name||'')).replace(/^[A-Z0-9]{2,5}_(?=.)/,'');
+        const label=(lblIdx.has(dayIdx)&&!downKind&&v>0&&lblName)?`<span style="${_BAR_LBL_FIT}line-height:10px;font-family:var(--mono);color:${isGap?'var(--simulated)':'var(--bar-lbl)'};text-shadow:0 0 2px var(--bar-lbl-halo),0 0 2px var(--bar-lbl-halo);pointer-events:none">${esc(lblName)}</span>`:'';
+        h+=`<td ${dAttr} class="sup-day-${mon.ym}${isGap?' src-gap':''}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="${zpos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barBg};${campMark}">${label}</div>${grips}</td>`;
       });
     });
     return h+`</tr>`;
@@ -11423,6 +11509,21 @@ function _renderSupplyViewInner(wrap){
                   const realDaySet=new Set((DB.real_unloading_daily||[]).filter(u=>u.berth_id===berth.id&&u.product_id===pid&&u.unit!=='cars'&&(parseFloat(u.value)||0)>0).map(u=>u.date));
                   h+=`<tr class="supsec-termVessel"><td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${_pColor(pid)};font-size:9px">${_pChip(pid)}${pname}<span style="font-size:7px;opacity:.55;margin-left:4px">${_shipBerths.length>1?berth.name:'UNLOADING'}</span></td>`;
                   let _pk=null;
+                  // Simulation-proposed Anchorage / Unloading runs (per vessel) over the horizon,
+                  // not real and not already forced by a vessel campaign — draggable like campaigns.
+                  const _vcs=DB.vessel_campaigns||[];
+                  const _vSt=i=>{ const c=tl[i]; return c&&c.vesselCallId&&(c.state==='anchorage'||c.state==='unloading')?c.vesselCallId+'|'+c.state:''; };
+                  const _vSimVal=i=>{ const v=_vSt(i); const ds=_simDates[i]; if(!v||realDaySet.has(ds)) return null;
+                    const id=tl[i].vesselCallId;
+                    return _vcs.some(x=>x.vessel_call_id===id&&ds>=x.start_date&&ds<=x.end_date)?null:v; };
+                  const _vRunAt=_simRunsFrom(_simDates, _simDates.map((d,i)=>_vSimVal(i)), '', _vSt);
+                  // Split the composite "callId|state" back into key/val; a neighbour only counts for the SAME vessel.
+                  const _vSimRun=ds=>{ const r0=_vRunAt[ds]; if(!r0) return null; const [key,val]=r0.val.split('|');
+                    const nb=x=>{ if(!x) return ''; const [k,v]=x.split('|'); return k===key?v:''; };
+                    return {key, val, s:r0.s, e:r0.e, pv:nb(r0.pv), nv:nb(r0.nv)}; };
+                  // Vessel name in the middle of each (non-real) anchorage / unloading run.
+                  const _vVis=new Set(); months.forEach(m=>{ if(!collapsed.has(m.ym)) m.dates.forEach(d=>_vVis.add(d)); });
+                  const _vLbl=_midLabelIdx(_simDates.map((ds,i)=>{ const c=tl[i]; return (!c||!c.state||realDaySet.has(ds))?null:c.state+'|'+(c.vessel||''); }), _simDates.map(d=>_vVis.has(d)));
                   months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
                     const unl=mon.dates.reduce((s,ds)=>{ const c=tl[_dIdx(ds)]; return s+(c&&c.state==='unloading'?1:0); },0);
                     h+=`<td style="border-left:2px solid rgba(var(--purple-rgb),.1);font-size:8px;color:${rc};text-align:center;padding:4px 6px;border-bottom:1px solid var(--border)">${unl>0?unl+'d':''}</td>`;
@@ -11430,7 +11531,7 @@ function _renderSupplyViewInner(wrap){
                       const c=tl[_dIdx(ds)]; const st=c&&c.state; const vessel=(c&&c.vessel)||''; const vesselCallId=(c&&c.vesselCallId)||'';
                       // A forced Anchorage/Unloading campaign on this vessel+day: plan-edge mark + drag grips at its ends.
                       const vc=vesselCallId?(DB.vessel_campaigns||[]).find(x=>x.vessel_call_id===vesselCallId&&ds>=x.start_date&&ds<=x.end_date)||null:null;
-                      const vg=_campGrips('vessel',vc,ds);
+                      const vg=_campGrips('vessel',vc,ds)||_simGrips('simvessel',_vSimRun(ds),ds);
                       // REAL unloading (any source — vessel popup, Daily Data form, or imported file)
                       // shows the ACTUAL tonnage as a bold GREEN NUMBER on the same line.
                       if(realDaySet.has(ds)){
@@ -11441,7 +11542,7 @@ function _renderSupplyViewInner(wrap){
                       }
                       const p=_vesselCellParts(st,false);
                       const key=(st||'__i')+'|'+vessel; const runStart=!!st&&key!==_pk; _pk=key;
-                      const label=''; // no text on the bar — colour gives the state, the tooltip names the vessel
+                      const label=_vLbl.has(_dIdx(ds))?`<span style="${_BAR_LBL_FIT}line-height:12px;color:${st==='unloading'?'var(--on-teal)':'var(--bar-lbl-down)'};pointer-events:none">${esc(vessel)}</span>`:''; // vessel name only
                       const ttl=(st?(vessel+' — '+p.lbl+(vc?' · 🔒 campaign '+vc.start_date+' → '+vc.end_date:'')+' — '):'')+(vesselCallId?'click to set Forecast Campaign or Real value':'no vessel scheduled');
                       h+=`<td class="sup-day-${mon.ym}" data-ds="${ds}" title="${ttl}" onclick="event.stopPropagation();showVesselCampaignPopup('${berth.id}','${vesselCallId}','${ds}')" style="cursor:pointer;position:relative;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:12px;background:${p.bg}${vc?';box-shadow:inset 0 2px 0 var(--plan)':''}">${label}</div>${vg}</td>`;
                     });
@@ -15616,6 +15717,9 @@ function vpRender(){
           const realDay=new Set((DB.real_unloading_daily||[]).filter(u=>u.berth_id===berth.id&&(!pid||u.product_id===pid)&&u.unit!=='cars'&&(parseFloat(u.value)||0)>0).map(u=>u.date));
           const ganttRow=(rowLbl, stateOf)=>{
             let _pk=null;
+            // Vessel name in the middle of each run, over the planner's whole day list.
+            const _allD=[], _visD=[]; months.forEach(mon=>{ const col=window._vpColapsed.has(mon.ym); mon.days.forEach(d=>{ _allD.push(d); _visD.push(!col); }); });
+            const _lblAt=new Set([..._midLabelIdx(_allD.map(d=>{ const c=stateOf(d); return c&&c.state?c.state+'|'+(c.vessel||''):null; }), _visD)].map(i=>_allD[i]));
             const cells=months.map(mon=>{const isCol=window._vpColapsed.has(mon.ym);
               const unl=mon.days.reduce((s,d)=>{ const c=stateOf(d); return s+(c&&c.state==='unloading'?1:0); },0);
               const mTd=`<td class="logi-mcol" style="${_mTdSty}">${unl>0?unl+'d':'—'}</td>`;
@@ -15624,7 +15728,7 @@ function vpRender(){
                 const isReal=st==='unloading'&&realDay.has(vpDayDate(d));
                 const p=_vesselCellParts(st,isReal);
                 const key=(st||'__i')+'|'+vessel; const rs=!!st&&key!==_pk; _pk=key;
-                const lbl=''; // no text on the bar — colour gives the state, the tooltip names the vessel
+                const lbl=_lblAt.has(d)?`<span style="${_BAR_LBL_FIT}line-height:12px;color:${st==='unloading'?'var(--on-teal)':'var(--bar-lbl-down)'};pointer-events:none">${esc(vessel)}</span>`:''; // vessel name only
                 const ttl=st?(vessel+' — '+p.lbl):'';
                 return `<td title="${ttl}" style="position:relative;padding:2px 0;overflow:visible;${_tpTdSty(d)}"><div style="position:relative;height:12px;background:${p.bg}">${lbl}</div></td>`;
               }).join('');
