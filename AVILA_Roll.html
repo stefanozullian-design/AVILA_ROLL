@@ -9354,13 +9354,30 @@ function _berthProductTimeline(hist, carries, pid){
   const hit=(callId,name)=>carries(callId,pid)||carries(name,pid);
   return (hist||[]).map(bv=>{
     if(!bv) return null;
-    if(bv.docked && hit(bv.dockedCallId,bv.docked)) return {state: bv.state==='unloading'?'unloading':'anchorage', vessel:bv.docked, vesselCallId:bv.dockedCallId||null};
+    if(bv.docked && hit(bv.dockedCallId,bv.docked)) return {state: bv.state==='unloading'?'unloading':'anchorage', vessel:bv.docked, vesselCallId:bv.dockedCallId||null, left:bv.dockedLeft};
     const w=(bv.waitingList||[]).find(x=>hit(x.vesselCallId,x.name));
-    if(w) return {state:'anchorage', vessel:w.name, vesselCallId:w.vesselCallId||null};
+    if(w) return {state:'anchorage', vessel:w.name, vesselCallId:w.vesselCallId||null, left:w.left};
     return null;
   });
 }
 
+// Tonnes a vessel brings to ONE berth: a split vessel's legs at that berth, else the call's quantity.
+function _vesselCargoAt(vesselCallId, berthId){
+  const v=vesselCallId&&(DB.vessel_calls||[]).find(x=>x.id===vesselCallId); if(!v) return 0;
+  if(v.legs&&v.legs.length) return v.legs.filter(l=>l.berth_element_id===berthId).reduce((a,l)=>a+(parseFloat(l.quantity_t)||0),0);
+  return parseFloat(v.quantity_t||v.total_quantity_t)||0;
+}
+// Tooltip line for a vessel cell: cargo · unloaded so far · left aboard at end of that day.
+// "left" comes from the simulation (real unloading entries already count), so the two add up
+// to the cargo. Returns '' when unknown (no sim yet, or a history written before this field).
+function _vesselLeftTip(c, berthId){
+  if(!c||c.left==null) return '';
+  const cargo=_vesselCargoAt(c.vesselCallId, berthId);
+  const left=Math.max(0,c.left), fmt=n=>Math.round(n).toLocaleString();
+  return cargo>0
+    ? ` · cargo ${fmt(cargo)} t · unloaded ${fmt(Math.max(0,cargo-left))} t · ${fmt(left)} t left (end of day)`
+    : ` · ${fmt(left)} t left (end of day)`;
+}
 // One vessel-status cell. Forecast unloading = hatched green; ACTUAL unloading (a day the user
 // entered real unload) = solid green. Anchorage = red hatch (covers not-yet-docked, berth-
 // occupied, silo-full, and manual-campaign holds — only two vessel states exist).
@@ -11537,13 +11554,13 @@ function _renderSupplyViewInner(wrap){
                       if(realDaySet.has(ds)){
                         _pk='__real'; // break the run so the next forecast bar re-labels its vessel
                         const rt=realUnloadTonnesBerthProdDay(berth.id,pid,ds);
-                        h+=`<td class="sup-day-${mon.ym} cell-real" title="${vessel?vessel+' — ':''}actual unloading · ${Math.round(rt).toLocaleString()} t — click to edit" data-ds="${ds}" onclick="event.stopPropagation();showVesselCampaignPopup('${berth.id}','${vesselCallId}','${ds}')" style="${vg?'position:relative;':''}cursor:pointer;font-size:9px;font-weight:700;color:var(--teal);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${Math.round(rt).toLocaleString()}${vg}</td>`;
+                        h+=`<td class="sup-day-${mon.ym} cell-real" title="${vessel?vessel+' — ':''}actual unloading · ${Math.round(rt).toLocaleString()} t${_vesselLeftTip(c,berth.id)} — click to edit" data-ds="${ds}" onclick="event.stopPropagation();showVesselCampaignPopup('${berth.id}','${vesselCallId}','${ds}')" style="${vg?'position:relative;':''}cursor:pointer;font-size:9px;font-weight:700;color:var(--teal);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${Math.round(rt).toLocaleString()}${vg}</td>`;
                         return;
                       }
                       const p=_vesselCellParts(st,false);
                       const key=(st||'__i')+'|'+vessel; const runStart=!!st&&key!==_pk; _pk=key;
                       const label=_vLbl.has(_dIdx(ds))?`<span style="${_BAR_LBL_FIT}line-height:12px;color:${st==='unloading'?'var(--on-teal)':'var(--bar-lbl-down)'};pointer-events:none">${esc(vessel)}</span>`:''; // vessel name only
-                      const ttl=(st?(vessel+' — '+p.lbl+(vc?' · 🔒 campaign '+vc.start_date+' → '+vc.end_date:'')+' — '):'')+(vesselCallId?'click to set Forecast Campaign or Real value':'no vessel scheduled');
+                      const ttl=(st?(vessel+' — '+p.lbl+_vesselLeftTip(c,berth.id)+(vc?' · 🔒 campaign '+vc.start_date+' → '+vc.end_date:'')+' — '):'')+(vesselCallId?'click to set Forecast Campaign or Real value':'no vessel scheduled');
                       h+=`<td class="sup-day-${mon.ym}" data-ds="${ds}" title="${ttl}" onclick="event.stopPropagation();showVesselCampaignPopup('${berth.id}','${vesselCallId}','${ds}')" style="cursor:pointer;position:relative;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:12px;background:${p.bg}${vc?';box-shadow:inset 0 2px 0 var(--plan)':''}">${label}</div>${vg}</td>`;
                     });
                   });
@@ -15729,7 +15746,7 @@ function vpRender(){
                 const p=_vesselCellParts(st,isReal);
                 const key=(st||'__i')+'|'+vessel; const rs=!!st&&key!==_pk; _pk=key;
                 const lbl=_lblAt.has(d)?`<span style="${_BAR_LBL_FIT}line-height:12px;color:${st==='unloading'?'var(--on-teal)':'var(--bar-lbl-down)'};pointer-events:none">${esc(vessel)}</span>`:''; // vessel name only
-                const ttl=st?(vessel+' — '+p.lbl):'';
+                const ttl=st?(vessel+' — '+p.lbl+_vesselLeftTip(c,berth.id)):'';
                 return `<td title="${ttl}" style="position:relative;padding:2px 0;overflow:visible;${_tpTdSty(d)}"><div style="position:relative;height:12px;background:${p.bg}">${lbl}</div></td>`;
               }).join('');
             }).join('');
@@ -19154,9 +19171,12 @@ function simulate(elements, connections, horizon, includeProposed=false){
       if(r.berthVesselHistory[berth.id]===undefined) return;
       const bs=state[berth.id];
       const docked=bs.currentVessel||null;
-      const waitingList=(bs.vesselPending||[]).map(p=>({name:p.name||'vessel', reason:'anchorage', vesselCallId:p.vesselCallId||null}));
+      // left = tonnes still aboard at END of day (berthQueue for the docked vessel — real
+      // unloading entries already consumed it — and quantity_t for vessels still waiting).
+      const waitingList=(bs.vesselPending||[]).map(p=>({name:p.name||'vessel', reason:'anchorage', vesselCallId:p.vesselCallId||null, left:Math.round(p.quantity_t||0)}));
       const st=docked?(bs.status==='running'?'unloading':'anchorage'):(waitingList.length?'anchorage':'idle');
-      r.berthVesselHistory[berth.id].push({docked, dockedCallId:bs.currentVesselCallId||null, state:st, waiting:waitingList.length, waitingList});
+      const dockedLeft=docked?Math.round(Object.values(bs.berthQueue||{}).reduce((a,b)=>a+b,0)):null;
+      r.berthVesselHistory[berth.id].push({docked, dockedCallId:bs.currentVesselCallId||null, dockedLeft, state:st, waiting:waitingList.length, waitingList});
     });
 
   }
