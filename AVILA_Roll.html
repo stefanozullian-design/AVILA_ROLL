@@ -1267,6 +1267,15 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
 .sp-fp-mid-input{background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:9px;padding:4px 7px;outline:none;text-align:right;width:100%;}
 .sp-fp-mid-input:focus{border-color:var(--amber);}
 .sp-fp-mid-input.overridden{color:var(--amber);border-color:rgba(var(--amber-rgb),.5);}
+/* Campaign drag grips (Supply Gantts) — shown on row hover, drag to move a campaign edge */
+.camp-grip{position:absolute;top:0;bottom:0;width:7px;cursor:ew-resize;z-index:4;opacity:0;transition:opacity .12s}
+.camp-grip.s{left:-2px}.camp-grip.e{right:-2px}
+.camp-grip::after{content:'';position:absolute;top:2px;bottom:2px;left:2px;width:3px;border-radius:2px;background:var(--plan)}
+tr:hover .camp-grip,body.camp-dragging .camp-grip{opacity:1}
+body.camp-dragging,body.camp-dragging *{cursor:ew-resize!important;user-select:none!important}
+td.camp-drag-pv{box-shadow:inset 0 2px 0 var(--plan),inset 0 -2px 0 var(--plan);background:var(--plan-faint)!important}
+td.camp-drag-cut>div:first-child{opacity:.3}
+.camp-drag-tip{position:fixed;z-index:30000;pointer-events:none;padding:3px 7px;border:1px solid var(--plan);border-radius:3px;background:var(--surface);color:var(--text);font-family:var(--mono);font-size:9px;white-space:nowrap}
 </style>
 </head>
 <body>
@@ -5612,14 +5621,15 @@ function showCampaignPopup(elId, dateStr, runStart, runEnd, runProduct){
       <div class="fr s2">
         <div class="ff">
           <div class="fl" id="camp-from-label">From</div>
-          <input class="fi" id="camp-from" type="date" value="${fromVal}" style="width:100%">
+          <input class="fi" id="camp-from" type="date" onchange="window._campRealAck=false" value="${fromVal}" style="width:100%">
         </div>
         <div class="ff" id="camp-to-field">
           <div class="fl">To</div>
-          <input class="fi" id="camp-to" type="date" value="${toVal}" style="width:100%">
+          <input class="fi" id="camp-to" type="date" onchange="window._campRealAck=false" value="${toVal}" style="width:100%">
         </div>
       </div>
     </div>
+    <div id="camp-warn" style="display:none;margin-top:10px;padding:6px 8px;border-left:3px solid var(--amber);background:rgba(var(--amber-rgb),.08);color:var(--amber);font-size:9px;line-height:1.5"></div>
 
     <div style="margin-top:12px;display:flex;gap:8px;justify-content:space-between;align-items:center">
       <div style="display:flex;gap:6px">
@@ -5650,8 +5660,10 @@ function showCampaignPopup(elId, dateStr, runStart, runEnd, runProduct){
   }
   ov.innerHTML=`<div style="background:var(--surface);border:1px solid var(--lime);padding:18px;border-radius:6px;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.6)">${html}</div>`;
   ov.style.display='flex';
+  window._campInited=false; window._campRealAck=false;
   _campSetMode(defaultMode);
   _campProductChanged(document.getElementById('camp-product')); // reflect a pre-selected downtime option
+  window._campInited=true;
 }
 
 // Product-dropdown change in the Campaign popup. Keeps the original behaviour (sync the
@@ -5666,6 +5678,17 @@ function _campProductChanged(sel){
   const rate=document.getElementById('camp-rate');
   const rateLbl=document.getElementById('camp-rate-label');
   const rateHint=document.getElementById('camp-rate-hint');
+  const warn=document.getElementById('camp-warn'); if(warn&&window._campInited) warn.style.display='none';
+  window._campRealAck=false;
+  // Downtime is a plan, never a measured value: picking it while the popup opened in Real
+  // mode (it does whenever the day already has actuals) used to make Save silently refuse.
+  // Switch to Forecast, and default to ONE day — the "To" otherwise inherits the whole
+  // run's end date, turning a single PM day into PM for the rest of the run.
+  if(isDown&&window._campInited){
+    if(window._campMode==='real') _campSetMode('forecast');
+    const f=document.getElementById('camp-from'), t=document.getElementById('camp-to');
+    if(f&&t&&f.value) t.value=f.value;
+  }
   if(window._campMode!=='real'&&rate) rate.value=opt?opt.dataset.rate:rate.value;
   const isPm=opt&&opt.dataset&&opt.dataset.pm==='1'; // Down PM Day → half-day at 50% (not a full stop)
   if(rate){ rate.disabled=!!isDown; rate.style.opacity=isDown?'.5':'1'; }
@@ -6172,6 +6195,7 @@ function showVesselCampaignPopup(berthId, vesselCallId, dateStr){
       </div>
     </div>
     <div id="vcamp-hint" style="font-size:8px;color:var(--text-dim);line-height:1.5;margin-top:8px"></div>
+    <div id="vcamp-warn" style="display:none;margin-top:10px;padding:6px 8px;border-left:3px solid var(--amber);background:rgba(var(--amber-rgb),.08);color:var(--amber);font-size:9px;line-height:1.5"></div>
     <div style="margin-top:12px;display:flex;gap:8px;justify-content:space-between;align-items:center">
       <div style="display:flex;gap:6px">
         <span id="vcamp-del-wrap">${existing?`<button onclick="deleteVesselCampaign()" style="padding:5px 10px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid rgba(var(--red-rgb),.5);color:var(--red);cursor:pointer;border-radius:2px">✕ Delete Campaign</button>`:''}</span>
@@ -6233,7 +6257,7 @@ function applyVesselCampaign(){
   if(window._vCampMode==='real'){
     const value=parseFloat(document.getElementById('vcamp-value')?.value);
     const ds=document.getElementById('vcamp-from')?.value;
-    if(!ds||isNaN(value)||value<0){ statMsg('Enter a valid date and a non-negative tonnage'); return; }
+    if(!ds||isNaN(value)||value<0){ _campWarn('Enter a valid date and a non-negative tonnage','vcamp'); return; }
     const now=new Date().toISOString();
     DB.real_unloading_daily=(DB.real_unloading_daily||[]).filter(u=>!(u.date===ds&&u.product_id===ctx.pid&&(u.facility_id===ctx.facId||u.berth_id===ctx.berthId)));
     DB.real_unloading_daily.push({date:ds,facility_id:ctx.facId,berth_id:ctx.berthId,product_id:ctx.pid,mode:'ship',value,unit:'t',source:'actual',created_at:now,updated_at:now});
@@ -6244,14 +6268,12 @@ function applyVesselCampaign(){
   const from=document.getElementById('vcamp-from')?.value;
   const to=document.getElementById('vcamp-to')?.value;
   const action=document.getElementById('vcamp-action')?.value;
-  if(!from||!to||from>to){ statMsg('Enter a valid date range'); return; }
+  if(!from||!to||from>to){ _campWarn('Enter a valid date range','vcamp'); return; }
   if(!DB.vessel_campaigns) DB.vessel_campaigns=[];
   // Remove any overlapping campaign for this SAME vessel — one forced action per day —
   // mirroring applyCampaign()'s overlap handling for finish mills.
-  DB.vessel_campaigns=DB.vessel_campaigns.filter(c=>
-    c.vessel_call_id!==ctx.vesselCallId || c.end_date<from || c.start_date>to
-  );
-  DB.vessel_campaigns.push({id:ctx.existingId||`vcamp_${Date.now()}`, vessel_call_id:ctx.vesselCallId, action, start_date:from, end_date:to});
+  DB.vessel_campaigns=_campSplice(DB.vessel_campaigns, c=>c.vessel_call_id===ctx.vesselCallId, from, to);
+  DB.vessel_campaigns.push({id:`vcamp_${Date.now()}_${Math.random().toString(36).slice(2,6)}`, vessel_call_id:ctx.vesselCallId, action, start_date:from, end_date:to});
   closeVesselCampaignPopup();
   autoSave(); renderSupplyView(); statMsg('Campaign applied — running simulation…'); scheduleSimulation();
 }
@@ -6278,8 +6300,8 @@ function applyCampaign(elId){
 
   // REAL mode: write a single-day actual to real_production_daily (Tier 0 — same as Daily Data / Excel).
   if(window._campMode==='real'){
-    if(DOWNTIME_PRODUCTS[productId]){ statMsg('“Down For Repairs / PM Day” is a forecast plan — switch to Forecast Campaign to schedule downtime'); return; }
-    if(!productId||!fromDate){ statMsg('Please choose a product and date'); return; }
+    if(DOWNTIME_PRODUCTS[productId]){ _campWarn('Down For Repairs / PM Day is a plan, not a measured value — switch to 📈 Forecast Campaign to save it'); return; }
+    if(!productId||!fromDate){ _campWarn('Please choose a product and date'); return; }
     const facId=getEl(elId)?.facility_id||S.facility_id;
     const now=new Date().toISOString();
     // Upsert: one row per element+product+date.
@@ -6295,17 +6317,26 @@ function applyCampaign(elId){
     return;
   }
 
-  if(!productId||!fromDate||!toDate){ statMsg('Please fill all fields'); return; }
-  if(fromDate>toDate){ statMsg('From date must be before To date'); return; }
+  if(!productId||!fromDate||!toDate){ _campWarn('Please fill all fields'); return; }
+  if(fromDate>toDate){ _campWarn('“From” must be on or before “To”'); return; }
+  // Real production always wins over a campaign, so on days that already have actuals the
+  // campaign is saved but never shows. Say so once; a second click on Apply saves anyway.
+  if(!window._campRealAck){
+    const realDays=[...new Set((DB.real_production_daily||[]).filter(r=>r.element_id===elId&&r.date>=fromDate&&r.date<=toDate&&(parseFloat(r.volume_t)||0)>0).map(r=>r.date))].sort();
+    if(realDays.length){
+      window._campRealAck=true;
+      _campWarn(`${realDays.length===1?realDays[0]+' already has':realDays.length+' days in this range ('+realDays[0]+' → '+realDays[realDays.length-1]+') already have'} real production. Real data wins, so the campaign won't show there. Click Apply again to save anyway, or move “From”.`);
+      return;
+    }
+  }
 
-  // Remove any overlapping campaigns for this element in the date range
-  DB.production_campaigns=(DB.production_campaigns||[]).filter(c=>
-    c.element_id!==elId || c.end_date<fromDate || c.start_date>toDate
-  );
+  // Overlapping campaigns for this element are TRIMMED to make room, not deleted: a one-day
+  // PM inside a 10-day campaign used to wipe the whole campaign.
+  DB.production_campaigns=_campSplice(DB.production_campaigns||[], c=>c.element_id===elId, fromDate, toDate);
 
   // Add new campaign
   DB.production_campaigns.push({
-    id:'camp_'+Date.now(),
+    id:'camp_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),
     element_id:elId,
     product_id:productId,
     start_date:fromDate,
@@ -6319,6 +6350,118 @@ function applyCampaign(elId){
   renderSupplyView();
   statMsg('Campaign saved — running simulation…');
   scheduleSimulation();
+}
+
+// ── Drag a campaign's start / end on the Supply Gantts ──────────────────────────────────
+// Campaign start/end cells carry a grip (_campGrips); dragging it along its row moves that
+// edge. On release the campaign takes the new dates and any other campaign of the same row
+// it now overlaps is trimmed (_campSplice) — the same rule as saving from the popup. Works
+// for every row that tags its day cells with data-ds and its grips with a store:
+//   prod   → DB.production_campaigns (kilns, finish mills, packing machines)
+//   vessel → DB.vessel_campaigns     (Anchorage / Unloading overrides)
+const _CAMP_STORES={
+  prod:  {key:'production_campaigns', same:c=>x=>x.element_id===c.element_id},
+  vessel:{key:'vessel_campaigns',     same:c=>x=>x.vessel_call_id===c.vessel_call_id},
+};
+function _campGrips(store,c,ds){
+  if(!c) return '';
+  const id=esc(c.id); let g='';
+  if(ds===c.start_date) g+=`<div class="camp-grip s" data-store="${store}" data-camp="${id}" data-edge="start" title="Drag to move the campaign start (${c.start_date})"></div>`;
+  if(ds===c.end_date)   g+=`<div class="camp-grip e" data-store="${store}" data-camp="${id}" data-edge="end" title="Drag to move the campaign end (${c.end_date})"></div>`;
+  return g;
+}
+let _campDrag=null;
+function _campDragCells(row){ return [...row.querySelectorAll('td[data-ds]')]; }
+function _campDragPaint(){
+  const d=_campDrag; if(!d) return;
+  d.cells.forEach(td=>{ const ds=td.dataset.ds;
+    const inNew=ds>=d.s&&ds<=d.e, inOld=ds>=d.c.start_date&&ds<=d.c.end_date;
+    td.classList.toggle('camp-drag-pv',inNew);
+    td.classList.toggle('camp-drag-cut',inOld&&!inNew); });
+  const n=Math.round((new Date(d.e+'T12:00:00')-new Date(d.s+'T12:00:00'))/864e5)+1;
+  d.tip.textContent=`${d.s} → ${d.e} · ${n} day${n===1?'':'s'}`;
+}
+function _campDragMove(e){
+  const d=_campDrag; if(!d) return;
+  d.tip.style.left=(e.clientX+12)+'px'; d.tip.style.top=(e.clientY+14)+'px';
+  const rr=d.row.getBoundingClientRect();
+  const hit=document.elementFromPoint(e.clientX, rr.top+rr.height/2);
+  const td=hit&&hit.closest('td[data-ds]');
+  if(!td||td.parentElement!==d.row) return;
+  const ds=td.dataset.ds;
+  if(ds!==d.orig) d.moved=true;
+  if(d.edge==='start'){ d.s=ds>d.c.end_date?d.c.end_date:ds; d.e=d.c.end_date; }
+  else { d.e=ds<d.c.start_date?d.c.start_date:ds; d.s=d.c.start_date; }
+  _campDragPaint();
+}
+function _campDragEnd(cancel){
+  const d=_campDrag; if(!d) return;
+  _campDrag=null;
+  document.removeEventListener('mousemove',_campDragMove);
+  document.removeEventListener('mouseup',_campDragUp);
+  document.removeEventListener('keydown',_campDragKey);
+  document.body.classList.remove('camp-dragging');
+  d.cells.forEach(td=>td.classList.remove('camp-drag-pv','camp-drag-cut'));
+  d.tip.remove();
+  if(d.moved){ // swallow the click that follows the mouseup so the popup doesn't open too
+    const eat=ev=>{ ev.stopPropagation(); ev.preventDefault(); };
+    document.addEventListener('click',eat,true); setTimeout(()=>document.removeEventListener('click',eat,true),0);
+  }
+  if(cancel||!d.moved||(d.s===d.c.start_date&&d.e===d.c.end_date)) return;
+  _campApplyDates(d.store,d.c.id,d.s,d.e);
+}
+function _campDragUp(){ _campDragEnd(false); }
+function _campDragKey(e){ if(e.key==='Escape') _campDragEnd(true); }
+function _campApplyDates(store,id,s,e){
+  const st=_CAMP_STORES[store]; if(!st) return;
+  const list=DB[st.key]||[]; const c=list.find(x=>x.id===id); if(!c) return;
+  const others=list.filter(x=>x!==c);
+  DB[st.key]=[..._campSplice(others, st.same(c), s, e), {...c, start_date:s, end_date:e}];
+  autoSave();
+  renderSupplyView();
+  let note='';
+  if(store==='prod'){
+    const nReal=new Set((DB.real_production_daily||[]).filter(r=>r.element_id===c.element_id&&r.date>=s&&r.date<=e&&(parseFloat(r.volume_t)||0)>0).map(r=>r.date)).size;
+    if(nReal) note=` · ${nReal} day${nReal===1?' has':'s have'} real data (real wins there)`;
+  }
+  statMsg(`Campaign now ${s} → ${e}${note} — running simulation…`);
+  scheduleSimulation();
+}
+document.addEventListener('mousedown',e=>{
+  const g=e.target.closest&&e.target.closest('.camp-grip'); if(!g||e.button!==0) return;
+  const st=_CAMP_STORES[g.dataset.store]; if(!st) return;
+  const c=(DB[st.key]||[]).find(x=>x.id===g.dataset.camp); if(!c) return;
+  e.preventDefault(); e.stopPropagation();
+  const row=g.closest('tr'); const td=g.closest('td[data-ds]');
+  const tip=document.createElement('div'); tip.className='camp-drag-tip';
+  tip.style.left=(e.clientX+12)+'px'; tip.style.top=(e.clientY+14)+'px';
+  document.body.appendChild(tip);
+  _campDrag={store:g.dataset.store, c:{...c}, edge:g.dataset.edge, row, cells:_campDragCells(row),
+    orig:td?td.dataset.ds:null, s:c.start_date, e:c.end_date, moved:false, tip};
+  document.body.classList.add('camp-dragging');
+  document.addEventListener('mousemove',_campDragMove);
+  document.addEventListener('mouseup',_campDragUp);
+  document.addEventListener('keydown',_campDragKey);
+  _campDragPaint();
+});
+
+// Make room for a new [from, to] campaign in a campaign list: every record matching `same`
+// that overlaps is trimmed to the part before `from` and/or after `to` (a campaign spanning
+// the whole range is split in two). Shared by production and vessel campaigns.
+function _campSplice(list, same, from, to){
+  const out=[];
+  list.forEach(c=>{
+    if(!same(c)||c.end_date<from||c.start_date>to){ out.push(c); return; }
+    if(c.start_date<from) out.push({...c, end_date:_addDays(from,-1)});
+    if(c.end_date>to) out.push({...c, id:(c.id||'camp')+'_'+Math.random().toString(36).slice(2,6), start_date:_addDays(to,1)});
+  });
+  return out;
+}
+// Validation message shown INSIDE the open campaign popup. These used to go to the status
+// bar, which resets after 2.5 s — easy to miss, so a rejected save looked like it had worked.
+function _campWarn(msg, prefix){
+  const el=document.getElementById((prefix||'camp')+'-warn');
+  if(el){ el.textContent='⚠ '+msg; el.style.display=''; } else statMsg(msg);
 }
 
 // Apply a shorter end-date to an existing campaign (called from warning banner)
@@ -6436,7 +6579,8 @@ function deleteCampaignRange(elId, startDate, endDate){
   closeCampaignPopup();
   autoSave();
   renderSupplyView();
-  statMsg('Campaign deleted — simulation auto-selection restored');
+  statMsg('Campaign deleted — running simulation…');
+  scheduleSimulation();
 }
 
 function updateMaintEvent(){
@@ -8908,7 +9052,7 @@ const _DOWN_LABEL = {maint:'MAINT', blocked:'FULL', repair:'REPAIRS', pm:'PM DAY
 const _DOWN_TIP = {
   blocked:'⛔ Blocked — receiving silo full, so the element had to stop',
   repair:'🔧 Down For Repairs (manual) — no production',
-  pm:'🗓 Down PM Day (manual) — no production',
+  pm:'🗓 Down PM Day (manual) — half day, runs at 50%',
 };
 // Sentinel product_ids used by downtime campaigns (0 production, tagged reason).
 const DOWNTIME_PRODUCTS = {'__down_repair__':'repair','__down_pm__':'pm'};
@@ -9344,9 +9488,19 @@ function _renderSupplyViewInner(wrap){
         const rate=campRate||fbRate;
         return {product_id:managerCampaign.product_id, capacity_tpd:rate, isCampaign:true};
       }
-      // __down_pm__ → fall through to sim results (it ran at ~50%)
+      // __down_pm__ → the product the sim picked, at the ~50% it actually ran, still TAGGED
+      // as a PM day. Returning the bare sim tier here made a saved PM day render exactly like
+      // a normal production day (same colour, full rated tonnes) — it looked unrecorded.
+      const base=_resolveSimTiers(el, ds, dayIdx);
+      const t=el.type==='kiln'&&hasSim&&r.kilnProdHistory?.[el.id]?.[dayIdx]!==undefined
+        ? base.capacity_tpd              // kiln history already holds the actual (halved) clinker
+        : base.capacity_tpd*0.5;
+      return {...base, capacity_tpd:t, isCampaign:true, downtime:'pm'};
     }
-
+    return _resolveSimTiers(el, ds, dayIdx);
+  };
+  // Tiers 1–3 of resolveProduction (sim → schedule → default), shared with the PM-day path.
+  const _resolveSimTiers=(el, ds, dayIdx)=>{
     // Tier 1: sim results — KILNS report ACTUAL produced clinker (0 when blocked), so the
     // CLINKER PRODUCTION row reflects reality and reconciles with clinker inventory.
     if(hasSim&&el.type==='kiln'&&r.kilnProdHistory?.[el.id]){
@@ -9402,6 +9556,116 @@ function _renderSupplyViewInner(wrap){
     if(real.length>0) return real.filter(rp=>(rp.volume_t||0)>0).map(rp=>({product_id:rp.product_id, capacity_tpd:parseFloat(rp.volume_t)||0, isActual:true}));
     const single=resolveProduction(el, ds, dayIdx, maintDays);
     return (single.product_id&&single.capacity_tpd>0)?[single]:[];
+  };
+  // ── One equipment row of the Supply page (kiln · finish mill · packing machine) ──────────
+  // The single renderer behind CLINKER PRODUCTION, FINISH MILL PRODUCTION and both PACKING
+  // PLANT PRODUCTION blocks (plant + terminal). It used to be four hand-kept copies, which is
+  // how a fix (the PM-day tag) could land in one and not another. Any equipment type the
+  // topology gains comes through here too, driven only by el.type:
+  //   kiln                → numbers (a mini hatch bar on down days), no run pre-fill
+  //   finish mill/packer  → product-coloured Gantt bar, real days show the actual tonnes
+  // o = {color, rgb, depth, sec}. Campaign start/end cells carry drag grips (_campGrips).
+  const _supEquipRow=(el,o)=>{
+    const isKiln=el.type==='kiln', isPack=el.type==='packing_plant';
+    const maintDays=maintSetFor(el.id);
+    const _stopDays=type=>new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type===type).map(e=>_simDates[e.day-1]).filter(Boolean));
+    // starved = needed to run but had no feed (unplanned shortfall); blocked = receiving silo full
+    const starvedDays=isKiln?new Set():_stopDays('starved');
+    const blockedDays=_stopDays('blocked');
+    const caps=(_capsByEl.get(el.id)||[]);
+    const rated=isKiln?caps.reduce((s,c)=>s+(parseFloat(c.capacity_tpd)||0),0)
+      :isPack?(()=>{ const ls=caps.filter(c=>_isPackingRow(c)); return ls.length?Math.max(...ls.map(_packLineCapT)):0; })()
+      :(caps.length?Math.max(...caps.map(c=>parseFloat(c.capacity_tpd)||0)):0);
+    const starvedTip=isPack?'⚠ Unplanned shortfall — packer could not run (no bulk cement)':'⚠ Unplanned shortfall — mill could not produce (no clinker)';
+    const myCamps=(DB.production_campaigns||[]).filter(c=>c.element_id===el.id);
+    const campAt=ds=>myCamps.find(c=>ds>=c.start_date&&ds<=c.end_date)||null;
+    let h=`<tr class="supsec-${o.sec}">
+              <td style="${stickyLeft('var(--surface)',o.depth,'border-bottom:1px solid var(--border),')}color:${o.color};font-size:9px" title="${esc(el.name)}">${_supLeafLabel(el.name)}
+                <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${rated>0?rated.toLocaleString()+' t/d rated':''}</span>
+              </td>`;
+    let _gPrev=null;
+    // Contiguous same-product runs, so a click pre-fills the campaign dialog with that run's
+    // product + dates. Not for kilns: they run one product for months, so "the run" would
+    // default the dialog to a months-long range.
+    const _runByDate={};
+    if(!isKiln){ let cs=null,cp=null,pd=null;
+      const _fin=(endDs)=>{ if(cs==null)return; let on=false; for(const d of allDates){ if(d===cs)on=true; if(on)_runByDate[d]={start:cs,end:endDs,product:cp}; if(d===endDs)break; } };
+      allDates.forEach(ds=>{
+        const rr=maintDays.has(ds)?{capacity_tpd:0,product_id:null}:resolveProduction(el,ds,_dIdx(ds),maintDays);
+        const pid=(rr.capacity_tpd>0&&!rr.downtime)?rr.product_id:null;
+        if(pid&&pid===cp){ pd=ds; }
+        else { if(cs!=null)_fin(pd); if(pid){cs=ds;cp=pid;pd=ds;}else{cs=null;cp=null;pd=null;} }
+      });
+      if(cs!=null)_fin(pd);
+    }
+    months.forEach(mon=>{
+      const isCol=collapsed.has(mon.ym);
+      const mt=mon.dates.reduce((s,ds)=>s+resolveProduction(el,ds,_dIdx(ds),maintDays).capacity_tpd,0);
+      h+=`<td style="border-left:2px solid rgba(var(--${o.rgb}-rgb),.15);font-size:9px;color:${o.color};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+      if(!isCol) mon.dates.forEach(ds=>{
+        const dayIdx=_dIdx(ds);
+        const res=resolveProduction(el,ds,dayIdx,maintDays);
+        const v=res.capacity_tpd;
+        const prod=_prodById.get(res.product_id);
+        const isMaint=maintDays.has(ds);
+        const isCamp=res.isCampaign;
+        const dt=res.downtime; // 'repair' | 'pm' from a downtime campaign
+        const grips=_campGrips('prod',campAt(ds),ds);
+        const gPos=grips?'position:relative;':'';
+        const run=_runByDate[ds];
+        const campArgs=run?`'${el.id}','${ds}','${run.start}','${run.end}','${run.product}'`:`'${el.id}','${ds}'`;
+        const clickFn=isMaint?`openMaintenanceEventById('${maintDays.get(ds)}')`:`showCampaignPopup(${campArgs})`;
+        const dAttr=`data-eq="${el.id}" data-ds="${ds}"`;
+
+        if(isKiln){
+          // Numbers, but a DOWN day shows a mini hatch bar instead of a bare "0" so the reason
+          // is evident at a glance — maintenance, blocked (clinker silo full), or a manual
+          // Down-For-Repairs / Down-PM-Day campaign. Clicking a maintenance day opens its event.
+          const campBorder=isCamp?'box-shadow:inset 0 2px 0 var(--plan);':'';
+          const lockBadge=isCamp?'<span style="font-size:7px;color:var(--lime);margin-left:2px" title="Manager campaign">🔒</span>':'';
+          const isBlocked=(!isMaint&&!dt&&v<=0&&blockedDays.has(ds));
+          const downKind=isMaint?'maint':dt?dt:isBlocked?'blocked':null;
+          const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?_DOWN_TIP[dt]+(v>0?` · ${prod?.name?esc(prod.name)+' ':''}${Math.round(v).toLocaleString()} t`:''):isBlocked?_DOWN_TIP.blocked:isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name||''));
+          let inner, cAlign='text-align:right;', cPad='padding:4px 6px;';
+          if(downKind){ cAlign=''; cPad='padding:3px 0;';
+            inner=`<div style="position:relative;height:10px;background:${_DOWN_HATCH[downKind]}"></div>`; }
+          else { inner = v>0?prodIcon(prod)+Math.round(v).toLocaleString()+lockBadge:'0'; }
+          h+=`<td ${dAttr} class="sup-day-${mon.ym} ${(res.isActual&&v>0)?'cell-real':((!downKind&&v>0&&ds<todayStr)?'cell-gap':'')}" title="${cellTitle}${(res.isActual&&v>0)?' · actual':''}" onclick="event.stopPropagation();${clickFn}" style="${gPos}cursor:pointer;font-size:9px;color:${v>0?o.color:'rgba(var(--red-rgb),calc(var(--zero-k)*.4))'};${cAlign}${cPad}border-bottom:1px solid var(--border);overflow:visible;${campBorder}${tdSty(ds)}">${inner}${grips}</td>`;
+          return;
+        }
+
+        const barColor=prod?((typeof spProdColor==='function')?spProdColor(prod.name||prod.id,false):(PRODUCT_CAT_COLORS[prod.category||'']||o.color)):o.color;
+        // REAL value (from file or daily-data input): the day's total tonnage, colour-coded by
+        // product. A mill can change product mid-day and make TWO the same day → a ▾N marker
+        // and every product+tonnage in the tooltip.
+        if(!!res.isActual && v>0){
+          _gPrev='__real';
+          const _allP=resolveProductionAll(el,ds,dayIdx,maintDays);
+          const _multi=_allP.length>1;
+          const _tip=(_allP.length?_allP.map(p=>(_prodById.get(p.product_id)?.name||p.product_id)+' '+Math.round(p.capacity_tpd).toLocaleString()+'t').join(' + '):(prod?.name||''))+' · actual';
+          const _mk=_multi?`<span style="font-size:7px;color:var(--amber);vertical-align:super;margin-left:1px">▾${_allP.length}</span>`:'';
+          h+=`<td ${dAttr} class="sup-day-${mon.ym} cell-real" title="${_tip}" onclick="event.stopPropagation();${clickFn}" style="${gPos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barColor};box-shadow:inset 0 -2px 0 var(--real)"><span style="position:absolute;left:4px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:8px;font-weight:700;color:${_barTextColor(barColor)};pointer-events:none">${Math.round(v).toLocaleString()}${_mk}</span></div>${grips}</td>`;
+          return;
+        }
+        // FORECAST / maintenance / downtime: Gantt bar — colour = product, or a distinct hatch
+        // when DOWN (maintenance · starved · blocked · Down-For-Repairs / Down-PM-Day). No text
+        // on the bar: colour identifies it, the tooltip gives the detail.
+        const isStarved=(!isMaint&&!dt&&v<=0&&starvedDays.has(ds));
+        const isBlocked=(!isMaint&&!dt&&v<=0&&!isStarved&&blockedDays.has(ds));
+        const downKind=isMaint?'maint':dt?dt:isStarved?'starved':isBlocked?'blocked':null;
+        const runKey=downKind?('__'+downKind):(v>0?(res.product_id||'__p'):'__idle');
+        const isRunStart=(runKey!=='__idle'&&runKey!==_gPrev);
+        _gPrev=runKey;
+        const barBg=downKind?(_DOWN_HATCH[downKind]||'transparent'):(v>0?_hatchBar(barColor):'transparent');
+        const isGap=(!downKind&&v>0&&ds<todayStr); // simulated on a day that should have an actual
+        const _edges=[]; if(isCamp&&!isMaint) _edges.push('inset 0 2px 0 var(--plan)'); if(isGap) _edges.push('inset 0 -2px 0 var(--simulated)');
+        const campMark=_edges.length?`box-shadow:${_edges.join(',')};`:'';
+        const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?_DOWN_TIP[dt]+(v>0?` · ${prod?.name?esc(prod.name)+' ':''}${Math.round(v).toLocaleString()} t`:''):isBlocked?_DOWN_TIP.blocked:isStarved?starvedTip:(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name?`${esc(prod.name)} · ${Math.round(v)} t/d`:'Idle')));
+        const zpos=isRunStart?'position:relative;z-index:2;':gPos;
+        h+=`<td ${dAttr} class="sup-day-${mon.ym}${isGap?' src-gap':''}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="${zpos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barBg};${campMark}"></div>${grips}</td>`;
+      });
+    });
+    return h+`</tr>`;
   };
   // Source of a number DERIVED from other inputs (requirements, clinker need, by-product output,
   // totals): 'cell-real' when every input contributing that day is actual, 'cell-gap' on a past
@@ -10141,87 +10405,7 @@ function _renderSupplyViewInner(wrap){
           });
           h+=`</tr>`;
 
-          node.mills.forEach(el=>{
-            const maintDays=maintSetFor(el.id);
-            // Days the mill couldn't produce despite needing to (no clinker) — an
-            // UNPLANNED cement shortfall, flagged with a gray/red hatch below.
-            const starvedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='starved').map(e=>_simDates[e.day-1]).filter(Boolean));
-            const blockedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='blocked').map(e=>_simDates[e.day-1]).filter(Boolean)); // down: receiving silo full
-            const caps=(_capsByEl.get(el.id)||[]);
-            const maxSingleCap=caps.length?Math.max(...caps.map(c=>parseFloat(c.capacity_tpd)||0)):0;
-            h+=`<tr class="supsec-cementProd">
-              <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${cemColor};font-size:9px" title="${esc(el.name)}">${_supLeafLabel(el.name)}
-                <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${maxSingleCap>0?maxSingleCap.toLocaleString()+' t/d rated':''}</span>
-              </td>`;
-            let _gPrev=null;
-            // Precompute contiguous production runs (same product) so a click pre-fills the
-            // campaign dialog with that run's product + start/end dates.
-            const _runByDate={};
-            { let cs=null,cp=null,pd=null;
-              const _fin=(endDs)=>{ if(cs==null)return; let on=false; for(const d of allDates){ if(d===cs)on=true; if(on)_runByDate[d]={start:cs,end:endDs,product:cp}; if(d===endDs)break; } };
-              allDates.forEach(ds=>{
-                const rr=maintDays.has(ds)?{capacity_tpd:0,product_id:null}:resolveProduction(el,ds,_dIdx(ds),maintDays);
-                const pid=(rr.capacity_tpd>0)?rr.product_id:null;
-                if(pid&&pid===cp){ pd=ds; }
-                else { if(cs!=null)_fin(pd); if(pid){cs=ds;cp=pid;pd=ds;}else{cs=null;cp=null;pd=null;} }
-              });
-              if(cs!=null)_fin(pd);
-            }
-            months.forEach(mon=>{
-              const isCol=collapsed.has(mon.ym);
-              const mt=mon.dates.reduce((s,ds)=>{
-                const dayIdx=_dIdx(ds);
-                return s+resolveProduction(el,ds,dayIdx,maintDays).capacity_tpd;
-              },0);
-              h+=`<td style="border-left:2px solid rgba(var(--green-rgb),.15);font-size:9px;color:${cemColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
-              if(!isCol) mon.dates.forEach(ds=>{
-                const dayIdx=_dIdx(ds);
-                const res=resolveProduction(el,ds,dayIdx,maintDays);
-                const v=res.capacity_tpd;
-                const prod=_prodById.get(res.product_id);
-                const isMaint=maintDays.has(ds);
-                const isCamp=res.isCampaign;
-                const isReal=!!res.isActual && v>0;
-                const barColor=prod?((typeof spProdColor==='function')?spProdColor(prod.name||prod.id,false):(PRODUCT_CAT_COLORS[prod.category||'']||cemColor)):cemColor;
-                const run=_runByDate[ds];
-                const campArgs=run?`'${el.id}','${ds}','${run.start}','${run.end}','${run.product}'`:`'${el.id}','${ds}'`;
-                const clickFn=isMaint?`openMaintenanceEventById('${maintDays.get(ds)}')`:`showCampaignPopup(${campArgs})`;
-                // REAL value (from file or daily-data input): show the day's total tonnage,
-                // colour-coded by product. A mill can change product mid-day and make TWO the
-                // same day → show a ▾N marker and list every product+tonnage in the tooltip.
-                if(isReal){
-                  _gPrev='__real';
-                  const _allP=resolveProductionAll(el,ds,dayIdx,maintDays);
-                  const _multi=_allP.length>1;
-                  const _tip=(_allP.length?_allP.map(p=>(_prodById.get(p.product_id)?.name||p.product_id)+' '+Math.round(p.capacity_tpd).toLocaleString()+'t').join(' + '):(prod?.name||''))+' · actual';
-                  const _mk=_multi?`<span style="font-size:7px;color:var(--amber);vertical-align:super;margin-left:1px">▾${_allP.length}</span>`:'';
-                  h+=`<td class="sup-day-${mon.ym} cell-real" title="${_tip}" onclick="event.stopPropagation();${clickFn}" style="cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barColor};box-shadow:inset 0 -2px 0 var(--real)"><span style="position:absolute;left:4px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:8px;font-weight:700;color:${_barTextColor(barColor)};pointer-events:none">${Math.round(v).toLocaleString()}${_mk}</span></div></td>`;
-                  return;
-                }
-                // FORECAST / maintenance / downtime: Gantt bar — colour = product, or a
-                // distinct hatch when the mill is DOWN (maintenance · blocked=silo full ·
-                // manual Down-For-Repairs / Down-PM-Day). A short label marks the reason.
-                const dt=res.downtime; // 'repair' | 'pm' from a downtime campaign
-                const isStarved=(!isMaint&&!dt&&v<=0&&starvedDays.has(ds));
-                const isBlocked=(!isMaint&&!dt&&v<=0&&!isStarved&&blockedDays.has(ds));
-                const downKind=isMaint?'maint':dt?dt:isStarved?'starved':isBlocked?'blocked':null;
-                const runKey=downKind?('__'+downKind):(v>0?(res.product_id||'__p'):'__idle');
-                const isRunStart=(runKey!=='__idle'&&runKey!==_gPrev);
-                _gPrev=runKey;
-                const barBg=downKind?(_DOWN_HATCH[downKind]||'transparent'):(v>0?_hatchBar(barColor):'transparent');
-                const isGap=(!downKind&&v>0&&ds<todayStr); // simulated on a day that should have an actual
-                const _edges=[]; if(isCamp&&!isMaint) _edges.push('inset 0 2px 0 var(--plan)'); if(isGap) _edges.push('inset 0 -2px 0 var(--simulated)');
-                const campMark=_edges.length?`box-shadow:${_edges.join(',')};`:'';
-                const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?_DOWN_TIP[dt]:isBlocked?_DOWN_TIP.blocked:isStarved?'⚠ Unplanned shortfall — mill could not produce (no clinker)':(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name?`${esc(prod.name)} · ${Math.round(v)} t/d`:'Idle')));
-                const lblName=(typeof spShortProd==='function')?spShortProd(prod?.name||''):(prod?.name||'');
-                const barTxt=(downKind==='starved')?(_thRule('down')==='grey'?'NO FEED':''):(downKind?(_DOWN_LABEL[downKind]||''):(v>0?`${lblName} · ${Math.round(v).toLocaleString()}${isCamp?' 🔒':''}`:''));
-                const label=(isRunStart&&barTxt)?`<span style="position:absolute;left:5px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:9px;font-weight:700;color:${downKind?'var(--bar-lbl-down)':isGap?'var(--simulated)':'var(--bar-lbl)'};text-shadow:0 0 2px var(--bar-lbl-halo),0 0 2px var(--bar-lbl-halo);pointer-events:none">${barTxt}</span>`:'';
-                const zpos=isRunStart?'position:relative;z-index:2;':'';
-                h+=`<td class="sup-day-${mon.ym}${isGap?' src-gap':''}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="${zpos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barBg};${campMark}">${label}</div></td>`;
-              });
-            });
-            h+=`</tr>`;
-          });
+          node.mills.forEach(el=>{ h+=_supEquipRow(el,{color:cemColor,rgb:'green',depth:node.depth+2,sec:'cementProd'}); });
 
           // ── BY PRODUCT breakdown (verification) ───────────────────────────
           // Same production tonnage, but aggregated per cement product across ALL mills in
@@ -10380,8 +10564,6 @@ function _renderSupplyViewInner(wrap){
         if(node.packers&&node.packers.length){
           const packColor='var(--blue)';
           const packEls=node.packers;
-          const _packRated=el=>{ const ls=(_capsByEl.get(el.id)||[]).filter(c=>_isPackingRow(c));
-            return ls.length?Math.max(...ls.map(_packLineCapT)):0; };
           h+=`<tr class="sup-sec-hdr" data-seckey="packProd" onclick="_supToggleSec('packProd')" style="cursor:pointer;background:rgba(var(--blue-rgb),.05);border-top:2px solid rgba(var(--blue-rgb),.3)">
             <td title="Packed · t" style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${packColor};font-size:8px;letter-spacing:.5px;font-weight:700"><span class="sup-arrow">${_supSecArrow('packProd')}</span> PACKING PLANT PRODUCTION <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>`;
           months.forEach(mon=>{
@@ -10396,80 +10578,7 @@ function _renderSupplyViewInner(wrap){
           });
           h+=`</tr>`;
 
-          node.packers.forEach(el=>{
-            const maintDays=maintSetFor(el.id);
-            const starvedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='starved').map(e=>_simDates[e.day-1]).filter(Boolean));
-            const blockedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='blocked').map(e=>_simDates[e.day-1]).filter(Boolean)); // down: receiving silo full
-            const maxSingleCap=_packRated(el);
-            h+=`<tr class="supsec-packProd">
-              <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${packColor};font-size:9px" title="${esc(el.name)}">${_supLeafLabel(el.name)}
-                <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${maxSingleCap>0?maxSingleCap.toLocaleString()+' t/d rated':''}</span>
-              </td>`;
-            let _gPrev=null;
-            // Precompute contiguous production runs (same product) so a click pre-fills the campaign dialog.
-            const _runByDate={};
-            { let cs=null,cp=null,pd=null;
-              const _fin=(endDs)=>{ if(cs==null)return; let on=false; for(const d of allDates){ if(d===cs)on=true; if(on)_runByDate[d]={start:cs,end:endDs,product:cp}; if(d===endDs)break; } };
-              allDates.forEach(ds=>{
-                const rr=maintDays.has(ds)?{capacity_tpd:0,product_id:null}:resolveProduction(el,ds,_dIdx(ds),maintDays);
-                const pid=(rr.capacity_tpd>0)?rr.product_id:null;
-                if(pid&&pid===cp){ pd=ds; }
-                else { if(cs!=null)_fin(pd); if(pid){cs=ds;cp=pid;pd=ds;}else{cs=null;cp=null;pd=null;} }
-              });
-              if(cs!=null)_fin(pd);
-            }
-            months.forEach(mon=>{
-              const isCol=collapsed.has(mon.ym);
-              const mt=mon.dates.reduce((s,ds)=>{
-                const dayIdx=_dIdx(ds);
-                return s+resolveProduction(el,ds,dayIdx,maintDays).capacity_tpd;
-              },0);
-              h+=`<td style="border-left:2px solid rgba(var(--blue-rgb),.15);font-size:9px;color:${packColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
-              if(!isCol) mon.dates.forEach(ds=>{
-                const dayIdx=_dIdx(ds);
-                const res=resolveProduction(el,ds,dayIdx,maintDays);
-                const v=res.capacity_tpd;
-                const prod=_prodById.get(res.product_id);
-                const isMaint=maintDays.has(ds);
-                const isCamp=res.isCampaign;
-                const isReal=!!res.isActual && v>0;
-                const barColor=prod?((typeof spProdColor==='function')?spProdColor(prod.name||prod.id,false):(PRODUCT_CAT_COLORS[prod.category||'']||packColor)):packColor;
-                const run=_runByDate[ds];
-                const campArgs=run?`'${el.id}','${ds}','${run.start}','${run.end}','${run.product}'`:`'${el.id}','${ds}'`;
-                const clickFn=isMaint?`openMaintenanceEventById('${maintDays.get(ds)}')`:`showCampaignPopup(${campArgs})`;
-                if(isReal){
-                  _gPrev='__real';
-                  const _allP=resolveProductionAll(el,ds,dayIdx,maintDays);
-                  const _multi=_allP.length>1;
-                  const _tip=(_allP.length?_allP.map(p=>(_prodById.get(p.product_id)?.name||p.product_id)+' '+Math.round(p.capacity_tpd).toLocaleString()+'t').join(' + '):(prod?.name||''))+' · actual';
-                  const _mk=_multi?`<span style="font-size:7px;color:var(--amber);vertical-align:super;margin-left:1px">▾${_allP.length}</span>`:'';
-                  h+=`<td class="sup-day-${mon.ym} cell-real" title="${_tip}" onclick="event.stopPropagation();${clickFn}" style="cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barColor};box-shadow:inset 0 -2px 0 var(--real)"><span style="position:absolute;left:4px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:8px;font-weight:700;color:${_barTextColor(barColor)};pointer-events:none">${Math.round(v).toLocaleString()}${_mk}</span></div></td>`;
-                  return;
-                }
-                // FORECAST / maintenance / downtime: Gantt bar — colour = product, or a
-                // distinct hatch when the packer is DOWN (maintenance · blocked=packed silo
-                // full · manual Down-For-Repairs / Down-PM-Day). Short label marks the reason.
-                const dt=res.downtime;
-                const isStarved=(!isMaint&&!dt&&v<=0&&starvedDays.has(ds));
-                const isBlocked=(!isMaint&&!dt&&v<=0&&!isStarved&&blockedDays.has(ds));
-                const downKind=isMaint?'maint':dt?dt:isStarved?'starved':isBlocked?'blocked':null;
-                const runKey=downKind?('__'+downKind):(v>0?(res.product_id||'__p'):'__idle');
-                const isRunStart=(runKey!=='__idle'&&runKey!==_gPrev);
-                _gPrev=runKey;
-                const barBg=downKind?(_DOWN_HATCH[downKind]||'transparent'):(v>0?_hatchBar(barColor):'transparent');
-                const isGap=(!downKind&&v>0&&ds<todayStr); // simulated on a day that should have an actual
-                const _edges=[]; if(isCamp&&!isMaint) _edges.push('inset 0 2px 0 var(--plan)'); if(isGap) _edges.push('inset 0 -2px 0 var(--simulated)');
-                const campMark=_edges.length?`box-shadow:${_edges.join(',')};`:'';
-                const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?_DOWN_TIP[dt]:isBlocked?_DOWN_TIP.blocked:isStarved?'⚠ Unplanned shortfall — packer could not run (no bulk cement)':(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name?`${esc(prod.name)} · ${Math.round(v)} t/d`:'Idle')));
-                const lblName=(typeof spShortProd==='function')?spShortProd(prod?.name||''):(prod?.name||'');
-                const barTxt=(downKind==='starved')?(_thRule('down')==='grey'?'NO FEED':''):(downKind?(_DOWN_LABEL[downKind]||''):(v>0?`${lblName} · ${Math.round(v).toLocaleString()}${isCamp?' 🔒':''}`:''));
-                const label=(isRunStart&&barTxt)?`<span style="position:absolute;left:5px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:9px;font-weight:700;color:${downKind?'var(--bar-lbl-down)':isGap?'var(--simulated)':'var(--bar-lbl)'};text-shadow:0 0 2px var(--bar-lbl-halo),0 0 2px var(--bar-lbl-halo);pointer-events:none">${barTxt}</span>`:'';
-                const zpos=isRunStart?'position:relative;z-index:2;':'';
-                h+=`<td class="sup-day-${mon.ym}${isGap?' src-gap':''}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="${zpos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barBg};${campMark}">${label}</div></td>`;
-              });
-            });
-            h+=`</tr>`;
-          });
+          node.packers.forEach(el=>{ h+=_supEquipRow(el,{color:packColor,rgb:'blue',depth:node.depth+2,sec:'packProd'}); });
         }
 
         // ── RAIL LOADING — its own top-level block (same level as CLINKER / CEMENT /
@@ -10791,49 +10900,7 @@ function _renderSupplyViewInner(wrap){
           });
           h+=`</tr>`;
 
-          node.kilns.forEach(el=>{
-            const maintDays=maintSetFor(el.id);
-            const blockedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='blocked').map(e=>_simDates[e.day-1]).filter(Boolean)); // down: clinker silo full
-            const defaultCap=(_capsByEl.get(el.id)||[])
-              .reduce((s,c)=>s+(parseFloat(c.capacity_tpd)||0),0);
-            h+=`<tr class="supsec-clinkerProd">
-              <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${clkColor};font-size:9px" title="${esc(el.name)}">${_supLeafLabel(el.name)}
-                <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${defaultCap>0?defaultCap.toLocaleString()+' t/d rated':''}</span>
-              </td>`;
-            months.forEach(mon=>{
-              const isCol=collapsed.has(mon.ym);
-              const mt=mon.dates.reduce((s,ds)=>{
-                const dayIdx=_dIdx(ds);
-                return s+resolveProduction(el,ds,dayIdx,maintDays).capacity_tpd;
-              },0);
-              h+=`<td style="border-left:2px solid rgba(var(--orange-rgb),.15);font-size:9px;color:${clkColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
-              if(!isCol) mon.dates.forEach(ds=>{
-                const dayIdx=_dIdx(ds);
-                const res=resolveProduction(el,ds,dayIdx,maintDays);
-                const v=res.capacity_tpd;
-                const prod=_prodById.get(res.product_id);
-                const isCamp=res.isCampaign;
-                const campBorder=isCamp?'box-shadow:inset 0 2px 0 var(--plan);':'';
-                const lockBadge=isCamp?'<span style="font-size:7px;color:var(--lime);margin-left:2px" title="Manager campaign">🔒</span>':'';
-                const isMaint=maintDays.has(ds);
-                // Kilns render as numbers, but a DOWN day shows a mini hatch bar instead of a
-                // bare "0"/"MAINT" so the reason is evident at a glance — maintenance (grey),
-                // blocked=clinker silo full (amber), or a manual Down-For-Repairs / Down-PM-Day
-                // campaign (orange / blue-grey). Clicking a maintenance bar opens its event.
-                const dt=res.downtime;
-                const isBlocked=(!isMaint&&!dt&&v<=0&&blockedDays.has(ds));
-                const downKind=isMaint?'maint':dt?dt:isBlocked?'blocked':null;
-                const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?_DOWN_TIP[dt]:isBlocked?_DOWN_TIP.blocked:isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name||''));
-                const clickFn=isMaint?`openMaintenanceEventById('${maintDays.get(ds)}')`:`showCampaignPopup('${el.id}','${ds}')`;
-                let inner, cAlign='text-align:right;', cPad='padding:4px 6px;';
-                if(downKind){ cAlign=''; cPad='padding:3px 0;';
-                  inner=`<div style="position:relative;height:10px;background:${_DOWN_HATCH[downKind]}"><span style="position:absolute;left:4px;top:0;line-height:10px;font-size:8px;font-weight:700;color:var(--bar-lbl-down);font-family:var(--mono);pointer-events:none">${_DOWN_LABEL[downKind]}</span></div>`; }
-                else { inner = v>0?prodIcon(prod)+Math.round(v).toLocaleString()+lockBadge:'0'; }
-                h+=`<td class="sup-day-${mon.ym} ${(res.isActual&&v>0)?'cell-real':((!downKind&&v>0&&ds<todayStr)?'cell-gap':'')}" title="${cellTitle}${(res.isActual&&v>0)?' · actual':''}" onclick="event.stopPropagation();${clickFn}" style="cursor:pointer;font-size:9px;color:${v>0?clkColor:'rgba(var(--red-rgb),calc(var(--zero-k)*.4))'};${cAlign}${cPad}border-bottom:1px solid var(--border);overflow:visible;${campBorder}${tdSty(ds)}">${inner}</td>`;
-              });
-            });
-            h+=`</tr>`;
-          });
+          node.kilns.forEach(el=>{ h+=_supEquipRow(el,{color:clkColor,rgb:'orange',depth:node.depth+2,sec:'clinkerProd'}); });
         }
 
         // ── Emit in display order: CLINKER → CEMENT BULK → PACKING → RAIL LOADING,
@@ -11314,8 +11381,6 @@ function _renderSupplyViewInner(wrap){
           // forecast days a product-coloured bar; click opens the Campaign popup.
           if(gr.key==='packed'&&_facPackers.length&&!_isPurch){
             const packColor='var(--blue)';
-            const _packRated=el=>{ const ls=(_capsByEl.get(el.id)||[]).filter(c=>_isPackingRow(c));
-              return ls.length?Math.max(...ls.map(_packLineCapT)):0; };
             h+=`<tr class="sup-sec-hdr" data-seckey="packProd" onclick="_supToggleSec('packProd')" style="cursor:pointer;background:rgba(var(--blue-rgb),.05);border-top:1px solid rgba(var(--blue-rgb),.3)">
               <td title="Packed · t" style="${stickyLeft('var(--surface)',depth+1,'border-bottom:1px solid var(--border),')}color:${packColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('packProd')}</span> PACKING PLANT PRODUCTION <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>`;
             months.forEach(mon=>{
@@ -11329,80 +11394,7 @@ function _renderSupplyViewInner(wrap){
               });
             });
             h+=`</tr>`;
-            _facPackers.forEach(el=>{
-              const maintDays=maintSetFor(el.id);
-              const starvedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='starved').map(e=>_simDates[e.day-1]).filter(Boolean));
-              const blockedDays=new Set((r?.stopEvents||[]).filter(e=>e.element_id===el.id&&e.type==='blocked').map(e=>_simDates[e.day-1]).filter(Boolean)); // down: receiving silo full
-              const maxSingleCap=_packRated(el);
-              h+=`<tr class="supsec-packProd">
-                <td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${packColor};font-size:9px" title="${esc(el.name)}">${_supLeafLabel(el.name)}
-                  <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${maxSingleCap>0?maxSingleCap.toLocaleString()+' t/d rated':''}</span>
-                </td>`;
-              let _gPrev=null;
-              // Precompute contiguous production runs (same product) so a click pre-fills the campaign dialog.
-              const _runByDate={};
-              { let cs=null,cp=null,pd=null;
-                const _fin=(endDs)=>{ if(cs==null)return; let on=false; for(const d of allDates){ if(d===cs)on=true; if(on)_runByDate[d]={start:cs,end:endDs,product:cp}; if(d===endDs)break; } };
-                allDates.forEach(ds=>{
-                  const rr=maintDays.has(ds)?{capacity_tpd:0,product_id:null}:resolveProduction(el,ds,_dIdx(ds),maintDays);
-                  const pid=(rr.capacity_tpd>0)?rr.product_id:null;
-                  if(pid&&pid===cp){ pd=ds; }
-                  else { if(cs!=null)_fin(pd); if(pid){cs=ds;cp=pid;pd=ds;}else{cs=null;cp=null;pd=null;} }
-                });
-                if(cs!=null)_fin(pd);
-              }
-              months.forEach(mon=>{
-                const isCol=collapsed.has(mon.ym);
-                const mt=mon.dates.reduce((s,ds)=>{
-                  const dayIdx=_dIdx(ds);
-                  return s+resolveProduction(el,ds,dayIdx,maintDays).capacity_tpd;
-                },0);
-                h+=`<td style="border-left:2px solid rgba(var(--blue-rgb),.15);font-size:9px;color:${packColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
-                if(!isCol) mon.dates.forEach(ds=>{
-                  const dayIdx=_dIdx(ds);
-                  const res=resolveProduction(el,ds,dayIdx,maintDays);
-                  const v=res.capacity_tpd;
-                  const prod=_prodById.get(res.product_id);
-                  const isMaint=maintDays.has(ds);
-                  const isCamp=res.isCampaign;
-                  const isReal=!!res.isActual && v>0;
-                  const barColor=prod?((typeof spProdColor==='function')?spProdColor(prod.name||prod.id,false):(PRODUCT_CAT_COLORS[prod.category||'']||packColor)):packColor;
-                  const run=_runByDate[ds];
-                  const campArgs=run?`'${el.id}','${ds}','${run.start}','${run.end}','${run.product}'`:`'${el.id}','${ds}'`;
-                  const clickFn=isMaint?`openMaintenanceEventById('${maintDays.get(ds)}')`:`showCampaignPopup(${campArgs})`;
-                  if(isReal){
-                    _gPrev='__real';
-                    const _allP=resolveProductionAll(el,ds,dayIdx,maintDays);
-                    const _multi=_allP.length>1;
-                    const _tip=(_allP.length?_allP.map(p=>(_prodById.get(p.product_id)?.name||p.product_id)+' '+Math.round(p.capacity_tpd).toLocaleString()+'t').join(' + '):(prod?.name||''))+' · actual';
-                    const _mk=_multi?`<span style="font-size:7px;color:var(--amber);vertical-align:super;margin-left:1px">▾${_allP.length}</span>`:'';
-                    h+=`<td class="sup-day-${mon.ym} cell-real" title="${_tip}" onclick="event.stopPropagation();${clickFn}" style="cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barColor};box-shadow:inset 0 -2px 0 var(--real)"><span style="position:absolute;left:4px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:8px;font-weight:700;color:${_barTextColor(barColor)};pointer-events:none">${Math.round(v).toLocaleString()}${_mk}</span></div></td>`;
-                    return;
-                  }
-                  // FORECAST / maintenance / downtime: Gantt bar — colour = product, or a
-                  // distinct hatch when the packer is DOWN (maintenance · blocked · manual
-                  // Down-For-Repairs / Down-PM-Day). Short label marks the reason.
-                  const dt=res.downtime;
-                  const isStarved=(!isMaint&&!dt&&v<=0&&starvedDays.has(ds));
-                  const isBlocked=(!isMaint&&!dt&&v<=0&&!isStarved&&blockedDays.has(ds));
-                  const downKind=isMaint?'maint':dt?dt:isStarved?'starved':isBlocked?'blocked':null;
-                  const runKey=downKind?('__'+downKind):(v>0?(res.product_id||'__p'):'__idle');
-                  const isRunStart=(runKey!=='__idle'&&runKey!==_gPrev);
-                  _gPrev=runKey;
-                  const barBg=downKind?(_DOWN_HATCH[downKind]||'transparent'):(v>0?_hatchBar(barColor):'transparent');
-                const isGap=(!downKind&&v>0&&ds<todayStr); // simulated on a day that should have an actual
-                  const _edges=[]; if(isCamp&&!isMaint) _edges.push('inset 0 2px 0 var(--plan)'); if(isGap) _edges.push('inset 0 -2px 0 var(--simulated)');
-                const campMark=_edges.length?`box-shadow:${_edges.join(',')};`:'';
-                  const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?_DOWN_TIP[dt]:isBlocked?_DOWN_TIP.blocked:isStarved?'⚠ Unplanned shortfall — packer could not run (no bulk cement)':(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name?`${esc(prod.name)} · ${Math.round(v)} t/d`:'Idle')));
-                  const lblName=(typeof spShortProd==='function')?spShortProd(prod?.name||''):(prod?.name||'');
-                  const barTxt=(downKind==='starved')?(_thRule('down')==='grey'?'NO FEED':''):(downKind?(_DOWN_LABEL[downKind]||''):(v>0?`${lblName} · ${Math.round(v).toLocaleString()}${isCamp?' 🔒':''}`:''));
-                  const label=(isRunStart&&barTxt)?`<span style="position:absolute;left:5px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:9px;font-weight:700;color:${downKind?'var(--bar-lbl-down)':isGap?'var(--simulated)':'var(--bar-lbl)'};text-shadow:0 0 2px var(--bar-lbl-halo),0 0 2px var(--bar-lbl-halo);pointer-events:none">${barTxt}</span>`:'';
-                  const zpos=isRunStart?'position:relative;z-index:2;':'';
-                  h+=`<td class="sup-day-${mon.ym}${isGap?' src-gap':''}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="${zpos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barBg};${campMark}">${label}</div></td>`;
-                });
-              });
-              h+=`</tr>`;
-            });
+            _facPackers.forEach(el=>{ h+=_supEquipRow(el,{color:packColor,rgb:'blue',depth:depth+2,sec:'packProd'}); });
           }
 
           // 4) TRANSFERS — split by arrival mode. A purchased source receives
@@ -11436,20 +11428,22 @@ function _renderSupplyViewInner(wrap){
                     h+=`<td style="border-left:2px solid rgba(var(--purple-rgb),.1);font-size:8px;color:${rc};text-align:center;padding:4px 6px;border-bottom:1px solid var(--border)">${unl>0?unl+'d':''}</td>`;
                     if(!isCol) mon.dates.forEach(ds=>{
                       const c=tl[_dIdx(ds)]; const st=c&&c.state; const vessel=(c&&c.vessel)||''; const vesselCallId=(c&&c.vesselCallId)||'';
+                      // A forced Anchorage/Unloading campaign on this vessel+day: plan-edge mark + drag grips at its ends.
+                      const vc=vesselCallId?(DB.vessel_campaigns||[]).find(x=>x.vessel_call_id===vesselCallId&&ds>=x.start_date&&ds<=x.end_date)||null:null;
+                      const vg=_campGrips('vessel',vc,ds);
                       // REAL unloading (any source — vessel popup, Daily Data form, or imported file)
                       // shows the ACTUAL tonnage as a bold GREEN NUMBER on the same line.
                       if(realDaySet.has(ds)){
                         _pk='__real'; // break the run so the next forecast bar re-labels its vessel
                         const rt=realUnloadTonnesBerthProdDay(berth.id,pid,ds);
-                        h+=`<td class="sup-day-${mon.ym} cell-real" title="${vessel?vessel+' — ':''}actual unloading · ${Math.round(rt).toLocaleString()} t — click to edit" onclick="event.stopPropagation();showVesselCampaignPopup('${berth.id}','${vesselCallId}','${ds}')" style="cursor:pointer;font-size:9px;font-weight:700;color:var(--teal);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${Math.round(rt).toLocaleString()}</td>`;
+                        h+=`<td class="sup-day-${mon.ym} cell-real" title="${vessel?vessel+' — ':''}actual unloading · ${Math.round(rt).toLocaleString()} t — click to edit" data-ds="${ds}" onclick="event.stopPropagation();showVesselCampaignPopup('${berth.id}','${vesselCallId}','${ds}')" style="${vg?'position:relative;':''}cursor:pointer;font-size:9px;font-weight:700;color:var(--teal);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${Math.round(rt).toLocaleString()}${vg}</td>`;
                         return;
                       }
                       const p=_vesselCellParts(st,false);
                       const key=(st||'__i')+'|'+vessel; const runStart=!!st&&key!==_pk; _pk=key;
-                      const glyph=st==='anchorage'?' ⚓':'';
-                      const label=runStart?`<span style="position:absolute;left:4px;top:0;line-height:12px;white-space:nowrap;font-size:8px;font-weight:700;color:${st==='unloading'?'var(--on-teal)':'var(--bar-lbl-down)'};pointer-events:none">${vessel}${glyph}</span>`:'';
-                      const ttl=(st?(vessel+' — '+p.lbl+' — '):'')+(vesselCallId?'click to set Forecast Campaign or Real value':'no vessel scheduled');
-                      h+=`<td class="sup-day-${mon.ym}" title="${ttl}" onclick="event.stopPropagation();showVesselCampaignPopup('${berth.id}','${vesselCallId}','${ds}')" style="cursor:pointer;position:relative;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:12px;background:${p.bg}">${label}</div></td>`;
+                      const label=''; // no text on the bar — colour gives the state, the tooltip names the vessel
+                      const ttl=(st?(vessel+' — '+p.lbl+(vc?' · 🔒 campaign '+vc.start_date+' → '+vc.end_date:'')+' — '):'')+(vesselCallId?'click to set Forecast Campaign or Real value':'no vessel scheduled');
+                      h+=`<td class="sup-day-${mon.ym}" data-ds="${ds}" title="${ttl}" onclick="event.stopPropagation();showVesselCampaignPopup('${berth.id}','${vesselCallId}','${ds}')" style="cursor:pointer;position:relative;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:12px;background:${p.bg}${vc?';box-shadow:inset 0 2px 0 var(--plan)':''}">${label}</div>${vg}</td>`;
                     });
                   });
                   h+=`</tr>`;
@@ -14030,14 +14024,15 @@ function showRailCampaignPopup(dpId, dateStr, runStart, runEnd, runProduct){
       <div class="fr s2">
         <div class="ff">
           <div class="fl" id="camp-from-label">From</div>
-          <input class="fi" id="camp-from" type="date" value="${fromVal}" style="width:100%">
+          <input class="fi" id="camp-from" type="date" onchange="window._campRealAck=false" value="${fromVal}" style="width:100%">
         </div>
         <div class="ff" id="camp-to-field">
           <div class="fl">To</div>
-          <input class="fi" id="camp-to" type="date" value="${toVal}" style="width:100%">
+          <input class="fi" id="camp-to" type="date" onchange="window._campRealAck=false" value="${toVal}" style="width:100%">
         </div>
       </div>
     </div>
+    <div id="camp-warn" style="display:none;margin-top:10px;padding:6px 8px;border-left:3px solid var(--amber);background:rgba(var(--amber-rgb),.08);color:var(--amber);font-size:9px;line-height:1.5"></div>
 
     <div style="margin-top:12px;display:flex;gap:8px;justify-content:space-between;align-items:center">
       <div style="display:flex;gap:6px">
@@ -15629,8 +15624,7 @@ function vpRender(){
                 const isReal=st==='unloading'&&realDay.has(vpDayDate(d));
                 const p=_vesselCellParts(st,isReal);
                 const key=(st||'__i')+'|'+vessel; const rs=!!st&&key!==_pk; _pk=key;
-                const glyph=st==='anchorage'?' ⚓':st==='waiting'?' ⏳':'';
-                const lbl=rs?`<span style="position:absolute;left:3px;top:0;line-height:12px;white-space:nowrap;font-size:8px;font-weight:700;color:${st==='unloading'?'var(--on-teal)':'var(--bar-lbl-down)'};pointer-events:none">${vessel}${glyph}</span>`:'';
+                const lbl=''; // no text on the bar — colour gives the state, the tooltip names the vessel
                 const ttl=st?(vessel+' — '+p.lbl):'';
                 return `<td title="${ttl}" style="position:relative;padding:2px 0;overflow:visible;${_tpTdSty(d)}"><div style="position:relative;height:12px;background:${p.bg}">${lbl}</div></td>`;
               }).join('');
