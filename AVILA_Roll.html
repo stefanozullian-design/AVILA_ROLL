@@ -17562,7 +17562,9 @@ async function runSimulation(){
     document.getElementById('mode-lbl').textContent='Planning';
     document.getElementById('sim-date-lbl').textContent=`Day ${effectiveHorizon} / ${effectiveHorizon}`;
     statMsg(`Simulation complete — ${r.stopEvents.length} stop event(s)`);
-    autoSave();  // Persist simResults to localStorage so they survive page refresh
+    // Carry the new simResults into the scenario file. keepStamp: a simulation changes no data,
+    // so it must not re-stamp the data as new (see autoSave).
+    autoSave({keepStamp:true});
     // Re-render the planner tables if user is on the logistics page
     if(S.topSection==='logistics'){
       if(S.activeSchedTab==='rail') rpRender();
@@ -21838,7 +21840,9 @@ function _pushBIBuildTables(){
       link_id:lk.id, link_name:_slName(lk),
       from_silo_id:lk.from_silo_id, from_silo_name:_elName(lk.from_silo_id), from_facility_id:fF, from_facility_name:facName[fF]||'',
       to_silo_id:lk.to_silo_id, to_silo_name:_elName(lk.to_silo_id), to_facility_id:tF, to_facility_name:facName[tF]||'',
-      product_id:lk.product_id||'', direction:lk.two_way?'two way':'one way',
+      product_id:lk.product_id||'', product_name:(DB.products.find(p=>p.id===lk.product_id)||{}).name||'',
+      route:`${_slShort(lk.from_silo_id)} ${lk.two_way?'⇄':'→'} ${_slShort(lk.to_silo_id)}`,
+      direction:lk.two_way?'two way':'one way',
       max_rate_tpd:parseFloat(lk.max_rate_tpd)||null,
       cross_facility:fF!==tF,
       is_valid:_slValid(lk) // false = the two silos no longer hold the same product (the sim ignores it)
@@ -21850,6 +21854,7 @@ function _pushBIBuildTables(){
     const fF=elFac[from]||'', tF=elFac[to]||'';
     return stamp({scenario_type:v.scenario_type, date:v.date, link_id:lk.id,
       direction:from===lk.from_silo_id?'forward':'reverse',
+      route:`${_slShort(from)} → ${_slShort(to)}`, // the Supply-page row label (one per direction)
       facility_id:fF, to_facility_id:tF, from_silo_id:from, to_silo_id:to,
       product_id:lk.product_id||'', cross_facility:fF!==tF,
       tonnes:v.tonnes, planned_t:v.planned_t, short_t:v.short_t, forecast_basis:v.basis});
@@ -26706,7 +26711,6 @@ async function dsIngestTopology(buf, name){
     Object.keys(DB).forEach(table=>{
       if(saved.DB[table]!==undefined) DB[table]=saved.DB[table];
     });
-    _slResetIfAbsent(saved.DB);
     if(saved.simCfg) Object.assign(S.simCfg,saved.simCfg);
     if(saved.counter) S.elCounter=saved.counter;
     syncElCounter();
@@ -29750,7 +29754,14 @@ function hideTyping(){if(typingEl){typingEl.remove();typingEl=null;}}
 // serialization (full DB → localStorage) runs once per 500ms burst.
 // beforeunload flushes a pending save so closing the tab never loses an edit.
 let _autoSaveTimer=null;
-function autoSave(){
+// The save stamp (savedAt) says WHEN THE DATA LAST CHANGED, and the shared-file merge relies on
+// it to spot an out-of-date copy coming back (_mgIsStale). So it only advances for real edits:
+// autoSave({keepStamp:true}) — the save after a simulation run — writes the same data under the
+// previous stamp. Before this, every simulation re-stamped the data as new, so an old tab left
+// open on another computer could push hours-old data that looked like the latest.
+let _autoSaveStampDue=false;
+function autoSave(opts){
+  if(!(opts&&opts.keepStamp)) _autoSaveStampDue=true;
   _rollPublishCatalogSoon();   // keep the Sales page's copy of this scenario's catalog current
   clearTimeout(_autoSaveTimer);
   _autoSaveTimer=setTimeout(()=>{_autoSaveTimer=null;autoSaveNow();},500);
@@ -29822,7 +29833,8 @@ function autoSaveNow(){
 
   // Stamp every save so startup can tell whether localStorage or the topology
   // file is the newer copy (used by the stale-file safety net in dsIngestTopology).
-  const _saveStamp = new Date().toISOString();
+  const _saveStamp = (_autoSaveStampDue || !window._lastSaveStamp) ? new Date().toISOString() : window._lastSaveStamp;
+  _autoSaveStampDue = false;
   window._lastSaveStamp = _saveStamp;
 
   // Build the mirror WITHOUT touching DB. The previous version filtered
@@ -29952,6 +29964,7 @@ function loadSaved(){
       // Remember when this localStorage copy was saved, so the topology data
       // source can refuse to overwrite it with an OLDER file (stale-file guard).
       window._lsSavedAt = saved.savedAt || null;
+      if(saved.savedAt) window._lastSaveStamp = saved.savedAt; // this data's own stamp (see autoSave)
 
       // Update Real Data Input panel facility selector after loading
       if(typeof initRealDataFacilitySelector === 'function'){
@@ -30108,7 +30121,11 @@ function _mgPick3(b, o, t){
 }
 
 // Three-way merge of one table (array of rows).
-function _mgMergeTable(table, baseArr, oursArr, theirsArr){
+// staleTheirs: the disk copy carries a save stamp OLDER than the version this browser last
+// synced — an out-of-date copy came back (another computer that was asleep/offline wrote its
+// old state, or a sync conflict restored an older version). Rows missing from such a copy are
+// NOT a teammate's deletions: they are kept (and written back) instead of being dropped.
+function _mgMergeTable(table, baseArr, oursArr, theirsArr, staleTheirs){
   const bm=new Map(), om=new Map(), tm=new Map();
   for(const r of baseArr)   bm.set(_mgRowKey(table,r), r);
   for(const r of oursArr)   om.set(_mgRowKey(table,r), r);
@@ -30126,7 +30143,8 @@ function _mgMergeTable(table, baseArr, oursArr, theirsArr){
     }else if(!bm.has(k)){
       rows.push(orow); localApplied++;                                          // we added it
     }else if(_mgStr(orow)===_mgStr(bm.get(k))){
-      remoteApplied++;                                                          // they deleted an untouched row
+      if(staleTheirs){ rows.push(orow); localApplied++; }                       // an OLDER copy lacks it — keep ours
+      else remoteApplied++;                                                     // they deleted an untouched row
     }else{
       rows.push(orow); localApplied++;                                          // they deleted, we edited — keep ours
       conflicts.push({table, key:k, label:_mgRowLabel(table,orow,k), kind:'remote-deleted'});
@@ -30155,7 +30173,8 @@ function _mgMergeFlat(b, o, t){
 }
 
 // Merge whole payloads ({DB, counter, simCfg, simResults?, savedAt}).
-function _mgMergePayload(base, ours, theirs){
+function _mgMergePayload(base, ours, theirs, opts){
+  opts=opts||{};
   const conflicts=[]; let remoteApplied=0, localApplied=0;
   const mergedDB={};
   const tables=new Set([...Object.keys(ours.DB||{}), ...Object.keys(theirs.DB||{})]);
@@ -30169,7 +30188,7 @@ function _mgMergePayload(base, ours, theirs){
     if(!Array.isArray(o) && Array.isArray(th)){ mergedDB[t]=th; remoteApplied+=th.length?1:0; continue; }
     if(!Array.isArray(th) && Array.isArray(o)){ mergedDB[t]=o;  localApplied +=o.length?1:0;  continue; }
     if(Array.isArray(o)||Array.isArray(th)){
-      const r=_mgMergeTable(t, Array.isArray(b)?b:[], Array.isArray(o)?o:[], Array.isArray(th)?th:[]);
+      const r=_mgMergeTable(t, Array.isArray(b)?b:[], Array.isArray(o)?o:[], Array.isArray(th)?th:[], !!opts.staleTheirs);
       mergedDB[t]=r.rows; remoteApplied+=r.remoteApplied; localApplied+=r.localApplied;
       for(const c of r.conflicts) conflicts.push(c);
     }else{
@@ -30191,7 +30210,13 @@ function _mgMergePayload(base, ours, theirs){
   // (prefer whichever side changed) but never let them force a write by themselves.
   const sr=_mgPick3(base.simResults??null, ours.simResults??null, theirs.simResults??null);
   if(sr.value!=null) payload.simResults=sr.value;
-  return {payload, conflicts, remoteApplied, localApplied};
+  return {payload, conflicts, remoteApplied, localApplied, staleTheirs:!!opts.staleTheirs, staleSavedAt:opts.staleTheirs?(theirs.savedAt||null):null};
+}
+// Is the disk copy OLDER than what this browser last synced? Save stamps only advance on real
+// edits (see autoSaveNow), so an out-of-date copy coming back keeps its old stamp.
+function _mgIsStale(diskPayload, basePayloadOrBaseline){
+  const d=diskPayload&&diskPayload.savedAt, b=basePayloadOrBaseline&&basePayloadOrBaseline.savedAt;
+  return !!(d&&b&&d<b);
 }
 
 // Decide how a pending write should hit the disk.
@@ -30212,7 +30237,9 @@ async function _mgPrepareWrite(handle, ours, baseline){
   if(!theirs || !theirs.DB) return {mode:'plain'};
   let base=null; try{ base=JSON.parse(baseline.text); }catch(e){}
   if(!base || !base.DB) return {mode:'plain'};
-  const mergeInfo=_mgMergePayload(base, ours, theirs);
+  // An OLDER copy than the one we last synced came back (see _mgIsStale): merge it, but
+  // never read the rows it lacks as deletions — they are kept and written back.
+  const mergeInfo=_mgMergePayload(base, ours, theirs, {staleTheirs:_mgIsStale(theirs, base)});
   if(mergeInfo.localApplied===0 && mergeInfo.conflicts.length===0)
     return {mode:'pull', theirs, diskText, fileMod:f.lastModified, mergeInfo};
   return {mode:'merge', mergeInfo};
@@ -30221,8 +30248,9 @@ async function _mgPrepareWrite(handle, ours, baseline){
 // Push a (merged / pulled) payload into the live app + light re-render — the
 // same set dsIngestTopology refreshes, safe to run mid-session.
 function _mgApplyPayloadToApp(payload){
+  // Tables the payload lacks are KEPT as they are (a copy written by an older app version
+  // has no silo_links etc.; wiping ours made transfers vanish — see _slResetIfAbsent).
   Object.keys(DB).forEach(t=>{ if(payload.DB[t]!==undefined) DB[t]=payload.DB[t]; });
-  _slResetIfAbsent(payload.DB);
   if(payload.simCfg) Object.assign(S.simCfg, payload.simCfg);
   if(payload.counter) S.elCounter=payload.counter;
   if(typeof syncElCounter==='function') syncElCounter();
@@ -30252,6 +30280,8 @@ function _mgShowMergeBanner(fileName, info){
   b.innerHTML=`<span style="font-size:15px;line-height:1">${isConflict?'⚠':'⇄'}</span>
     <span style="flex:1;line-height:1.35">${isConflict
       ? `Merged changes from <b>${fileName||'the shared file'}</b> — <b>${conflicts.length} conflict${conflicts.length>1?'s':''}</b> where both you and a teammate edited the same item: ${names}. <b>Your version was kept</b> — please double-check ${conflicts.length>1?'these items':'this item'}.`
+      : info.staleTheirs
+      ? `An <b>older copy</b> of <b>${fileName||'the shared file'}</b>${info.staleSavedAt?` (saved ${new Date(info.staleSavedAt).toLocaleString()})`:''} had replaced the newer one — probably another computer or tab with an out-of-date copy. Your newer changes were kept and saved back.`
       : `Synced with <b>${fileName||'the shared file'}</b>: pulled ${info.remoteApplied} change${info.remoteApplied!==1?'s':''} made by a teammate${info.localApplied?` and saved ${info.localApplied} of yours`:''}.`}</span>
     <button onclick="document.getElementById('mg-merge-banner')?.remove()" style="background:transparent;color:inherit;border:1px solid currentColor;padding:6px 11px;font-family:inherit;font-size:10px;cursor:pointer;border-radius:3px">Dismiss</button>`;
   if(!isConflict){ clearTimeout(window._mgBannerT); window._mgBannerT=setTimeout(()=>{document.getElementById('mg-merge-banner')?.remove();}, 15000); }
@@ -30626,10 +30656,14 @@ async function scLoadScenario(id, opts){
       ? !!(lsStamp && baseline.savedAt && lsStamp>baseline.savedAt)
       : !!(lsStamp && (!fileStamp || lsStamp>fileStamp)); // no baseline → old stamp heuristic
     const remoteChanged = baseline ? (text!==baseline.text) : false;
-    if(baseline && localChanged && remoteChanged){
+    // The file changed, but to a copy OLDER than the one we last synced: another computer that
+    // was asleep/offline pushed its old state (or a sync conflict restored an older version).
+    // Adopting it would silently drop everything saved since — merge it instead, keeping rows.
+    const staleFile = !!(baseline && remoteChanged && _mgIsStale(saved, baseline));
+    if(baseline && remoteChanged && (localChanged || staleFile)){
       let base=null; try{ base=JSON.parse(baseline.text); }catch(e){}
       if(base && base.DB){
-        const res=_mgMergePayload(base, scBuildPayload(), saved);
+        const res=_mgMergePayload(base, scBuildPayload(), saved, {staleTheirs:staleFile});
         _mgApplyPayloadToApp(res.payload);
         // The merge result came from the file, so anything the cache had dropped
         // is back in memory — and the tables it still lacks were taken from
@@ -30650,6 +30684,7 @@ async function scLoadScenario(id, opts){
         let mod=fileMod; try{ mod=(await handle.getFile()).lastModified; }catch(e){}
         if(wrote) scSaveBaseline(id, outText, res.payload.savedAt, mod);
         window._lsSavedAt=res.payload.savedAt;
+        window._lastSaveStamp=res.payload.savedAt;
         scSetSaveStatus(wrote?'saved':'error');
         _mgShowMergeBanner(m.fileName, res);
         scAfterLoad();
@@ -30664,8 +30699,12 @@ async function scLoadScenario(id, opts){
     }
     // !localChanged → fall through: the file is the freshest copy, adopt it.
   }
+  // Switching to ANOTHER scenario: a file that predates the silo tables must not inherit the
+  // previous scenario's links. Re-opening the SAME scenario (startup guard) keeps them — the
+  // file may just have been written by an older app version on another computer.
+  const _sameScenario = !!(opts.guard && SC.activeId===id);
   Object.keys(DB).forEach(t=>{ if(saved.DB[t]!==undefined) DB[t]=saved.DB[t]; });
-  _slResetIfAbsent(saved.DB);
+  if(!_sameScenario) _slResetIfAbsent(saved.DB);
   if(saved.simCfg) Object.assign(S.simCfg,saved.simCfg);
   if(saved.counter) S.elCounter=saved.counter;
   syncElCounter();
@@ -30674,6 +30713,7 @@ async function scLoadScenario(id, opts){
   if(typeof _demandCacheInvalidate==='function') _demandCacheInvalidate();
   SC.activeId=id; m.lastOpened=new Date().toISOString();
   window._lsSavedAt=saved.savedAt||null;
+  if(saved.savedAt) window._lastSaveStamp=saved.savedAt; // adopted data keeps its own stamp (see autoSave)
   scSaveBaseline(id, text, saved.savedAt||null, fileMod);
   scSaveMeta(); scSetSaveStatus('saved'); scAfterLoad();
   return true;
@@ -31030,6 +31070,7 @@ async function scRestoreSnapshot(id, name){
     const payload=JSON.parse(text);
     if(!payload||!payload.DB) throw new Error('not a valid scenario snapshot');
     _mgApplyPayloadToApp(payload);
+    _slResetIfAbsent(payload.DB); // a restore goes back to that version — silo tables included
     await scManualSave(); // pushes the restored state back into the live file (merge-aware) + snapshots it
     closeModal();
     statMsg('Restored ✓ — '+name);
