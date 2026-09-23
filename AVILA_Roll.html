@@ -2027,11 +2027,11 @@ td.camp-drag-cut>div:first-child{opacity:.3}
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;font-size:10px;line-height:1.7">
             <div>
               <div style="color:var(--blue);margin-bottom:4px">DIMENSIONS</div>
-              <div style="color:var(--text-dim)">dim_date <span style="opacity:.6">(contiguous calendar)</span> · dim_facility · dim_element · dim_product</div>
+              <div style="color:var(--text-dim)">dim_date <span style="opacity:.6">(contiguous calendar)</span> · dim_facility · dim_element · dim_product · dim_silo_link</div>
             </div>
             <div>
               <div style="color:var(--green);margin-bottom:4px">FACTS</div>
-              <div style="color:var(--text-dim)">fact_production · fact_inventory · fact_demand · fact_unloading · fact_rail_movement · fact_stop_events · fact_service · fact_rail_sim · fact_vessel_call</div>
+              <div style="color:var(--text-dim)">fact_production · fact_inventory · fact_demand · fact_unloading · fact_rail_movement · fact_stop_events · fact_service · fact_rail_sim · fact_vessel_call · fact_silo_transfer</div>
             </div>
           </div>
           <div style="margin-top:14px;padding-top:12px;border-top:1px dashed var(--border2);font-size:9px;color:var(--text-dim);line-height:1.6">
@@ -4500,7 +4500,7 @@ function renderSiloLinkProps(id){
       <div class="fhint">Only used to warn when a plan asks for more. The simulation never moves material on its own.</div></div>
   </div>
   <div class="pg"><div class="pg-title">Plans and actuals</div>
-    <div style="font-size:9px;color:var(--text-dim);line-height:1.6;padding:0 10px 8px">${nP} plan${nP===1?'':'s'} · ${nR} actual record${nR===1?'':'s'}.<br>Type daily tonnes (or double-click a day for a campaign) in the ${_slFamLabel([lk.product_id])} section of the Production page.</div>
+    <div style="font-size:9px;color:var(--text-dim);line-height:1.6;padding:0 10px 8px">${nP} plan${nP===1?'':'s'} · ${nR} actual record${nR===1?'':'s'}.<br>On the Production page (${_slFamLabel([lk.product_id])} section), click a day to plan a campaign or record an actual, and drag a campaign's ends to change its duration.</div>
     <div style="padding:0 10px 8px"><button type="button" class="btn-sec" style="width:100%" onclick="slOpenOnSupply('${id}')">Open on the Production page →</button></div>
   </div>
   <div style="padding:0 10px 10px"><button class="btn-sec" style="width:100%;color:var(--red);border-color:rgba(var(--red-rgb),.5)" onclick="deleteSiloLink('${id}')">🗑 Delete link</button></div>`;
@@ -4540,69 +4540,74 @@ function slOpenOnSupply(id){
   },400);
 }
 
-// ── Supply page editing ────────────────────────────────────────────────────
-// A typed day BEFORE today records what was actually moved (real_silo_transfers_daily); today or
-// later is a one-day plan that overrides any campaign on that day. Clearing the cell removes the
-// day's record / override; 0 is an explicit "nothing moved / nothing planned".
-function saveSiloXferCell(inp){
-  const {link:linkId,from,to,date:ds}=inp.dataset; if(!linkId||!from||!to||!ds) return;
-  const lk=_slLink(linkId); if(!lk) return;
-  const raw=(inp.value||'').replace(/,/g,'').trim();
-  const v=raw===''?null:Math.max(0,parseFloat(raw)||0);
-  if(ds<new Date()._ymd()) _slSetReal(lk,from,to,ds,v);
-  else {
-    DB.silo_transfer_plans=(DB.silo_transfer_plans||[]).filter(p=>!(p.link_id===linkId&&p.from_silo_id===from&&p.to_silo_id===to&&p.start_date===ds&&p.end_date===ds));
-    if(v!=null) DB.silo_transfer_plans.push({id:'stp_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),link_id:linkId,from_silo_id:from,to_silo_id:to,start_date:ds,end_date:ds,rate_tpd:v,notes:'typed on the Production page'});
-  }
-  const maxT=parseFloat(lk.max_rate_tpd)||0;
-  autoSave(); renderSupplyView(); scheduleSimulation();
-  if(v!=null&&maxT>0&&v>maxT) statMsg(`⚠ ${Math.round(v).toLocaleString()} t is above this link's max of ${Math.round(maxT).toLocaleString()} t/day`);
-}
-// Double-click a transfer day: plan a campaign (date range, t/day) or record the actual tonnes.
+// ── Campaign popup (click a day on a transfer row) ─────────────────────────
+// The same popup as the finish mills' (showCampaignPopup): 📈 Forecast Campaign = a date range
+// at a t/day rate (overlapping campaigns of this link + direction are trimmed, not deleted —
+// _campSplice), ✅ Real Data = the tonnes actually moved on one day. On the Supply Gantt a
+// campaign's start / end can also be dragged (store 'xfer' in _CAMP_STORES).
 function showSiloXferPopup(linkId,from,to,ds){
   const lk=_slLink(linkId); if(!lk) return;
-  const today=new Date()._ymd();
   const real=_slRealT(linkId,from,to,ds);
   const pr=_slPlanRow(linkId,from,to,ds);
-  const camp=pr&&pr.start_date!==pr.end_date?pr:null;
-  window._sxCtx={linkId,from,to,ds,real,camp,planRate:pr?(parseFloat(pr.rate_tpd)||0):null};
-  window._sxOverAck=false;
   const maxT=parseFloat(lk.max_rate_tpd)||0;
-  const pname=DB.products.find(p=>p.id===lk.product_id)?.name||lk.product_id;
-  const btnSty='padding:5px 10px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid rgba(var(--red-rgb),.5);color:var(--red);cursor:pointer;border-radius:2px';
+  window._sxCtx={linkId,from,to,ds,real,camp:pr};
+  window._sxRealAck=false; window._sxOverAck=false;
+  const defaultMode=real!=null?'real':'forecast';
+  const pname=DB.products.find(p=>p.id===lk.product_id)?.name||lk.product_id||'';
+  const delSty='padding:5px 10px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid rgba(var(--red-rgb),.5);color:var(--red);cursor:pointer;border-radius:2px';
   const html=`
   <div style="font-family:var(--mono);font-size:9px;min-width:320px">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
       <div>
-        <div id="sx-title" style="font-size:11px;font-weight:700;color:var(--orange)"></div>
-        <div style="color:var(--text-dim);margin-top:2px">${esc(_slShort(from))} → ${esc(_slShort(to))} · ${esc(pname)}</div>
+        <div id="sx-title" style="font-size:11px;font-weight:700;color:${pr?'var(--lime)':'var(--text)'}">${pr?'🔒 Edit Campaign':'+ New Campaign'}</div>
+        <div style="color:var(--text-dim);margin-top:2px">${esc(_slName(lk))} · ${ds}</div>
       </div>
       <button onclick="closeCampaignPopup()" style="background:transparent;border:none;color:var(--text-dim);cursor:pointer;font-size:16px">✕</button>
     </div>
-    <div style="display:flex;margin-bottom:12px;border:1px solid var(--border2);border-radius:3px;overflow:hidden">
-      <button type="button" id="sx-mode-plan" onclick="_sxSetMode('plan')" style="flex:1;padding:6px 8px;font-family:var(--mono);font-size:9px;border:none;cursor:pointer">📈 Plan campaign</button>
-      <button type="button" id="sx-mode-real" onclick="_sxSetMode('real')" style="flex:1;padding:6px 8px;font-family:var(--mono);font-size:9px;border:none;cursor:pointer">✅ Actual</button>
+
+    <!-- Forecast vs Real toggle -->
+    <div style="display:flex;gap:0;margin-bottom:12px;border:1px solid var(--border2);border-radius:3px;overflow:hidden">
+      <button type="button" id="sx-mode-forecast" onclick="_sxSetMode('forecast')" style="flex:1;padding:6px 8px;font-family:var(--mono);font-size:9px;border:none;cursor:pointer">📈 Forecast Campaign</button>
+      <button type="button" id="sx-mode-real" onclick="_sxSetMode('real')" style="flex:1;padding:6px 8px;font-family:var(--mono);font-size:9px;border:none;cursor:pointer">✅ Real Data</button>
     </div>
+
     <div style="display:flex;flex-direction:column;gap:8px">
-      <div class="fr s2">
-        <div class="ff"><div class="fl" id="sx-rate-label">Tonnes per day</div>
-          <input class="fi" id="sx-rate" type="number" min="0" step="1" style="width:100%" oninput="window._sxOverAck=false"></div>
-        <div style="font-size:8px;color:var(--text-dim);align-self:flex-end;padding-bottom:6px">${maxT>0?`max ${Math.round(maxT).toLocaleString()} t/day`:'no max rate set'}</div>
+      <div class="fr s1">
+        <div class="ff">
+          <div class="fl">Transfer</div>
+          <div class="fi" style="width:100%;opacity:.85;cursor:default">${esc(_slShort(from))} → ${esc(_slShort(to))} · ${esc(pname)}</div>
+        </div>
       </div>
       <div class="fr s2">
-        <div class="ff"><div class="fl" id="sx-from-label">From</div><input class="fi" id="sx-from" type="date" style="width:100%"></div>
-        <div class="ff" id="sx-to-field"><div class="fl">To</div><input class="fi" id="sx-to" type="date" style="width:100%"></div>
+        <div class="ff">
+          <div class="fl" id="sx-rate-label">Rate (t/d)</div>
+          <input class="fi" id="sx-rate" type="number" min="0" step="10" style="width:100%" oninput="window._sxOverAck=false">
+        </div>
+        <div id="sx-rate-hint" style="font-size:8px;color:var(--text-dim);align-self:flex-end;padding-bottom:6px">${maxT>0?`max ${Math.round(maxT).toLocaleString()} t/d`:'no max rate set'}</div>
+      </div>
+      <div class="fr s2">
+        <div class="ff">
+          <div class="fl" id="sx-from-label">From</div>
+          <input class="fi" id="sx-from" type="date" onchange="window._sxRealAck=false" style="width:100%">
+        </div>
+        <div class="ff" id="sx-to-field">
+          <div class="fl">To</div>
+          <input class="fi" id="sx-to" type="date" onchange="window._sxRealAck=false" style="width:100%">
+        </div>
       </div>
     </div>
     <div id="sx-warn" style="display:none;margin-top:10px;padding:6px 8px;border-left:3px solid var(--amber);background:rgba(var(--amber-rgb),.08);color:var(--amber);font-size:9px;line-height:1.5"></div>
+
     <div style="margin-top:12px;display:flex;gap:8px;justify-content:space-between;align-items:center">
       <div style="display:flex;gap:6px">
-        <span id="sx-del-wrap">${camp?`<button onclick="_sxDeletePlan('${camp.id}')" style="${btnSty}">✕ Delete campaign</button>`:''}</span>
-        <span id="sx-clear-wrap">${real!=null?`<button onclick="_sxClearReal()" style="${btnSty}">✕ Clear actual</button>`:''}</span>
+        <span id="sx-del-wrap">${pr?`<button onclick="_sxDeletePlan('${pr.id}')" style="${delSty}">✕ Delete Campaign</button>`:''}</span>
+        <span id="sx-clear-real-wrap" style="display:none">${real!=null?`<button onclick="_sxClearReal()" style="${delSty}">✕ Clear Real Value</button>`:''}</span>
+        <button onclick="closeCampaignPopup();switchView('topology');setTimeout(()=>selectSiloLink('${lk.id}'),60)" title="Show this link on the topology (direction, max rate, material)"
+          style="padding:5px 10px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid var(--orange);color:var(--orange);cursor:pointer;border-radius:2px">┄ Topology</button>
       </div>
       <div style="display:flex;gap:6px">
         <button onclick="closeCampaignPopup()" style="padding:5px 12px;font-family:var(--mono);font-size:9px;background:transparent;border:1px solid var(--border2);color:var(--text-dim);cursor:pointer;border-radius:2px">Cancel</button>
-        <button id="sx-apply-btn" onclick="applySiloXferPopup()" style="padding:5px 14px;font-family:var(--mono);font-size:9px;border:none;cursor:pointer;font-weight:700;border-radius:2px"></button>
+        <button id="sx-apply-btn" onclick="applySiloXferPopup()" style="padding:5px 14px;font-family:var(--mono);font-size:9px;background:var(--lime);border:none;color:var(--on-lime);cursor:pointer;font-weight:700;border-radius:2px">🔒 Apply Campaign</button>
       </div>
     </div>
   </div>`;
@@ -4613,61 +4618,77 @@ function showSiloXferPopup(linkId,from,to,ds){
     ov.onclick=e=>{ if(e.target===ov) closeCampaignPopup(); };
     document.body.appendChild(ov);
   }
-  ov.innerHTML=`<div style="background:var(--surface);border:1px solid var(--orange);padding:18px;border-radius:6px;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.6)">${html}</div>`;
+  ov.innerHTML=`<div style="background:var(--surface);border:1px solid var(--lime);padding:18px;border-radius:6px;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.6)">${html}</div>`;
   ov.style.display='flex';
-  _sxSetMode(real!=null||ds<today?'real':'plan');
+  _sxSetMode(defaultMode);
 }
+// Forecast (date-range campaign) vs Real (one day's actual) — styled like _campSetMode.
 function _sxSetMode(mode){
   const c=window._sxCtx; if(!c) return;
-  window._sxMode=mode; window._sxOverAck=false;
+  window._sxMode=mode; window._sxOverAck=false; window._sxRealAck=false;
   const real=mode==='real';
-  const on='background:var(--orange);color:var(--on-lime);font-weight:700', off='background:transparent;color:var(--text-dim);font-weight:400';
+  const onSty='background:var(--lime);color:var(--on-lime);font-weight:700', offSty='background:transparent;color:var(--text-dim);font-weight:400';
   const base='flex:1;padding:6px 8px;font-family:var(--mono);font-size:9px;border:none;cursor:pointer;';
-  document.getElementById('sx-mode-plan').style.cssText=base+(real?off:on);
-  document.getElementById('sx-mode-real').style.cssText=base+(real?on:off);
+  document.getElementById('sx-mode-forecast').style.cssText=base+(real?offSty:onSty);
+  document.getElementById('sx-mode-real').style.cssText=base+(real?onSty:offSty);
   document.getElementById('sx-to-field').style.display=real?'none':'';
   document.getElementById('sx-from-label').textContent=real?'Date':'From';
-  document.getElementById('sx-rate-label').textContent=real?'Tonnes moved':'Tonnes per day';
-  document.getElementById('sx-title').textContent=real?'✅ Actual transfer':(c.camp?'🔒 Edit transfer campaign':'+ New transfer campaign');
-  document.getElementById('sx-del-wrap').style.display=real?'none':'';
-  document.getElementById('sx-clear-wrap').style.display=real?'':'none';
+  document.getElementById('sx-rate-label').textContent=real?'Actual moved (t)':'Rate (t/d)';
+  document.getElementById('sx-rate-hint').style.display=real?'none':'';
+  document.getElementById('sx-title').textContent=real?'✅ Real Transfer':(c.camp?'🔒 Edit Campaign':'+ New Campaign');
+  // From = the clicked day (not the campaign's first day — same reason as showCampaignPopup);
+  // To = the end of the campaign covering it.
   document.getElementById('sx-from').value=c.ds;
   document.getElementById('sx-to').value=(!real&&c.camp)?c.camp.end_date:c.ds;
-  document.getElementById('sx-rate').value=real?(c.real??''):(c.planRate??'');
+  document.getElementById('sx-rate').value=real?(c.real??''):(c.camp?(parseFloat(c.camp.rate_tpd)||0):'');
   const ap=document.getElementById('sx-apply-btn');
-  ap.textContent=real?'✅ Save actual':'🔒 Apply campaign';
-  ap.style.background=real?'var(--royal)':'var(--orange)'; ap.style.color=real?'var(--on-blue)':'var(--on-lime)';
+  ap.textContent=real?'✅ Save Real Value':'🔒 Apply Campaign';
+  ap.style.background=real?'var(--royal)':'var(--lime)'; ap.style.color=real?'var(--on-blue)':'var(--on-lime)';
+  document.getElementById('sx-del-wrap').style.display=real?'none':'';
+  document.getElementById('sx-clear-real-wrap').style.display=real?'':'none';
   const w=document.getElementById('sx-warn'); if(w) w.style.display='none';
 }
 function applySiloXferPopup(){
   const c=window._sxCtx; const lk=c&&_slLink(c.linkId); if(!lk) return;
   const raw=(document.getElementById('sx-rate')?.value||'').replace(/,/g,'').trim();
   const t=parseFloat(raw);
-  if(raw===''||!(t>=0)){ _campWarn('Enter the tonnes (0 or more)','sx'); return; }
   const from=document.getElementById('sx-from')?.value, to=document.getElementById('sx-to')?.value;
   if(window._sxMode==='real'){
-    if(!from){ _campWarn('Choose the date','sx'); return; }
+    if(raw===''||!(t>=0)||!from){ _campWarn('Please enter the tonnes moved and the date','sx'); return; }
     _slSetReal(lk,c.from,c.to,from,t);
-  } else {
-    if(!from||!to){ _campWarn('Choose both dates','sx'); return; }
-    if(from>to){ _campWarn('From must be on or before To','sx'); return; }
-    const maxT=parseFloat(lk.max_rate_tpd)||0;
-    if(maxT>0&&t>maxT&&!window._sxOverAck){ window._sxOverAck=true;
-      _campWarn(`${Math.round(t).toLocaleString()} t/day is above this link's max of ${Math.round(maxT).toLocaleString()} t/day. Apply again to keep it.`,'sx'); return; }
-    // Make room: trim every plan of this direction overlapping the range (day overrides too).
-    DB.silo_transfer_plans=_campSplice(DB.silo_transfer_plans||[],p=>p.link_id===lk.id&&p.from_silo_id===c.from&&p.to_silo_id===c.to,from,to);
-    DB.silo_transfer_plans.push({id:'stp_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),link_id:lk.id,from_silo_id:c.from,to_silo_id:c.to,start_date:from,end_date:to,rate_tpd:t,notes:''});
+    closeCampaignPopup(); autoSave(); _slRefreshViews();
+    statMsg('Real transfer saved — running simulation…'); scheduleSimulation();
+    return;
   }
-  closeCampaignPopup(); autoSave(); _slRefreshViews(); scheduleSimulation();
+  if(raw===''||!(t>=0)||!from||!to){ _campWarn('Please fill all fields','sx'); return; }
+  if(from>to){ _campWarn('“From” must be on or before “To”','sx'); return; }
+  // A recorded actual always wins over a campaign, so on those days the campaign is saved but
+  // never used. Say so once; a second click on Apply saves anyway (as for production).
+  if(!window._sxRealAck){
+    const realDays=[...new Set((DB.real_silo_transfers_daily||[]).filter(x=>x.link_id===lk.id&&x.from_silo_id===c.from&&x.to_silo_id===c.to&&x.date>=from&&x.date<=to).map(x=>x.date))].sort();
+    if(realDays.length){ window._sxRealAck=true;
+      _campWarn(`${realDays.length===1?realDays[0]+' already has':realDays.length+' days in this range ('+realDays[0]+' → '+realDays[realDays.length-1]+') already have'} a recorded transfer. Real data wins, so the campaign won't apply there. Click Apply again to save anyway, or move “From”.`,'sx'); return; }
+  }
+  const maxT=parseFloat(lk.max_rate_tpd)||0;
+  if(maxT>0&&t>maxT&&!window._sxOverAck){ window._sxOverAck=true;
+    _campWarn(`${Math.round(t).toLocaleString()} t/d is above this link's max of ${Math.round(maxT).toLocaleString()} t/d. Click Apply again to keep it.`,'sx'); return; }
+  // Overlapping campaigns of this link + direction are TRIMMED to make room, not deleted.
+  DB.silo_transfer_plans=_campSplice(DB.silo_transfer_plans||[],_CAMP_STORES.xfer.same({link_id:lk.id,from_silo_id:c.from,to_silo_id:c.to}),from,to);
+  DB.silo_transfer_plans.push({id:'stp_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),link_id:lk.id,from_silo_id:c.from,to_silo_id:c.to,start_date:from,end_date:to,rate_tpd:t,notes:''});
+  closeCampaignPopup(); autoSave(); _slRefreshViews();
+  statMsg('Campaign saved — running simulation…'); scheduleSimulation();
 }
 function _sxDeletePlan(planId){
   DB.silo_transfer_plans=(DB.silo_transfer_plans||[]).filter(p=>p.id!==planId);
-  closeCampaignPopup(); autoSave(); _slRefreshViews(); scheduleSimulation();
+  closeCampaignPopup(); autoSave(); _slRefreshViews();
+  statMsg('Campaign deleted — running simulation…'); scheduleSimulation();
 }
 function _sxClearReal(){
   const c=window._sxCtx; const lk=c&&_slLink(c.linkId); if(!lk) return;
+  if(!confirm(`Clear the real transfer for ${c.ds}?\nThe campaign (if any) applies to this day again.`)) return;
   _slSetReal(lk,c.from,c.to,c.ds,null);
-  closeCampaignPopup(); autoSave(); _slRefreshViews(); scheduleSimulation();
+  closeCampaignPopup(); autoSave(); _slRefreshViews();
+  statMsg('Real transfer cleared — running simulation…'); scheduleSimulation();
 }
 function _slRefreshViews(){
   if(S.view==='schedules') renderSiloXferRegister(); else renderSupplyView();
@@ -7001,9 +7022,11 @@ function applyCampaign(elId){
 // for every row that tags its day cells with data-ds and its grips with a store:
 //   prod   → DB.production_campaigns (kilns, finish mills, packing machines)
 //   vessel → DB.vessel_campaigns     (Anchorage / Unloading overrides)
+//   xfer   → DB.silo_transfer_plans  (silo transfer campaigns — one link + direction per row)
 const _CAMP_STORES={
   prod:  {key:'production_campaigns', same:c=>x=>x.element_id===c.element_id},
   vessel:{key:'vessel_campaigns',     same:c=>x=>x.vessel_call_id===c.vessel_call_id},
+  xfer:  {key:'silo_transfer_plans',  same:c=>x=>x.link_id===c.link_id&&x.from_silo_id===c.from_silo_id&&x.to_silo_id===c.to_silo_id},
 };
 function _campGrips(store,c,ds){
   if(!c) return '';
@@ -7111,6 +7134,10 @@ function _campApplyDates(store,id,s,e){
   if(store==='prod'){
     const nReal=new Set((DB.real_production_daily||[]).filter(r=>r.element_id===c.element_id&&r.date>=s&&r.date<=e&&(parseFloat(r.volume_t)||0)>0).map(r=>r.date)).size;
     if(nReal) note=` · ${nReal} day${nReal===1?' has':'s have'} real data (real wins there)`;
+  }
+  if(store==='xfer'){
+    const nReal=new Set((DB.real_silo_transfers_daily||[]).filter(r=>r.link_id===c.link_id&&r.from_silo_id===c.from_silo_id&&r.to_silo_id===c.to_silo_id&&r.date>=s&&r.date<=e).map(r=>r.date)).size;
+    if(nReal) note=` · ${nReal} day${nReal===1?' has':'s have'} a recorded actual (actual wins there)`;
   }
   statMsg(`Campaign now ${s} → ${e}${note} — running simulation…`);
   scheduleSimulation();
@@ -10594,11 +10621,14 @@ function _renderSupplyViewInner(wrap){
 
   // ── <MATERIAL> TRANSFER section — silo transfer links (DB.silo_links) ─────────
   // One row per allowed direction of every live link touching `silos` whose product passes
-  // `pred` — a two-way link gives two rows, so every number is positive. A recorded day is
-  // green (cell-real, dbl-click to correct). Any other day is an input: typed before today it
-  // records the actual, today or later it plans that day; dbl-click plans a campaign. Planned
-  // days carry the plan edge; a day the simulation could not move in full also gets an amber
-  // bottom edge, and a past day with nothing recorded is amber (cell-gap) like every section.
+  // `pred` — a two-way link gives two rows, so every number is positive. The rows are Gantt
+  // rows with the finish mills' rules (_supEquipRow): a planned campaign is a hatched bar in the
+  // material's colour with its t/day in the middle of each run and the plan edge on top; a
+  // recorded day is a solid bar carrying the tonnes (green bottom edge); a planned day the
+  // simulation could not move at all shows the FULL hatch (origin empty / destination full), a
+  // partial one an amber bottom edge; a past day with no actual gets the simulated edge. Click a
+  // day for the campaign popup (showSiloXferPopup: Forecast Campaign / Real Data); drag a
+  // campaign's start or end grip to change its duration (store 'xfer' in _CAMP_STORES).
   const _slXferSection=(silos,{key,pred,color,rgb,depth})=>{
     const ids=new Set(silos.map(s=>s.id));
     const links=(DB.silo_links||[]).filter(lk=>(ids.has(lk.from_silo_id)||ids.has(lk.to_silo_id))
@@ -10612,13 +10642,15 @@ function _renderSupplyViewInner(wrap){
       const real=_slRealT(lk.id,d.from,d.to,ds);
       const pr=_slPlanRow(lk.id,d.from,d.to,ds);
       const di=_dIdx(ds), hs=di>=0?r?.siloTransferHistory?.[lk.id]?.[di]?.[dir]:null;
-      const c={v:real!=null?real:(pr?(parseFloat(pr.rate_tpd)||0):0), real:real!=null, planned:!!pr, moved:hs?hs.moved:null};
+      const c={v:real!=null?real:(pr?(parseFloat(pr.rate_tpd)||0):0), real:real!=null, plan:pr||null, moved:hs?hs.moved:null};
       _memo.set(mk,c); return c;
     };
     const dayTot=ds=>rows.reduce((s,rw)=>s+cell(rw,ds).v,0);
     const label=_slFamLabel(links.map(l=>l.product_id));
+    const visDs=new Set(); months.forEach(m=>{ if(!collapsed.has(m.ym)) m.dates.forEach(x=>visDs.add(x)); });
+    const visArr=_simDates.map(x=>visDs.has(x));
     let out=`<tr class="sup-sec-hdr" data-seckey="${key}" onclick="_supToggleSec('${key}')" style="cursor:pointer;background:rgba(var(--${rgb}-rgb),.04);border-top:1px solid rgba(var(--${rgb}-rgb),.25)">
-      <td title="Tonnes moved between two silos that hold the same material — one line per direction. Set the links up on the topology (Movement › Silo Transfer)." style="${stickyLeft('var(--surface)',depth,'border-bottom:1px solid var(--border),')}color:${color};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow(key)}</span> ${label}</td>`;
+      <td title="Tonnes moved between two silos that hold the same material — one line per direction. Click a day to plan a campaign or record an actual; drag a campaign's ends to change its duration. Links are drawn on the topology (Movement › Silo Transfer)." style="${stickyLeft('var(--surface)',depth,'border-bottom:1px solid var(--border),')}color:${color};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow(key)}</span> ${label}</td>`;
     months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
       const mt=mon.dates.reduce((a,ds)=>a+dayTot(ds),0);
       out+=`<td style="border-left:2px solid rgba(var(--${rgb}-rgb),.2);font-size:9px;font-weight:700;color:${color};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
@@ -10630,7 +10662,10 @@ function _renderSupplyViewInner(wrap){
       const {lk,d}=row, fe=getEl(d.from), te=getEl(d.to);
       const ff=_elFacName(fe), tf=_elFacName(te);
       const maxT=parseFloat(lk.max_rate_tpd)||0;
-      const pname=_prodById.get(lk.product_id)?.name||lk.product_id;
+      const prod=_prodById.get(lk.product_id), pname=prod?.name||lk.product_id;
+      const barColor=prod?((typeof spProdColor==='function')?spProdColor(prod.name||prod.id,false):(PRODUCT_CAT_COLORS[prod.category||'']||color)):color;
+      // The t/day label sits in the middle of each planned run of one rate (like the mills' product label).
+      const lblIdx=_midLabelIdx(_simDates.map(ds=>{ const c=cell(row,ds); return (!c.real&&c.plan&&c.v>0)?(c.plan.id+'|'+c.v):null; }),visArr);
       out+=`<tr class="supsec-${key}" data-sl="${lk.id}"><td title="${esc(fe?.name||'')} → ${esc(te?.name||'')} · ${esc(pname)}" style="${stickyLeft('var(--surface)',depth+1,'border-bottom:1px solid var(--border),')}color:${color};font-size:9px">`
         +`<span style="color:var(--orange);margin-right:4px">┄</span>${esc(_slShort(d.from))} → ${esc(_slShort(d.to))}`
         +(ff!==tf?`<span style="color:var(--text-dim);font-size:8px;margin-left:5px">${esc(ff)} → ${esc(tf)}</span>`:'')
@@ -10639,23 +10674,31 @@ function _renderSupplyViewInner(wrap){
         const mt=mon.dates.reduce((a,ds)=>a+cell(row,ds).v,0);
         out+=`<td style="border-left:2px solid rgba(var(--${rgb}-rgb),.1);font-size:9px;color:${color};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
         if(!isCol) mon.dates.forEach(ds=>{
-          const c=cell(row,ds);
-          const args=`'${lk.id}','${d.from}','${d.to}','${ds}'`;
+          const c=cell(row,ds), di=_dIdx(ds);
+          const grips=_campGrips('xfer',c.plan,ds);
+          const gPos=grips?'position:relative;':'';
+          const clickFn=`showSiloXferPopup('${lk.id}','${d.from}','${d.to}','${ds}')`;
           if(c.real){
             // An actual the simulation could not apply in full (its origin/destination levels
-            // disagree with the recorded move) keeps the amber edge so the gap is visible.
+            // disagree with the recorded move) gets an amber top edge; the tooltip says why.
             const rShort=c.moved!=null&&c.moved<c.v-0.5;
-            out+=`<td class="sup-day-${mon.ym} cell-real" title="${Math.round(c.v).toLocaleString()} t moved · actual${rShort?` — the simulation could apply only ${Math.round(c.moved).toLocaleString()} t (its origin is empty or its destination full that day; entering real inventories fixes that)`:''} — dbl-click to correct" ondblclick="event.stopPropagation();showSiloXferPopup(${args})" style="cursor:cell;font-size:9px;color:var(--real);font-weight:700;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${rShort?'box-shadow:inset 0 -2px 0 var(--amber);':''}${tdSty(ds)}">${Math.round(c.v).toLocaleString()}</td>`;
+            const tip=`${Math.round(c.v).toLocaleString()} t moved · actual${rShort?` — the simulation could apply only ${Math.round(c.moved).toLocaleString()} t (its origin is empty or its destination full that day; entering real inventories fixes that)`:''}`;
+            out+=`<td data-ds="${ds}" class="sup-day-${mon.ym} cell-real" title="${tip}" onclick="event.stopPropagation();${clickFn}" style="${gPos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barColor};box-shadow:inset 0 -2px 0 var(--real)${rShort?',inset 0 2px 0 var(--amber)':''}"><span style="position:absolute;left:4px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:8px;font-weight:700;color:${_barTextColor(barColor)};pointer-events:none">${Math.round(c.v).toLocaleString()}</span></div>${grips}</td>`;
             return;
           }
-          const past=ds<todayStr;
-          const short=c.v>0&&c.moved!=null&&c.moved<c.v-0.5;
-          const tip=(c.planned?`${Math.round(c.v).toLocaleString()} t planned`:'nothing planned')
-            +(short?` — only ${Math.round(c.moved).toLocaleString()} t could move (${c.moved<=0?'origin empty or destination full':'origin ran short or destination nearly full'})`:'')
-            +(past?' · no actual recorded — type the tonnes moved':' — type to plan this day, dbl-click for a campaign');
-          const edges=[c.planned&&c.v>0?'inset 0 2px 0 var(--plan)':'',short?'inset 0 -2px 0 var(--amber)':''].filter(Boolean).join(',');
-          out+=`<td class="sup-day-${mon.ym} ${past&&c.v>0?'cell-gap':''}" title="${tip}" ondblclick="event.stopPropagation();showSiloXferPopup(${args})" style="cursor:cell;padding:1px 2px;border-bottom:1px solid var(--border);${edges?`box-shadow:${edges};`:''}${tdSty(ds)}">`
-            +`<input class="sl-xfer-cell" data-link="${lk.id}" data-from="${d.from}" data-to="${d.to}" data-date="${ds}" value="${c.planned?Math.round(c.v):''}" onchange="saveSiloXferCell(this)" style="width:40px;background:transparent;border:none;color:${c.v>0?color:'var(--text-dim)'};font-family:var(--mono);font-size:9px;text-align:right;padding:3px 2px;outline:none"></td>`;
+          const on=!!c.plan&&c.v>0;
+          const full=on&&c.moved!=null&&c.moved<=0;
+          const short=on&&!full&&c.moved!=null&&c.moved<c.v-0.5;
+          const isGap=on&&ds<todayStr; // planned on a day that should have an actual
+          const barBg=!on?'transparent':full?_DOWN_HATCH.blocked:_hatchBar(barColor);
+          const edges=[]; if(c.plan) edges.push('inset 0 2px 0 var(--plan)');
+          if(short) edges.push('inset 0 -2px 0 var(--amber)'); else if(isGap&&!full) edges.push('inset 0 -2px 0 var(--simulated)');
+          const tip=!c.plan?'Nothing planned — click to plan a campaign or record an actual'
+            :`🔒 Campaign: ${Math.round(c.v).toLocaleString()} t/d${c.plan.start_date!==c.plan.end_date?` (${c.plan.start_date} → ${c.plan.end_date})`:''}`
+              +(full?' — nothing could move (origin empty or destination full)':short?` — only ${Math.round(c.moved).toLocaleString()} t could move (origin ran short or destination nearly full)`:'')
+              +(ds<todayStr?' · no actual recorded':'');
+          const lbl=(lblIdx.has(di)&&on&&!full)?`<span style="${_BAR_LBL_FIT}line-height:10px;font-family:var(--mono);color:${isGap?'var(--simulated)':'var(--bar-lbl)'};text-shadow:0 0 2px var(--bar-lbl-halo),0 0 2px var(--bar-lbl-halo);pointer-events:none">${Math.round(c.v).toLocaleString()} t/d</span>`:'';
+          out+=`<td data-ds="${ds}" class="sup-day-${mon.ym}${isGap?' src-gap':''}" title="${tip}" onclick="event.stopPropagation();${clickFn}" style="${gPos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barBg};${edges.length?`box-shadow:${edges.join(',')};`:''}">${lbl}</div>${grips}</td>`;
         });
       });
       out+=`</tr>`;
@@ -21779,6 +21822,57 @@ function _pushBIBuildTables(){
     });
   });
 
+  // ── SILO TRANSFERS (DB.silo_links) ─────────────────────
+  // dim_silo_link: one row per link. fact_silo_transfer: one row per link, direction and day.
+  //   actual   → tonnes recorded as moved (real_silo_transfers_daily)
+  //   forecast → tonnes the simulation moved; planned_t = what it was asked to move (the plan,
+  //              or the recorded actual on a day that has one — forecast_basis says which);
+  //              short_t = the part it could not (origin empty / destination full)
+  // facility_id is the facility the material LEAVES and to_facility_id the one it reaches;
+  // cross_facility rows are supply for the receiver, the rest are moves inside one facility.
+  const _slById={}; (DB.silo_links||[]).forEach(l=>{ _slById[l.id]=l; });
+  const _elName=id=>(DB.elements.find(e=>e.id===id)||{}).name||'';
+  const dim_silo_link=(DB.silo_links||[]).map(lk=>{
+    const fF=elFac[lk.from_silo_id]||'', tF=elFac[lk.to_silo_id]||'';
+    return {
+      link_id:lk.id, link_name:_slName(lk),
+      from_silo_id:lk.from_silo_id, from_silo_name:_elName(lk.from_silo_id), from_facility_id:fF, from_facility_name:facName[fF]||'',
+      to_silo_id:lk.to_silo_id, to_silo_name:_elName(lk.to_silo_id), to_facility_id:tF, to_facility_name:facName[tF]||'',
+      product_id:lk.product_id||'', direction:lk.two_way?'two way':'one way',
+      max_rate_tpd:parseFloat(lk.max_rate_tpd)||null,
+      cross_facility:fF!==tF,
+      is_valid:_slValid(lk) // false = the two silos no longer hold the same product (the sim ignores it)
+    };
+  });
+  const fact_silo_transfer=[];
+  const _r1=x=>Math.round((parseFloat(x)||0)*10)/10;
+  const _xferRow=(lk,from,to,v)=>{
+    const fF=elFac[from]||'', tF=elFac[to]||'';
+    return stamp({scenario_type:v.scenario_type, date:v.date, link_id:lk.id,
+      direction:from===lk.from_silo_id?'forward':'reverse',
+      facility_id:fF, to_facility_id:tF, from_silo_id:from, to_silo_id:to,
+      product_id:lk.product_id||'', cross_facility:fF!==tF,
+      tonnes:v.tonnes, planned_t:v.planned_t, short_t:v.short_t, forecast_basis:v.basis});
+  };
+  (DB.real_silo_transfers_daily||[]).forEach(t=>{
+    const lk=_slById[t.link_id]; if(!lk||!t.date) return; // a deleted link's leftovers
+    fact_silo_transfer.push(_xferRow(lk,t.from_silo_id,t.to_silo_id,{scenario_type:'actual', date:t.date,
+      tonnes:_r1(t.volume_t), planned_t:null, short_t:null, basis:''}));
+  });
+  if(r){
+    Object.entries(r.siloTransferHistory||{}).forEach(([lid,arr])=>{
+      const lk=_slById[lid]; if(!lk) return;
+      (arr||[]).forEach((h,i)=>{
+        if(!h) return;
+        [['fwd',lk.from_silo_id,lk.to_silo_id],['rev',lk.to_silo_id,lk.from_silo_id]].forEach(([k,from,to])=>{
+          const m=h[k]; if(!m) return;
+          fact_silo_transfer.push(_xferRow(lk,from,to,{scenario_type:'forecast', date:offsetToDate(i),
+            tonnes:_r1(m.moved), planned_t:_r1(m.asked), short_t:Math.max(0,_r1(m.asked-m.moved)), basis:m.real?'actual':'plan'}));
+        });
+      });
+    });
+  }
+
   // ── FACT: STOP EVENTS ──────────────────────────────────
   const fact_stop_events=[];
   if(r){
@@ -21801,21 +21895,22 @@ function _pushBIBuildTables(){
     {key:'simulation_start_date',value:simStart},
     {key:'simulation_horizon_days',value:horizon},
     {key:'simulation_active_facility',value:getFacility()?.name||''},
-    {key:'export_version',value:'2'},
+    {key:'export_version',value:'3'},
     {key:'skipped_orphan_demand_rows',value:String(_orphanDemand)},
     {key:'note_forecast_scope',value:'Forecast rows cover only the simulation\'s active facility. Actuals span every facility present in real_* tables.'},
     {key:'note_inventory_breakdown',value:'Forecast inventory is total per silo (product breakdown is not retained after the run). Actual inventory carries product_id.'},
     {key:'note_mill_tonnes',value:'Forecast mill tonnes are estimated as rated_tpd for the chosen product on running days. Kiln tonnes are actual simulation outputs.'},
     {key:'note_dim_date',value:'dim_date is a contiguous day-by-day calendar covering every date referenced by any fact (including rail departure/arrival and forecast demand). Safe to mark as the Power BI date table.'},
-    {key:'note_scm_type',value:'dim_product.scm_type splits category=additive into slag/ash. Blank means the product has not been tagged yet in the product editor.'}
+    {key:'note_scm_type',value:'dim_product.scm_type splits category=additive into slag/ash. Blank means the product has not been tagged yet in the product editor.'},
+    {key:'note_silo_transfer',value:'fact_silo_transfer: one row per silo link, direction and day. actual = tonnes recorded as moved; forecast = tonnes the simulation moved (planned_t = asked, short_t = could not move). facility_id = origin facility, to_facility_id = receiving facility; cross_facility=true rows are inbound supply for the receiver. Their effect is already inside fact_inventory — do not add them to stock.'}
   ];
 
   return {
     meta,
-    dim_date, dim_facility, dim_element, dim_product,
+    dim_date, dim_facility, dim_element, dim_product, dim_silo_link,
     fact_production, fact_inventory, fact_demand,
     fact_unloading, fact_rail_movement, fact_stop_events,
-    fact_service, fact_rail_sim, fact_vessel_call
+    fact_service, fact_rail_sim, fact_vessel_call, fact_silo_transfer
   };
 }
 
