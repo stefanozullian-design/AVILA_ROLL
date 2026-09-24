@@ -8821,7 +8821,10 @@ function openProductModal(p){
     <div class="modal-body">
       <div class="fr">
         <div class="ff"><div class="fl">Name</div><input class="fi" id="pm-name" value="${p?.name||''}" placeholder="e.g. BRS IL(K1)/CLK"></div>
-        <div class="ff"><div class="fl">Material Code</div><input class="fi" id="pm-code" value="${p?.material_code||''}" placeholder="e.g. OPC-001"></div>
+        <div class="ff"><div class="fl">SAP Material Code</div><input class="fi" id="pm-code" value="${p?.material_code||''}" placeholder="e.g. 4802-000000000001638064 or 1638064">
+          <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-top:3px">
+            Demand Mapping places SAP sales on this product by this code, and real production imports read it too. Left blank, its sales cannot be imported.
+          </div></div>
       </div>
       <div class="fr">
         <div class="ff"><div class="fl">Description</div><input class="fi" id="pm-desc" value="${p?.description||''}"></div>
@@ -8932,7 +8935,11 @@ function saveProduct(){
     const pct=parseFloat(document.getElementById(`ing-pct-${i}`)?.value)||0;
     if(sel.value&&pct>0) DB.recipes.push({id:`r_${Date.now()}_${ri++}`,product_id:pid,material_id:sel.value,pct});
   });
-  autoSave(); closeModal(); renderCatalogView(); statMsg('Product saved');
+  autoSave(); closeModal(); renderCatalogView();
+  // Demand Mapping reads the catalog's SAP code: refresh it if it is on screen, and say
+  // so at save time when the code is missing — not weeks later when sales go unplaced.
+  if(document.getElementById('cfg-panel-demandmap')?.offsetParent&&typeof xlmapRender==='function') xlmapRender();
+  statMsg(material_code?'Product saved':'Product saved — no SAP material code, so Demand Mapping cannot place its sales yet');
 }
 
 
@@ -26655,9 +26662,12 @@ function _xlSourceBody(){
   if(p.reasons.length){
     h+=`<div style="padding:9px 12px;border-bottom:1px solid var(--border)">
       <div style="font-family:var(--mono);font-size:8px;letter-spacing:1px;color:var(--amber);text-transform:uppercase;margin-bottom:4px">Could not be placed — biggest first</div>
-      ${p.reasons.slice(0,14).map(r=>`<div style="font-family:var(--mono);font-size:9px;color:var(--text);margin:2px 0">
+      ${p.reasons.slice(0,14).map(r=>{ const mm=/^material (\d+) is not in the material table/.exec(r.reason);
+        return `<div style="font-family:var(--mono);font-size:9px;color:var(--text);margin:2px 0">
         <span style="color:var(--amber)">⚠</span> ${esc(r.reason)}
-        <span style="color:var(--text-dim)"> · ${n(r.rows)} rows · ${n(r.t)} t</span></div>`).join('')}
+        <span style="color:var(--text-dim)"> · ${n(r.rows)} rows · ${n(r.t)} t</span>
+        ${mm?`<span class="tbl-act" title="Type the SAP code into the product's Material Code in Configuration → Products, or add a table row here" onclick="_xlUi.open.mat=true;_xlAdd('materials',{code:'${mm[1]}',product:'',pres:'BLK',note:''})">+ table row</span>`:''}</div>`; }).join('')}
+      <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-top:4px">Counts are from when the file was read — Re-read after changing a table or a product's SAP code.</div>
       ${p.reasons.length>14?`<div style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">· and ${p.reasons.length-14} more</div>`:''}
     </div>`;
   }
@@ -27122,7 +27132,8 @@ function xlmapClassify(soldTo){
 }
 function xlmapName(parts){
   return String(XLMAP.template||'{source}/{movement}/{product}/{presentation}/{class}')
-    .replace(/\{(\w+)\}/g,(_,k)=>parts[k]??'');
+    .replace(/\{(\w+)\}/g,(_,k)=>parts[k]??'')
+    .replace(/\/{2,}/g,'/');   // a product with no pack (catalog clinker "BRS_CLK") leaves no empty segment
 }
 function xlmapTranslate(row){
   if(!XLMAP) xlmapLoad();
@@ -27132,10 +27143,34 @@ function xlmapTranslate(row){
   if(sp&&sp.source) trace.push({t:'Ship point', r:`${spCode} → ${sp.source}`});
   else missing.push(sp?`ship point ${spCode} has no source set`:`ship point ${spCode||'(blank)'} is not in the ship-point table`);
 
-  const mCode=String(row.material??'').trim();
-  const mat=(XLMAP.materials||[]).find(r=>String(r.code??'').trim()===mCode);
-  if(mat&&mat.product) trace.push({t:'Material', r:`${mCode} → ${mat.product}${mat.pres?' / '+mat.pres:''}`});
-  else missing.push(mat?`material ${mCode} has no product set`:`material ${mCode||'(blank)'} is not in the material table`);
+  let mCode=String(row.material??'').trim();
+  const warn=[], picked=mCode.startsWith('cat:')?(DB.products||[]).find(x=>x.id===mCode.slice(4)):null;
+  // Builder only: a catalog product picked by id. With a SAP code it runs exactly as
+  // a real row carrying that code would (a shared code → the ship point decides).
+  if(picked&&_xlCatCode(picked.material_code)) mCode=_xlCatCode(picked.material_code).sap;
+  let mat=(XLMAP.materials||[]).find(r=>String(r.code??'').trim()===mCode), catalogId=null;
+  if(!mat&&picked&&mCode.startsWith('cat:')){
+    // No SAP code yet: it still composes its name (so the bench can find its demand
+    // point), but no SAP row can reach it.
+    const s=_xlSplitProduct(picked.name); mat={product:s.product, pres:s.pres}; catalogId=picked.id;
+    trace.push({t:'Material', r:`${picked.name} (catalog product — no SAP material code)`});
+    warn.push(`${picked.name} has no SAP material code — SAP sales cannot land on it until one is typed in Configuration → Products`);
+  }else if(!mat){
+    const cat=_xlCatalogProductsFor(mCode, spCode);
+    if(cat.length===1){
+      const s=_xlSplitProduct(cat[0].name); mat={product:s.product, pres:s.pres}; catalogId=cat[0].id;
+      const nShare=_xlCatalogProductsFor(mCode,'').length;
+      trace.push({t:'Material', r:`${mCode} → ${s.product}${s.pres?' / '+s.pres:''} (from the product catalog — no table row${nShare>1?`; ${nShare} products share the code, ship point ${spCode} picks this one`:''})`});
+    }
+  }
+  if(mat&&mat.product){ if(!catalogId) trace.push({t:'Material', r:`${mCode} → ${mat.product}${mat.pres?' / '+mat.pres:''}`}); }
+  else if(mat) missing.push(`material ${mCode} has no product set`);
+  else{
+    const cat=_xlCatalogProductsFor(mCode, spCode);
+    missing.push(cat.length>1
+      ? `material ${mCode} is on ${cat.length} catalog products (${cat.map(p=>p.name).join(', ')}) — add a material-table row to pick one`
+      : `material ${mCode||'(blank)'} is not in the material table or on any catalog product`);
+  }
 
   const stCode=String(row.ship_type??'').trim();
   const mov=(XLMAP.movements||[]).find(r=>_xlNorm(r.ship_type)===_xlNorm(stCode));
@@ -27154,7 +27189,7 @@ function xlmapTranslate(row){
     if(alias.action==='ignore'){ action='ignore'; trace.push({t:'Alias', r:`${name} → ignored`}); }
     else if(alias.to){ finalName=alias.to; trace.push({t:'Alias', r:`${name} → ${alias.to}`}); }
   }
-  return {name, finalName, parts, trace, missing, action, mapped:!missing.length};
+  return {name, finalName, parts, trace, missing, warn, action, catalogId, mapped:!missing.length};
 }
 // Does a demand point with this name exist in the scenario that is open?
 function xlmapFindDp(name){
@@ -27232,9 +27267,36 @@ function _xlShipBody(){
     </tr>`).join(''))}</div>
   ${_xlAddBtn('Add ship point',`_xlAdd('ship_points',{code:'',source:'',note:''})`)}`;
 }
+// Every product the topology uses, measured against this table — so a product added
+// to the catalog shows up here the day it is created, not the day its sales go missing.
+function _xlCatalogStrip(){
+  const cov=_xlCatalogCoverage();
+  const cat=cov.filter(c=>c.kind==='catalog'), noc=cov.filter(c=>c.kind==='nocode'), dr=cov.filter(c=>c.kind==='drift');
+  if(!cat.length&&!noc.length&&!dr.length) return `<div style="padding:7px 12px;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:9px;color:var(--green)">
+    ✓ All ${cov.length} products the topology uses translate through this table.</div>`;
+  const item=(c,extra,act)=>`<span style="display:inline-flex;gap:4px;align-items:center;margin:2px 10px 2px 0;white-space:nowrap">
+    <span style="color:var(--text)">${esc(c.name)}</span>${extra?`<span style="color:var(--text-dim)">${extra}</span>`:''}${act||''}</span>`;
+  const grp=(icon,color,title,list)=>`<div style="margin:3px 0">
+    <div style="color:${color}">${icon} ${title}</div><div style="padding-left:14px;line-height:1.7">${list}</div></div>`;
+  let h=`<div style="padding:8px 12px;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:9px">
+    <div style="font-size:8px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase;margin-bottom:3px">Product catalog ↔ this table</div>`;
+  if(noc.length) h+=grp('⚠','var(--amber)',`${noc.length} topology product${noc.length===1?' has':'s have'} no SAP material code — SAP sales cannot land on ${noc.length===1?'it':'them'}`,
+    noc.map(c=>item(c,'',`<span class="tbl-act" style="margin:0" onclick="_xlEditProduct('${esc(c.id)}')">set code</span>`)).join(''));
+  if(cat.length) h+=grp('✓','var(--green)',`${cat.length} placed straight from the catalog's SAP code — no row needed`,
+    cat.map(c=>item(c,c.sap,`<span class="tbl-act" style="margin:0" title="Optional: write it into this table" onclick="_xlPinCatalog('${esc(c.id)}')">pin</span>`)).join(''));
+  // Only offer the rename when the demand points carry the catalog's name and not the
+  // table's — MIA_I/II's demand points follow the table, renaming would orphan them.
+  const drNote=c=>c.dpTable&&!c.dpCatalog?`demand points use ${esc(c.tableName)} ✓`
+    :c.dpCatalog&&!c.dpTable?`demand points use the catalog's name`
+    :c.dpTable&&c.dpCatalog?`demand points exist under both names — sales land on ${esc(c.tableName)}`:'no demand point under either name';
+  if(dr.length) h+=grp('·','var(--text-dim)',`${dr.length} code${dr.length===1?' is':'s are'} named differently here than in the catalog — composed names follow this table`,
+    dr.map(c=>item(c,`${c.sap} here: ${esc(c.tableName)} · ${drNote(c)}`,
+      c.dpCatalog&&!c.dpTable?`<span class="tbl-act" style="margin:0" title="Rename the table row to the catalog's name, so sales land on the demand points that carry it" onclick="_xlUseCatalogName('${esc(c.id)}')">use catalog name</span>`:'')).join(''));
+  return h+`</div>`;
+}
 function _xlMatBody(){
   const rows=(XLMAP.materials||[]).map((r,i)=>({r,i})).filter(({r})=>_xlHit('mat',r.code,r.product,r.pres,r.note));
-  return `<div style="padding:8px 12px;border-bottom:1px solid var(--border)">${_xlFilterBox('mat','filter code or product…')}</div>
+  return _xlCatalogStrip()+`<div style="padding:8px 12px;border-bottom:1px solid var(--border)">${_xlFilterBox('mat','filter code or product…')}</div>
   <div id="xl-body-mat">${_xlTbl(_xlHdr(['Material','Product','Pack',''])+rows.map(({r,i})=>`<tr>
       ${_xlTd(_xlInp('materials',i,'code',r.code,'1606504'),'100px')}
       ${_xlTd(`<input class="fi" list="xl-prodlist" style="padding:3px 6px;font-size:9px" value="${esc(r.product??'')}" placeholder="BRS_IL(12)" onchange="_xlSet('materials',${i},'product',this.value)">`,'190px')}
@@ -27302,6 +27364,76 @@ function _xlAliBody(){
   ${_xlAddBtn('Add alias',`_xlAdd('aliases',{from:'',to:'',action:'map',note:''})`)}`;
 }
 
+// ── The product catalog is the fallback for the material table ───────────────
+// A product created in the catalog (e.g. BRS_IL(HE)/BLK, 2026-09-23) used to be invisible
+// here until someone also typed a material-table row for it: its SAP sales could not be
+// placed and the builder could not pick it. The catalog record already carries the SAP
+// material ("Material Code": "4802-000000000001638064" = ship point 4802 + material 1638064,
+// or just "1638064"), so a material the table does not translate now falls back to the
+// catalog product with that code. An explicit table row still wins. When one material sits
+// on several products (clinker 1035907 = BRS_CLK at 4802 and MIA_CLK at 4808) the row's
+// ship point picks the product.
+function _xlCatCode(mc){ // "4802-000000000001638064" → {ship:"4802", sap:"1638064"}
+  const m=/^(?:(\d{3,6})[-\s]+)?0*(\d+)$/.exec(String(mc||'').trim()); // not "OPC-001"
+  return m?{ship:m[1]||'', sap:m[2]}:null;
+}
+function _xlCatalogProductsFor(code, shipPt){
+  const c=String(code||'').trim().replace(/^0+/,''); if(!c) return [];
+  const hits=(DB.products||[]).filter(p=>{ const k=_xlCatCode(p.material_code); return !!(k&&k.sap===c); });
+  if(hits.length<2) return hits;
+  const s=String(shipPt||'').trim();
+  const byShip=s?hits.filter(p=>_xlCatCode(p.material_code).ship===s):[];
+  return byShip.length?byShip:hits;
+}
+function _xlSplitProduct(name){ // catalog "BRS_IL(HE)/BLK" → table-style {product:"BRS_IL(HE)", pres:"BLK"}
+  const s=String(name||'').trim(), i=s.lastIndexOf('/');
+  return i>0?{product:s.slice(0,i), pres:s.slice(i+1)}:{product:s, pres:''};
+}
+const _xlTableHasCode=code=>(XLMAP.materials||[]).some(r=>String(r.code??'').trim()===String(code??'').trim());
+// Products the topology uses (silo contents + demand-point products).
+function _xlTopologyProductIds(){
+  const used=new Set();
+  (DB.elements||[]).forEach(e=>{ if(e.type==='bulk_silo'||e.type==='packed_silo') (getSiloProducts(e)||[]).forEach(p=>used.add(p)); });
+  (DB.demand_points||[]).forEach(d=>(d.products||[]).forEach(p=>p&&p.product_id&&used.add(p.product_id)));
+  return used;
+}
+// How every product the topology uses reaches the material table:
+//   table    — a table row translates its name (nothing to do)
+//   catalog  — no row, but its catalog SAP code does the job (the fallback above)
+//   nocode   — no row and no SAP code: its sales cannot be placed until one is added
+//   drift    — its SAP code IS in the table but under another product name
+function _xlCatalogCoverage(){
+  if(!XLMAP) xlmapLoad();
+  const rows=XLMAP.materials||[], used=_xlTopologyProductIds(), out=[];
+  const dpNames=(DB.elements||[]).filter(e=>e.type==='demand_point').map(e=>_xlNorm(e.name));
+  (DB.products||[]).forEach(p=>{
+    if(!used.has(p.id)||!p.name) return;
+    const sp=_xlSplitProduct(p.name), k=_xlCatCode(p.material_code);
+    const byName=rows.some(r=>_xlNorm(r.product)===_xlNorm(sp.product)&&_xlNorm(r.pres||'')===_xlNorm(sp.pres));
+    const byCode=k?rows.find(r=>String(r.code??'').trim()===k.sap):null;
+    const kind=byName?'table':byCode?'drift':k?'catalog':'nocode';
+    const tableName=byCode?(byCode.product+(byCode.pres?'/'+byCode.pres:'')):'';
+    // For a drift: which of the two names do the demand points carry? Only that one lands.
+    const dpWith=n=>n?dpNames.filter(d=>d.includes('/'+_xlNorm(n)+'/')).length:0;
+    out.push({id:p.id, name:p.name, product:sp.product, pres:sp.pres, sap:k?k.sap:'', ship:k?k.ship:'', kind, tableName,
+      dpTable:kind==='drift'?dpWith(tableName):0, dpCatalog:kind==='drift'?dpWith(p.name):0});
+  });
+  return out.sort((a,b)=>a.name.localeCompare(b.name));
+}
+// Pin a catalog-derived translation as an explicit table row (optional — the fallback already works).
+function _xlPinCatalog(pid){
+  const c=_xlCatalogCoverage().find(x=>x.id===pid); if(!c) return;
+  (XLMAP.materials=XLMAP.materials||[]).push({code:c.sap||'', product:c.product, pres:c.pres, note:'from the product catalog'});
+  _xlUi.check=null; xlmapSave(c.sap?`Material ${c.sap} → ${c.name} added to the table`:`Row added for ${c.name} — type its SAP material code`);
+  xlmapRender();
+}
+// Make the table row agree with the catalog's name for the same SAP code.
+function _xlUseCatalogName(pid){
+  const c=_xlCatalogCoverage().find(x=>x.id===pid); if(!c||!c.sap) return;
+  (XLMAP.materials||[]).forEach(r=>{ if(String(r.code??'').trim()===c.sap){ r.product=c.product; r.pres=c.pres; } });
+  _xlUi.check=null; xlmapSave(`Material ${c.sap} now reads ${c.name}`); xlmapRender();
+}
+
 // Build a demand point — pick by name, never by code. The codes are what SAP
 // sends and what the tables translate; nobody should have to remember them to
 // answer "what would a JAX slag sale land on?". Everything here runs through
@@ -27333,7 +27465,10 @@ function _xlProductsAtFacility(fac){
   });
   return names.size?names:null;
 }
-// One option per product+pack in the material table, carrying its codes.
+// One option per product+pack in the material table, carrying its codes — plus
+// every catalog product the table does not cover: by its SAP code when it has one
+// (the translation fallback places those), else as 'cat:<id>' (flagged nocode) so a
+// topology product without a code can still be picked and its demand point found.
 function _xlMaterialOptions(){
   const by=new Map();
   (XLMAP.materials||[]).forEach(m=>{
@@ -27342,6 +27477,15 @@ function _xlMaterialOptions(){
     const e=by.get(label)||{label,product:m.product,pres:m.pres||'',codes:[]};
     e.codes.push(String(m.code||'').trim());
     by.set(label,e);
+  });
+  const known=new Set([...by.keys()].map(_xlNorm)), used=_xlTopologyProductIds();
+  const shared=code=>(DB.products||[]).filter(x=>_xlCatCode(x.material_code)?.sap===code).length>1;
+  (DB.products||[]).forEach(p=>{
+    if(!p.name||known.has(_xlNorm(p.name))) return;
+    const k=_xlCatCode(p.material_code), s=_xlSplitProduct(p.name);
+    // A code shared by several products (clinker 1035907) would make identical options — pick by product.
+    if(k&&!_xlTableHasCode(k.sap)) by.set(p.name,{label:p.name,product:s.product,pres:s.pres,codes:[shared(k.sap)?'cat:'+p.id:k.sap],catalog:true});
+    else if(!k&&used.has(p.id))    by.set(p.name,{label:p.name,product:s.product,pres:s.pres,codes:['cat:'+p.id],catalog:true,nocode:true});
   });
   return [...by.values()].sort((a,b)=>a.label.localeCompare(b.label));
 }
@@ -27390,14 +27534,14 @@ function _xlTestBody(){
       ${fld('Movement',sel('ship_type',movs.map(m=>({v:m.ship_type,l:m.ship_type+' → '+m.movement})),'150px'))}
     </div>
     <div style="margin-top:5px;font-family:var(--mono);font-size:8px;color:var(--text-dim)">
-      ${fac?`Source resolves to facility <span style="color:var(--text)">${esc(fac.name)}</span>${wired.length?` · ${wired.length} product${wired.length===1?'':'s'} wired to it, listed first`:' · nothing wired to it yet'} · ${allMats.length} products in the material table`
+      ${fac?`Source resolves to facility <span style="color:var(--text)">${esc(fac.name)}</span>${wired.length?` · ${wired.length} product${wired.length===1?'':'s'} wired to it, listed first`:' · nothing wired to it yet'} · ${allMats.filter(m=>!m.catalog).length} products in the material table${allMats.some(m=>m.catalog)?` + ${allMats.filter(m=>m.catalog).length} from the product catalog`:''}`
            :`No facility named <span style="color:var(--amber)">${esc(t.source||'—')}</span> in this scenario — every product listed`}
     </div>
     <div id="xl-test-out" style="margin-top:10px">${_xlTestOutHTML()}</div>
   </div>`;
 }
 function _xlProductSelect(wired,rest,cur,fac){
-  const opt=m=>`<option value="${esc(m.codes[0])}" ${m.codes.includes(cur)?'selected':''}>${esc(m.label)}</option>`;
+  const opt=m=>`<option value="${esc(m.codes[0])}" ${m.codes.includes(cur)?'selected':''}>${esc(m.label)}${m.nocode?' · no SAP code':m.catalog?' · catalog':''}</option>`;
   const body=wired.length
     ? `<optgroup label="wired to ${esc(fac?fac.name:'this facility')}">${wired.map(opt).join('')}</optgroup>`
       +(rest.length?`<optgroup label="── everything else">${rest.map(opt).join('')}</optgroup>`:'')
@@ -27433,13 +27577,15 @@ function _xlTestOutHTML(){
     ${fac?`<span class="tbl-act" onclick="openFacilityInTopology('${fac.id}',${dp?`'${dp.id}'`:'null'})">open ${esc(fac.name)} in topology →</span>`:''}
   </div>`;
   h+=`<div style="font-family:var(--mono);font-size:9px;color:var(--text-dim);margin-bottom:${(!dp&&fac&&res.mapped&&res.action!=='ignore')?'3':'8'}px">
-    in codes: ${esc([t.code||'—',t.material||'—',t.sold_to||'—',t.ship_type||'—'].join('  ·  '))}</div>`;
+    in codes: ${esc([t.code||'—',_xlShownCode(t.material)||'—',t.sold_to||'—',t.ship_type||'—'].join('  ·  '))}</div>`;
   if(!dp&&fac&&res.mapped&&res.action!=='ignore'){
     const spot=_xlSpotFor(fac);
     h+=`<div style="font-family:var(--mono);font-size:9px;color:var(--text-dim);margin-bottom:8px">
-      create puts it ${esc(spot.where)} — the canvas jumps there with it selected and ringed${_xlProductIdFor(t.material)?', product already set':', no catalog product matches it yet'}. Connecting it to a silo stays yours.</div>`;
+      create puts it ${esc(spot.where)} — the canvas jumps there with it selected and ringed${_xlProductIdFor(t.material,t.code)?', product already set':', no catalog product matches it yet'}. Connecting it to a silo stays yours.</div>`;
   }
   res.trace.forEach(x=>h+=line(x.t,x.r));
+  (res.warn||[]).forEach(w=>h+=`<div style="font-family:var(--mono);font-size:9px;color:var(--amber);margin:4px 0 2px">⚠ ${esc(w)}
+    ${res.catalogId?`<span class="tbl-act" onclick="_xlEditProduct('${esc(res.catalogId)}')">set it →</span>`:''}</div>`);
   if(res.name!==res.finalName) h+=line('composed',res.name,'var(--text-dim)');
   if(res.action==='park')   h+=line('action','parked — kept out of demand (movement rule)','var(--amber)');
   if(res.action==='ignore') h+=line('action','ignored (alias rule)','var(--amber)');
@@ -27454,6 +27600,12 @@ function _xlTestOutHTML(){
       ✓ ${esc(dp.id)}${dfac?' at '+esc(dfac.name):''} — an import would land here</div>`;
   }
   return h+`</div>`;
+}
+// The builder's 'cat:<id>' picks shown as the SAP code a real row would carry.
+function _xlShownCode(v){
+  const s=String(v||''); if(!s.startsWith('cat:')) return s;
+  const p=(DB.products||[]).find(x=>x.id===s.slice(4)), k=p&&_xlCatCode(p.material_code);
+  return k?k.sap:'no SAP code';
 }
 function _xlCopyName(name){
   const done=()=>statMsg('Copied — paste it as the demand point name in the topology');
@@ -27483,13 +27635,24 @@ function _xlSpotFor(fac){
 }
 // The catalog product behind a material code, matched the way the check is: the
 // catalog keeps product and pack in one name, the material table keeps them apart.
-function _xlProductIdFor(materialCode){
-  const m=(XLMAP.materials||[]).find(r=>String(r.code||'').trim()===String(materialCode||'').trim());
-  if(!m||!m.product) return null;
+// A table name that drifted from the catalog's ("MIA_I/II" vs "MIA_I-II") still
+// finds its product through the catalog's own SAP code.
+function _xlProductIdFor(materialCode, shipPt){
+  const code=String(materialCode||'').trim();
+  if(code.startsWith('cat:')) return (DB.products||[]).some(p=>p.id===code.slice(4))?code.slice(4):null;
+  const byCode=()=>{ const c=_xlCatalogProductsFor(code, shipPt); return c.length===1?c[0].id:null; };
+  const m=(XLMAP.materials||[]).find(r=>String(r.code||'').trim()===code);
+  if(!m||!m.product) return m?null:byCode();
   const want=_xlNorm(m.product), packed=_xlNorm(m.product+'/'+(m.pres||''));
   const ps=DB.products||[];
   return (ps.find(p=>_xlNorm(p.name)===packed)||ps.find(p=>_xlNorm(p.name)===want)
-        ||ps.find(p=>_xlNorm(p.name).startsWith(want+'/')))?.id||null;
+        ||ps.find(p=>_xlNorm(p.name).startsWith(want+'/')))?.id||byCode();
+}
+// Open the catalog editor on one product (the Material Code field is what Demand Mapping reads).
+function _xlEditProduct(pid){
+  const i=(DB.products||[]).findIndex(p=>p.id===pid); if(i<0) return;
+  if(typeof editProduct==='function') editProduct(i);
+  setTimeout(()=>{ const f=document.getElementById('pm-code'); if(f){ f.focus(); f.style.outline='2px solid var(--amber)'; } },80);
 }
 function _xlCenterOn(el){
   const svg=document.getElementById('topo-svg'); if(!svg||!S.topoView) return;
@@ -27528,7 +27691,7 @@ function _xlCreateInTopology(){
     assigned_facility_id:fac.id, type:'demand_point', x:spot.x, y:spot.y, name:res.finalName,
     props:{}, state:'idle', maintenanceEvents:[], productCapacities:[], is_active:true};
   DB.elements.push(el);
-  const pid=_xlProductIdFor(t.material);
+  const pid=_xlProductIdFor(t.material,t.code);
   (DB.demand_points=DB.demand_points||[]).push({
     id:`dp_el_${id}`, facility_id:fac.id, element_id:id, element_name:res.finalName,
     products:pid?[{product_id:pid,priority:1}]:[], mode:'Fixed Daily', daily_tonnage:0,
@@ -27571,6 +27734,11 @@ function _xlCheck(){
   badSrc.forEach(s=>out.push({lvl:'info',t:`Source "${s}" is not a facility in this scenario`}));
   (XLMAP.aliases||[]).forEach(a=>{ if(a.action!=='ignore'&&a.to&&!xlmapFindDp(a.to))
     out.push({lvl:'bad',t:`Alias target "${a.to}" is not a demand point in this scenario`}); });
+  _xlCatalogCoverage().forEach(c=>{
+    if(c.kind==='nocode') out.push({lvl:'bad',t:`${c.name} is in the topology but has no SAP material code (Configuration → Products) — its sales cannot be placed`});
+    if(c.kind==='drift')  out.push({lvl:c.dpCatalog&&!c.dpTable?'bad':'info',
+      t:`Material ${c.sap} is ${c.tableName} here but ${c.name} in the catalog${c.dpCatalog&&!c.dpTable?' — its demand points carry the catalog name, so sales miss them':''}`});
+  });
   const rank={bad:0,info:1};
   out.sort((a,b)=>rank[a.lvl]-rank[b.lvl]);
   _xlUi.check=out.length?out:[{lvl:'ok',t:'Nothing to fix against the scenario that is open.'}];
@@ -27606,6 +27774,7 @@ function xlmapPanelHTML(){
   const nDp=(DB.elements||[]).filter(e=>e.type==='demand_point').length;
   const chk=_xlUi.check||[];
   const chkColor=l=>l==='bad'?'var(--amber)':l==='ok'?'var(--green)':'var(--text-dim)';
+  const noCode=_xlCatalogCoverage().filter(c=>c.kind==='nocode');
   return `
   <datalist id="xl-prodlist">${(DB.products||[]).map(p=>`<option value="${esc(p.name)}">`).join('')}</datalist>
   <datalist id="xl-preslist"><option value="BLK"><option value="PAK"></datalist>
@@ -27632,6 +27801,12 @@ function xlmapPanelHTML(){
         onchange="XLMAP.template=this.value;xlmapSave('Name format saved');_xlRunTest()">
       <span style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">{source} {movement} {product} {presentation} {class}</span>
     </div>
+
+    ${noCode.length?`<div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;padding:8px 12px;border:1px solid var(--amber);background:var(--surface);font-family:var(--mono);font-size:9px">
+      <span style="color:var(--amber)">⚠ ${noCode.length} product${noCode.length===1?'':'s'} in the topology ${noCode.length===1?'has':'have'} no SAP material code, so ${noCode.length===1?'its':'their'} SAP sales cannot be placed:</span>
+      <span style="color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">${esc(noCode.map(c=>c.name).join(', '))}</span>
+      <span class="tbl-act" style="margin:0" onclick="_xlUi.open.mat=true;xlmapRender();document.getElementById('xl-card-mat')?.scrollIntoView({block:'start'})">review →</span>
+    </div>`:''}
 
     ${chk.length?`<div style="border:1px solid var(--border);background:var(--surface);margin-bottom:12px;padding:9px 12px">
       <div style="font-family:var(--mono);font-size:8px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase;margin-bottom:5px">Check — ${chk.filter(c=>c.lvl==='bad').length} to fix</div>
