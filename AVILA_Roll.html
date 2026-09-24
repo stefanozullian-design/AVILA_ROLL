@@ -8939,6 +8939,7 @@ function saveProduct(){
   // Demand Mapping reads the catalog's SAP code: refresh it if it is on screen, and say
   // so at save time when the code is missing — not weeks later when sales go unplaced.
   if(document.getElementById('cfg-panel-demandmap')?.offsetParent&&typeof xlmapRender==='function') xlmapRender();
+  if(typeof _xlRulesChanged==='function') _xlRulesChanged();
   statMsg(material_code?'Product saved':'Product saved — no SAP material code, so Demand Mapping cannot place its sales yet');
 }
 
@@ -22109,6 +22110,14 @@ const EXPORT_SLOTS={
     file:'Avila Power BI.xlsx', pickerId:'avila-bi-export', rowId:'bi-export-dir-row',
     label:'Power BI export folder',
     desc:'Where <b style="color:var(--text)">📤 Push to BI</b> on the Results page writes. Point Power BI at this file once and refresh it from there.'
+  },
+  // Publish (Configuration → Demand Mapping) writes several files into this one folder —
+  // see XLPUB_FILES; `file` is only the one named in the generic folder row.
+  sap:{
+    dirKey:'__sap_pub_dir__', nameKey:'avila_sap_pub_dir_name',
+    file:'Avila_Shipments_Summary.xlsx', pickerId:'avila-sap-publish', rowId:'sap-pub-dir-row',
+    label:'Sales files folder',
+    desc:'Where <b style="color:var(--text)">Publish</b> in Configuration → Demand Mapping writes the Summary, Detail and Transfers files.'
   }
 };
 const _exportDirHandles={};   // slot → handle granted this session
@@ -25958,8 +25967,8 @@ async function spHandleFile(input){
 const DS_SLOTS = [
   // NOTE: the former 'topology' slot is retired — topology persistence is now
   // owned by the Scenario system (each scenario is its own JSON file). See scInit().
-  { id:'realSales',      label:'Real Sales',       description:'IR_RealSales.xlsx — actual shipment records', handler:'spIngestFile',  dbKey:'real_shipments_daily' },
-  { id:'demandSales',    label:'Demand — SAP Sales', description:'The sales export behind demand (columns A–AC: Ship Pt, Material, Sold-To, Ship Type, Delivery Date, Report Qty …). Bind it once — a SharePoint folder synced to this machine is re-read on every refresh. Rows are translated by Configuration → Demand Mapping and shown there as a preview; nothing is written until you apply it.', handler:'dsIngestDemandSales', dbKey:'' },
+  { id:'realSales',      label:'Real Sales',       description:'Avila_Shipments_Summary.xlsx — tonnes per demand point per day; this is where actual demand comes from. Written by Publish in Configuration → Demand Mapping (formerly by the Excel pivot).', handler:'spIngestFile',  dbKey:'real_shipments_daily' },
+  { id:'demandSales',    label:'Demand — SAP Sales', description:'The raw SAP sales export (Ship Pt, Material, Sold-To, Ship Type, Delivery Date, Report Qty …; .xlsx or .csv). Bind it once — a SharePoint folder synced to this machine is re-read on every refresh. Rows are translated by Configuration → Demand Mapping; Publish there writes the Summary, Detail and Transfers files that Real Sales, the Sales page and Power BI read.', handler:'dsIngestDemandSales', dbKey:'' },
   { id:'realProduction', label:'Real Production',  description:'ProductionReal.xlsx — SAP export with DATE, EQUIPMENT, MATERIAL CODE, PRODUCTION columns. EQUIPMENT must match element names (e.g. BROSFM01, BROSKL02). MATERIAL CODE matched via product material_code field.', handler:'dsIngestProduction', dbKey:'real_production_daily' },
   { id:'transportCost',  label:'Transport Cost',   description:'Freight and logistics cost matrix',            handler:'dsIngestTransport',  dbKey:'transport_costs' },
   { id:'custom',         label:'Custom',           description:'User-defined data file',                       handler:'dsIngestCustom',     dbKey:'custom_data' },
@@ -26559,56 +26568,92 @@ function _dsSalesYmd(v){
 }
 async function dsIngestDemandSales(buf,name){
   await loadLib('xlsx'); // pinned version + SRI — see LIBS
-  const wb=XLSX.read(buf,{type:'array',cellDates:true});
+  // A CSV save of the export reads the same way, and much faster than .xlsx.
+  const wb=XLSX.read(buf,{type:'array',cellDates:true,dense:true});
   const ws=wb.Sheets[wb.SheetNames[0]];
   if(!ws) throw new Error('The workbook has no sheets');
-  const rows=XLSX.utils.sheet_to_json(ws,{raw:true,defval:''});
+  // Rows as arrays, not keyed objects — 200k rows × 29 columns as objects is the
+  // heaviest part of reading the export.
+  const aoa=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:''});
+  // The header is the first row that names the ship point (a title row above it is fine).
+  let h0=aoa.findIndex((r,i)=>i<10&&r.some(c=>/^(ship\s*pt|ship\s*point|shipping\s*point)$/i.test(String(c).trim())));
+  if(h0<0) h0=0;
+  const hdr=(aoa[h0]||[]).map(c=>String(c??'').trim().toLowerCase());
+  const rows=aoa.slice(h0+1);
   if(!rows.length) throw new Error('The first sheet has no rows');
 
   // Columns are found by header name, so column order and any extra columns
   // (INV_ROLL_NAME, SalesRep, …) do not matter.
-  const keys=Object.keys(rows[0]);
-  const pick=(...names)=>{ for(const n of names){
-      const k=keys.find(k=>String(k).trim().toLowerCase()===n.toLowerCase()); if(k) return k; } return null; };
+  const pick=(...names)=>{ for(const n of names){ const i=hdr.indexOf(n.toLowerCase()); if(i>=0) return i; } return -1; };
   const cShip=pick('Ship Pt','ShipPt','Ship Point','Shipping Point');
   const cMat =pick('Material','Material Code','Material Number');
-  const cSold=pick('Sold-To','Sold To','SoldTo','Sold-to');
+  const cSold=pick('Sold-To','Sold To','SoldTo');
   const cType=pick('Ship Type','ShipType','Shipment Type');
-  const cDate=pick('Delivery Date','DeliveryDate','Delivery date');
+  const cDate=pick('Delivery Date','DeliveryDate');
   const cQty =pick('Report Qty','Report Quantity','Quantity Delivered','Qty');
   const missing=[['Ship Pt',cShip],['Material',cMat],['Sold-To',cSold],['Ship Type',cType],
-                 ['Delivery Date',cDate],['Report Qty',cQty]].filter(p=>!p[1]).map(p=>p[0]);
+                 ['Delivery Date',cDate],['Report Qty',cQty]].filter(p=>p[1]<0).map(p=>p[0]);
   if(missing.length) throw new Error('Columns not found in the first sheet: '+missing.join(', '));
+  // Carried into the Detail file when present; blank when the export leaves them out.
+  const cDesc=pick('Material Description'), cSoldN=pick('Sold-To Name','Sold To Name'),
+        cShipTo=pick('Ship-To','Ship To'), cShipToN=pick('Ship-To Name','Ship To Name'),
+        cDelFob=pick('DEL/FOB'), cCarr=pick('Carrier'), cCarrN=pick('Carrier Name');
+  const val=(row,c)=>c<0?'':(row[c]??'');
 
   if(!XLMAP) xlmapLoad();
-  const agg=new Map();          // demand point name → Map(date → tonnes)
+  const agg=new Map();          // demand point name → Map(date → tonnes)       → Summary
+  const aggPark=new Map();      // parked (transfer) name → Map(date → tonnes)  → Transfers
+  const detail=[];              // one line per delivery                        → Detail
   const reasons=new Map();      // why a row could not be placed → {rows, t}
+  const skipMats=new Map();     // material marked "not demand" → {desc, rows, t}
+  const noRep=new Map();        // Ship-To with no sales rep → {name, rows, t}
   const memo=new Map();         // the same four codes translate the same way every time
-  let mappedRows=0, mappedT=0, parkedRows=0, parkedT=0, ignoredRows=0, ignoredT=0;
-  let noDate=0, dateMin='', dateMax='';
+  let mappedRows=0, mappedT=0, parkedRows=0, parkedT=0, ignoredRows=0, ignoredT=0, skipRows=0, skipT=0;
+  let dateMin='', dateMax='';
+  const addReason=(m,qty)=>{ const r=reasons.get(m)||{rows:0,t:0}; r.rows++; r.t+=qty; reasons.set(m,r); };
+  const addDay=(map,nm,ds,qty)=>{ let byDate=map.get(nm); if(!byDate){ byDate=new Map(); map.set(nm,byDate); }
+    byDate.set(ds,(byDate.get(ds)||0)+qty); };
 
   for(const row of rows){
+    if(!row||!row.length) continue;
+    const ship=row[cShip], mat=row[cMat], sold=row[cSold];
+    // SALES/TRANS by Ship-To (the rule the SAP script also applies); the file's own
+    // Ship Type column only when no list is set or there is no Ship-To column.
+    const type=(cShipTo>=0&&xlmapShipType(row[cShipTo]))||row[cType];
+    if((ship===''||ship==null)&&(mat===''||mat==null)) continue;   // blank line
     const qty=parseFloat(row[cQty])||0;
-    const key=row[cShip]+'|'+row[cMat]+'|'+row[cSold]+'|'+row[cType];
+    const key=ship+'|'+mat+'|'+sold+'|'+type;
     let res=memo.get(key);
     if(!res){
-      res=xlmapTranslate({ship_pt:row[cShip],material:row[cMat],sold_to:row[cSold],ship_type:row[cType]});
+      res=xlmapTranslate({ship_pt:ship,material:mat,sold_to:sold,ship_type:type});
       memo.set(key,res);
     }
-    if(res.missing.length){
-      res.missing.forEach(m=>{ const r=reasons.get(m)||{rows:0,t:0}; r.rows++; r.t+=qty; reasons.set(m,r); });
+    if(res.action==='skip'){
+      skipRows++; skipT+=qty;
+      const k=String(mat).trim(), s=skipMats.get(k)||{desc:String(val(row,cDesc)),rows:0,t:0}; s.rows++; s.t+=qty; skipMats.set(k,s);
       continue;
     }
-    if(res.action==='park'){   parkedRows++;  parkedT+=qty;  continue; }
+    if(res.missing.length){
+      const desc=String(val(row,cDesc)).trim();
+      res.missing.forEach(m=>addReason(desc&&/^material /.test(m)?`${m} — ${desc}`:m, qty));
+      continue;
+    }
     if(res.action==='ignore'){ ignoredRows++; ignoredT+=qty; continue; }
     const ds=_dsSalesYmd(row[cDate]);
-    if(!ds){ noDate++; const r=reasons.get('no delivery date on the row')||{rows:0,t:0}; r.rows++; r.t+=qty; reasons.set('no delivery date on the row',r); continue; }
+    if(!ds){ addReason('no delivery date on the row',qty); continue; }
+    if(res.action==='park'){ parkedRows++; parkedT+=qty; addDay(aggPark,res.finalName,ds,qty); continue; }
     if(!dateMin||ds<dateMin) dateMin=ds;
     if(!dateMax||ds>dateMax) dateMax=ds;
-    let byDate=agg.get(res.finalName);
-    if(!byDate){ byDate=new Map(); agg.set(res.finalName,byDate); }
-    byDate.set(ds,(byDate.get(ds)||0)+qty);
+    addDay(agg,res.finalName,ds,qty);
     mappedRows++; mappedT+=qty;
+    // Detail line — the Excel's SalesDetailed columns, one per delivery. The pivot listed
+    // Report Qty as a row field, so two identical deliveries became ONE line (67.6 kt lost,
+    // 2025-01 → 2026-09); here every delivery keeps its own line, so loads can be counted.
+    const shipTo=String(val(row,cShipTo)).trim();
+    const rep=xlmapRep(shipTo);
+    if(!rep&&shipTo){ const n=noRep.get(shipTo)||{name:String(val(row,cShipToN)).trim(),rows:0,t:0}; n.rows++; n.t+=qty; noRep.set(shipTo,n); }
+    detail.push([val(row,cSold),val(row,cSoldN),shipTo,val(row,cShipToN),ship,val(row,cDelFob),
+                 val(row,cCarr),val(row,cCarrN),ds,qty,res.finalName,rep]);
   }
 
   const points=[...agg].map(([nm,byDate])=>({
@@ -26616,13 +26661,19 @@ async function dsIngestDemandSales(buf,name){
     t:[...byDate.values()].reduce((a,b)=>a+b,0)
   })).sort((a,b)=>Math.abs(b.t)-Math.abs(a.t));
   const matched=points.filter(p=>p.dp).length;
+  const dayCount=m=>[...m].reduce((n,[,d])=>n+d.size,0);
 
+  // What Publish writes. Memory only — publishing needs the export read this session.
+  window._dsDemandPub={file:name, at:Date.now(), summary:agg, transfers:aggPark, detail, dateMin, dateMax};
   window._dsDemandPreview={
     file:name, at:Date.now(), rows:rows.length, mappedRows, mappedT, dateMin, dateMax, points,
     reasons:[...reasons].map(([reason,v])=>({reason,...v})).sort((a,b)=>Math.abs(b.t)-Math.abs(a.t)),
     parked:{rows:parkedRows,t:parkedT}, ignored:{rows:ignoredRows,t:ignoredT},
-    dayRows:[...agg].reduce((n,[,m])=>n+m.size,0)
+    skipped:{rows:skipRows,t:skipT,mats:[...skipMats].map(([code,v])=>({code,...v})).sort((a,b)=>Math.abs(b.t)-Math.abs(a.t))},
+    noRep:[...noRep].map(([code,v])=>({code,...v})).sort((a,b)=>Math.abs(b.t)-Math.abs(a.t)),
+    dayRows:dayCount(agg), transferRows:dayCount(aggPark), detailRows:detail.length
   };
+  _xlUi.cmp=null;               // a comparison made against the previous read is stale
   if(document.getElementById('cfg-panel-demandmap')) xlmapRender();
 
   const warnings=[];
@@ -26648,13 +26699,13 @@ function _xlSourceBody(){
       </span>
       <span style="margin-left:auto;display:flex;gap:10px">${reload}${pick}</span>
     </div>`;
-  if(!p) return head+`<div style="padding:14px 12px;font-family:var(--mono);font-size:9px;color:var(--text-dim);text-align:center">
+  if(!p) return head+_xlFolderRulesHTML()+`<div style="padding:14px 12px;font-family:var(--mono);font-size:9px;color:var(--text-dim);text-align:center">
       Nothing read yet. The file is only previewed here — no demand value is written until you apply it.</div>`;
   const n=v=>Math.round(v).toLocaleString();
   const stat=(l,v,c)=>`<div style="flex:1;min-width:110px"><div style="font-family:var(--mono);font-size:8px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase">${l}</div>
     <div style="font-family:var(--mono);font-size:13px;font-weight:700;color:${c||'var(--text)'}">${v}</div></div>`;
   const noDp=p.points.filter(x=>!x.dp);
-  let h=head+`<div style="padding:10px 12px;display:flex;gap:14px;flex-wrap:wrap;border-bottom:1px solid var(--border)">
+  let h=head+_xlFolderRulesHTML()+`<div style="padding:10px 12px;display:flex;gap:14px;flex-wrap:wrap;border-bottom:1px solid var(--border)">
     ${stat('Rows read',n(p.rows))}
     ${stat('Placed',n(p.mappedRows),'var(--green)')}
     ${stat('Tonnes',n(p.mappedT),'var(--green)')}
@@ -26662,6 +26713,7 @@ function _xlSourceBody(){
     ${stat('Daily records',n(p.dayRows))}
     ${stat('Range',(p.dateMin||'—')+' → '+(p.dateMax||'—'))}
   </div>`;
+  h+=_xlPubHTML();
   if(p.reasons.length){
     h+=`<div style="padding:9px 12px;border-bottom:1px solid var(--border)">
       <div style="font-family:var(--mono);font-size:8px;letter-spacing:1px;color:var(--amber);text-transform:uppercase;margin-bottom:4px">Could not be placed — biggest first</div>
@@ -26676,8 +26728,15 @@ function _xlSourceBody(){
   }
   if(p.parked.rows||p.ignored.rows){
     h+=`<div style="padding:7px 12px;font-family:var(--mono);font-size:9px;color:var(--text-dim);border-bottom:1px solid var(--border)">
-      ${p.parked.rows?`Parked by a movement rule: ${n(p.parked.rows)} rows · ${n(p.parked.t)} t. `:''}
+      ${p.parked.rows?`Parked by a movement rule: ${n(p.parked.rows)} rows · ${n(p.parked.t)} t — written to ${XLPUB_FILES.transfers}. `:''}
       ${p.ignored.rows?`Ignored by an alias: ${n(p.ignored.rows)} rows · ${n(p.ignored.t)} t.`:''}</div>`;
+  }
+  const sk=p.skipped;
+  if(sk&&sk.rows){
+    h+=`<div style="padding:7px 12px;font-family:var(--mono);font-size:9px;color:var(--text-dim);border-bottom:1px solid var(--border)">
+      Not demand (material rows set to skip): ${n(sk.rows)} rows · ${n(sk.t)} t
+      <div style="padding-left:12px;line-height:1.6">${sk.mats.slice(0,8).map(m=>`${esc(m.code)} ${esc(m.desc||'')} · ${n(m.t)} t`).join('<br>')}
+      ${sk.mats.length>8?`<br>· and ${sk.mats.length-8} more`:''}</div></div>`;
   }
   if(noDp.length){
     h+=`<div style="padding:9px 12px;border-bottom:1px solid var(--border)">
@@ -26695,6 +26754,368 @@ function _xlSourceBody(){
     ${p.points.length>20?`<div style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">· and ${p.points.length-20} more</div>`:''}
   </div>`;
   return h;
+}
+
+// ── Publish: the app writes the files everyone else reads ────────────────────
+// The old chain was SAP → one big workbook (INV_ROLL_NAME formula + index tab + three
+// pivots) → values pasted into three small files. Publish replaces everything after the
+// SAP dump: the export read above is translated once, here, and written as the same
+// three files, same names, same sheets, same columns — so Real Sales in every scenario,
+// the Sales page and Power BI keep reading exactly what they read before. The only
+// difference is that the three now add up to the same tonnes (the Excel Detail pivot
+// had its own material filter and collapsed identical deliveries — 90 kt short).
+const XLPUB_FILES={summary:'Avila_Shipments_Summary.xlsx', detail:'Avila_Shipments_Detail.xlsx',
+                   transfers:'Avila_Transfers_Summary.xlsx', map:'Avila_Demand_Rules.json'};
+const XLPUB_LAST_KEY='avila_sap_pub_last';
+
+// 'YYYY-MM-DD' → Excel date serial, from calendar parts (no local-midnight maths).
+function _xlSerial(ds){
+  const [y,m,d]=ds.split('-').map(Number);
+  return Math.round((Date.UTC(y,m-1,d)-Date.UTC(1899,11,30))/864e5);
+}
+const _xlCode=v=>{ const s=String(v??'').trim(); return /^\d+$/.test(s)&&s.length<16?Number(s):s; };
+const _xlQty=v=>Math.round(v*1000)/1000;
+function _xlDateCol(ws,col,n){
+  for(let r=1;r<=n;r++){ const c=ws[XLSX.utils.encode_cell({r,c:col})]; if(c){ c.t='n'; c.z='m/d/yyyy'; } }
+}
+// Summary / Transfers: one row per day per demand point, newest day first (as the pivot).
+function _xlDaySheet(byName){
+  const out=[];
+  byName.forEach((byDate,nm)=>byDate.forEach((t,ds)=>out.push([ds,nm,t])));
+  out.sort((a,b)=>a[0]<b[0]?1:a[0]>b[0]?-1:a[1]<b[1]?-1:a[1]>b[1]?1:0);
+  const aoa=[['Delivery Date','INV_ROLL_NAME','Report Qty']].concat(out.map(r=>[_xlSerial(r[0]),r[1],_xlQty(r[2])]));
+  const ws=XLSX.utils.aoa_to_sheet(aoa); _xlDateCol(ws,0,out.length);
+  return {ws, rows:out.length, t:out.reduce((a,r)=>a+r[2],0)};
+}
+function _xlDetailSheet(detail){
+  const out=detail.map(([so,son,sh,shn,sp,df,ca,can,ds,q,nm,rep])=>
+    [_xlCode(so),son,_xlCode(sh),shn,_xlCode(sp),df,_xlCode(ca),can,ds,_xlQty(q),nm,rep]);
+  const cmp=(x,y)=>typeof x==='number'&&typeof y==='number'?x-y:(String(x)<String(y)?-1:String(x)>String(y)?1:0);
+  out.sort((a,b)=>cmp(a[0],b[0])||cmp(a[2],b[2])||cmp(a[8],b[8]));   // Sold-To, Ship-To, day
+  out.forEach(r=>{ r[8]=_xlSerial(r[8]); });
+  const aoa=[['Sold-To','Sold-To Name','Ship-To','Ship-To Name','Ship Pt','DEL/FOB','Carrier','Carrier Name',
+              'Delivery Date','Report Qty','INV_ROLL_NAME','SalesRep']].concat(out);
+  const ws=XLSX.utils.aoa_to_sheet(aoa); _xlDateCol(ws,8,out.length);
+  return {ws, rows:out.length};
+}
+const _xlBook=(sheet,ws)=>{ const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,sheet); return wb; };
+
+// SheetJS's own zip deflate is quick but weak: the Detail sheet is 79 MB of XML and came
+// out at 25 MB, three times the Excel-made file — a slow OneDrive upload and a slow Power
+// BI refresh. So SheetJS writes the workbook uncompressed and the browser's native
+// deflate (CompressionStream) re-packs each part: same bytes inside, Excel's size outside.
+let _crcTable=null;
+function _crc32(u8){
+  if(!_crcTable){ _crcTable=new Uint32Array(256);
+    for(let n=0;n<256;n++){ let c=n; for(let k=0;k<8;k++) c=c&1?0xEDB88320^(c>>>1):c>>>1; _crcTable[n]=c>>>0; } }
+  let c=0xFFFFFFFF;
+  for(let i=0;i<u8.length;i++) c=_crcTable[(c^u8[i])&255]^(c>>>8);
+  return (c^0xFFFFFFFF)>>>0;
+}
+async function _xlsxBytes(wb){
+  const opts={bookType:'xlsx',type:'array',bookSST:true};
+  if(typeof CompressionStream==='undefined') return XLSX.write(wb,{...opts,compression:true});
+  const zip=XLSX.CFB.read(new Uint8Array(XLSX.write(wb,{...opts,compression:false})),{type:'array'});
+  const parts=[];
+  zip.FileIndex.forEach((f,i)=>{ if(f.type===2&&f.content)
+    parts.push({name:zip.FullPaths[i].replace(/^[^/]*\//,''), data:new Uint8Array(f.content)}); });
+  parts.sort((a,b)=>(b.name==='[Content_Types].xml')-(a.name==='[Content_Types].xml'));
+  const enc=new TextEncoder(), chunks=[], central=[];
+  const now=new Date(), dosT=(now.getHours()<<11)|(now.getMinutes()<<5)|(now.getSeconds()>>1),
+        dosD=((now.getFullYear()-1980)<<9)|((now.getMonth()+1)<<5)|now.getDate();
+  let off=0;
+  for(const p of parts){
+    const comp=new Uint8Array(await new Response(new Blob([p.data]).stream()
+      .pipeThrough(new CompressionStream('deflate-raw'))).arrayBuffer());
+    const name=enc.encode(p.name), crc=_crc32(p.data);
+    const lh=new DataView(new ArrayBuffer(30));
+    [[0,0x04034b50,4],[4,20,2],[6,0,2],[8,8,2],[10,dosT,2],[12,dosD,2],[14,crc,4],
+     [18,comp.length,4],[22,p.data.length,4],[26,name.length,2],[28,0,2]]
+      .forEach(([o,v,n])=>n===4?lh.setUint32(o,v,true):lh.setUint16(o,v,true));
+    const ch=new DataView(new ArrayBuffer(46));
+    [[0,0x02014b50,4],[4,20,2],[6,20,2],[8,0,2],[10,8,2],[12,dosT,2],[14,dosD,2],[16,crc,4],
+     [20,comp.length,4],[24,p.data.length,4],[28,name.length,2],[30,0,2],[32,0,2],[34,0,2],
+     [36,0,2],[38,0,4],[42,off,4]]
+      .forEach(([o,v,n])=>n===4?ch.setUint32(o,v,true):ch.setUint16(o,v,true));
+    chunks.push(new Uint8Array(lh.buffer),name,comp);
+    central.push(new Uint8Array(ch.buffer),name);
+    off+=30+name.length+comp.length;
+  }
+  const cdSize=central.reduce((a,c)=>a+c.length,0);
+  const end=new DataView(new ArrayBuffer(22));
+  [[0,0x06054b50,4],[4,0,2],[6,0,2],[8,parts.length,2],[10,parts.length,2],[12,cdSize,4],[16,off,4],[20,0,2]]
+    .forEach(([o,v,n])=>n===4?end.setUint32(o,v,true):end.setUint16(o,v,true));
+  return new Blob([...chunks,...central,new Uint8Array(end.buffer)],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+}
+
+// A day file as it sits in the folder now → totals by demand point and by month.
+async function _xlReadDayFile(dir,file){
+  let f;
+  try{ f=await (await dir.getFileHandle(file)).getFile(); }catch(e){ return null; }
+  const wb=XLSX.read(await f.arrayBuffer(),{type:'array',cellDates:true,dense:true});
+  const ws=wb.Sheets[wb.SheetNames.find(n=>n==='SalesConsolidated')||wb.SheetNames[0]];
+  const aoa=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:''});
+  const h0=aoa.findIndex(r=>r.some(c=>String(c).trim()==='INV_ROLL_NAME'));
+  if(h0<0) return {file, modified:f.lastModified, rows:0, t:0, byName:new Map(), byMonth:new Map(), dateMin:'', dateMax:''};
+  const hdr=aoa[h0].map(c=>String(c).trim());
+  const cD=hdr.indexOf('Delivery Date'), cN=hdr.indexOf('INV_ROLL_NAME'), cQ=hdr.indexOf('Report Qty');
+  const byName=new Map(), byMonth=new Map(); let rows=0,t=0,dateMin='',dateMax='';
+  aoa.slice(h0+1).forEach(r=>{
+    const ds=_dsSalesYmd(r[cD]); if(!ds) return;
+    const nm=String(r[cN]??'').trim(), q=parseFloat(r[cQ])||0;
+    rows++; t+=q;
+    if(!dateMin||ds<dateMin) dateMin=ds; if(!dateMax||ds>dateMax) dateMax=ds;
+    byName.set(nm,(byName.get(nm)||0)+q); byMonth.set(ds.slice(0,7),(byMonth.get(ds.slice(0,7))||0)+q);
+  });
+  return {file, modified:f.lastModified, rows, t, byName, byMonth, dateMin, dateMax};
+}
+function _xlPubTotals(byName){
+  const n=new Map(), m=new Map(); let t=0, rows=0;
+  byName.forEach((byDate,nm)=>byDate.forEach((q,ds)=>{
+    rows++; t+=q; n.set(nm,(n.get(nm)||0)+q); m.set(ds.slice(0,7),(m.get(ds.slice(0,7))||0)+q); }));
+  return {byName:n, byMonth:m, t, rows};
+}
+const _xlDiffRows=(a,b)=>[...new Set([...a.keys(),...b.keys()])]
+  .map(k=>({k, now:a.get(k)||0, next:b.get(k)||0})).map(r=>({...r, d:r.next-r.now}));
+
+async function _xlPubChooseDir(){
+  const h=await exportDir('sap',true);
+  if(h){ statMsg('Sales files folder: '+h.name); await _xlSaveRules(false); }
+  xlmapRender();
+}
+async function _xlPubClearDir(){ await clearExportDir('sap'); xlmapRender(); }
+
+// Compare what Publish would write with the files in the folder now — the parallel
+// run: while the Excel still makes the files, this shows every place the two disagree.
+async function _xlCompare(){
+  const pub=window._dsDemandPub;
+  if(!pub){ statMsg('Read the SAP export first (Re-read above)'); return; }
+  const dir=await exportDir('sap',true);   // first: the picker needs the click
+  if(!dir){ statMsg('Choose the folder the sales files live in first'); return; }
+  statMsg('Comparing with the files in '+dir.name+'…');
+  await loadLib('xlsx');
+  const [curS,curT]=await Promise.all([_xlReadDayFile(dir,XLPUB_FILES.summary),_xlReadDayFile(dir,XLPUB_FILES.transfers)]);
+  const newS=_xlPubTotals(pub.summary), newT=_xlPubTotals(pub.transfers);
+  _xlUi.cmp={at:Date.now(), folder:dir.name, curS, curT, newS, newT,
+    names:curS?_xlDiffRows(curS.byName,newS.byName).sort((a,b)=>Math.abs(b.d)-Math.abs(a.d)):[],
+    months:curS?_xlDiffRows(curS.byMonth,newS.byMonth).sort((a,b)=>a.k<b.k?-1:1):[]};
+  _xlUi.open.src=true;
+  xlmapRender();
+  statMsg('Comparison ready');
+}
+
+async function _xlPublish(){
+  const pub=window._dsDemandPub;
+  if(!pub){ statMsg('Read the SAP export first (Re-read above)'); return; }
+  const dir=await exportDir('sap',true);   // first: the picker needs the click
+  if(!dir){ statMsg('Choose the folder the sales files live in first'); return; }
+  const p=window._dsDemandPreview||{};
+  const n=v=>Math.round(v).toLocaleString();
+  const unplaced=(p.reasons||[]).reduce((a,r)=>a+r.t,0);
+  if(!confirm(`Replace the sales files in "${dir.name}"?\n\n`+
+    `${XLPUB_FILES.summary} — ${n(p.dayRows||0)} rows · ${n(p.mappedT||0)} t\n`+
+    `${XLPUB_FILES.detail} — ${n(p.detailRows||0)} lines\n`+
+    `${XLPUB_FILES.transfers} — ${n(p.transferRows||0)} rows\n`+
+    `${XLPUB_FILES.map} — the translation tables\n\n`+
+    (unplaced?`${n(unplaced)} t could not be placed and is left out (listed under the source file).\n`:'')+
+    `The current files are copied to Backup/ first. Every scenario that reads the Summary will be offered the update.`)) return;
+  const btn=document.getElementById('xl-pub-btn');
+  const say=t=>{ if(btn) btn.textContent=t; };
+  try{
+    if(btn) btn.disabled=true;
+    await loadLib('xlsx');
+    say('Building…');
+    await new Promise(r=>setTimeout(r,30));   // let the label paint before the heavy part
+    const s=_xlDaySheet(pub.summary), tr=_xlDaySheet(pub.transfers), de=_xlDetailSheet(pub.detail);
+    const files=[
+      [XLPUB_FILES.summary,  await _xlsxBytes(_xlBook('SalesConsolidated',s.ws))],
+      [XLPUB_FILES.transfers,await _xlsxBytes(_xlBook('SalesConsolidated',tr.ws))],
+      [XLPUB_FILES.detail,   await _xlsxBytes(_xlBook('SalesDetailed',de.ws))],
+      [XLPUB_FILES.map,      new Blob([JSON.stringify(xlmapRulesPayload(),null,1)],{type:'application/json'})]
+    ];
+    say('Backing up…');
+    const bak=await dir.getDirectoryHandle('Backup',{create:true});
+    for(const [fn] of files){
+      try{
+        const old=await (await dir.getFileHandle(fn)).getFile();
+        const dot=fn.lastIndexOf('.');
+        const w=await (await bak.getFileHandle(fn.slice(0,dot)+' (before publish)'+fn.slice(dot),{create:true})).createWritable();
+        await w.write(await old.arrayBuffer()); await w.close();
+      }catch(e){ if(e.name!=='NotFoundError') throw e; }   // nothing there yet — nothing to keep
+    }
+    say('Writing…');
+    for(const [fn,data] of files){
+      const w=await (await dir.getFileHandle(fn,{create:true})).createWritable();
+      await w.write(data); await w.close();
+    }
+    const last={at:_xlLocalStamp(), folder:dir.name, source:pub.file,
+      summaryRows:s.rows, summaryT:s.t, detailRows:de.rows, transferRows:tr.rows, dateMin:pub.dateMin, dateMax:pub.dateMax};
+    try{ localStorage.setItem(XLPUB_LAST_KEY,JSON.stringify(last)); }catch(e){}
+    _xlUi.cmp=null;
+
+    // This scenario takes the new Summary through Real Sales — the very path every
+    // other scenario and computer uses — so there is one way actuals land, not two.
+    say('Updating this scenario…');
+    const sh=await dir.getFileHandle(XLPUB_FILES.summary);
+    let same=false; const cur=DS.handles.realSales;
+    if(cur){ try{ same=await cur.isSameEntry(sh); }catch(e){} }
+    else{ DS.handles.realSales=sh; await dsSaveHandle('realSales',sh); same=true; }
+    if(same){
+      await dsRefreshSlot('realSales',true);
+      delete DS.pending.realSales;
+      document.getElementById('data-pending-banner')?.remove();
+      dsRefreshConfigUI();
+      scheduleSimulation(300);
+      statMsg(`Published to ${dir.name} — this scenario's actual demand is updated`);
+    }else{
+      statMsg(`Published to ${dir.name}. Real Sales here reads ${DS.meta.realSales?.fileName||'another file'} from a different place, so this scenario was not updated.`);
+    }
+  }catch(e){
+    console.error('publish',e);
+    alert('Publish stopped: '+(e.message||e)+'\n\nFiles already written stay written; the previous copies are in Backup/.');
+  }finally{
+    if(btn){ btn.disabled=false; }
+    xlmapRender();
+  }
+}
+
+// The publish block inside the Source file card.
+function _xlPubHTML(){
+  const p=window._dsDemandPreview;
+  const n=v=>Math.round(v).toLocaleString();
+  const folder=exportDirName('sap');
+  let last=null; try{ last=JSON.parse(localStorage.getItem(XLPUB_LAST_KEY)||'null'); }catch(e){}
+  const ready=!!window._dsDemandPub;
+  let h=`<div style="padding:10px 12px;border-bottom:1px solid var(--border)">
+    <div style="font-family:var(--mono);font-size:8px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase;margin-bottom:6px">Publish from the app — the files every scenario, the Sales page and Power BI read${folder?'':' (choose the folder above first)'}</div>
+    <div style="font-family:var(--mono);font-size:9px;color:var(--text-dim);line-height:1.6;margin-bottom:8px">
+      ${ready&&p?`Writes <span style="color:var(--text)">${XLPUB_FILES.summary}</span> (${n(p.dayRows)} rows · ${n(p.mappedT)} t),
+        <span style="color:var(--text)">${XLPUB_FILES.detail}</span> (${n(p.detailRows)} lines),
+        <span style="color:var(--text)">${XLPUB_FILES.transfers}</span> (${n(p.transferRows)} rows) and
+        <span style="color:var(--text)">${XLPUB_FILES.map}</span>. The current copies go to Backup/ first.
+        This scenario then re-reads the Summary; other scenarios and computers are offered it on their next check.`
+      :`Re-read the export above first — publishing writes what was read in this session.`}
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <button class="tb-btn sec" style="font-size:9px;padding:4px 12px" ${ready?'':'disabled'} onclick="_xlCompare()">Compare with the files there now</button>
+      <button class="tb-btn" id="xl-pub-btn" style="font-size:9px;padding:4px 14px" ${ready?'':'disabled'} onclick="_xlPublish()">Publish</button>
+      ${last?`<span style="font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-left:6px">last published ${esc(last.at)} to ${esc(last.folder)} · ${n(last.summaryRows)} rows · ${n(last.summaryT)} t</span>`:''}
+    </div>`;
+  const c=_xlUi.cmp;
+  if(c){
+    const sgn=v=>(v>0?'+':v<0?'−':'')+n(Math.abs(v));
+    const dCol=v=>Math.abs(v)<1?'var(--text-dim)':'var(--amber)';
+    const box=(title,cur,nw)=>`<div style="flex:1;min-width:220px;border:1px solid var(--border);padding:7px 9px">
+      <div style="font-family:var(--mono);font-size:8px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase;margin-bottom:3px">${title}</div>
+      ${cur?`<div style="font-family:var(--mono);font-size:9px">there now <span style="color:var(--text)">${n(cur.t)} t</span> · ${n(cur.rows)} rows · ${esc(cur.dateMin)} → ${esc(cur.dateMax)}</div>`
+          :`<div style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">no file there yet</div>`}
+      <div style="font-family:var(--mono);font-size:9px">from SAP <span style="color:var(--text)">${n(nw.t)} t</span> · ${n(nw.rows)} rows</div>
+      ${cur?`<div style="font-family:var(--mono);font-size:10px;font-weight:700;color:${dCol(nw.t-cur.t)}">${Math.abs(nw.t-cur.t)<1?'✓ same tonnes':'difference '+sgn(nw.t-cur.t)+' t'}</div>`:''}
+    </div>`;
+    h+=`<div style="margin-top:10px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">${box('Summary',c.curS,c.newS)}${box('Transfers',c.curT,c.newT)}</div>`;
+    const pd=window._dsDemandPub;
+    if(c.curS&&pd&&((c.curS.dateMin&&c.curS.dateMin<pd.dateMin)||(c.curS.dateMax&&c.curS.dateMax>pd.dateMax)))
+      h+=`<div style="font-family:var(--mono);font-size:9px;color:var(--amber);margin-bottom:6px">⚠ The file there now covers ${esc(c.curS.dateMin)} → ${esc(c.curS.dateMax)}; the export covers ${esc(pd.dateMin)} → ${esc(pd.dateMax)}. Days outside the export are dropped when you publish.</div>`;
+    const tbl=(title,rows,label)=>{
+      const off=rows.filter(r=>Math.abs(r.d)>=1);
+      if(!off.length) return `<div style="font-family:var(--mono);font-size:9px;color:var(--green);margin:4px 0 8px">✓ ${title}: every ${label} matches</div>`;
+      return `<div style="font-family:var(--mono);font-size:8px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase;margin:6px 0 3px">${title} — ${off.length} differ${rows.length>off.length?` · ${rows.length-off.length} match`:''}</div>
+        ${_xlTbl(_xlHdr([label,'there now','from SAP','difference'])+off.slice(0,30).map(r=>`<tr>
+          ${_xlTd(`<span style="font-family:var(--mono);font-size:9px">${esc(r.k||'(blank)')}</span>`)}
+          ${_xlTd(`<span style="font-family:var(--mono);font-size:9px">${n(r.now)}</span>`,'90px')}
+          ${_xlTd(`<span style="font-family:var(--mono);font-size:9px">${n(r.next)}</span>`,'90px')}
+          ${_xlTd(`<span style="font-family:var(--mono);font-size:9px;color:${dCol(r.d)}">${sgn(r.d)}</span>`,'90px')}
+        </tr>`).join(''))}
+        ${off.length>30?`<div style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">· and ${off.length-30} more</div>`:''}`;
+    };
+    if(c.curS){ h+=tbl('Summary by demand point',c.names,'demand point'); h+=tbl('Summary by month',c.months,'month'); }
+    h+=`<div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-top:4px">Compared ${new Date(c.at).toLocaleTimeString()} against ${esc(c.folder)}. A name only "there now" is usually one the Excel index built and these tables do not (or #N/A).</div></div>`;
+  }
+  return h+`</div>`;
+}
+
+// ── The rules file the SAP script reads ─────────────────────────────────────
+// Avila_Demand_Rules.json, next to the sales files. The app is the only place the rules
+// are edited; the script (Avila_Sales_Pipeline.vbs) only applies them. The product
+// catalog is flattened in because the script has no scenario to look products up in —
+// a product placed through its catalog SAP code (BRS_IL(HE)) would otherwise be dropped.
+// rules_id is a hash of the content: the script stamps it on every file it writes.
+function _xlHash(text){
+  let h=0x811c9dc5;
+  for(let i=0;i<text.length;i++){ h^=text.charCodeAt(i); h=Math.imul(h,0x01000193); }
+  return (h>>>0).toString(16).padStart(8,'0');
+}
+// 'YYYY-MM-DD HH:MM' on this computer's clock (toISOString is UTC — 21:40 for 5:40 PM).
+function _xlLocalStamp(d){
+  d=d||new Date();
+  const p=n=>String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function xlmapRulesPayload(){
+  if(!XLMAP) xlmapLoad();
+  const catalog=[];
+  (DB.products||[]).forEach(p=>{
+    const k=_xlCatCode(p.material_code); if(!k) return;
+    const sp=_xlSplitProduct(p.name);
+    catalog.push({code:k.sap, ship_pt:k.ship, product:sp.product, pres:sp.pres, name:p.name});
+  });
+  const body={format:'avila-demand-rules', version:XLMAP.version||3,
+    template:XLMAP.template, fallback_class:XLMAP.fallback_class, fallback_rep:XLMAP.fallback_rep||'',
+    transfer_ship_tos:XLMAP.transfer_ship_tos||'',
+    ship_points:XLMAP.ship_points||[], materials:XLMAP.materials||[], class_rules:XLMAP.class_rules||[],
+    movements:XLMAP.movements||[], aliases:XLMAP.aliases||[], sales_reps:XLMAP.sales_reps||[],
+    catalog_materials:catalog};
+  const id=_xlHash(JSON.stringify(body));
+  return {...body, rules_id:id, saved_at:new Date().toISOString(), saved_at_local:_xlLocalStamp(),
+    scenario:(typeof scActive==='function'?scActive()?.name:'')||''};
+}
+const XLRULES_SAVED_KEY='avila_rules_saved';
+let _xlRulesTimer=null;
+// Any edit (a table, a product's SAP code) → write the file a moment later, silently,
+// if the folder is already open this session. Otherwise the panel says it is behind.
+function _xlRulesChanged(){
+  clearTimeout(_xlRulesTimer);
+  _xlRulesTimer=setTimeout(()=>{ _xlSaveRules(false); },1500);
+}
+async function _xlSaveRules(prompt){
+  let ok=false;
+  try{
+    const dir=await exportDir('sap',!!prompt);   // prompt only from a click
+    if(!dir){ if(prompt) statMsg('Choose the folder the sales files live in first'); return false; }
+    const payload=xlmapRulesPayload();
+    const w=await (await dir.getFileHandle(XLPUB_FILES.map,{create:true})).createWritable();
+    await w.write(new Blob([JSON.stringify(payload,null,1)],{type:'application/json'}));
+    await w.close();
+    try{ localStorage.setItem(XLRULES_SAVED_KEY,JSON.stringify({at:_xlLocalStamp(),
+      id:payload.rules_id, folder:dir.name})); }catch(e){}
+    if(prompt) statMsg(`Rules saved to ${dir.name}/${XLPUB_FILES.map}`);
+    ok=true;
+  }catch(e){ console.warn('rules save',e); if(prompt) statMsg('Could not save the rules file: '+(e.message||e)); }
+  const el=document.getElementById('xl-rules-row'); if(el) el.outerHTML=_xlFolderRulesHTML();
+  return ok;
+}
+// Folder + rules status, shown in the Source file card whether or not the export was read.
+function _xlFolderRulesHTML(){
+  const folder=exportDirName('sap');
+  let saved=null; try{ saved=JSON.parse(localStorage.getItem(XLRULES_SAVED_KEY)||'null'); }catch(e){}
+  let cur=''; try{ cur=xlmapRulesPayload().rules_id; }catch(e){}
+  const upToDate=saved&&saved.id===cur;
+  const state=!saved?`<span style="color:var(--amber)">not saved yet</span>`
+    :upToDate?`<span style="color:var(--green)">✓ saved ${esc(saved.at)}</span> <span style="color:var(--text-dim)">· id ${esc(saved.id)}</span>`
+    :`<span style="color:var(--amber)">⚠ changed since it was saved (${esc(saved.at)})</span>`;
+  return `<div id="xl-rules-row" style="padding:9px 12px;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:9px;display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center">
+    <span style="font-size:8px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase">Sales files folder</span>
+    ${folder?`<span style="color:var(--green)">📁 ${esc(folder)}</span>
+      <span class="tbl-act" style="margin:0" onclick="_xlPubChooseDir()">Change…</span>
+      <span class="tbl-act" style="margin:0" onclick="_xlPubClearDir()">Clear</span>`
+    :`<span class="tbl-act" style="margin:0" onclick="_xlPubChooseDir()">Choose the folder…</span>
+      <span style="color:var(--text-dim)">RealValues — where the Summary, Detail and Transfers live</span>`}
+    <span style="flex-basis:100%;height:0"></span>
+    <span style="font-size:8px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase">Rules for the SAP script</span>
+    <span style="color:var(--text)">${XLPUB_FILES.map}</span> ${state}
+    <span class="tbl-act" style="margin:0" onclick="_xlSaveRules(true)">Save rules now</span>
+  </div>`;
 }
 
 async function dsIngestTopology(buf, name){
@@ -26988,11 +27409,47 @@ function dsBuildSlotHTML(slot){
 // reproduces today's INV_ROLL_NAME formula before any edit is made.
 const XLMAP_KEY='avila_demand_map';
 let XLMAP=null;
-const _xlUi={open:{src:true,ship:true,mat:false,cls:true,mov:true,ali:true},filter:{},test:{}};
+const _xlUi={open:{src:true,ship:true,mat:false,cls:true,mov:true,ali:true,rep:false},filter:{},test:{}};
 
+// Materials that are not demand. The Excel Summary pivot hid these by Material
+// Description (services and supplies that carry a tonnage, some ash and purchased
+// lines); here they are material-table rows marked "skip", so the choice is visible
+// and can be flipped. 1518201 is the big one (27 kt): PEV white cement billed as a
+// loading fee — the SAP script moves those lines from 4809 to 9063 and gives them their
+// tonnes, so they ARE white cement, yet the Excel Summary hid them. Kept as skip to
+// match today's numbers until someone decides. 1638064 (IL(8) BRO) was hidden there
+// too, but it is BRS_IL(HE) since 2026-09-23 — left out of this list on purpose.
+const XLMAP_SKIP_SEED=[
+  {code:'1518201',note:'SERV,LOADING_FEE_BY_TON — PEV white cement billed as a loading fee; hidden in the Excel Summary. Set to demand to count it'},
+  {code:'1634047',note:'AB,FLY_ASH,CLASS_F,C618,BULK,USECOPRAIR'},
+  {code:'1633895',note:'CEM,BLD,GRAY,IL(10),BULK,USARGNEWBE'},
+  {code:'1626129',note:'AB,FLY_ASH,CLASS_F,C618,BULK,USECOCUMBE'},
+  {code:'1614488',note:'AB,FLY_ASH,CLASS_F,C618,BULK,USBORBARRY'},
+  {code:'1601494',note:'AB,FLY_ASH,CLASS_F,C618,BULK,TKSTIMEDCE'},
+  {code:'1626244',note:'AB,FLY_ASH,CLASS_F,C618,BULK,TRASHZONGU'},
+  {code:'1035909',note:'CLK,CLINKER,GRAY,PURCHASED'},
+  {code:'1606447',note:'SERV,TERMINAL_FEE'},
+  {code:'1425025',note:'SERV,OTHER_FREIGHT_CHARGE,BY_LOAD'},
+  {code:'1425021',note:'SERV,BELOW_MINIMAL_WEIGHT,BY_LOAD'},
+  {code:'1625211',note:'SERV,SURCHARGE,DIVISION_12,BULK,TON'},
+  {code:'1410820',note:'SUPPLIES,PILLOW_PACK,PALLET_COVERS'},
+  {code:'1029658',note:'SUPPLIES,PALLET_COVER,PLASTIC'}
+];
+// Marks the seed codes "skip" — only rows that have no choice yet, so a code someone
+// already set to count stays counted.
+function _xlApplySkipSeed(map){
+  map.materials=map.materials||[];
+  XLMAP_SKIP_SEED.forEach(s=>{
+    const r=map.materials.find(m=>String(m.code??'').trim()===s.code);
+    if(!r){ map.materials.push({code:s.code,product:'',pres:'',action:'skip',note:s.note}); return; }
+    if(r.action) return;
+    r.action='skip';
+    r.note=r.note?r.note+' · '+s.note:s.note;
+  });
+}
 function xlmapDefaults(){
-  return {
-    version:1,
+  const d={
+    version:3,
     template:'{source}/{movement}/{product}/{presentation}/{class}',
     fallback_class:'UNK',
     ship_points:[
@@ -27089,8 +27546,30 @@ function xlmapDefaults(){
       {ship_type:'SALES', movement:'DEM', action:'import', note:''},
       {ship_type:'TRANS', movement:'TRF', action:'park',   note:'transfers — phase 2'}
     ],
-    aliases:[]
+    aliases:[],
+    // Ship-To → sales rep: the Excel's SalesRep column (VLOOKUP(Ship-To, index!L:P)), seeded
+    // from the index tab. The raw SAP export carries no rep; the Detail file and the Sales
+    // page's Rep filter need one.
+    sales_reps:[
+    {rep:"TBD",ship_tos:"50411911 50267211 50267109 50296094 50380590 50267241 50410328 50414323 50408788 50442334 50427922 50408050 50428970 50405666 50005099 50428894 50428533 50482090 50458401 50382024 50377349 50413670 50347688 50383133 50520536 50323366 50323369 50519604 50516885 50519009 50243332 50502079 50481663 50498654 50499877 50500944 50496852 50504601 50470069 50505346 50495679 50499321 50493084 50503613 50501987 50504426 50477620 50491534 50000046 50487384 50469844 50470015 50501207 50520569 50325920 50409621 50458013 50409590 50355439 50239607 50191138 50298371 50445748 50409947 50417882 50504478 50475907 50417319 50471345 50417588 50423180 50448721 50483091 50427498 50469767 50409564 50415110 50446883 50433246 50457284 50459136 50438561 50440779 50468704 50394209 50503185 50413725 50387930 50517680 50394407 50402780 50412288 50403858 50401017 50411602 50306185 50301626 4690 50516064 50513720 50010841 50504023 50010560 50371336 50519517 50000149 50423519 50429243 50520495 50420660 50473978 50419884 50433862 50406162 50000168 50401592 50365941 50365929 50365924 50449638 50449814 50367908 50469795 50417970 50430929 50436763 50444831 50367916 50410348 50287408 50043622 50043617 50355079 50310177 50503978 50504732 50256255 50455187 50431590 50428539 50447004 50000230 50519400 50449253 50493960 50458369 50408886 50452116 50408751 50450441 50480680 50481638 50095201 50518057 50520242 50502394 50518063 50520017 50429073 50489760 50440058 50487654 1158 50043612 50043609 50311642 50467505 50006036 50000452 50385464 50404430 50366511 50366491 50407680 50176330 50311923 50168153 50409864 50467002 50498692 50466034 50480274 50488108 50481814 50497419 50494533 50478374 50378840 50399943 50453820 50484723 50464534 50457451 50438539 50421375 50328590 50344638 50429152 50429153 50000302 50516573 50005800 50516935 50496234 50494240 50403337 50008881 50000636 5054 5052 50466327 50519786 50398131 50429936 50393719 50345014 50439792 50433206 50445193 50302318 50420340 1065 50472799 50472797 50381305 50479052 50520338 1178 50466658 4084 50399593 50000399 50463293 50484738 50518871 50446538 50024188 50462423 50014290 50332224 50296606 50024843 50517685 50286641 50000419 50000308 50355555 50469874 50253861 50425623 50231786 50429075 50417954 50017124 50007787 50502477 50517127 50362458 50390864 50387553 50360655 50000427 50354917 50433983 50380517 50380607 50516325 50427201 50410596 50427211 50380385 50433868 50433989 50312876 50346042 50507536 50421904 50411869 50456816 50413504 50298725 50400288 50402039 50432667 50402828 50410214 50406802 50427459 50449264 50470368 50412742 50434718 50451706 50418202 50440261 50431966 50400546 50400832 50352209 50368489 50422609 50448296 50416842 50401869 50453361 50438557 50426460 50439431 50440768 50000437 50000365 50341391 50394045 50378882 50308073 50002724 50422968 50446529 50450229 50448532 50402403 50409281 50409215 50409268 50410989 50413852 50424035 50389289 50389623 50393737 50429724 50134733 50127731 50380606 50407317",note:""},
+    {rep:"STELLJES,PAUL A",ship_tos:"4087 4042 1150 4063 1148 1119 1188 1189 1135 4016 1123 1190 1112 50000159 1130 1193 1192 1121 1081 1055 4079 1153 1206 4076 1209 4038 4095 1139 4008 4005 1087 4075 1088 1106 1145 1033 4048 1173 50261340 1151 1111 1175 1049 4090 4086 1115 1057 1095 4010 1155 1037 1136 4033 1128 1132 1129 1200 1140 1144 1071 4091 4082 4083 1120 1085 1182 1179 4065 4067 1068 1204 1160 1052 1156 1125 4049 1084 1090 1069 1053 4062 4058 1036 4061 4070 4059 1040 50322338 50009953 1114 4015 1092 1086 1124 1131 1207 1142",note:""},
+    {rep:"KRAMER,ROGER",ship_tos:"50514474 50509825 50508966 50515873 50512344 50516224 50516088 50514779 50507495 50513266 50501922 50503741 50508784 50502142 50507217 50498592 50513272 50013711 50010628 50010641 50512197 50516125 50516166 50510900 50484322 50493734 50013799 50506876 50404775 50398401 50398407 50413498 50456656 50515666 50476637 50014244 50441041 50441042 50391482 50516074 50352241 50422723 50511999 50505777 50506125 50368948 50513569 50457299 50445079 50515295 50515306 50515294 50515953 50515951 50515307 50515952 50500606 50416296 50512492 50497805 50505944 50499972 50452730 50481435 50481471 50427190 50495426 50481473 50452678 50452728 50513754 50265975 50294719 50507499 50507537 50507365 50507500 50453017",note:""},
+    {rep:"DEVORE,JERALD C",ship_tos:"50483528 50392560 50014587 50424056 50010882 50007662 50344686 50360672 50511038 50205635 50498689 50000353 50258114 50008162 50025589 50027138 50402561 50402555 50511901 50470534 50010624 50387936 50387456 50026081 50375801 50390248 50505923 50378793 50000225 50043607 50000385 50366410 50000395 50000409 50366493 50366492 50366516 50366476 50365942 50000371 50226170 50008908 50431676 50000635 50011612 50515404 50283709 50010759 50516701 50000382 50000403 50007969 50000432 50229509 50000418 50335036 50351148 50237580 50478948 50331854 50334233 50422187 50422188 50012311",note:""},
+    {rep:"EDELMANN JR,JOHN F",ship_tos:"50199142 50424449 50472235 50516188 50513397 50311526 50443702 50228246 50174748 50278613 50383097 50309164 50014064 50023743 50358180 50299515 50012315 50404728 50012443 50354615 50436019 50364138 50504942 50475451 50331745 50412890 50469864 50095183 50000247 50000300 50014044 50000301 50000303 50488327 50008886 50000305 50170508 50194318 50513640 50360982 50013968 50000447 50304636 50007771 50012148 50022856 50189719 50008020 50422950 50281535 50281591 50007836 50007831 50444600 50000193",note:""},
+    {rep:"DE LA TORRE,GEORGE",ship_tos:"50451994 50512027 50000050 50319980 50008328 50000142 50467533 50000148 50204423 50025898 50515809 50491394 50458000 50447638 50444802 50445722 50319850 50413935 50371344 50364405 50000443 50000391 50000441 50321056 50366475 50000461 50366518 50365129 50366468 50366444 50485052 50013071 50026069 50012110 50013978 50192573 50506216 50000404 50025359 50476868 50000081",note:""},
+    {rep:"SHEFFIELD, CHARLES C",ship_tos:"50000114 50306175 50400790 50363962 50005745 50449993 50507927 50395199 50477990 50477994 50490659 50000190 50025340 50321650 50510067 50380086 50008236 50008237 50301465 50007669 50242728 50452175 50452172 50289354 50344636 50344637 50306131 50389810 50000261 50514651 50514589 50514648 50514650 50514588 50514649 50445842 50271611",note:""},
+    {rep:"SCOTT, ALICIA PEREZ",ship_tos:"50011412 50201583 50218589 50010609 50516545 50512889 50513099 50514124 50506169 50514201 50510141 50401614 50374310 50434933 50335738 50396946 50478013 50516427 50508600 50360749 50331480 50458938 50011494 50304206",note:""},
+    {rep:"STEWART, JOSEPH K",ship_tos:"50248637 50000503 50000632 50489068 50494962 50333367 50014797 50002731 50002723 50351993 50010574 50246867",note:""}
+    ],
+    fallback_rep:'',
+    // SALES vs TRANS is not an SAP field: SAP's own "Ship Type" is a shipping code (01, 03).
+    // The Excel decided it by Ship-To — a Ship-To that is one of our plants/terminals is a
+    // transfer: IF(OR(C2=4802,…),"TRANS","SALES"). Same list here, editable. 4809 (PEV) and
+    // 4810 (WPB) were not in the formula.
+    transfer_ship_tos:'4802 4805 4808 4892 4922 4930 5052 5054 5056'
   };
+  _xlApplySkipSeed(d);
+  return d;
 }
 
 function xlmapLoad(){
@@ -27098,16 +27577,54 @@ function xlmapLoad(){
     const raw=localStorage.getItem(XLMAP_KEY);
     XLMAP=raw?JSON.parse(raw):xlmapDefaults();
   }catch(e){ console.warn('demand map load',e); XLMAP=xlmapDefaults(); }
+  if(!XLMAP||typeof XLMAP!=='object'||Array.isArray(XLMAP)) XLMAP=xlmapDefaults();
   // Shape guard: a hand-edited or older file must never break the panel.
   const d=xlmapDefaults();
-  ['ship_points','materials','class_rules','movements','aliases'].forEach(k=>{
+  ['ship_points','materials','class_rules','movements','aliases','sales_reps'].forEach(k=>{
     if(!Array.isArray(XLMAP[k])) XLMAP[k]=d[k];
   });
   if(!XLMAP.template) XLMAP.template=d.template;
   if(!XLMAP.fallback_class) XLMAP.fallback_class=d.fallback_class;
+  if(XLMAP.fallback_rep===undefined) XLMAP.fallback_rep=d.fallback_rep;
+  // v1 → v2 (2026-09-24): "not demand" materials, so the app's Summary reproduces the
+  // Excel pivot's. Added to the saved tables, never replacing an edit.
+  const v0=XLMAP.version||1;
+  if(v0<2) _xlApplySkipSeed(XLMAP);
+  // v3 (2026-09-24): the Ship-To list that makes a row a transfer (was the Excel formula).
+  if(v0<3&&XLMAP.transfer_ship_tos===undefined) XLMAP.transfer_ship_tos=d.transfer_ship_tos;
+  if(v0<3){
+    XLMAP.version=3;
+    try{ localStorage.setItem(XLMAP_KEY, JSON.stringify(XLMAP)); }catch(e){}
+  }
+  _xlRepIdx=null; _xlTrfSet=null;
   return XLMAP;
 }
+// Ship-To → rep, first listing wins (as VLOOKUP did). Rebuilt after any edit.
+var _xlRepIdx=null;   // var, not let: xlmapLoad (above) resets it
+function xlmapRep(shipTo){
+  if(!XLMAP) xlmapLoad();
+  if(!_xlRepIdx){
+    _xlRepIdx=new Map();
+    (XLMAP.sales_reps||[]).forEach(r=>{
+      if(!r||!r.rep) return;
+      String(r.ship_tos||'').split(/[\s,;]+/).forEach(c=>{ c=c.trim(); if(c&&!_xlRepIdx.has(c)) _xlRepIdx.set(c,r.rep); });
+    });
+  }
+  const k=String(shipTo??'').trim().replace(/\.0+$/,'');
+  return _xlRepIdx.get(k)??(XLMAP.fallback_rep||'');
+}
+// SALES or TRANS from the Ship-To (see transfer_ship_tos). Null when the list is empty,
+// so the caller falls back to the file's own Ship Type column.
+var _xlTrfSet=null;
+function xlmapShipType(shipTo){
+  if(!XLMAP) xlmapLoad();
+  if(!_xlTrfSet) _xlTrfSet=new Set(String(XLMAP.transfer_ship_tos||'').split(/[\s,;]+/).map(c=>c.trim()).filter(Boolean));
+  if(!_xlTrfSet.size) return null;
+  return _xlTrfSet.has(String(shipTo??'').trim().replace(/\.0+$/,''))?'TRANS':'SALES';
+}
 function xlmapSave(msg){
+  _xlRepIdx=null; _xlTrfSet=null;
+  _xlRulesChanged();
   try{ localStorage.setItem(XLMAP_KEY, JSON.stringify(XLMAP)); }
   catch(e){ console.warn('demand map save',e); statMsg('Could not save the demand mapping'); return; }
   statMsg(msg||'Demand mapping saved');
@@ -27166,7 +27683,9 @@ function xlmapTranslate(row){
       trace.push({t:'Material', r:`${mCode} → ${s.product}${s.pres?' / '+s.pres:''} (from the product catalog — no table row${nShare>1?`; ${nShare} products share the code, ship point ${spCode} picks this one`:''})`});
     }
   }
-  if(mat&&mat.product){ if(!catalogId) trace.push({t:'Material', r:`${mCode} → ${mat.product}${mat.pres?' / '+mat.pres:''}`}); }
+  const skipMat=!!(mat&&mat.action==='skip');
+  if(skipMat) trace.push({t:'Material', r:`${mCode} → not demand (its material row says skip${mat.note?' — '+mat.note:''})`});
+  else if(mat&&mat.product){ if(!catalogId) trace.push({t:'Material', r:`${mCode} → ${mat.product}${mat.pres?' / '+mat.pres:''}`}); }
   else if(mat) missing.push(`material ${mCode} has no product set`);
   else{
     const cat=_xlCatalogProductsFor(mCode, spCode);
@@ -27192,6 +27711,7 @@ function xlmapTranslate(row){
     if(alias.action==='ignore'){ action='ignore'; trace.push({t:'Alias', r:`${name} → ignored`}); }
     else if(alias.to){ finalName=alias.to; trace.push({t:'Alias', r:`${name} → ${alias.to}`}); }
   }
+  if(skipMat) action='skip';   // not demand, whatever the rest of the row says
   return {name, finalName, parts, trace, missing, warn, action, catalogId, mapped:!missing.length};
 }
 // Does a demand point with this name exist in the scenario that is open?
@@ -27298,16 +27818,64 @@ function _xlCatalogStrip(){
   return h+`</div>`;
 }
 function _xlMatBody(){
-  const rows=(XLMAP.materials||[]).map((r,i)=>({r,i})).filter(({r})=>_xlHit('mat',r.code,r.product,r.pres,r.note));
-  return _xlCatalogStrip()+`<div style="padding:8px 12px;border-bottom:1px solid var(--border)">${_xlFilterBox('mat','filter code or product…')}</div>
-  <div id="xl-body-mat">${_xlTbl(_xlHdr(['Material','Product','Pack',''])+rows.map(({r,i})=>`<tr>
+  const rows=(XLMAP.materials||[]).map((r,i)=>({r,i})).filter(({r})=>_xlHit('mat',r.code,r.product,r.pres,r.note,r.action==='skip'?'skip not demand':''));
+  const actSel=(i,v)=>`<select class="fi" style="padding:3px 6px;font-size:9px;${v==='skip'?'color:var(--amber)':''}" title="Skip = not demand (services, supplies, lines that repeat another line's tonnes): left out of every published file" onchange="_xlSet('materials',${i},'action',this.value);xlmapRender()">
+    <option value="" ${v!=='skip'?'selected':''}>demand</option><option value="skip" ${v==='skip'?'selected':''}>skip — not demand</option></select>`;
+  return _xlCatalogStrip()+`<div style="padding:8px 12px;border-bottom:1px solid var(--border)">${_xlFilterBox('mat','filter code, product or "skip"…')}</div>
+  <div id="xl-body-mat">${_xlTbl(_xlHdr(['Material','Product','Pack','Counts as','Note',''])+rows.map(({r,i})=>`<tr>
       ${_xlTd(_xlInp('materials',i,'code',r.code,'1606504'),'100px')}
-      ${_xlTd(`<input class="fi" list="xl-prodlist" style="padding:3px 6px;font-size:9px" value="${esc(r.product??'')}" placeholder="BRS_IL(12)" onchange="_xlSet('materials',${i},'product',this.value)">`,'190px')}
-      ${_xlTd(`<input class="fi" list="xl-preslist" style="padding:3px 6px;font-size:9px" value="${esc(r.pres??'')}" placeholder="BLK" onchange="_xlSet('materials',${i},'pres',this.value)">`,'80px')}
+      ${_xlTd(`<input class="fi" list="xl-prodlist" style="padding:3px 6px;font-size:9px" value="${esc(r.product??'')}" placeholder="${r.action==='skip'?'—':'BRS_IL(12)'}" onchange="_xlSet('materials',${i},'product',this.value)">`,'190px')}
+      ${_xlTd(`<input class="fi" list="xl-preslist" style="padding:3px 6px;font-size:9px" value="${esc(r.pres??'')}" placeholder="${r.action==='skip'?'—':'BLK'}" onchange="_xlSet('materials',${i},'pres',this.value)">`,'80px')}
+      ${_xlTd(actSel(i,r.action),'140px')}
       ${_xlTd(_xlInp('materials',i,'note',r.note,'optional'))}
       ${_xlTd(`<span class="tbl-act del" style="margin:0" onclick="_xlDel('materials',${i})">✕</span>`,'24px')}
     </tr>`).join(''))}</div>
   ${_xlAddBtn('Add material',`_xlAdd('materials',{code:'',product:'',pres:'BLK',note:''})`)}`;
+}
+// Ship-To → sales rep, one row per rep. Feeds the Detail file's SalesRep column (the
+// Sales page's Rep filter). The Ship-Tos the last read found without a rep are listed
+// underneath with a picker, so a new customer is one click, not a hunt.
+function _xlRepBody(){
+  const reps=XLMAP.sales_reps||[];
+  const rows=reps.map((r,i)=>({r,i})).filter(({r})=>_xlHit('rep',r.rep,r.ship_tos,r.note));
+  const cnt=s=>String(s||'').split(/[\s,;]+/).filter(Boolean).length;
+  let h=`<div style="padding:8px 12px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center">
+      ${_xlFilterBox('rep','filter rep or a Ship-To number…')}
+      <span style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">Ship-Tos separated by spaces. The first rep listing a Ship-To wins.</span>
+    </div>
+  <div id="xl-body-rep">${_xlTbl(_xlHdr(['Sales rep','Ship-Tos','',''])+rows.map(({r,i})=>`<tr>
+      ${_xlTd(_xlInp('sales_reps',i,'rep',r.rep,'STELLJES,PAUL A'),'190px')}
+      ${_xlTd(`<textarea class="fi" rows="2" style="width:100%;padding:3px 6px;font-family:var(--mono);font-size:9px;resize:vertical" onchange="_xlSet('sales_reps',${i},'ship_tos',this.value)">${esc(r.ship_tos||'')}</textarea>`)}
+      ${_xlTd(`<span style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">${cnt(r.ship_tos)}</span>`,'40px')}
+      ${_xlTd(`<span class="tbl-act del" style="margin:0" onclick="_xlDel('sales_reps',${i})">✕</span>`,'24px')}
+    </tr>`).join(''))}</div>
+  <div style="padding:8px 12px;border-top:1px solid var(--border);display:flex;align-items:center;gap:8px">
+    <span style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">No rep listed →</span>
+    <input class="fi" style="width:150px;padding:3px 6px;font-size:9px" value="${esc(XLMAP.fallback_rep||'')}" placeholder="(blank)"
+      onchange="XLMAP.fallback_rep=this.value.trim();xlmapSave('Fallback rep saved')">
+    <span class="tbl-act" style="margin-left:auto" onclick="_xlAdd('sales_reps',{rep:'',ship_tos:'',note:''})">+ Add rep</span>
+  </div>`;
+  const miss=(window._dsDemandPreview?.noRep||[]).filter(x=>!_xlRepIdx||!_xlRepIdx.has(x.code));
+  if(miss.length){
+    const n=v=>Math.round(v).toLocaleString();
+    const opts=reps.filter(r=>r.rep).map(r=>`<option value="${esc(r.rep)}">${esc(r.rep)}</option>`).join('');
+    h+=`<div style="padding:8px 12px;border-top:1px solid var(--border)">
+      <div style="font-family:var(--mono);font-size:8px;letter-spacing:1px;color:var(--amber);text-transform:uppercase;margin-bottom:4px">In the last read, no rep — ${miss.length} Ship-To${miss.length===1?'':'s'}, biggest first</div>
+      ${miss.slice(0,15).map(x=>`<div style="font-family:var(--mono);font-size:9px;margin:2px 0;display:flex;gap:8px;align-items:center">
+        <span style="flex:0 0 70px">${esc(x.code)}</span><span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text-dim)">${esc(x.name)} · ${n(x.t)} t</span>
+        <select class="fi" style="flex:0 0 190px;width:190px;padding:2px 5px;font-size:9px" onchange="if(this.value)_xlAssignRep('${esc(x.code)}',this.value)"><option value="">assign to…</option>${opts}</select></div>`).join('')}
+      ${miss.length>15?`<div style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">· and ${miss.length-15} more</div>`:''}
+      <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-top:3px">Re-read the export after assigning, so the next Publish carries the rep.</div>
+    </div>`;
+  }
+  return h;
+}
+function _xlAssignRep(code,rep){
+  const r=(XLMAP.sales_reps||[]).find(x=>x.rep===rep); if(!r) return;
+  r.ship_tos=(String(r.ship_tos||'').trim()+' '+code).trim();
+  xlmapSave(`Ship-To ${code} → ${rep}`);
+  xlmapRep('');   // rebuild the index so the list above drops it
+  xlmapRender();
 }
 function _xlClsBody(){
   const rows=XLMAP.class_rules||[];
@@ -27344,7 +27912,15 @@ function _xlMovBody(){
       ${_xlTd(_xlInp('movements',i,'note',r.note,'optional'))}
       ${_xlTd(`<span class="tbl-act del" style="margin:0" onclick="_xlDel('movements',${i})">✕</span>`,'24px')}
     </tr>`).join(''))
-  +_xlAddBtn('Add ship type',`_xlAdd('movements',{ship_type:'',movement:'',action:'import',note:''})`);
+  +_xlAddBtn('Add ship type',`_xlAdd('movements',{ship_type:'',movement:'',action:'import',note:''})`)
+  +`<div style="padding:8px 12px;border-top:1px solid var(--border)">
+    <div style="font-family:var(--mono);font-size:9px;color:var(--text-dim);line-height:1.6;margin-bottom:5px">
+      <span style="color:var(--text)">SALES or TRANS comes from the Ship-To.</span> A Ship-To in this list is one of our plants or terminals, so the row is a
+      transfer (TRANS); any other Ship-To is a sale (SALES). SAP's own Ship Type column is a shipping code (01, 03) and is not used.
+      Empty list = use the file's Ship Type column as it is.</div>
+    <input class="fi" style="width:100%;padding:4px 7px;font-size:10px;font-family:var(--mono)" value="${esc(XLMAP.transfer_ship_tos||'')}" placeholder="4802 4805 4808 …"
+      onchange="XLMAP.transfer_ship_tos=this.value.trim();xlmapSave('Transfer Ship-Tos saved')">
+  </div>`;
 }
 function _xlAliBody(){
   const rows=(XLMAP.aliases||[]).map((r,i)=>({r,i})).filter(({r})=>_xlHit('ali',r.from,r.to,r.note));
@@ -27590,6 +28166,7 @@ function _xlTestOutHTML(){
   (res.warn||[]).forEach(w=>h+=`<div style="font-family:var(--mono);font-size:9px;color:var(--amber);margin:4px 0 2px">⚠ ${esc(w)}
     ${res.catalogId?`<span class="tbl-act" onclick="_xlEditProduct('${esc(res.catalogId)}')">set it →</span>`:''}</div>`);
   if(res.name!==res.finalName) h+=line('composed',res.name,'var(--text-dim)');
+  if(res.action==='skip')   h+=line('action','not demand — skipped (material row)','var(--amber)');
   if(res.action==='park')   h+=line('action','parked — kept out of demand (movement rule)','var(--amber)');
   if(res.action==='ignore') h+=line('action','ignored (alias rule)','var(--amber)');
   if(res.missing.length){
@@ -27761,6 +28338,7 @@ function _xlImport(){
     try{
       const obj=JSON.parse(await f.text());
       if(!obj||typeof obj!=='object') throw new Error('not a mapping file');
+      ['format','catalog_materials','rules_id','saved_at','saved_at_local','scenario'].forEach(k=>delete obj[k]);
       localStorage.setItem(XLMAP_KEY, JSON.stringify(obj));
       xlmapLoad(); xlmapRender(); statMsg(`Demand mapping loaded from ${f.name}`);
     }catch(e){ statMsg('That file is not a demand mapping'); }
@@ -27824,6 +28402,7 @@ function xlmapPanelHTML(){
     ${_xlCard('cls','Customer class','how the Sold-To becomes INT / EXT / IND / LKHT',(XLMAP.class_rules||[]).length,_xlClsBody())}
     ${_xlCard('mov','Movement','what each ship type means',(XLMAP.movements||[]).length,_xlMovBody())}
     ${_xlCard('ali','Demand point aliases','when the composed name and the demand point differ',(XLMAP.aliases||[]).length,_xlAliBody())}
+    ${_xlCard('rep','Sales reps','Ship-To → rep, for the Detail file and the Sales page',(XLMAP.sales_reps||[]).length,_xlRepBody())}
   </div>`;
 }
 function xlmapRender(){
