@@ -24413,6 +24413,7 @@ function _cfgTab(tab){
   document.getElementById('cfg-panel-rules').style.display=tab==='rules'?'':'none';
   document.getElementById('cfg-panel-datasources').style.display=tab==='datasources'?'':'none';
   document.getElementById('cfg-panel-demandmap').style.display=tab==='demandmap'?'':'none';
+  if(tab==='demandmap'&&typeof _xlSaveRules==='function') _xlSaveRules(false,'open');
   document.getElementById('cfg-panel-ai').style.display=tab==='ai'?'':'none';
   const tabStyActive=`padding:7px 16px;font-family:var(--mono);font-size:10px;cursor:pointer;border:none;background:transparent;border-bottom:2px solid var(--green);color:var(--green);letter-spacing:.5px;text-transform:uppercase`;
   const tabStyInactive=`padding:7px 16px;font-family:var(--mono);font-size:10px;cursor:pointer;border:none;background:transparent;border-bottom:2px solid transparent;color:var(--text-dim);letter-spacing:.5px;text-transform:uppercase`;
@@ -26880,7 +26881,7 @@ const _xlDiffRows=(a,b)=>[...new Set([...a.keys(),...b.keys()])]
 
 async function _xlPubChooseDir(){
   const h=await exportDir('sap',true);
-  if(h){ statMsg('Sales files folder: '+h.name); await _xlSaveRules(false); }
+  if(h){ statMsg('Sales files folder: '+h.name); await _xlSaveRules(false,'click'); }
   xlmapRender();
 }
 async function _xlPubClearDir(){ await clearExportDir('sap'); xlmapRender(); }
@@ -27052,6 +27053,22 @@ function _xlLocalStamp(d){
   const p=n=>String(n).padStart(2,'0');
   return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
+// Canonical JSON (keys sorted) so the same rules hash the same on every computer,
+// whatever order a row's fields happened to be typed in.
+function _xlCanon(v){
+  if(Array.isArray(v)) return '['+v.map(_xlCanon).join(',')+']';
+  if(v&&typeof v==='object') return '{'+Object.keys(v).filter(k=>v[k]!==undefined).sort()
+    .map(k=>JSON.stringify(k)+':'+_xlCanon(v[k])).join(',')+'}';
+  return JSON.stringify(v??null);
+}
+// The part people edit — what two computers must agree on. The catalog is not in it:
+// it comes from whichever scenario is open.
+function _xlTablesOf(o){
+  return {template:o.template||'', fallback_class:o.fallback_class||'', fallback_rep:o.fallback_rep||'',
+    transfer_ship_tos:o.transfer_ship_tos||'', ship_points:o.ship_points||[], materials:o.materials||[],
+    class_rules:o.class_rules||[], movements:o.movements||[], aliases:o.aliases||[], sales_reps:o.sales_reps||[]};
+}
+const _xlTablesId=o=>_xlHash(_xlCanon(_xlTablesOf(o)));
 function xlmapRulesPayload(){
   if(!XLMAP) xlmapLoad();
   const catalog=[];
@@ -27060,14 +27077,9 @@ function xlmapRulesPayload(){
     const sp=_xlSplitProduct(p.name);
     catalog.push({code:k.sap, ship_pt:k.ship, product:sp.product, pres:sp.pres, name:p.name});
   });
-  const body={format:'avila-demand-rules', version:XLMAP.version||3,
-    template:XLMAP.template, fallback_class:XLMAP.fallback_class, fallback_rep:XLMAP.fallback_rep||'',
-    transfer_ship_tos:XLMAP.transfer_ship_tos||'',
-    ship_points:XLMAP.ship_points||[], materials:XLMAP.materials||[], class_rules:XLMAP.class_rules||[],
-    movements:XLMAP.movements||[], aliases:XLMAP.aliases||[], sales_reps:XLMAP.sales_reps||[],
-    catalog_materials:catalog};
-  const id=_xlHash(JSON.stringify(body));
-  return {...body, rules_id:id, saved_at:new Date().toISOString(), saved_at_local:_xlLocalStamp(),
+  const body={format:'avila-demand-rules', version:XLMAP.version||3, ..._xlTablesOf(XLMAP), catalog_materials:catalog};
+  return {...body, rules_id:_xlHash(_xlCanon(body)), tables_id:_xlTablesId(XLMAP), tables_edited_at:XLMAP.edited_at||'',
+    saved_at:new Date().toISOString(), saved_at_local:_xlLocalStamp(),
     scenario:(typeof scActive==='function'?scActive()?.name:'')||''};
 }
 const XLRULES_SAVED_KEY='avila_rules_saved';
@@ -27078,24 +27090,77 @@ function _xlRulesChanged(){
   clearTimeout(_xlRulesTimer);
   _xlRulesTimer=setTimeout(()=>{ _xlSaveRules(false); },1500);
 }
-async function _xlSaveRules(prompt){
-  let ok=false;
+async function _xlReadRulesFile(dir){
+  try{
+    const f=await (await dir.getFileHandle(XLPUB_FILES.map)).getFile();
+    const o=JSON.parse(await f.text());
+    return o&&o.format==='avila-demand-rules'?o:null;
+  }catch(e){ return null; }   // not there yet
+}
+function _xlAdoptRules(file){
+  XLMAP={...XLMAP, ..._xlTablesOf(file), edited_at:file.tables_edited_at||file.saved_at||''};
+  try{ localStorage.setItem(XLMAP_KEY, JSON.stringify(XLMAP)); }catch(e){}
+  _xlRepIdx=null; _xlTrfSet=null; _xlUi.check=null;
+}
+const _xlWhen=iso=>{ if(!iso) return 'never (still the defaults)'; const d=new Date(iso); return isNaN(d)?String(iso):_xlLocalStamp(d); };
+// Each computer's browser keeps its own copy of the tables (localStorage); the file in the
+// shared folder is what they meet on. So the file is READ before it is written: rules
+// changed only on the other computer are taken, rules changed only here are written, and
+// when both changed the person picks — never a silent overwrite (on 9/24 the SAP computer
+// had 29 ship points and this one 27).
+// mode: 'edit' (after a change here), 'click' (Save rules now / choosing the folder),
+// 'open' (opening Demand Mapping — only reads; it never rewrites the file just because
+// this scenario's product catalog differs from the one the file was saved with).
+async function _xlSaveRules(prompt, mode){
+  mode=mode||'edit';
+  let ok=false, note='';
   try{
     const dir=await exportDir('sap',!!prompt);   // prompt only from a click
     if(!dir){ if(prompt) statMsg('Choose the folder the sales files live in first'); return false; }
+    let saved=null; try{ saved=JSON.parse(localStorage.getItem(XLRULES_SAVED_KEY)||'null'); }catch(e){}
+    const base=(saved&&saved.tables_id)||null;   // the tables this browser last read or wrote
+    const file=await _xlReadRulesFile(dir);
+    if(file){
+      const fileT=file.tables_id||_xlTablesId(file), localT=_xlTablesId(XLMAP);
+      if(fileT!==localT){
+        let takeFile;
+        if(!XLMAP.edited_at) takeFile=true;                 // never edited on this computer
+        else if(base&&localT===base) takeFile=true;          // only the other computer changed them
+        else if(base&&fileT===base) takeFile=false;          // only this computer changed them
+        else{
+          const fT=file.tables_edited_at||file.saved_at||'', lT=XLMAP.edited_at||'';
+          takeFile=confirm(`The demand-mapping rules were changed both in ${dir.name}/${XLPUB_FILES.map} and in this browser.\n\n`+
+            `File: last edited ${_xlWhen(fT)}${fT>lT?'   ← newer':''}  (saved from scenario "${file.scenario||'?'}")\n`+
+            `This computer: last edited ${_xlWhen(lT)}${lT>fT?'   ← newer':''}\n\n`+
+            `OK = use the FILE's rules here (this computer's changes are dropped)\n`+
+            `Cancel = keep THIS computer's rules and overwrite the file`);
+        }
+        if(takeFile){
+          _xlAdoptRules(file);
+          note=`Rules loaded from ${dir.name} — last edited ${_xlWhen(file.tables_edited_at||file.saved_at)}`;
+        }
+      }
+    }
     const payload=xlmapRulesPayload();
-    const w=await (await dir.getFileHandle(XLPUB_FILES.map,{create:true})).createWritable();
-    await w.write(new Blob([JSON.stringify(payload,null,1)],{type:'application/json'}));
-    await w.close();
-    try{ localStorage.setItem(XLRULES_SAVED_KEY,JSON.stringify({at:_xlLocalStamp(),
-      id:payload.rules_id, folder:dir.name})); }catch(e){}
-    if(prompt) statMsg(`Rules saved to ${dir.name}/${XLPUB_FILES.map}`);
+    let at=_xlLocalStamp(), id=payload.rules_id;
+    const sameTables=file&&(file.tables_id||_xlTablesId(file))===payload.tables_id;
+    if(file&&(file.rules_id===payload.rules_id||(mode==='open'&&sameTables))){
+      at=file.saved_at_local||at; id=file.rules_id||id;    // nothing of ours to write
+    }else{
+      const w=await (await dir.getFileHandle(XLPUB_FILES.map,{create:true})).createWritable();
+      await w.write(new Blob([JSON.stringify(payload,null,1)],{type:'application/json'}));
+      await w.close();
+    }
+    try{ localStorage.setItem(XLRULES_SAVED_KEY,JSON.stringify({at, id,
+      tables_id:payload.tables_id, folder:dir.name})); }catch(e){}
+    if(note){ statMsg(note); if(document.getElementById('cfg-panel-demandmap')) xlmapRender(); }
+    else if(prompt) statMsg(`Rules saved to ${dir.name}/${XLPUB_FILES.map}`);
     ok=true;
   }catch(e){ console.warn('rules save',e); if(prompt) statMsg('Could not save the rules file: '+(e.message||e)); }
   const el=document.getElementById('xl-rules-row'); if(el) el.outerHTML=_xlFolderRulesHTML();
   return ok;
 }
-// Folder + rules status, shown in the Source file card whether or not the export was read.
+// Folder + rules status, at the top of Demand Mapping.
 function _xlFolderRulesHTML(){
   const folder=exportDirName('sap');
   let saved=null; try{ saved=JSON.parse(localStorage.getItem(XLRULES_SAVED_KEY)||'null'); }catch(e){}
@@ -27114,7 +27179,7 @@ function _xlFolderRulesHTML(){
     <span style="flex-basis:100%;height:0"></span>
     <span style="font-size:8px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase">Rules for the SAP script</span>
     <span style="color:var(--text)">${XLPUB_FILES.map}</span> ${state}
-    <span class="tbl-act" style="margin:0" onclick="_xlSaveRules(true)">Save rules now</span>
+    <span class="tbl-act" style="margin:0" onclick="_xlSaveRules(true,'click')">Save rules now</span>
   </div>`;
 }
 
@@ -27624,6 +27689,7 @@ function xlmapShipType(shipTo){
 }
 function xlmapSave(msg){
   _xlRepIdx=null; _xlTrfSet=null;
+  if(XLMAP) XLMAP.edited_at=new Date().toISOString();
   _xlRulesChanged();
   try{ localStorage.setItem(XLMAP_KEY, JSON.stringify(XLMAP)); }
   catch(e){ console.warn('demand map save',e); statMsg('Could not save the demand mapping'); return; }
@@ -28338,9 +28404,9 @@ function _xlImport(){
     try{
       const obj=JSON.parse(await f.text());
       if(!obj||typeof obj!=='object') throw new Error('not a mapping file');
-      ['format','catalog_materials','rules_id','saved_at','saved_at_local','scenario'].forEach(k=>delete obj[k]);
+      ['format','catalog_materials','rules_id','tables_id','tables_edited_at','saved_at','saved_at_local','scenario'].forEach(k=>delete obj[k]);
       localStorage.setItem(XLMAP_KEY, JSON.stringify(obj));
-      xlmapLoad(); xlmapRender(); statMsg(`Demand mapping loaded from ${f.name}`);
+      xlmapLoad(); xlmapSave(`Demand mapping loaded from ${f.name}`); xlmapRender();
     }catch(e){ statMsg('That file is not a demand mapping'); }
   };
   inp.click();
