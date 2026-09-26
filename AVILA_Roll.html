@@ -2644,7 +2644,13 @@ function _rollPublishCatalog(){
         products:(dpBy.get(e.id)?.products||[]).map(x=>x.product_id).filter(Boolean)}))
     };
     let all={}; try{ all=JSON.parse(localStorage.getItem(SC_CATALOG_KEY)||'{}')||{}; }catch(e){}
-    all.byId=all.byId||{}; all.byId[id]=cat; all.activeId=id;
+    all.byId=all.byId||{};
+    // Nothing the Sales page uses changed (same scenario, same catalog) → leave the stored copy
+    // alone. Re-writing it with only a new publishedAt made an open Sales tab redraw its whole
+    // page after every single edit made here.
+    const prev=all.byId[id];
+    if(prev && all.activeId===id && JSON.stringify({...prev,publishedAt:null})===JSON.stringify({...cat,publishedAt:null})) return;
+    all.byId[id]=cat; all.activeId=id;
     localStorage.setItem(SC_CATALOG_KEY,JSON.stringify(all));
   }catch(e){ console.warn('Sales catalog publish failed',e); }
 }
@@ -2871,6 +2877,70 @@ const DB = {
   real_shipping_daily:   [], // { date:'YYYY-MM-DD', facility_id, product_id, volume_t, source:'actual', created_at, updated_at }
   real_unloading_daily:  []  // { date:'YYYY-MM-DD', facility_id, berth_id, product_id, mode:'ship'|'rail'|'truck', value, unit:'t'|'cars', cars?:N (rail: entered car count for display; value stays tonnes for the sim), source:'actual', created_at, updated_at }
 };
+
+// ═══════════════════════════════════════════════════════
+// FAST READ-ONLY LOOKUPS (performance)
+// The simulation and the big pages ask the same question thousands of times — "the real
+// rows for this element / silo on this date" — and every ask used to read the WHOLE table
+// (tens of thousands of rows). While one heavy piece of work runs (a simulation pass, a
+// page render) each table is indexed once and every ask becomes a direct lookup.
+// Why this can never show stale or wrong numbers:
+//  • An index only exists inside _idxRun(...) — one synchronous block (a render, a
+//    simulation pass) — and is thrown away the moment the outermost block ends. Edits
+//    happen in their own event handlers, so the render/simulation after any edit always
+//    starts from a fresh index built from the data exactly as it is then.
+//  • Inside a block the index is rebuilt automatically if its table was replaced or rows
+//    were added/removed (checked on every lookup). It holds the row objects themselves,
+//    so a value edited in place is read as it is now.
+//  • Outside a block every helper falls back to the original full-table scan.
+//  • Same answers as the scans they replace: rows come back in table order, and the
+//    "first" row is the one .find() would have returned. Results are READ-ONLY arrays.
+// ═══════════════════════════════════════════════════════
+const _IDX={depth:0, maps:new Map()};
+const _IDX_NONE=Object.freeze([]);
+function _idxRun(fn){
+  _IDX.depth++;
+  try{ return fn(); }
+  finally{ if(--_IDX.depth===0) _IDX.maps.clear(); }
+}
+// Map(k1 → Map(k2 → rows[])), or Map(k1 → rows[]) without f2, over DB[table] in table order.
+function _idxMap(table, f1, f2){
+  const arr=DB[table]||_IDX_NONE, id=table+'|'+f1+'|'+(f2||'');
+  const ix=_IDX.maps.get(id);
+  if(ix&&ix.arr===arr&&ix.len===arr.length) return ix.map;
+  const map=new Map();
+  for(let i=0;i<arr.length;i++){
+    const r=arr[i]; if(r==null) continue;
+    const a=r[f1]; if(a!==a) continue;           // NaN never === anything, so never matches
+    if(f2){
+      const b=r[f2]; if(b!==b) continue;
+      let m2=map.get(a); if(!m2){ m2=new Map(); map.set(a,m2); }
+      const rows=m2.get(b); if(rows) rows.push(r); else m2.set(b,[r]);
+    }else{
+      const rows=map.get(a); if(rows) rows.push(r); else map.set(a,[r]);
+    }
+  }
+  _IDX.maps.set(id,{arr,len:arr.length,map});
+  return map;
+}
+// Rows of DB[table] where row[f1]===k1 (and row[f2]===k2 when f2 is given), in table order.
+function _idxRows(table, f1, k1, f2, k2){
+  if(!_IDX.depth){
+    const t=DB[table]||_IDX_NONE;
+    return f2?t.filter(r=>r[f1]===k1&&r[f2]===k2):t.filter(r=>r[f1]===k1);
+  }
+  const m=_idxMap(table,f1,f2).get(k1);
+  if(!m) return _IDX_NONE;
+  return (f2?m.get(k2):m)||_IDX_NONE;
+}
+// The first such row (what .find() returns), or undefined.
+function _idxFirst(table, f1, k1, f2, k2){
+  if(!_IDX.depth){
+    const t=DB[table]||_IDX_NONE;
+    return f2?t.find(r=>r[f1]===k1&&r[f2]===k2):t.find(r=>r[f1]===k1);
+  }
+  return _idxRows(table,f1,k1,f2,k2)[0];
+}
 
 // Seed catalog data
 function seedCatalogs(){
@@ -7362,7 +7432,7 @@ function _elemLinkedData(elId){
     if(n) counts['demand_points']=n;
   }
   if(DB.demand_values){
-    const n=DB.demand_values.filter(d=>d.element_id===elId).length;
+    const n=_idxRows('demand_values','element_id',elId).length;
     if(n) counts['demand_values']=n;
   }
   if(DB.element_maintenance_events){
@@ -7374,11 +7444,11 @@ function _elemLinkedData(elId){
     if(n) counts['capacities']=n;
   }
   if(DB.real_production_daily){
-    const n=DB.real_production_daily.filter(e=>e.element_id===elId).length;
+    const n=_idxRows('real_production_daily','element_id',elId).length;
     if(n) counts['real_prod']=n;
   }
   if(DB.real_inventory_daily){
-    const n=DB.real_inventory_daily.filter(e=>e.silo_id===elId).length;
+    const n=_idxRows('real_inventory_daily','silo_id',elId).length;
     if(n) counts['real_inv']=n;
   }
   if(DB.connections){
@@ -7439,6 +7509,7 @@ function renderElementsView(){
 }
 
 function renderElementsTable(){
+  if(!_IDX.depth) return _idxRun(()=>renderElementsTable.apply(this,arguments)); // fast lookups for this whole block
   const nameFilter=(document.getElementById('elem-filter-name')?.value||'').toLowerCase();
   const typeFilter=document.getElementById('elem-filter-type')?.value||'';
   const facFilter=document.getElementById('elem-filter-fac')?.value||'';
@@ -8359,7 +8430,7 @@ function renderSupplyKPIs(){
     const ratedMax=caps.reduce((s,c)=>s+(parseFloat(c.capacity_tpd)||0),0);
     mtdDates.forEach(ds=>{
       // Actual data
-      const actual=DB.real_production_daily.filter(rp=>rp.date===ds&&rp.element_id===el.id&&pidOk(rp.product_id));
+      const actual=_idxRows('real_production_daily','element_id',el.id,'date',ds).filter(rp=>pidOk(rp.product_id));
       if(actual.length) mtdActual+=actual.reduce((s,rp)=>s+(parseFloat(rp.volume_t)||0),0);
       // Rated (skip maintenance days)
       const isMaint=DB.element_maintenance_events.some(m=>{
@@ -8952,6 +9023,7 @@ function saveProduct(){
 // ═══════════════════════════════════════════════════════
 
 function renderDemandView(){
+  if(!_IDX.depth) return _idxRun(()=>renderDemandView.apply(this,arguments)); // fast lookups for this whole block
   const wrap=document.getElementById('demand-table-wrap'); if(!wrap) return;
   fltRender('dem');
   let allDpEls=getFacElements().filter(e=>e.type==='demand_point');
@@ -9804,6 +9876,7 @@ const DOWNTIME_PRODUCTS = {'__down_repair__':'repair','__down_pm__':'pm'};
 // SUPPLY / PRODUCTION VIEW
 // ═══════════════════════════════════════════════════════
 function renderSupplyView(){
+  if(!_IDX.depth) return _idxRun(()=>renderSupplyView.apply(this,arguments)); // fast lookups for this whole block
   const wrap=document.getElementById('supply-table-wrap'); if(!wrap) return;
   fltRender('sup');
   _supSyncInvModeBtn();
@@ -9963,7 +10036,7 @@ function _realPackT(rec){
   return tpp>0?(parseFloat(rec.pallets)||0)*tpp:null;
 }
 function _dedupRealProd(elId, ds){
-  const rows=(DB.real_production_daily||[]).filter(r=>r.date===ds&&r.element_id===elId);
+  const rows=_idxRows('real_production_daily','element_id',elId,'date',ds); // read-only
   if(!rows.length) return [];
   const byProd={};
   rows.forEach(r=>{
@@ -10777,7 +10850,7 @@ function _renderSupplyViewInner(wrap){
   // below and scroll together. One grouped bar per day, one bar per product.
   const _chartInvVal=(siloId, ds, startInv)=>{
     const prev=new Date(ds+'T00:00:00'); prev.setDate(prev.getDate()-1);
-    const realInv=DB.real_inventory_daily.find(ri=>ri.date===prev._ymd()&&ri.silo_id===siloId);
+    const realInv=_idxFirst('real_inventory_daily','silo_id',siloId,'date',prev._ymd());
     if(realInv) return parseFloat(realInv.eod_volume_t)||0;
     const dayIdx=_dIdx(ds);
     const hist=r?.inventoryHistory?.[siloId]||[];
@@ -11200,7 +11273,7 @@ function _renderSupplyViewInner(wrap){
             const prevDateStr=prevDate._ymd();
 
             // Check ONLY previous day's ending inventory (becomes today's beginning)
-            const realInv=DB.real_inventory_daily.find(ri=>ri.date===prevDateStr&&ri.silo_id===siloId);
+            const realInv=_idxFirst('real_inventory_daily','silo_id',siloId,'date',prevDateStr);
 
             if(realInv) return {value:parseFloat(realInv.eod_volume_t)||0, isActual:true};
 
@@ -11361,7 +11434,7 @@ function _renderSupplyViewInner(wrap){
           if(_packedSilosShown.length){
             const _packInvVal=(siloId,ds,startT)=>{
               const prev=new Date(ds+'T00:00:00'); prev.setDate(prev.getDate()-1);
-              const realInv=DB.real_inventory_daily.find(ri=>ri.date===prev._ymd()&&ri.silo_id===siloId);
+              const realInv=_idxFirst('real_inventory_daily','silo_id',siloId,'date',prev._ymd());
               if(realInv) return {value:parseFloat(realInv.eod_volume_t)||0,isActual:true};
               const dayIdx=_dIdx(ds);
               const hist=r?.inventoryHistory?.[siloId]||[];
@@ -11703,7 +11776,7 @@ function _renderSupplyViewInner(wrap){
             const prevDate=new Date(dateStr+'T00:00:00');
             prevDate.setDate(prevDate.getDate()-1);
             const prevDateStr=prevDate._ymd();
-            const realInv=DB.real_inventory_daily.find(ri=>ri.date===prevDateStr&&ri.silo_id===siloId);
+            const realInv=_idxFirst('real_inventory_daily','silo_id',siloId,'date',prevDateStr);
             if(realInv) return {value:parseFloat(realInv.eod_volume_t)||0, isActual:true};
             const dayIdx=_dIdx(dateStr);
             const hist=r?.inventoryHistory?.[siloId]||[];
@@ -11923,7 +11996,7 @@ function _renderSupplyViewInner(wrap){
         // Beginning-of-day inventory (real prev-day EOD else simulated).
         const getInv=(siloId,ds,startInv)=>{
           const prev=new Date(ds+'T00:00:00'); prev.setDate(prev.getDate()-1);
-          const realInv=DB.real_inventory_daily.find(ri=>ri.date===prev._ymd()&&ri.silo_id===siloId);
+          const realInv=_idxFirst('real_inventory_daily','silo_id',siloId,'date',prev._ymd());
           if(realInv) return {value:parseFloat(realInv.eod_volume_t)||0,isActual:true};
           const di=_dIdx(ds); const hist=r?.inventoryHistory?.[siloId]||[];
           return {value:di<=0?(parseFloat(startInv)||0):(hist[di-1]??0),isActual:false};
@@ -15490,6 +15563,7 @@ function _rpToggleMonth(ym){
 
 // ── Main render ───────────────────────────────────────────────────
 function rpRender(){
+  if(!_IDX.depth) return _idxRun(()=>rpRender.apply(this,arguments)); // fast lookups for this whole block
   _syncSimToggle();
   if(!S.simCfg.start_date){
     document.getElementById('rp-rail-section').style.display='none';
@@ -16298,6 +16372,7 @@ function _vpToggleMonth(ym){
 }
 
 function vpRender(){
+  if(!_IDX.depth) return _idxRun(()=>vpRender.apply(this,arguments)); // fast lookups for this whole block
   _syncSimToggle();
   if(!S.simCfg.start_date){
     document.getElementById('vp-dest-section').style.display='none';
@@ -16859,7 +16934,7 @@ function _demandRate(elId, dateStr){
   // Non-working day: expected demand is 0 unless the user entered a MANUAL override
   // (a demand_values row flagged nwd_manual). Actual shipments above still count.
   if(_isNWD(dateStr)){
-    const ov=(DB.demand_values||[]).find(v=>v.element_id===elId&&v.date===dateStr&&v.nwd_manual);
+    const ov=_idxRows('demand_values','element_id',elId,'date',dateStr).find(v=>v.nwd_manual);
     return ov?(parseFloat(ov.value_t)||0):0;
   }
 
@@ -16867,7 +16942,7 @@ function _demandRate(elId, dateStr){
   const valMap_cache=(_demandRate._cache=_demandRate._cache||{});
   if(!valMap_cache[elId]){
     const el=DB.elements.find(e=>e.id===elId);
-    const vals=(DB.demand_values||[]).filter(v=>v.element_id===elId);
+    const vals=_idxRows('demand_values','element_id',elId); // read-only
     valMap_cache[elId]={
       hasValues:vals.length>0,
       map:Object.fromEntries(vals.map(v=>[v.date,parseFloat(v.value_t)||0])),
@@ -17587,6 +17662,7 @@ async function runSimulation(){
 }
 
 function simulate(elements, connections, horizon, includeProposed=false){
+  if(!_IDX.depth) return _idxRun(()=>simulate.apply(this,arguments)); // fast lookups for this whole block
   const runId=`run_${Date.now()}`;
 
   // Always read fresh demand_values — clear any stale cache before computing
@@ -18034,6 +18110,29 @@ function simulate(elements, connections, horizon, includeProposed=false){
       .flatMap(dp=>(up[dp.id]||[]).filter(uid=>elMap[uid]?.type==='bulk_silo'))
   );
 
+  // Silos a demand point may draw a product from (kind 'bulk' = cement bulk silos, 'packed' =
+  // packed silos). This depends only on the topology, which cannot change during a run, so each
+  // list is worked out once and reused every day instead of re-filtering every element for every
+  // demand point, product and day. Same silos in the same order as the filter it replaces.
+  const _dpSiloMemo=new Map();
+  const _dpSilos=(kind, pid, topoSilos, facilityId, relaxed)=>{
+    let m=_dpSiloMemo;
+    for(const k of [topoSilos, facilityId, kind+(relaxed?'1':'0')]){
+      let n=m.get(k); if(!n){ n=new Map(); m.set(k,n); } m=n;
+    }
+    let list=m.get(pid);
+    if(!list){
+      const scoped=e=> relaxed || topoSilos.has(e.id) ||
+        (e.assigned_facility_id||e.facility_id||S.facility_id)===facilityId;
+      list=kind==='bulk'
+        ? elements.filter(e=>e.type==='bulk_silo'&&isCementSilo(e)&&!railTransferSiloIds.has(e.id)&&
+                             getSiloProducts(e).includes(pid)&&scoped(e))
+        : elements.filter(e=>e.type==='packed_silo'&&e.props.product_id===pid&&scoped(e));
+      m.set(pid,list);
+    }
+    return list;
+  };
+
   // ── SILO TRANSFERS (DB.silo_links) ───────────────────────────────────────
   // Links whose two silos are both in this run and still hold the link's product. Each day the
   // tonnes recorded for a direction (real_silo_transfers_daily) win, else the plan
@@ -18332,7 +18431,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
       // Packed silos too (tonnes, like the Supply page shows them) — a real packed inventory
       // from the Daily Data form or the Supply page used to be displayed but never anchored.
       elements.filter(e=>e.type==='bulk_silo'||e.type==='packed_silo').forEach(el=>{
-        const realInv=DB.real_inventory_daily.find(ri=>ri.date===prevAnchorStr&&ri.silo_id===el.id);
+        const realInv=_idxFirst('real_inventory_daily','silo_id',el.id,'date',prevAnchorStr);
         if(realInv){
           const realVal=parseFloat(realInv.eod_volume_t)||0;
           state[el.id].inventory=realVal;
@@ -19506,12 +19605,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
       }
       products.forEach(pid=>{
         if(remaining<=0) return;
-        elements.filter(e=>e.type==='bulk_silo'&&isCementSilo(e)&&
-                            !railTransferSiloIds.has(e.id)&&
-                            getSiloProducts(e).includes(pid)&&
-                            (topoSilos.has(e.id)||
-                             (e.assigned_facility_id||e.facility_id||S.facility_id)===dp.facilityId)
-        ).forEach(si=>{
+        _dpSilos('bulk',pid,topoSilos,dp.facilityId,false).forEach(si=>{
           if(remaining<=0) return;
           const avail=Math.max(0,(state[si.id]?.inventory||0));
           const pull=Math.min(remaining,avail);
@@ -19816,8 +19910,6 @@ function simulate(elements, connections, horizon, includeProposed=false){
     const _purchasedFacIds=new Set((DB.facilities||[]).filter(f=>f.type==='purchased').map(f=>f.id));
     const _pullDemand=(productIds, qty, topoSilos, facilityId, relaxed)=>{
       let remaining=qty, pulled=0;
-      const scoped=e=> relaxed || topoSilos.has(e.id) ||
-        (e.assigned_facility_id||e.facility_id||S.facility_id)===facilityId;
       const drain=si=>{
         if(remaining<=0) return;
         const ss=state[si.id];
@@ -19827,12 +19919,11 @@ function simulate(elements, connections, horizon, includeProposed=false){
       };
       productIds.forEach(pid=>{
         if(remaining<=0) return;
-        elements.filter(e=>e.type==='bulk_silo'&&isCementSilo(e)&&!railTransferSiloIds.has(e.id)&&
-                           getSiloProducts(e).includes(pid)&&scoped(e)).forEach(drain);
+        _dpSilos('bulk',pid,topoSilos,facilityId,relaxed).forEach(drain);
       });
       productIds.forEach(pid=>{
         if(remaining<=0) return;
-        elements.filter(e=>e.type==='packed_silo'&&e.props.product_id===pid&&scoped(e)).forEach(drain);
+        _dpSilos('packed',pid,topoSilos,facilityId,relaxed).forEach(drain);
       });
       return pulled;
     };
@@ -20787,6 +20878,7 @@ function _dashTimelineHTML(m){
 
 // ── RENDER ────────────────────────────────────────────────────────────────
 function renderDashboard(){
+  if(!_IDX.depth) return _idxRun(()=>renderDashboard.apply(this,arguments)); // fast lookups for this whole block
   const host=document.getElementById('dash2-inner'); if(!host) return;
   if(!S.simResults){
     host.innerHTML=`<div class="d2-empty" style="margin:22px">Run a simulation to build the dashboard.</div>`;
@@ -20914,7 +21006,16 @@ window.addEventListener('resize',()=>{
 // ═══════════════════════════════════════════════════════
 // RESULTS RENDERING
 // ═══════════════════════════════════════════════════════
-function renderResults(r){ renderDtree(r);renderDashCharts(r);renderEvLog(r);renderResultsTable();updateFacFilterBar();renderDashboard(); }
+// Called after every simulation run (the only caller; r === S.simResults). Draws only the
+// result page that is ON SCREEN: the Data Table and the Dashboard are shown exclusively via
+// switchView(), which redraws them from S.simResults every time they are opened, so drawing
+// them while hidden only made every edit wait for pages nobody was looking at.
+function renderResults(r){ _idxRun(()=>{
+  if(S.view==='datatable'){ renderDtree(r); renderDashCharts(r); }
+  else _demandCacheInvalidate(); // what renderDtree always did here (keeps the demand caches as fresh as before)
+  renderEvLog(r); renderResultsTable(); updateFacFilterBar();
+  if(S.view==='dashboard') renderDashboard();
+}); }
 
 // ═══════════════════════════════════════════════════════
 // DAILY RESULTS TABLE
@@ -21134,7 +21235,7 @@ function renderResultsTable(){
         // So ONLY check previous day's real inventory data (never check current date)
         let realInventory=null;
         if(day>1){
-          realInventory=DB.real_inventory_daily.find(ri=>ri.date===prevDateStr&&ri.silo_id===el.id);
+          realInventory=_idxFirst('real_inventory_daily','silo_id',el.id,'date',prevDateStr);
         }
 
         if(realInventory){
@@ -21998,6 +22099,9 @@ function importJSON(input){
       Object.keys(DB).forEach(table=>{
         if(saved.DB[table]!==undefined) DB[table]=saved.DB[table];
       });
+      // Every table was just replaced — drop the memoised demand / holiday lookups, or the
+      // pages below (and the next typed demand cell) would still read the pre-import values.
+      _demandCacheInvalidate();
       _slResetIfAbsent(saved.DB);
       if(saved.simCfg) Object.assign(S.simCfg,saved.simCfg);
       if(saved.counter) S.elCounter=saved.counter;
@@ -22376,6 +22480,7 @@ function _dashToggle(bodyId, hdrEl){
 }
 
 function renderDashCharts(r){
+  if(!_IDX.depth) return _idxRun(()=>renderDashCharts.apply(this,arguments)); // fast lookups for this whole block
   if(!r) return;
   _clkSimResults=r; // cache current results so legend-toggle redraws use live data
   _chartRedrawFns['dash-clk-legend']=()=>{const rr=_clkSimResults||S.simResults;if(!rr)return;_drawClinkerChart('dash-clk-chart',rr);_attachTooltip('dash-clk-chart');};
@@ -22423,7 +22528,7 @@ function _dtreeBuildGroups(r, days, fac){
     // So ONLY check previous day's real inventory (never check current date)
     let realInv=null;
     if(day>1){
-      realInv=DB.real_inventory_daily.find(ri=>ri.date===prevDateStr&&ri.silo_id===elId);
+      realInv=_idxFirst('real_inventory_daily','silo_id',elId,'date',prevDateStr);
     }
     if(realInv) return parseFloat(realInv.eod_volume_t)||0;
 
@@ -22715,6 +22820,7 @@ function _dtreeBuildGroups(r, days, fac){
 }
 
 function renderDtree(r){
+  if(!_IDX.depth) return _idxRun(()=>renderDtree.apply(this,arguments)); // fast lookups for this whole block
   const wrap=document.getElementById('dtree-wrap'); if(!wrap) return;
   if(!r){wrap.innerHTML='<div style="font-family:var(--mono);font-size:9px;color:var(--text-dim);padding:14px">Run simulation to see data tree</div>';return;}
 
@@ -23168,7 +23274,7 @@ function _drawClinkerChart(id, r){
     const dateStr=currentDate._ymd();
 
     // Check for ACTUAL production first
-    const realProduction=DB.real_production_daily.filter(rp=>rp.date===dateStr&&rp.element_id===elId);
+    const realProduction=_idxRows('real_production_daily','element_id',elId,'date',dateStr); // read-only
     if(realProduction.length>0){
       return realProduction.reduce((sum,rp)=>sum+(parseFloat(rp.volume_t)||0),0);
     }
@@ -23243,7 +23349,7 @@ function _drawClinkerChart(id, r){
     // So ONLY check previous day's real inventory (never check current date)
     let realInv=null;
     if(dayOffset>1){
-      realInv=DB.real_inventory_daily.find(ri=>ri.date===prevDateStr&&ri.silo_id===elId);
+      realInv=_idxFirst('real_inventory_daily','silo_id',elId,'date',prevDateStr);
     }
     if(realInv) return parseFloat(realInv.eod_volume_t)||0;
 
@@ -24883,6 +24989,12 @@ function renderSalesPerfView(){
   spRebuildCascade();   // build all dropdowns from current state
   spSyncFilterUI();     // push state → UI elements
   spInitForecastBasis(); // init forecast basis button styling
+  // Filtering + drawing the KPIs, chart and the (very large) table only matters while this page
+  // is on screen — opening it (switchView) always calls this function again. Forecast Builder
+  // applies and sales-data loads used to redraw it while hidden, which on a long sales history
+  // froze the app for many seconds for a page nobody was looking at. (Nothing outside this page
+  // reads the SP.* results.)
+  if(S.view!=='salesperf') return;
   spApplyFilters();     // compute filteredRows → render everything
 }
 
@@ -27210,6 +27322,7 @@ async function dsIngestTopology(buf, name){
     Object.keys(DB).forEach(table=>{
       if(saved.DB[table]!==undefined) DB[table]=saved.DB[table];
     });
+    _demandCacheInvalidate(); // tables replaced — don't let the Demand page re-render from pre-load lookups
     if(saved.simCfg) Object.assign(S.simCfg,saved.simCfg);
     if(saved.counter) S.elCounter=saved.counter;
     syncElCounter();
@@ -28834,6 +28947,7 @@ function _syncSecTab(view){
 }
 
 function switchView(view){
+  if(!_IDX.depth) return _idxRun(()=>switchView.apply(this,arguments)); // fast lookups for this whole block
   if(S.slPick&&view!=='topology') slCancelPick();
   S.view=view;
   document.querySelectorAll('.view-panel').forEach(p=>p.classList.remove('active'));
@@ -31266,7 +31380,10 @@ async function scWriteActive(id, opts){
         }
         let out=ours;
         if(prep.mode==='merge'){ out=prep.mergeInfo.payload; _mgApplyPayloadToApp(out); }
-        const outText=JSON.stringify(out,null,2);
+        // Compact JSON (no indentation): the same data, about a third smaller, so every
+        // autosave builds, writes and syncs (OneDrive/SharePoint) noticeably less. Any JSON
+        // reader — this app, older versions of it, scripts — reads both forms identically.
+        const outText=JSON.stringify(out);
         const w=await handle.createWritable(); await w.write(new Blob([outText],{type:'application/json'})); await w.close();
         let mod=null; try{ mod=(await handle.getFile()).lastModified; }catch(e){}
         scSaveBaseline(id, outText, out.savedAt||null, mod);
@@ -31498,7 +31615,7 @@ async function scLoadScenario(id, opts){
         // bad merge is recoverable from Version History.
         try{ if(typeof scMaybeSnapshot==='function') await scMaybeSnapshot(id, text, {forced:true, conflict:res.conflicts.length>0}); }catch(e){}
         m.lastOpened=new Date().toISOString(); scSaveMeta();
-        const outText=JSON.stringify(res.payload,null,2);
+        const outText=JSON.stringify(res.payload); // compact — see scWriteActive
         let wrote=false;
         try{
           if(await _dsEnsureWritePermission(handle)){
