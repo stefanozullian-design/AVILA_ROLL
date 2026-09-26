@@ -22113,6 +22113,7 @@ function importJSON(input){
     try{
       const saved=JSON.parse(e.target.result);
       if(!saved.DB){statMsg('Invalid file — no DB found');return;}
+      if(_scIsSalesPayload(saved)){ statMsg('⚠ That is an Avila Sales file, not an Avila Roll scenario — nothing was imported'); input.value=''; return; }
       // Merge DB tables
       Object.keys(DB).forEach(table=>{
         if(saved.DB[table]!==undefined) DB[table]=saved.DB[table];
@@ -27318,6 +27319,7 @@ async function dsIngestTopology(buf, name){
     const text = new TextDecoder().decode(buf);
     const saved = JSON.parse(text);
     if(!saved.DB) return {rowCount:0, error:'No DB found in JSON'};
+    if(_scIsSalesPayload(saved)) return {rowCount:0, error:'This is an Avila Sales file, not a topology'};
 
     // ── Stale-file safety net ────────────────────────────────────────────
     // On automatic startup refresh only: if this browser's saved edits are
@@ -30819,7 +30821,10 @@ function autoSaveNow(){
       // simResults intentionally NOT persisted to localStorage (large, regenerated
       // on load; the active scenario file still carries a copy — see scWriteActive)
       savedAt: _saveStamp,
-      _partialTables: b.dropped
+      _partialTables: b.dropped,
+      // Which scenario this copy is of — so startup never takes it for another scenario's copy
+      // (see _scLoadForeign).
+      scId: (typeof SC!=='undefined' && SC.activeId) || null
     });
     try{
       localStorage.setItem('prodcast_v3', text);
@@ -30837,12 +30842,14 @@ function autoSaveNow(){
 
   try{
     put(build(LS_SKIP_ALWAYS));
+    window._lsScId=(typeof SC!=='undefined' && SC.activeId) || null;   // what the cache now holds (see put)
     statMsg('Saved');
   }catch(e){
     console.warn('autoSave: full mirror exceeded quota — retrying compact', e);
     try{
       const b=build(LS_SKIP_COMPACT);
       put(b);
+      window._lsScId=(typeof SC!=='undefined' && SC.activeId) || null;
       statMsg('Saved (compact — '+b.dropped.length+' data table'+(b.dropped.length===1?'':'s')+' live in the scenario file only)');
     }catch(e2){
       console.error('Minimal save also failed:', e2);
@@ -30922,6 +30929,7 @@ function loadSaved(){
       // source can refuse to overwrite it with an OLDER file (stale-file guard).
       window._lsSavedAt = saved.savedAt || null;
       if(saved.savedAt) window._lastSaveStamp = saved.savedAt; // this data's own stamp (see autoSave)
+      window._lsScId = saved.scId;   // the scenario this copy is of (undefined: saved before that was recorded)
 
       // Update Real Data Input panel facility selector after loading
       if(typeof initRealDataFacilitySelector === 'function'){
@@ -31175,6 +31183,18 @@ function _mgIsStale(diskPayload, basePayloadOrBaseline){
   const d=diskPayload&&diskPayload.savedAt, b=basePayloadOrBaseline&&basePayloadOrBaseline.savedAt;
   return !!(d&&b&&d<b);
 }
+// Written by the Avila Sales page — its own "Sales file" (app:'AVILA_Sales'): sales rows, forecast
+// rules and demand-point stubs, no connections, no facilities. When that landed in a scenario file
+// (the file was picked as the Sales file there), merging it as "a teammate's changes" read every
+// row it lacks as a deletion and wiped the topology. It is never a version of a scenario: never
+// merged, pulled, healed from or opened here — this browser's copy is written back over it instead.
+// (Same for an EMPTY scenario file, e.g. one a save dialog was pointed at.)
+function _scIsSalesPayload(p){ return !!(p && typeof p==='object' && p.app==='AVILA_Sales'); }
+// The same test from a file's first bytes (the Sales page always writes "app" first) — cheap enough
+// to run on a picked file before it is registered, without parsing a multi-MB file twice.
+async function _scLooksLikeSalesFile(handle){
+  try{ const f=await handle.getFile(); return /^\s*\{\s*"app"\s*:\s*"AVILA_Sales"/.test(await f.slice(0,256).text()); }catch(e){ return false; }
+}
 
 // Decide how a pending write should hit the disk.
 //   plain — file untouched since baseline (or no baseline / unreadable / not a
@@ -31182,6 +31202,8 @@ function _mgIsStale(diskPayload, basePayloadOrBaseline){
 //   pull  — file changed but we have nothing new: adopt the disk copy, skip the
 //           write entirely (prevents two idle browsers ping-ponging rewrites).
 //   merge — both sides moved: write the three-way merge.
+// `foreign` ('sales' | 'empty') on a plain write: the disk copy was not a version of this
+// scenario at all (see _scIsSalesPayload) — ours goes back over it, and the caller says so.
 async function _mgPrepareWrite(handle, ours, baseline){
   if(!baseline || !baseline.text) return {mode:'plain'};
   let f=null;
@@ -31190,7 +31212,9 @@ async function _mgPrepareWrite(handle, ours, baseline){
   let diskText=null;
   try{ diskText=new TextDecoder().decode(await f.arrayBuffer()); }catch(e){ return {mode:'plain'}; }
   if(diskText===baseline.text) return {mode:'plain'};
+  if(!diskText.trim()) return {mode:'plain', foreign:'empty'};
   let theirs=null; try{ theirs=JSON.parse(diskText); }catch(e){}
+  if(_scIsSalesPayload(theirs)) return {mode:'plain', foreign:'sales'};
   if(!theirs || !theirs.DB) return {mode:'plain'};
   let base=null; try{ base=JSON.parse(baseline.text); }catch(e){}
   if(!base || !base.DB) return {mode:'plain'};
@@ -31242,6 +31266,35 @@ function _mgShowMergeBanner(fileName, info){
       : `Synced with <b>${fileName||'the shared file'}</b>: pulled ${info.remoteApplied} change${info.remoteApplied!==1?'s':''} made by a teammate${info.localApplied?` and saved ${info.localApplied} of yours`:''}.`}</span>
     <button onclick="document.getElementById('mg-merge-banner')?.remove()" style="background:transparent;color:inherit;border:1px solid currentColor;padding:6px 11px;font-family:inherit;font-size:10px;cursor:pointer;border-radius:3px">Dismiss</button>`;
   if(!isConflict){ clearTimeout(window._mgBannerT); window._mgBannerT=setTimeout(()=>{document.getElementById('mg-merge-banner')?.remove();}, 15000); }
+}
+// Amber, stays up: the scenario file did not hold a version of this scenario (see _scIsSalesPayload).
+//   kind: 'sales' (the Avila Sales page wrote its own data into it) | 'empty'
+//   what: 'restored'  — this browser's copy was written back over it
+//         'restoring' — startup: this browser's copy is kept and being written back
+//         'refused'   — it was not opened (nothing on screen changed)
+//         'salesfile' — a genuine Sales file was picked here; not opened
+function _mgShowForeignBanner(fileName, kind, what){
+  let b=document.getElementById('mg-merge-banner');
+  if(!b){ b=document.createElement('div'); b.id='mg-merge-banner'; document.body.appendChild(b); }
+  clearTimeout(window._mgBannerT);
+  b.style.cssText='position:fixed;top:0;left:0;right:0;z-index:99999;font-family:var(--mono),monospace;font-size:11px;padding:8px 14px;display:flex;align-items:center;gap:12px;box-shadow:0 2px 14px rgba(0,0,0,.55);'+
+    'background:var(--bn-warn-bg);border-bottom:2px solid var(--amber);color:var(--bn-warn-fg)';
+  const f=`<b>${_scEsc(fileName||'The scenario file')}</b>`;
+  const recover='To get the scenario back, restore an earlier copy: <b>🕒 History</b> (Version History), or the file\'s own version history in OneDrive / SharePoint.';
+  const msg = what==='salesfile'
+      ? `${f} is an <b>Avila Sales</b> file, not an Avila Roll scenario — it was not opened. Open it from the Sales page instead.`
+    : what==='refused'
+      ? (kind==='sales'
+          ? `${f} holds <b>Avila Sales</b> data, not this Avila Roll scenario (the Sales page wrote into it) — it was not opened, and nothing on screen changed. ${recover}`
+          : `${f} is empty — it was not opened, and nothing on screen changed. ${recover}`)
+      : (kind==='sales'
+          ? `${f} had been overwritten by the <b>Avila Sales</b> page with its own data (not this scenario). That is not a teammate's edit, so none of it was merged: `
+          : `${f} was empty on disk, so there was nothing to merge: `)
+        +(what==='restoring' ? 'this browser\'s copy of the scenario is being written back to it. If that copy is incomplete too, use 🕒 History to restore an earlier version.'
+                             : 'your scenario was written back to it.')
+        +(kind==='sales' ? ' (The Sales page keeps its own Sales file and never needs this one.)' : '');
+  b.innerHTML=`<span style="font-size:15px;line-height:1">⚠</span><span style="flex:1;line-height:1.35">${msg}</span>
+    <button onclick="document.getElementById('mg-merge-banner')?.remove()" style="background:transparent;color:inherit;border:1px solid currentColor;padding:6px 11px;font-family:inherit;font-size:10px;cursor:pointer;border-radius:3px">Dismiss</button>`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -31330,7 +31383,13 @@ async function _scHealPartial(handle){
   if(!Array.isArray(miss) || !miss.length) return true;
   try{
     const f=await handle.getFile();
-    const saved=JSON.parse(new TextDecoder().decode(await f.arrayBuffer()));
+    const text=new TextDecoder().decode(await f.arrayBuffer());
+    // Nothing of this scenario in the file to heal from: it is empty, or the Avila Sales page wrote
+    // its own data into it (see _scIsSalesPayload). The write that follows puts this browser's copy
+    // back; the tables memory still lacks are left out of it (absent), never written as empty.
+    if(!text.trim()) return true;
+    const saved=JSON.parse(text);
+    if(_scIsSalesPayload(saved)) return true;
     if(saved && saved.DB){
       let healed=0;
       miss.forEach(t=>{ if(saved.DB[t]!==undefined){ DB[t]=saved.DB[t]; healed++; } });
@@ -31408,6 +31467,7 @@ async function scWriteActive(id, opts){
         m.lastSaved=new Date().toISOString(); scSaveMeta();
         scSetSaveStatus('saved'); _dsHideWriteBlockedBanner(); scRenderDropdown();
         if(prep.mode==='merge') _mgShowMergeBanner(m.fileName, prep.mergeInfo);
+        else if(prep.foreign) _mgShowForeignBanner(m.fileName, prep.foreign, 'restored');
         scMaybeSnapshot(id, outText, {forced:opts.forceSnapshot, conflict:prep.mode==='merge'&&prep.mergeInfo.conflicts.length>0});
         return true;
       }catch(err){
@@ -31581,8 +31641,11 @@ async function scLoadScenario(id, opts){
   if(perm!=='granted') perm=await handle.requestPermission({mode:'read'});
   if(perm!=='granted'){ statMsg('Cannot read "'+m.name+'" — file access denied'); return false; }
   let saved, text, fileMod=null;
-  try{ const f=await handle.getFile(); fileMod=f.lastModified; text=new TextDecoder().decode(await f.arrayBuffer()); saved=JSON.parse(text); }
+  try{ const f=await handle.getFile(); fileMod=f.lastModified; text=new TextDecoder().decode(await f.arrayBuffer()); saved=text.trim()?JSON.parse(text):null; }
   catch(e){ statMsg('Could not read "'+m.name+'": '+e.message); return false; }
+  // Not a version of this scenario at all — emptied, or written by the Avila Sales page (see
+  // _scIsSalesPayload). Checked before the repair below: nothing is ever healed from such a file.
+  if(!saved || _scIsSalesPayload(saved)) return _scLoadForeign(id, m, saved?'sales':'empty', opts);
   if(!saved.DB){ statMsg('"'+m.name+'" is not a valid scenario file'); return false; }
 
   // Repair memory from the file FIRST, before any branch below decides who wins.
@@ -31609,7 +31672,12 @@ async function scLoadScenario(id, opts){
   //   only this browser → keep local (file is behind);
   //   only the file     → adopt the file (a teammate saved);
   //   both              → three-way merge, then write the result back.
-  if(opts.guard && SC.activeId===id){
+  // Only when the cached copy IS this scenario's: the auto-open pick can lag behind it (📂 Open
+  // from file… doesn't update it), and taking another scenario's copy for this one's wrote that
+  // other topology into this file. Such a copy says nothing about this file — adopt the file,
+  // exactly as when switching to it. (Caches saved before the tag existed keep the old behaviour.)
+  const cacheOfOther = window._lsScId!==undefined && window._lsScId!==id;
+  if(opts.guard && SC.activeId===id && !cacheOfOther){
     const fileStamp=saved.savedAt||null, lsStamp=window._lsSavedAt||null;
     const baseline=await scLoadBaseline(id);
     const localChanged = baseline
@@ -31662,7 +31730,7 @@ async function scLoadScenario(id, opts){
   // Switching to ANOTHER scenario: a file that predates the silo tables must not inherit the
   // previous scenario's links. Re-opening the SAME scenario (startup guard) keeps them — the
   // file may just have been written by an older app version on another computer.
-  const _sameScenario = !!(opts.guard && SC.activeId===id);
+  const _sameScenario = !!(opts.guard && SC.activeId===id && !cacheOfOther);
   Object.keys(DB).forEach(t=>{ if(saved.DB[t]!==undefined) DB[t]=saved.DB[t]; });
   if(!_sameScenario) _slResetIfAbsent(saved.DB);
   if(saved.simCfg) Object.assign(S.simCfg,saved.simCfg);
@@ -31676,6 +31744,20 @@ async function scLoadScenario(id, opts){
   if(saved.savedAt) window._lastSaveStamp=saved.savedAt; // adopted data keeps its own stamp (see autoSave)
   scSaveBaseline(id, text, saved.savedAt||null, fileMod);
   scSaveMeta(); scSetSaveStatus('saved'); scAfterLoad();
+  return true;
+}
+// scLoadScenario found a file that is not a version of this scenario (kind 'sales' | 'empty').
+// Reopening, at startup, the scenario whose copy this browser holds (the cache is tagged with its
+// scenario — see autoSaveNow): keep that copy and write it back over the file. Anything else —
+// another scenario, a copy that may belong to one, nothing cached — refuses: nothing is loaded
+// and nothing on screen changes (🕒 History can then restore the file).
+async function _scLoadForeign(id, m, kind, opts){
+  const ownCopy = !!(opts && opts.guard && SC.activeId===id && window._lsScId===id && window._lsSavedAt && (DB.facilities||[]).length);
+  if(!ownCopy){ _mgShowForeignBanner(m.fileName, kind, 'refused'); return false; }
+  m.lastOpened=new Date().toISOString(); scSaveMeta();
+  _mgShowForeignBanner(m.fileName, kind, 'restoring');
+  scScheduleWrite();   // → scWriteActive → _mgPrepareWrite finds the same file → plain write of this copy
+  scAfterLoad();
   return true;
 }
 
@@ -31816,6 +31898,8 @@ async function scOpenFile(){
     if(n!=='AbortError'){ console.warn('scenario open picker failed', e); statMsg('⚠ Could not open the file dialog — '+(e&&e.message||n||'unknown error')); }
     return;
   }
+  // An Avila Sales file is never a scenario (see _scIsSalesPayload) — not registered, not opened.
+  if(await _scLooksLikeSalesFile(handle)){ scCloseDropdown(); _mgShowForeignBanner(handle.name, 'sales', 'salesfile'); return; }
   // Reuse an existing entry if it points at the same file, else register new.
   const owner=await scFindOwner(handle, null);
   let id=owner?owner.id:null;
@@ -31898,8 +31982,9 @@ async function scSwitch(id, opts){
     }
   }
   scCloseDropdown(); scCloseStartup();
-  await scLoadScenario(id, reopen?{guard:true}:undefined);
-  localStorage.setItem('avila_sc_autoopen',id);  // Remember this scenario for next load
+  // Remember this scenario for next load — only once it actually loaded: startup takes the cached
+  // copy for the auto-opened scenario's, so it must not point at one that was refused.
+  if(await scLoadScenario(id, reopen?{guard:true}:undefined)) localStorage.setItem('avila_sc_autoopen',id);
 }
 
 // ── Top-bar pill + dropdown ──
@@ -32029,6 +32114,8 @@ async function scRestoreSnapshot(id, name){
     const text=await (await fh.getFile()).text();
     const payload=JSON.parse(text);
     if(!payload||!payload.DB) throw new Error('not a valid scenario snapshot');
+    // A folder shared with the Sales page's history lists its snapshots too (same name prefix).
+    if(_scIsSalesPayload(payload)) throw new Error('that snapshot was written by the Avila Sales page — it is not a version of this scenario');
     _mgApplyPayloadToApp(payload);
     _slResetIfAbsent(payload.DB); // a restore goes back to that version — silo tables included
     await scManualSave(); // pushes the restored state back into the live file (merge-aware) + snapshots it

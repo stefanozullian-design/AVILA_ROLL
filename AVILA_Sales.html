@@ -514,6 +514,8 @@ html[data-theme="daylight"] #logo:not([data-logo]) .logo-dark{display:none}
 /* ── Write-blocked banner ── */
 #ds-write-blocked-banner{position:fixed;top:52px;left:50%;transform:translateX(-50%);z-index:99992;display:none;align-items:center;gap:12px;background:var(--bn-err-bg);border:1px solid var(--red);color:var(--text-bright);font-family:var(--mono);font-size:10px;padding:8px 14px;border-radius:7px;box-shadow:0 8px 30px rgba(0,0,0,.6);}
 #ds-write-blocked-banner button{font-family:var(--mono);font-size:9px;padding:4px 10px;border-radius:4px;cursor:pointer;background:var(--red);color:var(--bg);border:none;font-weight:700;}
+#sc-roll-banner{position:fixed;top:52px;left:50%;transform:translateX(-50%);z-index:99993;display:flex;align-items:center;gap:12px;width:max-content;max-width:min(880px,calc(100vw - 32px));box-sizing:border-box;background:var(--bn-warn-bg);border:1px solid var(--amber);color:var(--bn-warn-fg);font-family:var(--mono);font-size:10px;padding:9px 14px;border-radius:7px;box-shadow:0 8px 30px rgba(0,0,0,.6);}
+#sc-roll-banner button{font-family:var(--mono);font-size:9px;padding:4px 10px;border-radius:4px;cursor:pointer;background:transparent;color:inherit;border:1px solid currentColor;flex-shrink:0;}
 </style>
 </head>
 <body>
@@ -5207,8 +5209,12 @@ document.addEventListener('DOMContentLoaded', () => {
 // localStorage 'avila_sales_scenarios' — cannot collide with the main app.
 // (The single-user stale-file guard is included; the main app's multi-user
 //  three-way OneDrive merge is intentionally not ported here.)
+// These are this page's OWN "Sales files" — never Avila Roll's scenario files
+// (see "Avila Roll's scenario files are off-limits here" below).
 // ═══════════════════════════════════════════════════════════════════════
-const SC = { meta:{}, handles:{}, historyDirs:{}, activeId:null, _writeTimer:null, _writeBusy:false, _writeQueued:false, _suspend:false, _forceSnap:false };
+// _loadedId: the Sales file whose contents this page holds — read in (or created) this session.
+// Only that file is ever written (see scWriteActive).
+const SC = { meta:{}, handles:{}, historyDirs:{}, activeId:null, _loadedId:null, _writeTimer:null, _writeBusy:false, _writeQueued:false, _suspend:false, _forceSnap:false };
 const SC_COLORS = ['#4da6ff','#ff3d5a','#ffb830','#00ff9d','#a78bfa','#f472b6','#2dd4bf','#fb923c'];
 
 // ── IndexedDB (file + folder handles) ──
@@ -5240,6 +5246,93 @@ function scActive(){ return SC.activeId?SC.meta[SC.activeId]:null; }
 function scPickColor(){ const used=Object.values(SC.meta).map(m=>m.color); return SC_COLORS.find(c=>!used.includes(c))||SC_COLORS[Object.keys(SC.meta).length%SC_COLORS.length]; }
 function scRelTime(iso){ if(!iso) return 'never saved'; const d=new Date(iso),now=new Date(),s=Math.round((now-d)/1000); if(s<60)return 'just now'; if(s<3600)return Math.round(s/60)+' min ago'; if(d.toDateString()===now.toDateString())return Math.round(s/3600)+'h ago'; const y=new Date(now-864e5); if(d.toDateString()===y.toDateString())return 'yesterday'; return d.toLocaleDateString('en',{month:'short',day:'numeric'}); }
 function _scEsc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+// ── Avila Roll's scenario files are off-limits here ──
+// This page keeps its data in its OWN Sales file, apart from the Avila Roll scenario it works on
+// (SCENARIO in the top bar). A Roll scenario .json is the topology's source of truth, and this
+// page's payload has no connections, no facilities and only demand-point stubs: written into a
+// Roll file, Roll's shared-file sync took it for a teammate's edit and deleted every row it
+// lacked — the whole topology. So a Roll file is never opened, created over or written here.
+// It is recognised two ways:
+//   • identity — it IS one of Roll's scenario files (Roll keeps their handles in its IndexedDB
+//     'avila_scenarios', same origin); this also catches one this page already overwrote;
+//   • content  — it holds a scenario payload (DB) this page did not write (app:'AVILA_Sales').
+// Picking one links this page to that Roll scenario instead.
+function _scRollHandles(){
+  return new Promise(res=>{
+    let req; try{ req=indexedDB.open('avila_scenarios'); }catch(e){ res({}); return; }
+    // No version: Roll's database opens as it is, nothing is upgraded. If Roll never created it,
+    // the implicit create is aborted rather than leaving an empty database behind.
+    req.onupgradeneeded=e=>{ try{ e.target.transaction.abort(); }catch(x){} };
+    req.onerror=req.onblocked=()=>res({});
+    req.onsuccess=e=>{
+      const db=e.target.result, out={};
+      db.onversionchange=()=>db.close();   // never hold up an upgrade of Roll's own database
+      try{
+        if(!db.objectStoreNames.contains('handles')){ db.close(); res(out); return; }
+        const tx=db.transaction('handles','readonly'), cur=tx.objectStore('handles').openCursor();
+        cur.onsuccess=ev=>{ const c=ev.target.result; if(c){ out[c.key]=c.value; c.continue(); } };
+        tx.oncomplete=tx.onabort=tx.onerror=()=>{ db.close(); res(out); };
+      }catch(x){ try{ db.close(); }catch(y){} res(out); }
+    };
+  });
+}
+// The Roll scenario whose file IS `handle` → {rollId, rollName}, else null. isSameEntry only
+// compares, so no file permission is needed. `rollHandles`: Roll's handles already read, to reuse.
+async function _scRollOwnerOf(handle, rollHandles){
+  if(!handle||typeof handle.isSameEntry!=='function') return null;
+  const hs=rollHandles||await _scRollHandles();
+  let meta={}; try{ meta=(JSON.parse(localStorage.getItem('avila_scenarios')||'{}')||{}).meta||{}; }catch(e){}
+  for(const id of Object.keys(hs)){
+    try{ if(hs[id] && await handle.isSameEntry(hs[id])) return {rollId:id, rollName:meta[id]?.name||String(hs[id].name||'').replace(/\.json$/i,'')}; }catch(e){}
+  }
+  return null;
+}
+// A scenario payload this page did not write — an Avila Roll scenario, or a Roll export.
+function _scIsForeignPayload(p){ return !!(p && typeof p==='object' && p.DB && typeof p.DB==='object' && p.app!=='AVILA_Sales'); }
+// The Roll scenario (from its catalog) that uses this file name, when exactly one does.
+function _scRollByFileName(name){
+  const hits=Object.values(spCatalogAll().byId).filter(c=>c && c.file && c.file===name);
+  return hits.length===1 ? {rollId:hits[0].id, rollName:hits[0].name} : {rollId:null, rollName:null};
+}
+// Why `handle` may not be this page's Sales file ({rollId, rollName} — ids null when only the
+// content gave it away), or null when it may be. Empty, unreadable or non-JSON files are fine.
+async function _scRollFileCheck(handle, rollHandles){
+  const owner=await _scRollOwnerOf(handle, rollHandles);
+  if(owner) return owner;
+  try{
+    const f=await handle.getFile(); if(!f.size) return null;
+    // This page always writes "app" as the FIRST key, so its own (often multi-MB) files are
+    // recognised from their first bytes instead of being parsed on every save.
+    if(/^\s*\{\s*"app"\s*:\s*"AVILA_Sales"/.test(await f.slice(0,256).text())) return null;
+    if(_scIsForeignPayload(JSON.parse(await f.text()))) return _scRollByFileName(handle.name);
+  }catch(e){}
+  return null;
+}
+// Say so (stays up until dismissed) and — when the user just picked it (opts.link, default) —
+// point this page at that Roll scenario instead, which is what picking it was meant to do.
+function _scRollFileNotice(fileName, roll, what, opts){
+  const link=!(opts && opts.link===false) && roll && roll.rollId;
+  const already=link && spLinkedId()===roll.rollId;
+  if(link && !already){ try{ spSetLink(roll.rollId); }catch(e){} }
+  _dsHideWriteBlockedBanner();
+  let b=document.getElementById('sc-roll-banner');
+  if(!b){ b=document.createElement('div'); b.id='sc-roll-banner'; document.body.appendChild(b); }
+  const linked=link ? ` — ${already?'already on':'now set to'} <b>${_scEsc(roll.rollName||roll.rollId)}</b>` : '';
+  b.innerHTML=`<span>⚠</span><span style="flex:1;line-height:1.45"><b>${_scEsc(fileName||'That file')}</b> is an <b>Avila Roll scenario</b> file — ${_scEsc(what)}. `+
+    `This page never writes into Roll's files: its data has no topology, and Roll would take it for a teammate's edit. `+
+    `Sales keeps its forecasts in its <b>own Sales file</b> (＋ New Sales file… in the menu at the top right) and works on a Roll scenario through <b>SCENARIO</b> in the top bar${linked}.</span>`+
+    `<button onclick="document.getElementById('sc-roll-banner')?.remove()">Dismiss</button>`;
+}
+// Drop a Sales-file entry that points at a Roll scenario file. The file itself is left alone.
+async function _scDetach(id){
+  const wasActive=(SC.activeId===id);
+  delete SC.meta[id]; delete SC.handles[id]; await scDeleteHandleIDB(id);
+  if(SC._loadedId===id) SC._loadedId=null;
+  if(localStorage.getItem('avila_sales_sc_autoopen')===id) localStorage.removeItem('avila_sales_sc_autoopen');
+  if(wasActive){ SC.activeId=null; clearTimeout(SC._writeTimer); }
+  scSaveMeta(); scUpdatePill(); scRenderDropdown();
+}
 
 // ── State payload: the whole working state of the Sales page ──
 function scBuildPayload(){
@@ -5283,12 +5376,19 @@ function scSetSaveStatus(state){ const d=document.getElementById('sc-dot'); if(!
 async function scWriteActive(id){
   id=id||SC.activeId; const m=SC.meta[id]; const handle=SC.handles[id];
   if(!m||!handle){ scSetSaveStatus('none'); return; }
+  // Only the file whose contents this page holds (read in, or created, this session) is written.
+  // One restored as active from last time but not opened yet has none of its data in memory —
+  // just this page's startup state — and writing that would replace what the file holds.
+  if(SC._loadedId!==id) return;
   if(SC._writeBusy){ SC._writeQueued=true; return; }
   SC._writeBusy=true;
   const forced=SC._forceSnap; SC._forceSnap=false;
   try{
     const granted=await _dsEnsureWritePermission(handle);
     if(!granted){ scSetSaveStatus('error'); _dsWriteBlockedBanner(id, m.fileName, 'file-edit permission was declined'); return; }
+    // Checked before EVERY write, not just when the file was picked: it may have become Roll's since.
+    const roll=await _scRollFileCheck(handle);
+    if(roll){ await _scDetach(id); _scRollFileNotice(m.fileName, roll, 'nothing was saved into it, and it is no longer used as this page\'s file'); return; }
     const payload=scBuildPayload();
     // Compact JSON (no indentation): the same data, about a third smaller — every save (each
     // forecast edit / commit triggers one) builds, writes and syncs noticeably less. JSON.parse
@@ -5306,6 +5406,7 @@ function scScheduleWrite(){
   if(SC._suspend) return;
   const stamp=new Date().toISOString(); window._lsSavedAt=stamp; try{ localStorage.setItem('avila_sales_sc_ls', stamp); }catch(e){}
   if(!scActive()||!SC.handles[SC.activeId]) return;   // no active scenario → localStorage only
+  if(SC._loadedId!==SC.activeId) return;              // its file not read in yet → nothing to write (see scWriteActive)
   scSetSaveStatus('saving');
   clearTimeout(SC._writeTimer);
   SC._writeTimer=setTimeout(()=>scWriteActive(), 500);
@@ -5313,12 +5414,14 @@ function scScheduleWrite(){
 async function scManualSave(){
   autoSave();
   clearTimeout(SC._writeTimer);
-  if(scActive() && SC.handles[SC.activeId]){
+  if(scActive() && SC.handles[SC.activeId] && SC._loadedId===SC.activeId){
     SC._forceSnap=true;
     await scWriteActive(SC.activeId);
-    statMsg('Scenario saved ✓ — '+(SC.meta[SC.activeId]?.fileName||''), 'green');
+    if(scActive()) statMsg('Sales file saved ✓ — '+(SC.meta[SC.activeId]?.fileName||''), 'green');   // (none → it was refused, see the banner)
+  } else if(scActive() && SC.handles[SC.activeId]){
+    statMsg('Saved to browser — open "'+scActive().name+'" from the Sales file menu to save into it');
   } else {
-    statMsg('Saved to browser (no scenario file linked — use the scenario menu to create one)');
+    statMsg('Saved to browser (no Sales file linked — use the Sales file menu to create one)');
   }
 }
 async function scRetryWrite(id){
@@ -5425,6 +5528,9 @@ function scAfterLoad(){
 async function scLoadScenario(id, opts){
   opts=opts||{}; const handle=SC.handles[id], m=SC.meta[id];
   if(!handle||!m){ statMsg('Scenario file not found'); return false; }
+  // An Avila Roll scenario file is never this page's file: not read in, and the entry is dropped.
+  const owner=await _scRollOwnerOf(handle);
+  if(owner){ await _scDetach(id); _scRollFileNotice(m.fileName, owner, 'it was not opened here, and nothing was written to it'); return false; }
   let perm=await handle.queryPermission({mode:'read'});
   if(perm!=='granted') perm=await handle.requestPermission({mode:'read'});
   if(perm!=='granted'){ statMsg('Cannot read "'+m.name+'" — file access denied'); return false; }
@@ -5432,6 +5538,10 @@ async function scLoadScenario(id, opts){
   try{ const f=await handle.getFile(); text=new TextDecoder().decode(await f.arrayBuffer()); saved=JSON.parse(text); }
   catch(e){ statMsg('Could not read "'+m.name+'": '+e.message); return false; }
   if(!saved.DB){ statMsg('"'+m.name+'" is not a valid scenario file'); return false; }
+  if(_scIsForeignPayload(saved)){
+    await _scDetach(id); _scRollFileNotice(m.fileName, _scRollByFileName(handle.name), 'it was not opened here, and nothing was written to it');
+    return false;
+  }
 
   // Startup safety net: when auto-opening the SAME scenario cached locally,
   // never let an older file silently erase newer un-flushed local edits.
@@ -5441,12 +5551,13 @@ async function scLoadScenario(id, opts){
     if(lsStamp && (!fileStamp || lsStamp>fileStamp)){
       console.warn('scLoadScenario: local cache ('+lsStamp+') newer than file ('+fileStamp+') — keeping local, re-saving');
       _dsWriteBlockedBanner(id, m.fileName, 'the file on disk is OLDER than your local edits — re-saving now');
+      SC._loadedId=id;   // the local copy IS this file's data, only newer
       m.lastOpened=new Date().toISOString(); scSaveMeta(); scScheduleWrite(); scAfterLoad();
       return true;
     }
   }
   scApplyPayload(saved);
-  SC.activeId=id; m.lastOpened=new Date().toISOString();
+  SC.activeId=id; SC._loadedId=id; m.lastOpened=new Date().toISOString();
   window._lsSavedAt=saved.savedAt||null; try{ localStorage.setItem('avila_sales_sc_ls', saved.savedAt||''); }catch(e){}
   scSaveMeta(); scSetSaveStatus('saved'); _dsHideWriteBlockedBanner(); scAfterLoad();
   return true;
@@ -5456,30 +5567,36 @@ async function scLoadScenario(id, opts){
 async function scCreateFromCurrent(suggestedName){
   if(!window.showSaveFilePicker){ statMsg('This browser cannot save files directly — use Chrome or Edge.'); return; }
   let handle;
-  try{ handle=await window.showSaveFilePicker({suggestedName:(suggestedName||'Scenario').replace(/[\\/:*?"<>|]/g,'')+'.json', types:[{description:'AVILA Sales scenario',accept:{'application/json':['.json']}}]}); }
+  try{ handle=await window.showSaveFilePicker({suggestedName:(suggestedName||'Scenario').replace(/[\\/:*?"<>|]/g,'')+'.json', types:[{description:'AVILA Sales file',accept:{'application/json':['.json']}}]}); }
   catch(e){ return; }
+  // The save dialog happily "replaces" an Avila Roll scenario file — never write this page's data there.
+  const roll=await _scRollFileCheck(handle);
+  if(roll){ scCloseDropdown(); _scRollFileNotice(handle.name, roll, 'nothing was saved into it; pick a new name for the Sales file'); return; }
   const id='sc_'+Date.now().toString(36);
   const name=(suggestedName||handle.name.replace(/\.json$/i,'')).trim();
   SC.meta[id]={ id, name, color:scPickColor(), fileName:handle.name, lastSaved:null, lastOpened:new Date().toISOString() };
   SC.handles[id]=handle; await scSaveHandle(id,handle);
-  SC.activeId=id; scSaveMeta();
+  SC.activeId=id; SC._loadedId=id; scSaveMeta();   // the new file gets exactly what this page holds now
   await scWriteActive(id);
   scCloseDropdown(); scCloseStartup(); scUpdatePill(); scRenderDropdown();
-  statMsg('Scenario "'+name+'" created', 'green');
+  statMsg('Sales file "'+name+'" created', 'green');
 }
-async function scNew(){ const n=prompt('Name the new scenario (it captures the current data):','New scenario'); if(n==null) return; await scCreateFromCurrent(n||'New scenario'); }
+async function scNew(){ const n=prompt('Name the new Sales file (it keeps this page\'s sales data and forecasts — the Avila Roll scenario stays in its own file):','Sales'); if(n==null) return; await scCreateFromCurrent(n||'Sales'); }
 async function scDuplicate(){ const m=scActive(); if(!m){ statMsg('No active scenario to duplicate'); return; } await scCreateFromCurrent(m.name+' copy'); }
 async function scOpenFile(){
   if(!window.showOpenFilePicker){ statMsg('This browser cannot open files directly — use Chrome or Edge.'); return; }
   let handle;
-  try{ [handle]=await window.showOpenFilePicker({types:[{description:'AVILA Sales scenario',accept:{'application/json':['.json']}}]}); }
+  try{ [handle]=await window.showOpenFilePicker({types:[{description:'AVILA Sales file',accept:{'application/json':['.json']}}]}); }
   catch(e){ return; }
+  // Picked Avila Roll's scenario .json? Then work on that scenario through the link instead —
+  // the startup picker stays up so a Sales file can be created (＋ New) or skipped.
+  const roll=await _scRollFileCheck(handle);
+  if(roll){ scCloseDropdown(); _scRollFileNotice(handle.name, roll, 'it was not opened as a Sales file'); return; }
   let id=null;
   for(const k of Object.keys(SC.handles)){ try{ if(await SC.handles[k].isSameEntry?.(handle)){ id=k; break; } }catch(e){} }
   if(!id){ id='sc_'+Date.now().toString(36); SC.meta[id]={ id, name:handle.name.replace(/\.json$/i,''), color:scPickColor(), fileName:handle.name, lastSaved:null, lastOpened:new Date().toISOString() }; SC.handles[id]=handle; await scSaveHandle(id,handle); }
   scSaveMeta();
-  await scLoadScenario(id);
-  localStorage.setItem('avila_sales_sc_autoopen',id);
+  if(await scLoadScenario(id)) localStorage.setItem('avila_sales_sc_autoopen',id);
   scCloseDropdown(); scCloseStartup();
 }
 function scRename(id){ const m=SC.meta[id]; if(!m) return; const nn=prompt('Rename scenario:', m.name); if(nn==null) return; const t=nn.trim(); if(t) m.name=t; scSaveMeta(); scUpdatePill(); scRenderDropdown(); }
@@ -5487,35 +5604,44 @@ async function scDelete(id){
   const m=SC.meta[id]; if(!m) return;
   if(!confirm('Remove scenario "'+m.name+'" from the list?\n\nThe .json file on disk is NOT deleted — you can re-open it later.')) return;
   delete SC.meta[id]; delete SC.handles[id]; await scDeleteHandleIDB(id);
+  if(SC._loadedId===id) SC._loadedId=null;
   if(localStorage.getItem('avila_sales_sc_autoopen')===id) localStorage.removeItem('avila_sales_sc_autoopen');
   const wasActive=(SC.activeId===id); if(wasActive) SC.activeId=null;
   scSaveMeta(); scUpdatePill(); scRenderDropdown();
   if(wasActive){ const rest=Object.keys(SC.meta); if(rest.length) await scLoadScenario(rest[0]); else scOpenStartup(true); }
 }
-async function scSwitch(id){
-  if(id===SC.activeId){ scCloseDropdown(); return; }
+// opts.force — re-read the file even when `id` is already SC.activeId (the startup picker passes
+// it). scInit restores SC.activeId from the last session BEFORE the picker is shown, so choosing
+// that file used to hit the early return and never read it; the page then saved its bare startup
+// state over the file on the first autosave (the Avila Roll app fixed the same trap in its copy).
+// Re-picking the file that is already open and read in still does nothing.
+async function scSwitch(id, opts){
+  const reopen=(id===SC.activeId);
+  if(reopen && SC._loadedId===id && !(opts&&opts.force)){ scCloseDropdown(); return; }
   clearTimeout(SC._writeTimer);
-  if(scActive() && SC.handles[SC.activeId]) await scWriteActive();  // flush current first
+  // Flush only when LEAVING for another file (scWriteActive also skips a file never read in):
+  // on a reopen the point is to read the file, and writing memory into it first would destroy it.
+  if(!reopen && scActive() && SC.handles[SC.activeId]) await scWriteActive();
   scCloseDropdown(); scCloseStartup();
-  await scLoadScenario(id);
-  localStorage.setItem('avila_sales_sc_autoopen',id);
+  if(await scLoadScenario(id, reopen?{guard:true}:undefined)) localStorage.setItem('avila_sales_sc_autoopen',id);
 }
 
 // ── Top-bar pill + dropdown ──
 function scUpdatePill(){
   const nm=document.getElementById('sc-name'); const m=scActive();
-  if(nm) nm.textContent = m ? m.name : 'No scenario';
+  if(nm) nm.textContent = m ? m.name : 'No Sales file';
   if(!m) scSetSaveStatus('none');
   const sw=document.getElementById('sc-switcher');
-  if(sw) sw.title = m ? ('Scenario: '+m.name+' ('+(m.fileName||'')+')') : 'No scenario — click to create or open one';
+  if(sw) sw.title = m ? ('Sales file: '+m.name+' ('+(m.fileName||'')+') — this page\'s own file; the Avila Roll scenario is picked under SCENARIO')
+                      : 'No Sales file — click to create or open one (this page\'s own file, not an Avila Roll scenario)';
 }
 function scToggleDropdown(ev){ if(ev) ev.stopPropagation(); const dd=document.getElementById('sc-dropdown'); if(!dd) return; if(dd.style.display==='none'){ scRenderDropdown(); dd.style.display='block'; } else dd.style.display='none'; }
 function scCloseDropdown(){ const dd=document.getElementById('sc-dropdown'); if(dd) dd.style.display='none'; document.querySelectorAll('.sc-rowmenu').forEach(e=>e.remove()); }
 function scRenderDropdown(){
   const dd=document.getElementById('sc-dropdown'); if(!dd) return;
   const ids=Object.keys(SC.meta);
-  let h=`<div class="sc-dd-hdr"><span>Scenarios</span><span>${ids.length} saved</span></div>`;
-  if(!ids.length){ h+=`<div style="padding:14px 12px;color:var(--text-dim);font-size:10px;text-align:center">No scenarios yet.</div>`; }
+  let h=`<div class="sc-dd-hdr"><span>Sales files</span><span>${ids.length} saved</span></div>`;
+  if(!ids.length){ h+=`<div style="padding:14px 12px;color:var(--text-dim);font-size:10px;text-align:center">No Sales files yet.</div>`; }
   ids.sort((a,b)=>(SC.meta[b].lastOpened||'').localeCompare(SC.meta[a].lastOpened||''));
   ids.forEach(id=>{
     const m=SC.meta[id]; const act=id===SC.activeId;
@@ -5526,7 +5652,7 @@ function scRenderDropdown(){
     </div>`;
   });
   h+=`<div class="sc-dd-foot">
-    <div class="sc-item" onclick="scNew()"><span style="color:var(--green)">＋</span> New scenario…</div>
+    <div class="sc-item" onclick="scNew()"><span style="color:var(--green)">＋</span> New Sales file…</div>
     <div class="sc-item" onclick="scDuplicate()">⧉ Duplicate current</div>
     <div class="sc-item" onclick="scOpenFile()">📂 Open from file…</div>
   </div>`;
@@ -5636,7 +5762,10 @@ async function scRestoreSnapshot(id, name){
     const text=await (await fh.getFile()).text();
     const payload=JSON.parse(text);
     if(!payload||!payload.DB) throw new Error('not a valid scenario snapshot');
+    // A folder shared with Avila Roll's history can list its snapshots too — never restore one here.
+    if(_scIsForeignPayload(payload)) throw new Error('that snapshot is an Avila Roll scenario, not a Sales file');
     scApplyPayload(payload);
+    if(id===SC.activeId) SC._loadedId=id;   // memory now holds exactly what this file should hold
     scAfterLoad();
     await scManualSave();
     closeModal();
@@ -5657,31 +5786,48 @@ function scOpenStartup(firstRun){
     ${i===0?'<span style="font-size:8px;color:var(--blue);border:1px solid var(--blue);border-radius:4px;padding:2px 6px">LAST USED</span>':''}
   </div>`; });
   ov.innerHTML=`<div class="sc-modal">
-    <div class="sc-modal-hdr"><div class="sc-h">Choose a scenario</div><div class="sc-sub">${firstRun?'No scenarios yet — create one to start saving your work to a file.':'Pick a model to work on, or start a new one.'}</div></div>
-    <div class="sc-modal-list">${rows||'<div style="padding:14px;color:var(--text-dim);font-size:11px;text-align:center">No saved scenarios</div>'}</div>
+    <div class="sc-modal-hdr"><div class="sc-h">Choose a Sales file</div><div class="sc-sub">${firstRun?'No Sales files yet — create one to start saving your sales work to a file.':'Pick the Sales file to work on, or start a new one.'}<br>`+
+      `This page's own file, separate from Avila Roll's scenario .json (never pick that one here) — the Roll scenario is chosen under <b>SCENARIO</b> in the top bar.</div></div>
+    <div class="sc-modal-list">${rows||'<div style="padding:14px;color:var(--text-dim);font-size:11px;text-align:center">No saved Sales files</div>'}</div>
     ${lastId?`<div style="display:flex;align-items:center;gap:7px;padding:4px 16px"><input type="checkbox" id="sc-autoopen-chk" style="accent-color:var(--green)"><label for="sc-autoopen-chk" style="color:var(--text-dim);font-size:9px;cursor:pointer">Always open ${_scEsc(SC.meta[lastId].name)} and skip this</label></div>`:''}
     <div class="sc-modal-foot">
       ${lastId?`<div class="sc-btn pri" onclick="scStartupOpen('${lastId}')">Open</div>`:''}
       <div class="sc-btn" onclick="scNew()">＋ New</div>
       <div class="sc-btn" onclick="scOpenFile()">📂 File…</div>
       <div style="flex:1"></div>
-      <div class="sc-btn" onclick="scCloseStartup()" title="Work without a scenario (changes won't be saved to a file until you create one)">Skip</div>
+      <div class="sc-btn" onclick="scStartupSkip()" title="Work without a Sales file (changes stay in this browser until you create one)">Skip</div>
     </div>
   </div>`;
   document.body.appendChild(ov);
 }
 function scCloseStartup(){ const ov=document.getElementById('sc-startup'); if(ov) ov.remove(); }
+// Skip = work without a file. The file restored as active from last time was never read in, so it
+// must not stay "active" (the pill would show it while nothing could be saved into it).
+function scStartupSkip(){
+  scCloseStartup();
+  if(SC.activeId && SC._loadedId!==SC.activeId){ SC.activeId=null; scSaveMeta(); scUpdatePill(); scRenderDropdown(); }
+}
 async function scStartupOpen(id){
   const chk=document.getElementById('sc-autoopen-chk');
   if(chk&&chk.checked) localStorage.setItem('avila_sales_sc_autoopen',id); else if(chk) localStorage.removeItem('avila_sales_sc_autoopen');
   scCloseStartup();
-  await scSwitch(id);
+  // force: the picked file is usually ALREADY SC.activeId (restored by scInit before this picker
+  // showed) — without it scSwitch would not read the file at all.
+  await scSwitch(id, {force:true});
 }
 
 // ── Init (called from DOMContentLoaded, after the first render) ──
 async function scInit(){
   scLoadMeta();
   for(const id of Object.keys(SC.meta)){ const h=await scLoadHandle(id); if(h) SC.handles[id]=h; }
+  // Entries saved before the Roll-file guard may point at an Avila Roll scenario file (picked here
+  // as if it were this page's file): take them off the list. The files themselves are not touched.
+  const rollHs=await _scRollHandles(); let dropped=null;
+  for(const id of Object.keys(SC.meta)){
+    const roll=SC.handles[id] ? await _scRollOwnerOf(SC.handles[id], rollHs) : null;
+    if(roll){ dropped={fileName:SC.meta[id].fileName, roll}; await _scDetach(id); }
+  }
+  if(dropped) _scRollFileNotice(dropped.fileName, dropped.roll, 'it was listed here as a Sales file and has been taken off that list (the file itself was not touched)', {link:false});
   scUpdatePill();
   document.addEventListener('click', e=>{
     const dd=document.getElementById('sc-dropdown'), sw=document.getElementById('sc-switcher');
