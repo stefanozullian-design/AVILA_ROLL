@@ -2075,7 +2075,7 @@ function spRenderChart(){
   // Forecast by date (after the last real day) for the current scope
   const fcByDate={};
   if(scope.leaves && scope.leaves.length){
-    labels.forEach(ds=>{ if(ds>lastReal){ let v=0; for(let i=0;i<scope.leaves.length;i++) v+=spLeafFcDay(scope.leaves[i],ds); v=spQ25z(v); if(v) fcByDate[ds]=v; } }); // row-level truck-load rounding (matches the table)
+    labels.forEach(ds=>{ if(ds>lastReal){ let v=_spFcAdd(0,scope.leaves,ds); v=spQ25z(v); if(v) fcByDate[ds]=v; } }); // row-level truck-load rounding (matches the table)
   }
 
   const actData=labels.map(d=> d<=lastReal ? Math.round(actByDate[d]||0) : null);
@@ -2212,7 +2212,7 @@ function spActualPeriod(scope, from, to, withForecast){
     const end=new Date(to+'T00:00:00');
     for(; d<=end; d.setDate(d.getDate()+1)){
       const ds=d.toISOString().split('T')[0];
-      for(let i=0;i<scope.leaves.length;i++) tot+=spLeafFcDay(scope.leaves[i],ds);
+      tot=_spFcAdd(tot,scope.leaves,ds);
     }
   }
   return Math.round(tot);
@@ -2543,7 +2543,11 @@ function spFcRecompute(){
 function spLeafFcDay(lf, ds){
   const dw=spDow(ds);
   if(dw===0) return 0;
-  const per=spPeriodOf(ds);
+  return _spLeafFcAt(lf, ds, dw, spPeriodOf(ds));
+}
+// The leaf-dependent part of spLeafFcDay, for a day whose weekday (dw, not Sunday) and forecast
+// period (per) are already known — so a row total can look those up once per day, not per leaf.
+function _spLeafFcAt(lf, ds, dw, per){
   if(per){
     const rr=SP._leafPeriodRate?.[lf.id]?.[per];
     if(rr){
@@ -2553,6 +2557,16 @@ function spLeafFcDay(lf, ds){
     }
   }
   return dw===6?(lf.satRate||0):(lf.wkRate||0);
+}
+// acc + spLeafFcDay(leaves[0],ds) + spLeafFcDay(leaves[1],ds) + … added one by one in the same order
+// (identical result), with the day's weekday and period looked up once for all the leaves.
+function _spFcAdd(acc, leaves, ds){
+  const n=leaves.length; if(!n) return acc;
+  const dw=spDow(ds);
+  if(dw===0){ for(let i=0;i<n;i++) acc+=0; return acc; }
+  const per=spPeriodOf(ds);
+  for(let i=0;i<n;i++) acc+=_spLeafFcAt(leaves[i],ds,dw,per);
+  return acc;
 }
 // Node's average daily rate for a period = Σ of its leaves' RAW weekday rates, rounded
 // ONCE to a 25 t truck-load at this row (one-truck minimum when active). Rounding here —
@@ -2624,7 +2638,10 @@ const SP_AUTO={ SHRINK:0.75, LEVEL_MONTHS:8, LEVEL_DECAY:0.85, TREND_CLAMP:0.05,
 function _spYm(ds){ return ds.slice(0,7); }
 function _spMonthAdd(ym,k){ let y=+ym.slice(0,4), m=+ym.slice(5,7)-1+k; y+=Math.floor(m/12); m=((m%12)+12)%12; return y+'-'+String(m+1).padStart(2,'0'); }
 function _spMonthDiff(a,b){ return (+b.slice(0,4)-+a.slice(0,4))*12+(+b.slice(5,7)-+a.slice(5,7)); }
-function _spWd(ym){ const y=+ym.slice(0,4), m=+ym.slice(5,7); const days=new Date(y,m,0).getDate(); let nWk=0,nSat=0; for(let d=1;d<=days;d++){ const dw=new Date(y,m-1,d).getDay(); if(dw>=1&&dw<=5)nWk++; else if(dw===6)nSat++; } return {nWk,nSat}; }
+// Weekdays / Saturdays in a month. Pure per month, so each month is counted once (the Auto model
+// asks for the same few months thousands of times); callers get their own copy.
+const _spWdCache={};
+function _spWd(ym){ const c=_spWdCache[ym]; if(c) return {nWk:c.nWk,nSat:c.nSat}; const y=+ym.slice(0,4), m=+ym.slice(5,7); const days=new Date(y,m,0).getDate(); let nWk=0,nSat=0; for(let d=1;d<=days;d++){ const dw=new Date(y,m-1,d).getDay(); if(dw>=1&&dw<=5)nWk++; else if(dw===6)nSat++; } _spWdCache[ym]={nWk,nSat}; return {nWk,nSat}; }
 
 // Cache key — the auto model depends on the data + the base (non-date) filters, not on rules.
 function spAutoKey(){ const m=DB.real_shipments_meta||{}; return [m.loaded_at,m.date_max,SP.f?.origin,SP.f?.rep,SP.f?.customer,SP.f?.custType,SP.f?.product].join('|'); }
@@ -3457,7 +3474,7 @@ function spRenderTable(skipThead=false){
       let t=0; const ds=monthDates[ym]||[];
       for(let i=0;i<ds.length;i++){ const d=ds[i];
         if(d<=lastReal) t+=node.actMap[d]||0;
-        else { for(let j=0;j<node.leaves.length;j++) t+=spLeafFcDay(node.leaves[j],d); }
+        else t=_spFcAdd(t,node.leaves,d);
       }
       return t;
     };
@@ -3536,7 +3553,7 @@ function spRenderTable(skipThead=false){
     const leaves=node.leaves; const fcCache={};
     const getFc=(ds)=>{
       let v=fcCache[ds]; if(v!==undefined) return v;
-      v=0; for(let i=0;i<leaves.length;i++) v+=spLeafFcDay(leaves[i],ds);
+      v=_spFcAdd(0,leaves,ds);
       v=spQ25z(v); // round the ROW's daily forecast to a truck-load — matches the row's rounded rate
       return fcCache[ds]=v;
     };
@@ -5254,7 +5271,10 @@ async function scWriteActive(id){
     const granted=await _dsEnsureWritePermission(handle);
     if(!granted){ scSetSaveStatus('error'); _dsWriteBlockedBanner(id, m.fileName, 'file-edit permission was declined'); return; }
     const payload=scBuildPayload();
-    const outText=JSON.stringify(payload,null,2);
+    // Compact JSON (no indentation): the same data, about a third smaller — every save (each
+    // forecast edit / commit triggers one) builds, writes and syncs noticeably less. JSON.parse
+    // reads both forms, so older copies of this page open these files unchanged.
+    const outText=JSON.stringify(payload);
     const w=await handle.createWritable(); await w.write(new Blob([outText],{type:'application/json'})); await w.close();
     m.lastSaved=new Date().toISOString(); scSaveMeta();
     window._lsSavedAt=payload.savedAt; try{ localStorage.setItem('avila_sales_sc_ls', payload.savedAt); }catch(e){}
