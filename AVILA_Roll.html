@@ -255,6 +255,20 @@ html[data-theme="daylight"] #logo:not([data-logo]) .logo-dark{display:none}
 .ac-foot{margin-top:16px;padding-top:10px;border-top:1px solid var(--border);font-size:9px;color:var(--text-dim);}
 .ac-tag{font-size:8px;color:var(--green);border:1px solid var(--green);border-radius:3px;padding:0 4px;margin-left:3px;}
 .ac-badge{display:inline-block;min-width:14px;padding:0 4px;border-radius:8px;background:var(--amber);color:var(--bg);font-size:9px;font-weight:700;text-align:center;margin-left:4px;}
+.ac-locktip{position:fixed;z-index:100000;display:none;max-width:330px;padding:6px 10px;border-radius:5px;background:var(--surface);border:1px solid var(--amber);color:var(--text);font-family:var(--mono);font-size:10px;box-shadow:0 4px 16px rgba(0,0,0,.45);pointer-events:none;}
+input.ac-ro{cursor:not-allowed!important;opacity:.75;}
+input.ac-ro:focus{outline:1px dashed var(--amber)!important;}
+.ac-card.wide{width:500px;}
+.ac-steps{display:flex;flex-direction:column;gap:10px;margin-top:16px;}
+.ac-step{display:flex;gap:12px;padding:12px;border:1px solid var(--border);border-radius:8px;opacity:.55;}
+.ac-step.on{opacity:1;border-color:var(--green);background:var(--green-faint);}
+.ac-step.done{opacity:.8;}
+.ac-step-n{width:22px;height:22px;border-radius:50%;border:1px solid currentColor;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:var(--green);flex-shrink:0;}
+.ac-step-t{color:var(--text-bright);font-size:12px;font-weight:700;}
+.ac-step-b{color:var(--text-dim);font-size:10px;line-height:1.55;margin-top:4px;}
+.ac-step-b b{color:var(--text);}
+.ac-wf-msg{font-size:10px;color:var(--text);margin-top:8px;min-height:13px;line-height:1.5;}
+.ac-wf-list{display:flex;flex-direction:column;gap:6px;margin-top:8px;max-height:220px;overflow:auto;}
 #ac-chip{max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .ac-mi{padding:7px 8px;font-size:11px;color:var(--text);cursor:pointer;border-radius:4px;}
 .ac-mi:hover{background:var(--surface2);}
@@ -30992,6 +31006,7 @@ function loadSaved(){
 // ═══════════════════════════════════════════════════════
 document.addEventListener('DOMContentLoaded',async()=>{
   try{ acEarlyCover(); }catch(e){ console.warn('acEarlyCover', e); }   // sign-in scenarios: hide the cached data until signed in
+  try{ _acInstallGuards(); window.addEventListener('load', _acInstallGuards); }catch(e){ console.warn('acGuards', e); }
   loadSaved(); // restores DB from localStorage (if any) and sets window._lsSavedAt for scInit()'s guard
 
   _applyTblZoom(_getTblZoom()); // restore saved table text size
@@ -31841,6 +31856,7 @@ function scAfterLoad(){
   switchTopSection(DB.facilities.length?'production':'configuration');
   scUpdatePill(); scRenderDropdown();
   _rollPublishCatalog(); _rollCheckHandoff();   // Sales page link: this scenario is now the active one
+  window._scLoadedId=SC.activeId;
   if(typeof acGate==='function') acGate();      // sign-in: this scenario may require it
 }
 
@@ -32112,8 +32128,13 @@ async function scOpenFile(){
     if(n!=='AbortError'){ console.warn('scenario open picker failed', e); statMsg('⚠ Could not open the file dialog — '+(e&&e.message||n||'unknown error')); }
     return;
   }
+  await scOpenHandle(handle);
+}
+// Register (or re-use) a scenario for a file handle and load it. Used by 📂 File… and by the
+// welcome screen's folder search. Returns true when the scenario loaded.
+async function scOpenHandle(handle){
   // An Avila Sales file is never a scenario (see _scIsSalesPayload) — not registered, not opened.
-  if(await _scLooksLikeSalesFile(handle)){ scCloseDropdown(); _mgShowForeignBanner(handle.name, 'sales', 'salesfile'); return; }
+  if(await _scLooksLikeSalesFile(handle)){ scCloseDropdown(); _mgShowForeignBanner(handle.name, 'sales', 'salesfile'); return false; }
   // Reuse an existing entry if it points at the same file, else register new.
   const owner=await scFindOwner(handle, null);
   let id=owner?owner.id:null;
@@ -32129,8 +32150,10 @@ async function scOpenFile(){
     SC.handles[id]=handle; await scSaveHandle(id,handle);
   }
   scSaveMeta();
-  await scLoadScenario(id);
+  const ok=await scLoadScenario(id);
+  if(ok){ try{ localStorage.setItem('avila_sc_autoopen', id); }catch(e){} }
   scCloseDropdown(); scCloseStartup(); scUpdatePill(); scRenderDropdown();
+  return !!ok;
 }
 // Rename = Save As. The scenario's name IS its filename, so renaming has to produce
 // a newly-named file; there is no rename-in-place in the File System Access API that
@@ -32499,9 +32522,9 @@ function acGate(){
   if(prevId && !u){ _acUser=null; _acClearSession(); }
   _acUser=null;
   // Already showing a form (e.g. the person is typing): don't rebuild it on a background sync.
-  if(document.getElementById('ac-gate') && _acState.mode && _acState.mode!=='wait'){ acUpdateChip(); return; }
+  if(document.getElementById('ac-gate') && _acState.mode && _acState.mode!=='wait' && _acState.mode!=='welcome'){ acUpdateChip(); return; }
   if(setpw){ _acState={mode:'setpw', email:setpw}; }
-  else if(!_acState.mode || _acState.mode==='wait') _acState={mode:'signin', email:(prevId||'')};
+  else if(!_acState.mode || _acState.mode==='wait' || _acState.mode==='welcome') _acState={mode:'signin', email:(prevId||'')};
   _acRenderGate(); acUpdateChip();
 }
 // The sign-in screen needs the scenario file (the list of people lives in it). If none is
@@ -32515,9 +32538,11 @@ function _acRenderGate(){
   const scn=SC.activeId&&SC.meta[SC.activeId]?SC.meta[SC.activeId].name:'';
   const head=(t,sub)=>`<div class="ac-logo">AVILA <span>Roll</span></div><div class="ac-h">${t}</div>${sub?`<div class="ac-sub">${sub}</div>`:''}`;
   let body='';
-  if(st.mode==='wait' || (st.mode!=='setpw' && _acGateNeedsScenario() && !_acEnabledDB())){
-    body=head('Opening the scenario…', 'Sign-in is required for this scenario. If nothing happens, open the scenario file first.')+
-      `<div class="ac-row"><button class="sc-btn pri" onclick="scOpenStartup()">📂 Open the scenario file</button></div>`;
+  if(st.mode==='welcome'){
+    body=_acWelcomeHTML(st);
+  }else if(st.mode==='wait'){
+    body=head('Opening the scenario…', 'Sign-in is required for this scenario.')+
+      `<div class="ac-links">Nothing happening? <a onclick="acWelcomeClassic()">Show my scenarios</a> · <a onclick="_acState={mode:'welcome',email:_acHashEmail()||'',file:_acHashParam('f')||''};_acRenderGate()">Open the shared folder</a></div>`;
   }else if(st.mode==='signin'){
     body=head('Sign in', scn?`Scenario <b>${e(scn)}</b>`:'')+
       `<label class="ac-l">Email</label><input class="ac-in" id="ac-email" type="email" autocomplete="username" value="${e(st.email)}" onkeydown="if(event.key==='Enter')document.getElementById('ac-pw').focus()">
@@ -32545,7 +32570,7 @@ function _acRenderGate(){
        <div class="ac-err" id="ac-err">${e(st.err)}</div>
        <div class="ac-row"><button class="sc-btn pri" onclick="acSetPassword()">Save password and sign in</button>${_acUser?`<button class="sc-btn" onclick="acGateCancel()">Cancel</button>`:`<button class="sc-btn" onclick="acGateMode('signin')">Back to sign in</button>`}</div>`;
   }
-  g.innerHTML=`<div class="ac-card">${body}<div class="ac-foot">Access is managed by the scenario's administrator.</div></div>`;
+  g.innerHTML=`<div class="ac-card${st.mode==='welcome'?' wide':''}">${body}<div class="ac-foot">Access is managed by the scenario's administrator.</div></div>`;
   setTimeout(()=>{ const f=g.querySelector('input:not([type=checkbox])'); if(f && !f.value) f.focus(); else if(f){ const n=g.querySelectorAll('input:not([type=checkbox])')[1]; if(n) n.focus(); } }, 30);
 }
 function acGateMode(mode){
@@ -32625,6 +32650,7 @@ function acSignOut(){
 
 // ── Top-bar chip ──
 function acUpdateChip(){
+  if(typeof acScheduleSweep==='function') acScheduleSweep();   // re-lock / unlock inputs for this person
   const c=document.getElementById('ac-chip'); if(!c) return;
   const pend=_acIsAdmin()?_acPendingRequests().length:0;
   if(!_acEnabledDB()){ c.innerHTML='👤'; c.title='Sign-in is not turned on for this scenario — click to set it up'; return; }
@@ -32668,6 +32694,248 @@ function _acNotifyRequests(force){
   acUpdateChip();
   if(fresh.length && (force || window._acReqPrimed)) _acBanner(`<b>${_scEsc(fresh.map(r=>r.name||r.email).join(', '))}</b> asked for access. <a style="text-decoration:underline;cursor:pointer" onclick="acOpenUsersPanel()">Review →</a>`, 'ok');
   window._acReqPrimed=true;
+}
+
+// ═══ Up-front lock — read-only places never open for editing ═══
+// Three layers, all no-ops for administrators and when sign-in is off:
+//   1. In-place inputs (demand grid, rail loading, rail pushes / yard counts, Daily Data) are
+//      marked read-only as they render (a debounced sweep) and refuse focus/typing.
+//   2. Editors and commands that open from a click (inventory / campaign / vessel / transfer
+//      popups, maintenance, mill policies, demand builder, topology tools…) are wrapped: the
+//      wrapper checks the person's rights for that function at that facility first and shows
+//      "🔒 Read-only" instead of opening.
+//   3. Campaign drag grips refuse to start a drag.
+// The save-time check in _acEnforce stays as the backstop for anything not covered here.
+function _acLockActive(){ return _acEnabledDB() && !_acIsAdmin(); }
+// May the person change `func` at `fac`? fac undefined = "anywhere" (they may change it at at
+// least one facility — the save-time check then stops the wrong one).
+function _acMay(func, fac){
+  if(!_acLockActive()) return true;
+  if(!_acUser) return false;
+  if(fac!==undefined && fac!==null) return _acCan(_acUser, func, fac);
+  const p=_acUser.perm||{}; return Object.keys(p).some(k=>(p[k]||{})[func]==='edit');
+}
+function _acFacOfEl(id){ if(id==null) return undefined; const e=(DB.elements||[]).find(x=>x.id===id); return e?(_acElFacility(e, _acFacByName())||undefined):undefined; }
+function _acLockTip(func, fac, ev){
+  const F=AC_FUNCS.find(x=>x.id===func);
+  const where=(fac!==undefined&&fac!==null)?' at '+_acFacName(fac):'';
+  const txt=_acUser?`🔒 Read-only — you can view but not change ${F?F.label:func}${where}`:'🔒 Sign in to make changes';
+  let t=document.getElementById('ac-locktip');
+  if(!t){ t=document.createElement('div'); t.id='ac-locktip'; t.className='ac-locktip'; document.body.appendChild(t); }
+  t.textContent=txt;
+  const x=ev&&ev.clientX!=null?ev.clientX:innerWidth/2, y=ev&&ev.clientY!=null?ev.clientY:80;
+  t.style.left=Math.min(x+12, innerWidth-340)+'px'; t.style.top=(y+14)+'px'; t.style.display='block';
+  clearTimeout(window._acTipT); window._acTipT=setTimeout(()=>{ t.style.display='none'; }, 2600);
+}
+// Which function / facility an in-place input edits (null = not a data input we govern).
+function _acInputScope(el){
+  if(!el || !el.classList) return null;
+  if(el.classList.contains('dem-cell')) return {func:'demand', fac:_acFacOfEl(el.dataset.el)};
+  if(el.classList.contains('rail-load-cell')) return {func:'logistics', fac:_acFacOfEl(el.dataset.dp)};
+  if(el.classList.contains('rp-push-inp')){
+    if(el.getAttribute('onchange')&&el.getAttribute('onchange').startsWith('_rpAvailEdit')) return {func:'real', fac:el.dataset.fac||_acFacOfEl(el.dataset.dp)};
+    return {func:'logistics', fac:_acFacOfEl(el.dataset.dp)};
+  }
+  if(el.classList.contains('rd-in')) return {func:el.dataset.type==='inventory'?'inventory':'real', fac:S.realDataFacilityId};
+  return null;
+}
+const AC_LOCK_INPUTS='input.dem-cell,input.rail-load-cell,input.rp-push-inp,#rd-sections-container .rd-in';
+function _acSweep(){
+  _acSweepT=null;
+  const on=_acLockActive();
+  document.body.classList.toggle('ac-locked-mode', on);
+  document.querySelectorAll(AC_LOCK_INPUTS).forEach(el=>{
+    let lock=false;
+    if(on){ const sc=_acInputScope(el); lock=!!sc && !_acMay(sc.func, sc.fac); }
+    if(lock){ if(!el.readOnly){ el.readOnly=true; el.dataset.acro='1'; el.classList.add('ac-ro'); } }
+    else if(el.dataset.acro){ el.readOnly=false; delete el.dataset.acro; el.classList.remove('ac-ro'); }
+  });
+  const rdBtn=document.getElementById('submitRealDataBtn');
+  if(rdBtn){ const ok=!on || _acMay('real', S.realDataFacilityId) || _acMay('inventory', S.realDataFacilityId); rdBtn.disabled=!ok; rdBtn.title=ok?'':'Read-only — you cannot change real values here'; }
+}
+let _acSweepT=null;
+function acScheduleSweep(){ if(_acSweepT) return; _acSweepT=setTimeout(_acSweep, 60); }
+// Typing / pasting into a locked input, or a drag grip on a read-only campaign.
+function _acBlockEvent(e){
+  if(!_acLockActive()) return;
+  const t=e.target;
+  if(t && t.matches && t.matches(AC_LOCK_INPUTS)){
+    const sc=_acInputScope(t);
+    if(sc && !_acMay(sc.func, sc.fac)){
+      if(e.type==='mousedown' || e.type==='focusin'){ if(!t.readOnly){ t.readOnly=true; t.dataset.acro='1'; t.classList.add('ac-ro'); } }
+      if(e.type==='keydown' && !/^(Tab|Arrow|Enter|Escape|Home|End|Page)/.test(e.key) && !(e.ctrlKey&&/^[ac]$/i.test(e.key))){ e.preventDefault(); const r=t.getBoundingClientRect(); _acLockTip(sc.func, sc.fac, {clientX:r.left, clientY:r.bottom-10}); }
+      if(e.type==='paste' || e.type==='drop'){ e.preventDefault(); }
+      if(e.type==='mousedown') _acLockTip(sc.func, sc.fac, e);
+    }
+    return;
+  }
+  if(e.type==='mousedown'){
+    const g=t && t.closest && t.closest('.camp-grip');
+    if(g){
+      const gd=g.dataset, st=_CAMP_STORES[gd.store];
+      const func=gd.store==='prod'||gd.store==='simprod'?'production':'logistics';
+      let fac;
+      if(st){ const c=(DB[st.key]||[]).find(x=>x.id===gd.camp); if(c){ const elFac=new Map((DB.elements||[]).map(x=>[x.id,_acElFacility(x,_acFacByName())])); fac=_acRowFacility(st.key, c, elFac)||undefined; } }
+      if(!_acMay(func, fac)){ e.preventDefault(); e.stopImmediatePropagation(); _acLockTip(func, fac, e); }
+    }
+  }
+}
+['mousedown','focusin','keydown','paste','drop'].forEach(t=>document.addEventListener(t, _acBlockEvent, true));
+new MutationObserver(()=>{ if(_acLockActive()||document.body.classList.contains('ac-locked-mode')) acScheduleSweep(); })
+  .observe(document.documentElement, {childList:true, subtree:true});
+
+// Layer 2 — guard the functions that open an editor or change data from a click.
+// spec: [functionName, func, (args)=>facility|undefined]
+const AC_GUARDS=[
+  ['showInventoryPopup','inventory', a=>_acFacOfEl(a[0])],
+  ['showCampaignPopup','production', a=>_acFacOfEl(a[0])],
+  ['showRailCampaignPopup','logistics', a=>_acFacOfEl(a[0])],
+  ['showTermRealPopup','real', a=>a[1]||undefined],
+  ['showVesselCampaignPopup','logistics', a=>_acFacOfEl(a[0])],
+  ['vpOpenArrivalDialog','logistics', a=>_acFacOfEl(a[0])],
+  ['showSiloXferPopup','logistics', a=>{ const l=(DB.silo_links||[]).find(x=>x.id===a[0]); return _acFacOfEl(a[1]||(l&&(l.from_silo_id||l.from))); }],
+  ['editVessel','logistics', a=>{ const v=(DB.vessel_calls||[])[a[0]]; return v?(v.facility_id||_acFacOfEl(v.berth_id)):undefined; }],
+  ['editTransport','logistics', ()=>undefined],
+  ['openMaintModal','production', a=>_acFacOfEl(a[0])],
+  ['editMaintEvent','production', a=>{ const m=(DB.element_maintenance_events||[]).find(x=>x.id===a[0]); return m?_acFacOfEl(m.element_id):undefined; }],
+  ['openMillPolicyManager','production', ()=>undefined],
+  ['openNonWorkingDaysPanel','production', ()=>AC_NET],
+  ['openDemandSwapManager','demand', a=>a[0]?_acFacOfEl(a[0]):undefined],
+  ['openDemandBuilder','demand', a=>_acFacOfEl(a[0])],
+  ['spSaveForecast','demand', ()=>undefined],
+  ['_rollApplyHandoff','demand', ()=>undefined],
+  ['submitRealData','real', ()=>S.realDataFacilityId, ()=>_acMay('inventory', S.realDataFacilityId)],
+  ['dsRefreshSlot','real', ()=>undefined],
+  ['dsAutoRefreshAll','real', ()=>undefined],
+  ['dsApplyPendingUpdates','real', ()=>undefined],
+  // Topology & setup
+  ...['saveProps','saveFacility','deleteFacility','openAddFacilityModal','saveProduct','deleteProduct','editProduct','saveRawMat','deleteRawMat','saveFuel','deleteFuel',
+      'confirmDeleteElement','executeDeleteElement','deleteSelectedEls','saveNewNode','saveLocNode','deleteLocNode','startAddNode','startRenameNode','saveRenameNode',
+      'addDpProduct','removeDpProduct','moveDpProduct','addProductCap','removeProductCap','addSiloProduct','removeSiloProduct','deleteSiloLink','slStartPick',
+      'autoLayout','clearCanvas','saveSimCfg','importJSON','addPlantCodeRow','removePlantCodeRow','addPackingLine','addRailDest','removeRailDest','_toggleAutoPropose']
+     .map(n=>[n,'topology', ()=>undefined]),
+];
+function _acInstallGuards(){
+  for(const [name, func, facOf, alsoOk] of AC_GUARDS){
+    const orig=window[name];
+    if(typeof orig!=='function' || orig._acGuarded) continue;
+    const g=function(...args){
+      if(_acLockActive()){
+        let fac; try{ fac=facOf(args); }catch(e){ fac=undefined; }
+        if(!_acMay(func, fac) && !(alsoOk && alsoOk(args))){ _acLockTip(func, fac, window.event); return; }
+      }
+      return orig.apply(this, args);
+    };
+    g._acGuarded=true;
+    try{ window[name]=g; }catch(e){ console.warn('acGuard', name, e); }
+  }
+  // Topology canvas: element drags and tool changes (other than look-around tools).
+  const st=window.setTool;
+  if(typeof st==='function' && !st._acGuarded){
+    const g=function(tool, ...rest){ if(_acLockActive() && !['select','pan'].includes(tool) && !_acMay('topology')){ _acLockTip('topology', undefined, window.event); return; } return st.call(this, tool, ...rest); };
+    g._acGuarded=true; window.setTool=g;
+  }
+  const md=window.onElMD;
+  if(typeof md==='function' && !md._acGuarded){
+    const g=function(ev, id, ...rest){ if(_acLockActive() && !_acMay('topology', _acFacOfEl(id))){ return; } return md.call(this, ev, id, ...rest); };
+    g._acGuarded=true; window.onElMD=g;
+  }
+}
+
+// ═══ Guided welcome — first visit on a computer ═══
+// Instead of "Choose a scenario → 📂 File… → dig for FLORIDA ROLL TREND.json", a newcomer gets:
+//   Step 1  choose the shared SharePoint folder (any folder above the file works) — one
+//           directory pick, one "Allow"; the app searches inside for the scenario file itself
+//           (by name when the e-mail link carries it: #setpw=<email>&f=<file name>).
+//   Step 2  set your password (from the e-mail link) — or sign in / request access.
+// Shown when this browser has no scenarios yet, or the link names a file it does not know.
+function _acHashParam(k){ const m=new RegExp('[#&]'+k+'=([^&]+)').exec(location.hash||''); return m?decodeURIComponent(m[1]):null; }
+// Called by scInit. Returns true when the welcome screen took over from the scenario picker.
+function acWelcome(){
+  const email=_acHashEmail(), file=_acHashParam('f');
+  const known=Object.values(SC.meta||{});
+  if(known.length){
+    if(!email) return false;                                        // returning user, no link → normal start
+    if(!file || known.some(m=>String(m.fileName||'').toLowerCase()===file.toLowerCase())) return false; // already has that file
+  }
+  _acState={mode:'welcome', email:email||'', file:file||''};
+  _acRenderGate();
+  return true;
+}
+function _acWelcomeHTML(st){
+  const e=_scEsc;
+  const setpw=!!st.email;
+  const step=(n,title,body,active,done)=>`<div class="ac-step ${active?'on':''} ${done?'done':''}"><div class="ac-step-n">${done?'✓':n}</div><div style="flex:1"><div class="ac-step-t">${title}</div>${body?`<div class="ac-step-b">${body}</div>`:''}</div></div>`;
+  const where=st.file?`<b>${e(st.file)}</b>`:'the team\'s scenario file';
+  const s1body=`Pick the SharePoint folder that holds ${where} — for example <b>Florida Logistics - _Inventory roll (Official)</b> in your CEMEX files. A folder higher up works too: the app searches inside it. When Chrome asks, choose <b>Edit files</b> / <b>Allow</b>.
+    <div class="ac-row"><button class="sc-btn pri" id="ac-wf-btn" onclick="acWelcomePickFolder()">📁 Choose folder</button></div>
+    <div class="ac-wf-msg" id="ac-wf-msg">${st.msg||''}</div>${st.list||''}`;
+  return `<div class="ac-logo">AVILA <span>Roll</span></div>
+    <div class="ac-h">Welcome${setpw?'':' to AVILA Roll'}</div>
+    <div class="ac-sub">${setpw?`Hi <b>${e(st.email)}</b> — two quick steps and you are in.`:'Two quick steps to join your team\'s planning scenario.'}</div>
+    <div class="ac-steps">
+      ${step(1,'Open the shared folder', s1body, true, false)}
+      ${step(2, setpw?'Set your password':'Sign in, or request access', setpw?'With the temporary password from your e-mail.':'The administrator gives you access and e-mails you a password.', false, false)}
+    </div>
+    <div class="ac-links">Other ways: <a onclick="acWelcomePickFile()">pick the file itself</a> · <a onclick="acWelcomeClassic()">scenarios on this computer / start a new one</a></div>`;
+}
+function acWelcomeClassic(){ _acState={mode:null}; _acCloseGate(); scOpenStartup(!Object.keys(SC.meta||{}).length); }
+async function acWelcomePickFile(){ _acState={mode:'wait'}; _acCloseGate(); await scOpenFile(); if(!window._scLoadedId) acWelcome() || (_acState={mode:'welcome',email:_acHashEmail()||'',file:_acHashParam('f')||''}, _acRenderGate()); }
+function _acWelcomeMsg(html, list){ _acState.msg=html; if(list!==undefined) _acState.list=list; const m=document.getElementById('ac-wf-msg'); if(m) m.innerHTML=html; if(list!==undefined) _acRenderGate(); }
+// Breadth-first search inside the picked folder. With a file name: the shallowest exact match
+// (backup folders skipped). Without: every .json that looks like an Avila Roll scenario
+// (snapshots, OneDrive conflict copies and "(1)" duplicates left out).
+async function _acFindScenarioFiles(dir, want){
+  const wantL=want?want.toLowerCase():null, hits=[]; let n=0;
+  const queue=[{h:dir, path:dir.name, depth:0}];
+  while(queue.length && n<4000){
+    const {h,path,depth}=queue.shift(); n++;
+    if(n%20===0) _acWelcomeMsg(`Searching… ${n} folders looked at`);
+    try{
+      for await (const [name,ch] of h.entries()){
+        if(ch.kind==='directory'){
+          if(depth<8 && !/^\.|^backup|^archive|^node_modules$/i.test(name)) queue.push({h:ch, path:path+' › '+name, depth:depth+1});
+        }else if(/\.json$/i.test(name)){
+          if(wantL){ if(name.toLowerCase()===wantL) return {hits:[{h:ch, path, name}], n}; }
+          else if(!/__sc_|-CMX-|-FanoPrivate|\(\d+\)\.json$|avila_demand|avila_sales|rules/i.test(name)) hits.push({h:ch, path, name});
+        }
+      }
+    }catch(e){ /* unreadable folder — skip */ }
+  }
+  if(!wantL){
+    // keep only files that really are scenarios (payload starts with {"DB") — first 40 checked
+    const ok=[];
+    for(const x of hits.slice(0,40)){ try{ const f=await x.h.getFile(); if(/^\s*\{\s*"DB"/.test(await f.slice(0,64).text())) ok.push(x); }catch(e){} }
+    return {hits:ok, n};
+  }
+  return {hits, n};
+}
+async function acWelcomePickFolder(){
+  if(!window.showDirectoryPicker){ _acWelcomeMsg('This browser cannot open folders — please use <b>Chrome</b> or <b>Edge</b>.'); return; }
+  let dir;
+  try{ dir=await window.showDirectoryPicker({id:'avila-welcome', mode:'readwrite'}); }
+  catch(e){ if(e && e.name!=='AbortError') _acWelcomeMsg('Could not open that folder ('+_scEsc(e.message||e.name)+'). Try the folder one level down.'); return; }
+  const btn=document.getElementById('ac-wf-btn'); if(btn) btn.disabled=true;
+  _acWelcomeMsg('Searching…');
+  const want=_acState.file||null;
+  const {hits, n}=await _acFindScenarioFiles(dir, want);
+  if(btn) btn.disabled=false;
+  if(!hits.length){
+    _acWelcomeMsg(want
+      ? `<b>${_scEsc(want)}</b> is not inside <b>${_scEsc(dir.name)}</b> (${n} folders searched). Choose the Florida Logistics folder, or one above it.`
+      : `No scenario file found inside <b>${_scEsc(dir.name)}</b> (${n} folders searched). Choose the folder your administrator told you about.`, '');
+    return;
+  }
+  if(hits.length===1) return _acWelcomeUse(hits[0]);
+  window._acWfHits=hits;
+  _acWelcomeMsg(`Found ${hits.length} scenario files — which one?`,
+    `<div class="ac-wf-list">${hits.map((x,i)=>`<div class="sc-card" onclick="_acWelcomeUse(window._acWfHits[${i}])"><div style="flex:1;min-width:0"><div class="sc-t">${_scEsc(x.name.replace(/\.json$/i,''))}</div><div class="sc-s">${_scEsc(x.path)}</div></div></div>`).join('')}</div>`);
+}
+async function _acWelcomeUse(hit){
+  _acWelcomeMsg(`Opening <b>${_scEsc(hit.name)}</b>…`, '');
+  const ok=await scOpenHandle(hit.h);
+  if(!ok || !window._scLoadedId){ _acState.mode='welcome'; _acWelcomeMsg(`Could not open <b>${_scEsc(hit.name)}</b> — try again, or pick the file itself.`); return; }
+  // scOpenHandle → scLoadScenario → scAfterLoad → acGate decides: set password / sign in / (sign-in off) straight in.
 }
 
 // ═══ Users & access panel (admin) ═══
@@ -32823,8 +33091,8 @@ function acDeclineRequest(rid){
 // The temporary password is shown ONCE, here — only its hash is stored. "Open e-mail draft"
 // hands the text to the computer's mail program (Outlook); the admin reviews and sends it.
 function _acShowPasswordMail(u, temp, isNew){
-  const url=location.origin+location.pathname+'#setpw='+encodeURIComponent(u.email);
   const scn=SC.meta[SC.activeId]||{};
+  const url=location.origin+location.pathname+'#setpw='+encodeURIComponent(u.email)+(scn.fileName?'&f='+encodeURIComponent(scn.fileName):'');
   const subject='Your access to AVILA Roll';
   const body=`Hi ${u.name||''},
 
@@ -32834,8 +33102,8 @@ Your temporary password: ${temp}
 
 1. Open this link in Chrome or Edge:
 ${url}
-2. If the app asks for the scenario file, open "${scn.fileName||''}" from the Florida Logistics SharePoint folder.
-3. Enter your email, the temporary password, and choose your own password.
+2. The first time, the app asks you to choose the shared folder: pick the Florida Logistics SharePoint folder (or any folder above it) and click Allow / Edit files. The app finds "${scn.fileName||'the scenario file'}" by itself.
+3. Enter the temporary password and choose your own password.
 
 Your access: ${_acAccessSummary(u)}
 
@@ -33041,6 +33309,9 @@ async function scInit(){
   });
 
   const ids=Object.keys(SC.meta);
+  // First visit on this computer (or an e-mail link naming a file it does not know yet):
+  // the guided welcome screen replaces the bare scenario picker.
+  if(typeof acWelcome==='function' && acWelcome()) return;
   if(!ids.length){ scOpenStartup(true); return; }              // first run, nothing to open
   const pref=localStorage.getItem('avila_sc_autoopen');
   if(pref && SC.meta[pref]){ SC.activeId=pref; if(await scLoadScenario(pref,{guard:true})) return; }
