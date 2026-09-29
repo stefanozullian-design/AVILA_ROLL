@@ -2951,7 +2951,8 @@ const DB = {
   real_unloading_daily:  [], // { date:'YYYY-MM-DD', facility_id, berth_id, product_id, mode:'ship'|'rail'|'truck', value, unit:'t'|'cars', cars?:N (rail: entered car count for display; value stays tonnes for the sim), source:'actual', created_at, updated_at }
   // Access control (see ACCESS CONTROL): people who may sign in to this scenario, and pending requests.
   access_users:          [], // { id:email, email, name, admin, active, perm:{facilityId|'__network':{func:'edit'}}, pw:{salt,iter,hash}, must_change, created_at, created_by, pw_changed_at }
-  access_requests:       []  // { id, email, name, note, at, status:'pending'|'declined', handled_by, handled_at }
+  access_requests:       [], // { id, email, name, note, at, status:'pending'|'declined', handled_by, handled_at }
+  change_requests:       []  // { id, area:'topology', by, name, at, status:'pending'|'accepted'|'rejected', items:[{t,k,before,after}] } — see TOPOLOGY SEAL
 };
 
 // ═══════════════════════════════════════════════════════
@@ -30883,7 +30884,10 @@ function autoSaveNow(){
       _partialTables: b.dropped,
       // Which scenario this copy is of — so startup never takes it for another scenario's copy
       // (see _scLoadForeign).
-      scId: (typeof SC!=='undefined' && SC.activeId) || null
+      scId: (typeof SC!=='undefined' && SC.activeId) || null,
+      // Which synced version of the file this copy was built from — at startup a copy built from
+      // an OLDER sync is not "local edits" (it only lacks what arrived later); see scLoadScenario.
+      scBase: (typeof _scBaseTag==='function') ? _scBaseTag() : null
     });
     try{
       localStorage.setItem('prodcast_v3', text);
@@ -30989,6 +30993,7 @@ function loadSaved(){
       window._lsSavedAt = saved.savedAt || null;
       if(saved.savedAt) window._lastSaveStamp = saved.savedAt; // this data's own stamp (see autoSave)
       window._lsScId = saved.scId;   // the scenario this copy is of (undefined: saved before that was recorded)
+      window._lsScBase = saved.scBase || null;   // the synced file version it was built from
 
       // Update Real Data Input panel facility selector after loading
       if(typeof initRealDataFacilitySelector === 'function'){
@@ -31389,9 +31394,13 @@ function _mgParseBaseline(baseline){
 // rewrites the shared file.
 function _mgSync(base, ours, theirs){
   // Changes the signed-in person may not make are put back before anything is recorded or merged.
-  if(typeof _acEnforce==='function') ours=_acEnforce(base, ours);
+  if(typeof _acEnforce==='function') ours=_acEnforce(base, ours, theirs);
+  // Topology: the administrator's sealed version is everyone's (see TOPOLOGY SEAL).
+  const oursBefore=ours;
+  let ts={ours, seal:null, request:null};
+  if(typeof _tsPrepare==='function'){ ts=_tsPrepare(base, ours, theirs); ours=ts.ours; }
   const diff=_clDiff(base, ours);
-  let log=_clUnion(_clUnion(window._scLog, ours.changeLog), theirs.changeLog);
+  let log=_clUnion(_clUnion(_clUnion(window._scLog, base.changeLog), ours.changeLog), theirs.changeLog);
   log=_clAppend(log, diff);
   const res=_mgMergePayload(base, ours, theirs, {idx:_clIndex(log)});
   res.payload.changeLog=_clCompact(log);
@@ -31399,6 +31408,7 @@ function _mgSync(base, ours, theirs){
   res.ownChanges=diff.ops.length;
   res.diff=diff;
   res.needWrite = res.localApplied>0 || res.conflicts.length>0;
+  if(ts.seal) _tsFinish(res, ts.seal, ts.request, oursBefore, theirs);
   // Who wrote what we are pulling in: saves in their log that we had not seen.
   const ours0=new Set(_clNorm(ours.changeLog).saves.map(s=>s.id));
   res.theirSaves=_clNorm(theirs.changeLog).saves.filter(s=>!ours0.has(s.id));
@@ -31447,6 +31457,7 @@ function _mgApplyPayloadToApp(payload){
   if(payload.simResults) S.simResults=payload.simResults;
   // The change log is only ever united, never replaced (a restored snapshot carries an old log).
   if(payload.changeLog) window._scLog=_clCompact(_clUnion(window._scLog, payload.changeLog));
+  if(payload.topoSeal && typeof _tsNewest==='function') window._scTopoSeal=_tsNewest(window._scTopoSeal, payload.topoSeal);
   // People / permissions may have changed (a new request, a reset password, access removed).
   try{ if(typeof acGate==='function') acGate(); }catch(e){ console.warn('acGate', e); }
   try{
@@ -31551,6 +31562,11 @@ async function scDeleteHistoryDirHandle(id){ try{const db=await scOpenIDB();awai
 // ── Merge baselines — the file state this browser last synced with ──
 // Persisted in IndexedDB so the three-way merge survives a reload; without a
 // baseline the app falls back to the old timestamp guard (binary keep/replace).
+// Identity of the file version this browser last synced with (for the local-copy tag above).
+function _scBaseTag(id){
+  id=id||(typeof SC!=='undefined'&&SC.activeId); const b=id&&SC.baselines[id];
+  return b&&b.text ? (b.fileMod+':'+b.text.length+':'+(b.savedAt||'')) : null;
+}
 async function scSaveBaseline(id, text, savedAt, fileMod){
   SC.baselines[id]={text, savedAt:savedAt||null, fileMod:fileMod??null};
   try{ const db=await scOpenIDB(); await new Promise((r,j)=>{const tx=db.transaction('baselines','readwrite');tx.objectStore('baselines').put(SC.baselines[id],id);tx.oncomplete=r;tx.onerror=j;}); }catch(e){ console.warn('SC baseline save',e); }
@@ -31582,7 +31598,7 @@ function scBuildPayload(){
   const miss=window._dbPartialTables;
   if(Array.isArray(miss)) miss.forEach(t=>{ delete dbOut[t]; });
   // Keep actual demand_values too — once imported they belong to the app.
-  return { DB:dbOut, counter:S.elCounter, simCfg:S.simCfg, simResults:S.simResults||null, savedAt:(window._lastSaveStamp||new Date().toISOString()), changeLog:window._scLog||_clEmpty() };
+  return { DB:dbOut, counter:S.elCounter, simCfg:S.simCfg, simResults:S.simResults||null, savedAt:(window._lastSaveStamp||new Date().toISOString()), changeLog:window._scLog||_clEmpty(), topoSeal:window._scTopoSeal||undefined };
 }
 
 // Restore tables that the localStorage cache had to drop, reading them back from
@@ -31911,7 +31927,15 @@ async function scLoadScenario(id, opts){
     // change log decide row by row (see _mgSync) — our offline edits are kept, the file's newer
     // rows come in, and an out-of-date file can no longer erase what it lacks.
     if(base && base.DB){
-      const res=_mgSync(base, scBuildPayload(), saved);
+      // Only a local copy built from THIS baseline holds real unsaved edits. One built from an
+      // older sync (the file moved on while this browser was closed / pulled without re-caching)
+      // would read as "I deleted / reverted everything since" — so it is not used as ours:
+      // the file is taken (plus anything the change log says it is missing).
+      const cacheIsFromBase = window._lsScBase && window._lsScBase===_scBaseTag(id);
+      let oursNow=scBuildPayload();
+      if(!cacheIsFromBase){ oursNow=Object.assign(JSON.parse(baseline.text), {changeLog:oursNow.changeLog, topoSeal:oursNow.topoSeal, simResults:oursNow.simResults}); console.info('scenario: local copy predates the last sync — using the file'); }
+      const res=_mgSync(base, oursNow, saved);
+      if(!cacheIsFromBase) res.remoteApplied=Math.max(1, res.remoteApplied||0);   // screen shows the old copy — replace it
       if(res.remoteApplied>0 || res.needWrite) _mgApplyPayloadToApp(res.payload);
       else window._scLog=res.payload.changeLog;
       window._dbPartialTables=[];
@@ -31967,6 +31991,8 @@ async function scLoadScenario(id, opts){
   // Change log: the file's, united with what this browser's last sync of THIS scenario knew
   // (an older app version writing the file drops the log; the baseline still has it).
   { let lg=_clNorm(saved.changeLog); if(SC.activeId===id){ try{ const bo=_mgParseBaseline(await scLoadBaseline(id)); if(bo) lg=_clUnion(lg, bo.changeLog); }catch(e){} } window._scLog=_clCompact(lg); }
+  window._scTopoSeal=(SC.activeId===id?_tsNewest(window._scTopoSeal, saved.topoSeal):(saved.topoSeal||null))||null;
+  if(window._scTopoSeal && !_tsSame(_tsTables(saved), window._scTopoSeal.tables)) Object.assign(DB, window._scTopoSeal.tables);   // written back on the next save
   window._dbPartialTables=[];                          // adopted the file wholesale — memory is complete
   if(typeof _demandCacheInvalidate==='function') _demandCacheInvalidate();
   SC.activeId=id; m.lastOpened=new Date().toISOString();
@@ -32410,6 +32436,7 @@ function _acRowFacility(table, row, elFac){
 // access request. Everything else in the access tables is the admin's.
 function _acAccessRowAllowed(table, b, o){
   if(table==='access_requests') return !b && !!o;
+  if(table==='change_requests') return !b && !!o && !!_acUser && o.by===_acUser.id;
   if(table==='access_users'){
     if(!_acUser || !b || !o || b.id!==_acUser.id || o.id!==_acUser.id) return false;
     const strip=r=>{ const c=Object.assign({},r); AC_PW_FIELDS.forEach(f=>delete c[f]); return _mgStr(c); };
@@ -32423,9 +32450,9 @@ function _acSilentRow(table, row){ return table==='vessel_calls' && row && row.s
 
 // Called by _mgSync before anything is diffed or merged: returns `ours` with every change
 // this person may not make put back to the baseline, and undoes those changes on screen.
-function _acEnforce(base, ours){
+function _acEnforce(base, ours, theirs){
   if(!base || !base.DB || !ours || !ours.DB) return ours;
-  if(!_acEnabledDB(base.DB) && !_acEnabledDB(ours.DB)) return ours;   // sign-in is off for this scenario
+  if(!_acEnabledDB(base.DB) && !_acEnabledDB(ours.DB) && !(theirs && theirs.DB && _acEnabledDB(theirs.DB))) return ours;   // sign-in is off for this scenario
   if(_acIsAdmin()) return ours;
   const elFac=new Map(), fbn=_acFacByName();
   for(const src of [base.DB.elements, ours.DB.elements]) for(const e of (src||[])) if(e && e.id!=null && !elFac.has(e.id)) elFac.set(e.id, _acElFacility(e, fbn));
@@ -32438,7 +32465,7 @@ function _acEnforce(base, ours){
     const om=new Map(); for(const r of oa) om.set(_mgRowKey(t,r), r);
     let changed=false, visible=false; const rows=[];
     const ok=(b,o)=>{
-      if(t==='access_users'||t==='access_requests') return _acAccessRowAllowed(t,b,o);
+      if(t==='access_users'||t==='access_requests'||t==='change_requests') return _acAccessRowAllowed(t,b,o);
       const fb=b?_acRowFacility(t,b,elFac):null, fo=o?_acRowFacility(t,o,elFac):null;
       const fn=_acFunc(t, o||b);
       const can=(!b || _acCan(_acUser, _acFunc(t,b), fb)) && (!o || _acCan(_acUser, fn, fo));
@@ -32652,7 +32679,7 @@ function acSignOut(){
 function acUpdateChip(){
   if(typeof acScheduleSweep==='function') acScheduleSweep();   // re-lock / unlock inputs for this person
   const c=document.getElementById('ac-chip'); if(!c) return;
-  const pend=_acIsAdmin()?_acPendingRequests().length:0;
+  const pend=_acIsAdmin()?_acPendingRequests().length+(typeof _tsPending==='function'?_tsPending().length:0):0;
   if(!_acEnabledDB()){ c.innerHTML='👤'; c.title='Sign-in is not turned on for this scenario — click to set it up'; return; }
   if(!_acUser){ c.innerHTML='👤 Sign in'; c.title='Sign in'; return; }
   const first=String(_acUser.name||_acUser.email).split(/[\s@]/)[0];
@@ -32687,12 +32714,12 @@ function _acAccessSummary(u){
 // Admin: a toast when a new request arrives (checked on every sync).
 function _acNotifyRequests(force){
   if(!_acIsAdmin()) return;
-  const pend=_acPendingRequests();
+  const pend=_acPendingRequests().concat(typeof _tsPending==='function'?_tsPending():[]);
   const seen=new Set(window._acSeenReq||[]);
   const fresh=pend.filter(r=>!seen.has(r.id));
   window._acSeenReq=pend.map(r=>r.id);
   acUpdateChip();
-  if(fresh.length && (force || window._acReqPrimed)) _acBanner(`<b>${_scEsc(fresh.map(r=>r.name||r.email).join(', '))}</b> asked for access. <a style="text-decoration:underline;cursor:pointer" onclick="acOpenUsersPanel()">Review →</a>`, 'ok');
+  if(fresh.length && (force || window._acReqPrimed)) _acBanner(`<b>${_scEsc(fresh.map(r=>r.name||r.email||r.by).join(', '))}</b> ${fresh.some(r=>r.area)?'sent a request (access or topology change)':'asked for access'}. <a style="text-decoration:underline;cursor:pointer" onclick="acOpenUsersPanel()">Review →</a>`, 'ok');
   window._acReqPrimed=true;
 }
 
@@ -32938,6 +32965,168 @@ async function _acWelcomeUse(hit){
   // scOpenHandle → scLoadScenario → scAfterLoad → acGate decides: set password / sign in / (sign-in off) straight in.
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// TOPOLOGY SEAL — the administrator's topology always prevails.
+// Once sign-in is on, the scenario file carries `topoSeal` = {at, by, tables}: the topology
+// exactly as the administrator last saved it. Every save from every browser (running this
+// version) writes the seal's tables as the topology — whatever an old tab, an out-of-date copy
+// or an older app version put there is replaced within one sync (~30 s), and the seal itself
+// only moves forward (newest `at` wins; only an administrator's save creates a newer one, by
+// applying just the rows that administrator changed onto the newest seal).
+// Someone who is not an administrator but has "Modify" on Topology & setup: their topology
+// edits do not go in — they become a change request (DB.change_requests) the administrator
+// accepts or rejects in 👥 Users & access.
+// ═══════════════════════════════════════════════════════════════════════
+const TOPO_TABLES=['macro_regions','countries','regions','sub_regions','facilities','elements','connections','products','recipes',
+  'raw_materials','fuels','element_product_capacities','element_raw_meal_recipes','silo_links','demand_points','simulation_rules'];
+function _tsNewest(...seals){
+  return seals.filter(s=>s && s.at && s.tables).sort((a,b)=>String(b.at).localeCompare(String(a.at)))[0]||null;
+}
+function _tsTables(p){ const o={}; for(const t of TOPO_TABLES){ const v=p&&p.DB?p.DB[t]:undefined; if(Array.isArray(v)) o[t]=v; } return o; }
+// Row-level topology changes base → ours: [{t,k,before,after}] (null = absent).
+function _tsTopoDiff(base, ours){
+  const ch=[];
+  for(const t of TOPO_TABLES){
+    const oa=ours&&ours.DB?ours.DB[t]:undefined; if(!Array.isArray(oa)) continue;
+    const ba=base&&base.DB&&Array.isArray(base.DB[t])?base.DB[t]:[];
+    const bm=new Map(); for(const r of ba) bm.set(_mgRowKey(t,r), r);
+    const om=new Map(); for(const r of oa) om.set(_mgRowKey(t,r), r);
+    for(const [k,o] of om){ const b=bm.get(k); if(b===undefined || _mgStr(b)!==_mgStr(o)) ch.push({t, k, before:b===undefined?null:b, after:o}); }
+    for(const [k,b] of bm) if(!om.has(k)) ch.push({t, k, before:b, after:null});
+  }
+  return ch;
+}
+// Apply row changes onto a copy of the seal's tables.
+function _tsApply(tables, changes){
+  const out={}; for(const t of TOPO_TABLES) if(Array.isArray(tables[t])) out[t]=tables[t].slice();
+  const byT={}; for(const c of changes) (byT[c.t]=byT[c.t]||[]).push(c);
+  for(const t of Object.keys(byT)){
+    const arr=out[t]||[], idx=new Map(); arr.forEach((r,i)=>idx.set(_mgRowKey(t,r), i));
+    const del=new Set();
+    for(const c of byT[t]){
+      const i=idx.get(c.k);
+      if(c.after===null){ if(i!==undefined) del.add(i); }
+      else if(i!==undefined) arr[i]=c.after;
+      else { idx.set(c.k, arr.length); arr.push(c.after); }
+    }
+    out[t]=arr.filter((_,i)=>!del.has(i));
+  }
+  return out;
+}
+function _tsSame(a, b){ for(const t of TOPO_TABLES){ if(_mgStr(a[t]||[])!==_mgStr(b[t]||[])) return false; } return true; }
+function _tsLabel(c){
+  const r=c.after||c.before||{};
+  const kind=c.before===null?'Add':c.after===null?'Remove':'Change';
+  const what={elements:(r.type||'element').replace(/_/g,' '), connections:'connection', facilities:'facility', products:'product', demand_points:'demand-point product', silo_links:'silo link', recipes:'recipe'}[c.t]||c.t.replace(/_/g,' ');
+  let name=r.name||r.id||'';
+  if(c.t==='connections'){ const el=id=>{ const e=(DB.elements||[]).find(x=>x.id===id); return e?e.name:id; }; name=el(r.from_element_id||r.from)+' → '+el(r.to_element_id||r.to); }
+  let fields='';
+  if(c.before && c.after){
+    const ks=[...new Set([...Object.keys(c.before), ...Object.keys(c.after)])].filter(k=>_mgStr(c.before[k])!==_mgStr(c.after[k]));
+    const simple=v=>v==null||typeof v!=='object';
+    const show=ks.filter(k=>k!=='x'&&k!=='y').slice(0,3).map(k=>simple(c.before[k])&&simple(c.after[k])?`${k}: ${String(c.before[k]??'—')} → ${String(c.after[k]??'—')}`:k);
+    fields=ks.every(k=>k==='x'||k==='y')?' (moved on the canvas)':' ('+show.join('; ')+(ks.length>3?'; …':'')+')';
+  }
+  return `${kind} ${what} <b>${_scEsc(String(name))}</b>${_scEsc(fields)}`;
+}
+// Called inside _mgSync after the permission check. Returns {ours, seal, request}.
+function _tsPrepare(base, ours, theirs){
+  const on=typeof _acEnabledDB==='function' && (_acEnabledDB(base.DB)||_acEnabledDB(ours.DB)||_acEnabledDB(theirs.DB));
+  if(!on) return {ours, seal:null, request:null};
+  let seal=_tsNewest(base.topoSeal, ours.topoSeal, theirs.topoSeal, window._scTopoSeal);
+  const tch=_tsTopoDiff(base, ours);
+  let request=null;
+  if(_acIsAdmin()){
+    if(tch.length && seal) seal={at:new Date().toISOString(), by:_acUser.id, tables:_tsApply(seal.tables, tch)};
+    else if(!seal) seal={at:new Date().toISOString(), by:_acUser.id, tables:_tsTables(ours)};   // first seal: what the administrator sees now
+  }else if(tch.length && _acUser && seal){
+    request={id:'cr_'+Date.now().toString(36)+Math.random().toString(36).slice(2,5), area:'topology', by:_acUser.id, name:_acUser.name||_acUser.email,
+      at:new Date().toISOString(), status:'pending', items:tch};
+  }
+  if(!seal) return {ours, seal:null, request:null};
+  // Everyone's copy of the topology becomes the seal's before anything is recorded or merged.
+  ours=Object.assign({}, ours, {DB:Object.assign({}, ours.DB, seal.tables), topoSeal:seal});
+  return {ours, seal, request};
+}
+// After the merge: the written topology is exactly the seal; say whether that changed the file
+// (needWrite) or what is on screen (applied like a pull).
+function _tsFinish(res, seal, request, oursBefore, theirs){
+  if(!seal) return;
+  Object.assign(res.payload.DB, seal.tables);
+  res.payload.topoSeal=seal;
+  window._scTopoSeal=seal;
+  if(!theirs.topoSeal || theirs.topoSeal.at!==seal.at || !_tsSame(_tsTables(theirs), seal.tables)) res.needWrite=true;
+  if(!_tsSame(_tsTables(oursBefore), seal.tables)){ res.remoteApplied=(res.remoteApplied||0)+1; res.topoRestored=true; }
+  if(request){
+    res.payload.DB.change_requests=(res.payload.DB.change_requests||[]).concat([request]);
+    res.needWrite=true; res.remoteApplied=(res.remoteApplied||0)+1;
+    setTimeout(()=>_acBanner(`Your topology change (${request.items.length} item${request.items.length>1?'s':''}) was <b>sent to the administrator for approval</b>. It will appear once accepted.`, 'ok'), 0);
+  }
+}
+
+// ── Administrator: pending topology requests ──
+function _tsPending(){ return (DB.change_requests||[]).filter(r=>r && r.status==='pending'); }
+function _tsRequestsHTML(){
+  const req=_tsPending(); if(!req.length) return '';
+  return `<div class="ac-sec">TOPOLOGY CHANGE REQUESTS <span class="ac-badge">${req.length}</span></div>`+req.map(r=>{
+    const cur=_tsTables({DB});
+    const items=r.items.map((c,i)=>{
+      const arr=cur[c.t]||[], now=arr.find(x=>_mgRowKey(c.t,x)===c.k);
+      const moved=_mgStr(now===undefined?null:now)!==_mgStr(c.before);
+      return `<div class="ac-dim" style="font-size:10px;color:var(--text)">• ${_tsLabel(c)}${moved?' <span style="color:var(--amber)">— changed since the request</span>':''}</div>`;
+    }).join('');
+    return `<div class="ac-li" style="align-items:flex-start"><div style="flex:1"><b>${_scEsc(r.name||r.by)}</b> · ${new Date(r.at).toLocaleString()}${items}</div>
+      <button class="btn-pri" onclick="tsAcceptRequest('${_scEsc(r.id)}')">Accept</button><button class="btn-sec" onclick="tsRejectRequest('${_scEsc(r.id)}')">Reject</button></div>`;
+  }).join('');
+}
+function tsAcceptRequest(id){
+  if(!_acIsAdmin()) return;
+  const r=(DB.change_requests||[]).find(x=>x.id===id); if(!r) return;
+  // New elements created on another computer may reuse an id that exists here — give them a new one.
+  let items=r.items;
+  const taken=new Set((DB.elements||[]).map(e=>e.id));
+  const clash=items.filter(c=>c.t==='elements' && c.before===null && c.after && taken.has(c.after.id)).map(c=>c.after.id);
+  if(clash.length){
+    let txt=JSON.stringify(items);
+    for(const old of clash){ if(typeof syncElCounter==='function') syncElCounter(); const nid='el_'+(++S.elCounter);
+      txt=txt.split('"'+old+'"').join('"'+nid+'"').split('"dp_el_'+old+'"').join('"dp_el_'+nid+'"'); }
+    items=JSON.parse(txt);
+  }
+  const t=_tsApply(_tsTables({DB}), items.map(c=>Object.assign({}, c, {k:c.after?_mgRowKey(c.t,c.after):c.k})));
+  Object.assign(DB, t);
+  if(typeof syncElCounter==='function') syncElCounter();
+  DB.change_requests=DB.change_requests.map(x=>x.id===id?Object.assign({}, x, {status:'accepted', handled_by:_acUser.id, handled_at:new Date().toISOString()}):x);
+  if(typeof _demandCacheInvalidate==='function') _demandCacheInvalidate();
+  autoSave(); scWriteActive(SC.activeId);
+  try{ _acRerender(); if(typeof renderDtree==='function') renderDtree(S.simResults); }catch(e){}
+  statMsg('Topology change accepted');
+  acOpenUsersPanel();
+}
+function tsRejectRequest(id){
+  if(!_acIsAdmin()) return;
+  DB.change_requests=(DB.change_requests||[]).map(x=>x.id===id?Object.assign({}, x, {status:'rejected', handled_by:_acUser.id, handled_at:new Date().toISOString()}):x);
+  autoSave(); scWriteActive(SC.activeId); acOpenUsersPanel();
+}
+// 🕒 History: bring back only the topology of a saved version (administrator).
+async function scRestoreTopologySnapshot(id, name){
+  if(_acEnabledDB() && !_acIsAdmin()){ statMsg('Only the administrator can restore the topology.'); return; }
+  const dir=await scEnsureHistoryDir(id,false); if(!dir) return;
+  if(!confirm('Restore ONLY the topology (facilities, equipment, silos, demand points, connections, products) from this saved version?\n\nDemand, inventory, plans and real values stay as they are now.')) return;
+  try{
+    await scWriteSnapshot(id, JSON.stringify(scBuildPayload()), 'pre-restore');
+    const payload=JSON.parse(await (await (await dir.getFileHandle(name)).getFile()).text());
+    if(!payload || !payload.DB) throw new Error('not a valid scenario snapshot');
+    const t=_tsTables(payload); if(!t.elements || !t.elements.length) throw new Error('that version has no topology');
+    Object.assign(DB, t);
+    if(payload.counter) S.elCounter=Math.max(S.elCounter||0, payload.counter);
+    if(typeof syncElCounter==='function') syncElCounter();
+    if(typeof _demandCacheInvalidate==='function') _demandCacheInvalidate();
+    await scManualSave();
+    closeModal(); _acRerender(); if(typeof renderLocationTree==='function') renderLocationTree(); if(typeof updateNavFacilities==='function') updateNavFacilities();
+    statMsg('Topology restored ✓ — '+t.elements.length+' elements from '+name);
+  }catch(e){ statMsg('Topology restore failed — '+e.message); console.warn('topology restore', e); }
+}
+
 // ═══ Users & access panel (admin) ═══
 function acOpenUsersPanel(){
   if(!SC.activeId){ statMsg('Open a scenario first — the list of people is stored in the scenario file.'); return; }
@@ -32958,6 +33147,7 @@ function acOpenUsersPanel(){
   showModalContent(`
     <div class="modal-hdr"><span class="modal-title">👥 Users &amp; access — ${e(SC.meta[SC.activeId]?.name||'')}</span><span class="modal-close" onclick="closeModal()">✕</span></div>
     <div class="modal-body ac-panel">
+      ${typeof _tsRequestsHTML==='function'?_tsRequestsHTML():''}
       <div class="ac-sec">ACCESS REQUESTS ${req.length?`<span class="ac-badge">${req.length}</span>`:''}</div>
       ${reqRows||'<div class="ac-dim" style="padding:6px 2px 10px">No requests waiting.</div>'}
       <div class="ac-sec">PEOPLE WITH ACCESS</div>
@@ -33218,6 +33408,7 @@ async function scRenderHistoryList(id){
     return `<div style="display:flex;align-items:center;gap:10px;padding:8px 2px;border-bottom:1px solid var(--border2);font-family:var(--mono)">
       <div style="flex:1;font-size:10px;color:var(--text)">${it.date.toLocaleString()}${tagBadge(it.tag)}</div>
       <button class="btn-sec" onclick="scRestoreSnapshot('${id}','${safe}')">↩ Restore</button>
+      <button class="btn-sec" onclick="scRestoreTopologySnapshot('${id}','${safe}')" title="Bring back only the topology (facilities, equipment, silos, demand points, connections, products) of this version">↩ Topology only</button>
       <span style="color:var(--red);cursor:pointer;font-size:12px;padding:0 4px" title="Delete" onclick="scDeleteSnapshot('${id}','${safe}')">🗑</span>
     </div>`;
   }).join('');
