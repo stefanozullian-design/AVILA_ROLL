@@ -3548,6 +3548,8 @@ function saveLocNode(type,id){
   const moved=!!newParent&&rec[fk]!==newParent;
   if(newParent) rec[fk]=newParent;
   autoSave(); renderLocationTree();
+  // A facility's name and Plant # codes are ship points the SAP script asks for (rules file)
+  if(type==='facility'&&typeof _xlRulesChanged==='function') _xlRulesChanged();
   if(typeof pcClash!=='undefined'&&pcClash&&pcClash.length){ statMsg(`Saved — but these codes are also on another facility: ${pcClash.join(', ')}`); return; }
   statMsg(moved?`Saved — moved to ${LOC_LEVELS[li-1].label} ${(DB[LOC_LEVELS[li-1].table]||[]).find(r=>r.id===newParent)?.name||''}`:'Saved');
 }
@@ -3714,6 +3716,7 @@ function deleteFacility(id,e){
   DB.connections=DB.connections.filter(c=>c.facility_id!==id);
   if(S.facility_id===id){ S.facility_id=null; document.getElementById('stat-fac').textContent='No facility selected'; }
   autoSave(); renderLocationTree(); statMsg('Facility deleted');
+  if(typeof _xlRulesChanged==='function') _xlRulesChanged();   // its Plant # codes leave the SAP script's list
 }
 
 // ═══════════════════════════════════════════════════════
@@ -24470,6 +24473,7 @@ function saveFacility(){
   DB.facilities.push(fac);
   S._newFacSubRegion=null;
   autoSave(); closeModal(); renderLocationTree();
+  if(typeof _xlRulesChanged==='function') _xlRulesChanged();   // its Plant # codes go to the SAP script
   statMsg(clash.length?`Facility "${name}" created — but these codes are also on another facility: ${clash.join(', ')}`:`Facility "${name}" created`);
 }
 
@@ -27268,7 +27272,15 @@ function xlmapRulesPayload(){
     const sp=_xlSplitProduct(p.name);
     catalog.push({code:k.sap, ship_pt:k.ship, product:sp.product, pres:sp.pres, name:p.name});
   });
-  const body={format:'avila-demand-rules', version:XLMAP.version||3, ..._xlTablesOf(XLMAP), catalog_materials:catalog};
+  // The topology's own ship points (facility Plant # codes, product material codes): the
+  // script asks SAP for these too and names a code the table lacks after its facility.
+  // …and the demand points themselves, so the script's report can say which ones SAP feeds.
+  const facName=id=>((DB.facilities||[]).find(f=>f.id===id)||{}).name||'';
+  const body={format:'avila-demand-rules', version:XLMAP.version||3, ..._xlTablesOf(XLMAP), catalog_materials:catalog,
+    catalog_ship_points:_xlTopologyShipPoints().map(t=>({code:t.code, source:t.source, facility:t.facility, from:t.from, label:t.label})),
+    demand_points:(DB.elements||[]).filter(e=>e.type==='demand_point')
+      .map(e=>({name:String(e.name||''), dp_code:String(e.props?.dp_code||''),   // dp_code: the override the import also matches
+                facility:facName(e.assigned_facility_id||e.facility_id), active:e.is_active!==false}))};
   return {...body, rules_id:_xlHash(_xlCanon(body)), tables_id:_xlTablesId(XLMAP), tables_edited_at:XLMAP.edited_at||'',
     saved_at:new Date().toISOString(), saved_at_local:_xlLocalStamp(),
     scenario:(typeof scActive==='function'?scActive()?.name:'')||''};
@@ -27335,7 +27347,11 @@ async function _xlSaveRules(prompt, mode){
     const payload=xlmapRulesPayload();
     let at=_xlLocalStamp(), id=payload.rules_id;
     const sameTables=file&&(file.tables_id||_xlTablesId(file))===payload.tables_id;
-    if(file&&(file.rules_id===payload.rules_id||(mode==='open'&&sameTables))){
+    // Opening Demand Mapping in the SAME scenario the file was written from refreshes the
+    // scenario part (catalog, topology ship points, demand points) — that is what keeps the
+    // SAP script's list current. Another scenario never overwrites it just by opening.
+    const sameScenario=!!file&&!!payload.scenario&&file.scenario===payload.scenario;
+    if(file&&(file.rules_id===payload.rules_id||(mode==='open'&&sameTables&&!sameScenario))){
       at=file.saved_at_local||at; id=file.rules_id||id;    // nothing of ours to write
     }else{
       const w=await (await dir.getFileHandle(XLPUB_FILES.map,{create:true})).createWritable();
@@ -27347,6 +27363,7 @@ async function _xlSaveRules(prompt, mode){
     if(note){ statMsg(note); if(document.getElementById('cfg-panel-demandmap')) xlmapRender(); }
     else if(prompt) statMsg(`Rules saved to ${dir.name}/${XLPUB_FILES.map}`);
     ok=true;
+    _xlLoadSapStatus(false);   // same folder: what the SAP script asked for last time
   }catch(e){ console.warn('rules save',e); if(prompt) statMsg('Could not save the rules file: '+(e.message||e)); }
   const el=document.getElementById('xl-rules-row'); if(el) el.outerHTML=_xlFolderRulesHTML();
   return ok;
@@ -27919,8 +27936,19 @@ function xlmapTranslate(row){
   const trace=[], missing=[];
   const spCode=String(row.ship_pt??'').trim();
   const sp=(XLMAP.ship_points||[]).find(r=>_xlNorm(r.code)===_xlNorm(spCode));
-  if(sp&&sp.source) trace.push({t:'Ship point', r:`${spCode} → ${sp.source}`});
-  else missing.push(sp?`ship point ${spCode} has no source set`:`ship point ${spCode||'(blank)'} is not in the ship-point table`);
+  let source='';
+  if(sp&&sp.source){ source=sp.source; trace.push({t:'Ship point', r:`${spCode} → ${sp.source}`}); }
+  else if(sp) missing.push(`ship point ${spCode} has no source set`);
+  else{
+    // No table row: the topology may still know the code (a facility's Plant #, or the ship
+    // point inside a product's material code). Translate in the .vbs does the same.
+    const tp=_xlTopoShipPoint(spCode);
+    if(tp&&tp.source){
+      source=tp.source;
+      trace.push({t:'Ship point', r:`${spCode} → ${tp.source} (topology — ${tp.from==='facility'?`Plant # of ${tp.facility}`:`material code of ${tp.label}`}; no table row)`});
+    }else missing.push(tp?`ship point ${spCode} is on product ${tp.label} in the topology, but that product has no Made At facility to name it`
+                         :`ship point ${spCode||'(blank)'} is not in the ship-point table or on any topology facility`);
+  }
 
   let mCode=String(row.material??'').trim();
   const warn=[], picked=mCode.startsWith('cat:')?(DB.products||[]).find(x=>x.id===mCode.slice(4)):null;
@@ -27961,7 +27989,7 @@ function xlmapTranslate(row){
   const cls=xlmapClassify(row.sold_to);
   trace.push({t:'Class', r:`Sold-To ${String(row.sold_to??'').trim()||'(blank)'}: ${cls.rule}`});
 
-  const parts={source:sp?sp.source:'', movement:mov?mov.movement:'', product:mat?mat.product:'',
+  const parts={source, movement:mov?mov.movement:'', product:mat?mat.product:'',
                presentation:mat?mat.pres:'', class:cls.value};
   const name=xlmapName(parts);
   let finalName=name, action=mov?(mov.action||'import'):'import';
@@ -28040,14 +28068,111 @@ const _xlAddBtn=(label,onclick)=>`<div style="padding:7px 12px"><span class="tbl
 
 function _xlShipBody(){
   const rows=(XLMAP.ship_points||[]).map((r,i)=>({r,i})).filter(({r})=>_xlHit('ship',r.code,r.source,r.note));
-  return `<div style="padding:8px 12px;border-bottom:1px solid var(--border)">${_xlFilterBox('ship','filter code or source…')}</div>
-  <div id="xl-body-ship">${_xlTbl(_xlHdr(['Ship Pt','Source','Note',''])+rows.map(({r,i})=>`<tr>
+  const st=_xlSapStatus();
+  return `${_xlSapHeadHTML(st)}${_xlSourceCoverageHTML()}<div style="padding:8px 12px;border-bottom:1px solid var(--border)">${_xlFilterBox('ship','filter code or source…')}</div>
+  <div id="xl-body-ship">${_xlTbl(_xlHdr(['Ship Pt','Source','Note',...(st?['SAP · last run']:[]),''])+rows.map(({r,i})=>`<tr>
       ${_xlTd(_xlInp('ship_points',i,'code',r.code,'4802'),'90px')}
       ${_xlTd(_xlInp('ship_points',i,'source',r.source,'BRS'),'150px')}
       ${_xlTd(_xlInp('ship_points',i,'note',r.note,'optional'))}
+      ${st?_xlTd(_xlSapCellHTML(r.code,st),'260px'):''}
       ${_xlTd(`<span class="tbl-act del" style="margin:0" onclick="_xlDel('ship_points',${i})">✕</span>`,'24px')}
     </tr>`).join(''))}</div>
   ${_xlAddBtn('Add ship point',`_xlAdd('ship_points',{code:'',source:'',note:''})`)}`;
+}
+
+// ── What the SAP script asked for, per ship point ──────────────────────────────
+// Avila_Sales_Pipeline.vbs asks ZDAL2 for every code in the Ship points table (plus
+// its own base list) and, after each run, writes Avila_Pipeline_ShipPoints.json next
+// to the sales files: what it asked, in which sales org, and what came back. Read-only
+// here — the table above is still the only thing people edit.
+const XLPIPE_STATUS_FILE='Avila_Pipeline_ShipPoints.json';
+async function _xlLoadSapStatus(prompt){
+  try{
+    const dir=await exportDir('sap',!!prompt);
+    if(!dir){ if(prompt) statMsg('Choose the sales files folder first'); return; }
+    let o=null;
+    try{
+      const f=await (await dir.getFileHandle(XLPIPE_STATUS_FILE)).getFile();
+      o=JSON.parse(await f.text());
+      if(!o||o.format!=='avila-pipeline-ship-points') o=null; else o._mtime=f.lastModified;
+    }catch(e){ o=null; }   // not written yet (script older than V1.2, or never run)
+    const next=o||{missing:true, folder:dir.name};
+    const prev=_xlUi.sap;
+    _xlUi.sap=next;
+    if(prompt||!prev||prev._mtime!==next._mtime||!!prev.missing!==!!next.missing){
+      if(document.getElementById('cfg-panel-demandmap')) xlmapRender();
+    }
+  }catch(e){ console.warn('pipeline status',e); }
+}
+// null until read; otherwise {data, idx: code → entry, plan: code → 'orgs asked'}
+function _xlSapStatus(){
+  const d=_xlUi.sap; if(!d||d.missing) return null;
+  if(d._idx) return d._idx;
+  const idx=new Map(), plan=new Map();
+  (d.ship_points||[]).forEach(e=>idx.set(_xlNorm(e.code),e));
+  (d.orgs||[]).forEach(o=>(o.ship_points||[]).forEach(c=>{
+    const k=_xlNorm(c); plan.set(k,(plan.has(k)?plan.get(k)+' ':'')+o.org);
+  }));
+  return (d._idx={data:d, idx, plan});
+}
+function _xlSapHeadHTML(st){
+  const box=inner=>`<div style="padding:8px 12px;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:9px;line-height:1.6;color:var(--text-dim)">${inner}</div>`;
+  const what=`Every code in this table — and every Plant # on a topology facility — is asked from SAP (ZDAL2) by <span style="color:var(--text)">Avila_Sales_Pipeline.vbs</span>; one that is not in its base list is asked in 2125, 2141 and 2172, and its history since 2025 is pulled once.`;
+  if(!_xlUi.sap) return box(`${what}<br><span class="tbl-act" style="margin:0" onclick="_xlLoadSapStatus(true)">Show what the last SAP run asked and got →</span>`);
+  if(!st) return box(`${what}<br><span style="color:var(--amber)">No run report yet in ${esc(_xlUi.sap.folder||'the sales files folder')}</span> — ${XLPIPE_STATUS_FILE} appears after the next run of the script.`);
+  const d=st.data;
+  let saved=null; try{ saved=JSON.parse(localStorage.getItem(XLRULES_SAVED_KEY)||'null'); }catch(e){}
+  const changed=saved&&saved.id&&d.rules_id&&saved.id!==d.rules_id;
+  const inTable=new Set((XLMAP.ship_points||[]).map(r=>_xlNorm(r.code)).filter(Boolean));
+  const extra=[...st.plan.keys()].filter(k=>!inTable.has(k)).sort();
+  const extraRows=extra.filter(k=>(st.idx.get(k)?.rows||0)>0);
+  return box(`<span style="font-size:8px;letter-spacing:1px;text-transform:uppercase">Last SAP run</span>
+    <span style="color:var(--text)">${esc(d.run_at||'?')}</span> by ${esc(d.run_by||'?')}
+    · ${d.with_sap?`window ${esc(d.window_from)} → ${esc(d.window_to)}`:'<span style="color:var(--amber)">rules only, no SAP</span>'}
+    · ${[...(d.orgs||[])].map(o=>`${esc(o.org)} (${(o.ship_points||[]).length})`).join(' · ')}
+    <span class="tbl-act" style="margin:0 0 0 6px" onclick="_xlLoadSapStatus(true)">reload</span><br>${what}
+    ${changed?`<br><span style="color:var(--amber)">This table changed after that run — the next run asks for the new list.</span>`:''}
+    ${extra.length?`<br>Also asked though not in this table (base list or topology)${extraRows.length?` (<span style="color:var(--amber)">${extraRows.map(esc).join(', ')}</span> returned rows that stay unplaced)`:''}: ${extra.map(esc).join(' ')}`:''}
+    ${_xlSapDpHTML(d.demand_points)}`);
+}
+// What the last run said about the scenario's demand points (Avila_Pipeline_Report.xlsx has
+// the full sheets "Puntos de demanda" and "Nombres sin punto").
+function _xlSapDpHTML(dp){
+  if(!dp) return '';
+  const list=(a,max)=>(a||[]).slice(0,max).map(esc).join(', ')+((a||[]).length>max?' …':'');
+  const bits=[];
+  if((dp.no_ship_point||[]).length) bits.push(`<span style="color:var(--amber)">${dp.no_ship_point.length} with no ship point for their source</span> (${list(dp.no_ship_point,4)})`);
+  if((dp.no_sales||[]).length) bits.push(`<span style="color:var(--amber)">${dp.no_sales.length} got no SAP sales</span> (${list(dp.no_sales,4)})`);
+  if((dp.bad_name||[]).length) bits.push(`${dp.bad_name.length} not named {source}/…`);
+  const tail=dp.not_dp_names?`<br>SAP sales on names that are not demand points: <span style="color:var(--amber)">${Number(dp.not_dp_t||0).toLocaleString()} t in ${dp.not_dp_names} name${dp.not_dp_names===1?'':'s'}</span> (report sheet "Nombres sin punto")`:'';
+  return `<br>Demand points in that run: ${dp.total}${bits.length?' — '+bits.join(' · '):' — <span style="color:var(--green)">all fed by SAP</span>'}${tail}`;
+}
+// One ship point's line: asked where, what came back, where it lands, its history.
+function _xlSapInfo(code,st){
+  const k=_xlNorm(code); if(!k||!st) return null;
+  const e=st.idx.get(k), orgs=st.plan.get(k)||'';
+  const n=v=>Number(v||0).toLocaleString();
+  if(!/^[A-Z0-9]{1,4}$/.test(k))   // the script's own rule: a SAP shipping point is 1–4 letters or digits
+    return {c:'var(--red)', t:'not asked — not a SAP ship point code', tip:'A SAP shipping point is 1 to 4 letters or digits; the script skips this one.'};
+  if(!orgs){
+    if(e&&e.note) return {c:'var(--red)', t:`not asked — ${e.note}`, tip:e.note};
+    return {c:'var(--amber)', t:'new — asked from the next run',
+      tip:`Not in the list of the last run (${st.data.run_at}). The next run asks SAP for it in 2125, 2141 and 2172 and pulls its history since ${st.data.history_from||'2025'} once.`};
+  }
+  const rows=e?e.rows:0;
+  const hist=e&&e.history_state==='pending'?' · history on the next SAP run':'';
+  const tip=[`Asked in ${orgs}`,
+    e?`${n(e.rows)} rows · ${n(e.t)} t in the SAP history${e.first?` (${e.first} → ${e.last})`:''}`:'',
+    e&&st.data.with_sap?`this run's window: ${n(e.month_rows)} rows · ${n(e.month_t)} t`:'',
+    e&&e.demand_points?`lands on: ${e.demand_points}`:'',
+    e&&e.history?`history: ${e.history}`:'',
+    e&&e.note?e.note:''].filter(Boolean).join('\n');
+  if(rows>0) return {c:'var(--green)', t:`✓ ${orgs} · ${n(rows)} row${rows===1?'':'s'} · last ${e.last||'?'}${hist}`, tip};
+  return {c:'var(--amber)', t:`asked in ${orgs} · no rows yet${hist}`, tip};
+}
+function _xlSapCellHTML(code,st){
+  const x=_xlSapInfo(code,st); if(!x) return '';
+  return `<span style="font-family:var(--mono);font-size:9px;color:${x.c}" title="${esc(x.tip)}">${esc(x.t)}</span>`;
 }
 // Every product the topology uses, measured against this table — so a product added
 // to the catalog shows up here the day it is created, not the day its sales go missing.
@@ -28215,6 +28340,76 @@ function _xlCatCode(mc){ // "4802-000000000001638064" → {ship:"4802", sap:"163
   const m=/^(?:(\d{3,6})[-\s]+)?0*(\d+)$/.exec(String(mc||'').trim()); // not "OPC-001"
   return m?{ship:m[1]||'', sap:m[2]}:null;
 }
+// ── Ship points the TOPOLOGY defines ─────────────────────────────────────────────
+// A facility's Plant # codes (Organization → facility) are its SAP shipping points, and a
+// product whose material code carries one ("4802-000…1638064") ships from it too. They go
+// into the rules file (catalog_ship_points), the SAP script asks for every one of them, and
+// a code with no row in the Ship points table still translates: its source is the facility,
+// named the way its demand points are — the first segment of the facility name (facility
+// "EXT/CEM/PURCH" is source EXT). When the table has the code, the table wins.
+function _xlFacSource(fac){ return String(fac&&fac.name||'').split('/')[0].trim(); }
+function _xlTopologyShipPoints(){
+  const out=[], seen=new Set();
+  const add=(code,rec)=>{ const k=_xlNorm(code); if(!k||seen.has(k)) return; seen.add(k); out.push({code:String(code).trim(),...rec}); };
+  (DB.facilities||[]).forEach(f=>facPlantCodes(f).forEach(c=>
+    add(c.code,{source:_xlFacSource(f), facility:f.name, from:'facility', label:c.label||''})));
+  (DB.products||[]).forEach(p=>{
+    const k=_xlCatCode(p.material_code); if(!k||!k.ship) return;
+    const f=p.facility_id?(DB.facilities||[]).find(x=>x.id===p.facility_id):null;
+    add(k.ship,{source:f?_xlFacSource(f):'', facility:f?f.name:'', from:'product', label:p.name});
+  });
+  return out;
+}
+function _xlTopoShipPoint(code){
+  const k=_xlNorm(code); if(!k) return null;
+  return _xlTopologyShipPoints().find(r=>_xlNorm(r.code)===k)||null;
+}
+// Which ship points feed each topology source, and what cannot reach SAP. One row per
+// facility (+ any demand-point source that is not a facility name) → {codes, dps, ...}.
+// A "source" is what a demand point's name starts with (PEV/DEM/…): the first segment of a
+// facility's name, or of a demand point's name. Each gets the ship points that produce it.
+function _xlSourceCoverage(){
+  const table=XLMAP.ship_points||[], topo=_xlTopologyShipPoints();
+  const rows=new Map();   // normalized source → {source, facs, codes, dps}
+  const row=src=>{
+    const s=String(src||'').trim(), k=_xlNorm(s); if(!k) return null;
+    if(!rows.has(k)) rows.set(k,{source:s, facs:[], codes:new Map(), dps:0});
+    return rows.get(k);
+  };
+  (DB.facilities||[]).forEach(f=>{ const r=row(_xlFacSource(f)); if(r) r.facs.push(f.name); });
+  const unnamed=[];
+  (DB.elements||[]).filter(e=>e.type==='demand_point').forEach(d=>{
+    const n=String(d.name||''), i=n.indexOf('/'), r=i>0?row(n.slice(0,i)):null;
+    if(r) r.dps++; else unnamed.push(n||d.id);
+  });
+  table.forEach(t=>{ const r=t.source?rows.get(_xlNorm(t.source)):null; if(r) r.codes.set(_xlNorm(t.code),{code:t.code, from:'table'}); });
+  topo.forEach(t=>{
+    const k=_xlNorm(t.code); if(!t.source||table.some(x=>_xlNorm(x.code)===k)) return;   // the table wins
+    const r=row(t.source); if(r&&!r.codes.has(k)) r.codes.set(k,{code:t.code, from:t.from});
+  });
+  // codes the topology names differently from the table (the table wins)
+  const clash=topo.map(t=>({t, x:table.find(r=>_xlNorm(r.code)===_xlNorm(t.code))}))
+    .filter(({t,x})=>x&&x.source&&t.source&&_xlNorm(x.source)!==_xlNorm(t.source))
+    .map(({t,x})=>({code:t.code, table:x.source, topo:t.source, where:t.from==='facility'?`Plant # of ${t.facility}`:`material code of ${t.label}`}));
+  return {list:[...rows.values()], unnamed, clash};
+}
+function _xlSourceCoverageHTML(){
+  const c=_xlSourceCoverage();
+  const ok=c.list.filter(r=>r.codes.size), dead=c.list.filter(r=>!r.codes.size&&r.dps), idle=c.list.filter(r=>!r.codes.size&&!r.dps);
+  const codeTxt=r=>[...r.codes.values()].map(x=>x.from==='table'?esc(x.code):`<span title="${x.from==='facility'?'Plant # in the topology':'ship point in a product material code'} — not in this table">${esc(x.code)}*</span>`).join(' ');
+  const name=r=>{ const f=r.facs.find(n=>_xlNorm(n)!==_xlNorm(r.source));
+    return `<span style="color:var(--text)" title="${esc(r.facs.length?'facility '+r.facs.join(', '):'demand points only — no facility by this name')}">${esc(r.source)}</span>${f?`<span style="color:var(--text-dim)"> (${esc(f)})</span>`:''}`; };
+  const line=(color,html)=>`<div style="margin:2px 0;color:${color}">${html}</div>`;
+  let h='';
+  if(ok.length) h+=line('var(--text-dim)',`<span style="color:var(--green)">✓</span> ${ok.map(r=>`${name(r)} ${codeTxt(r)}`).join(' · ')}`);
+  dead.forEach(r=>h+=line('var(--amber)',`⚠ ${name(r)}: ${r.dps} demand point${r.dps===1?'':'s'} but no SAP ship point — their actual sales can never come from SAP. Add the code as a row here or as a Plant # on the facility (Organization).`));
+  if(c.unnamed.length) h+=line('var(--amber)',`⚠ ${c.unnamed.length} demand point${c.unnamed.length===1?' is':'s are'} not named {source}/… so no SAP sale can land on ${c.unnamed.length===1?'it':'them'}: ${c.unnamed.slice(0,6).map(esc).join(', ')}${c.unnamed.length>6?' …':''}`);
+  if(idle.length) h+=line('var(--text-dim)',`· No SAP ship point and no demand points (nothing to pull yet): ${idle.map(name).join(', ')} — give one a Plant # or a row here when it starts selling.`);
+  c.clash.forEach(x=>h+=line('var(--text-dim)',`· ${esc(x.code)}: this table says ${esc(x.table)}, the topology (${esc(x.where)}) says ${esc(x.topo)} — the table wins.`));
+  if(ok.some(r=>[...r.codes.values()].some(x=>x.from!=='table'))) h+=line('var(--text-dim)',`* comes from the topology, not from this table — the script asks SAP for it all the same.`);
+  return `<div style="padding:8px 12px;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:9px;line-height:1.6">
+    <div style="font-size:8px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase;margin-bottom:2px">Topology sources → SAP ship points</div>${h||line('var(--text-dim)','No facilities in this scenario.')}</div>`;
+}
 function _xlCatalogProductsFor(code, shipPt){
   const c=String(code||'').trim().replace(/^0+/,''); if(!c) return [];
   const hits=(DB.products||[]).filter(p=>{ const k=_xlCatCode(p.material_code); return !!(k&&k.sap===c); });
@@ -28343,9 +28538,14 @@ function _xlClassOptions(){
 function _xlTestBody(){
   if(!XLMAP) xlmapLoad();
   const t=_xlUi.test||(_xlUi.test={});
-  const sources=[...new Set((XLMAP.ship_points||[]).map(r=>r.source).filter(Boolean))].sort();
+  // Table rows, then the codes only the topology knows (a facility's Plant #, a product's ship point)
+  const inTable=new Set((XLMAP.ship_points||[]).map(r=>_xlNorm(r.code)));
+  const allSp=[...(XLMAP.ship_points||[]),
+    ..._xlTopologyShipPoints().filter(p=>p.source&&!inTable.has(_xlNorm(p.code)))
+      .map(p=>({code:p.code, source:p.source, note:(p.from==='facility'?`Plant # of ${p.facility}`:`${p.label} material code`)+' — topology'}))];
+  const sources=[...new Set(allSp.map(r=>r.source).filter(Boolean))].sort();
   if(!t.source&&sources.length) t.source=sources[0];
-  const codes=(XLMAP.ship_points||[]).filter(r=>r.source===t.source);
+  const codes=allSp.filter(r=>r.source===t.source);
   if(!codes.some(c=>c.code===t.code)) t.code=codes[0]?.code||'';
   const fac=_xlFacForSource(t.source,t.code);
   const atFac=_xlProductsAtFacility(fac);
@@ -28422,6 +28622,9 @@ function _xlTestOutHTML(){
       create puts it ${esc(spot.where)} — the canvas jumps there with it selected and ringed${_xlProductIdFor(t.material,t.code)?', product already set':', no catalog product matches it yet'}. Connecting it to a silo stays yours.</div>`;
   }
   res.trace.forEach(x=>h+=line(x.t,x.r));
+  // Whether the SAP script actually asks for this ship point, and what came back
+  const sap=_xlSapInfo(t.code,_xlSapStatus());
+  if(sap) h+=`<div style="font-family:var(--mono);font-size:9px;margin:2px 0" title="${esc(sap.tip)}"><span style="color:var(--text-dim);display:inline-block;width:78px">SAP pull</span><span style="color:${sap.c}">ship point ${esc(t.code)}: ${esc(sap.t)}</span></div>`;
   (res.warn||[]).forEach(w=>h+=`<div style="font-family:var(--mono);font-size:9px;color:var(--amber);margin:4px 0 2px">⚠ ${esc(w)}
     ${res.catalogId?`<span class="tbl-act" onclick="_xlEditProduct('${esc(res.catalogId)}')">set it →</span>`:''}</div>`);
   if(res.name!==res.finalName) h+=line('composed',res.name,'var(--text-dim)');
@@ -28658,7 +28861,7 @@ function xlmapPanelHTML(){
 
     ${_xlCard('src','Source file','the SAP sales export this reads, and what it would land',(window._dsDemandPreview?Number(window._dsDemandPreview.rows).toLocaleString()+' rows':'not bound'),_xlSourceBody())}
     ${_xlCard('test','Build a demand point','pick by name and see the code, the rules, and whether it exists',nDp+' demand points',_xlTestBody())}
-    ${_xlCard('ship','Ship points','which facility a sale shipped from',(XLMAP.ship_points||[]).length,_xlShipBody())}
+    ${_xlCard('ship','Ship points','which facility a sale shipped from — and what the SAP script asks for',(XLMAP.ship_points||[]).length,_xlShipBody())}
     ${_xlCard('mat','Materials','material code → product and pack',(XLMAP.materials||[]).length,_xlMatBody())}
     ${_xlCard('cls','Customer class','how the Sold-To becomes INT / EXT / IND / LKHT',(XLMAP.class_rules||[]).length,_xlClsBody())}
     ${_xlCard('mov','Movement','what each ship type means',(XLMAP.movements||[]).length,_xlMovBody())}
