@@ -5928,7 +5928,7 @@ function saveMaintEvent(){
   DB.element_maintenance_events.push({
     id:`me_${Date.now()}`,
     element_id:elId,
-    facility_id:el?.facility_id||S.facility_id,
+    facility_id:el?.assigned_facility_id||el?.facility_id||S.facility_id,
     element_name:el?.name||'',
     element_type:el?.type||'',
     ...vals
@@ -6718,7 +6718,7 @@ function applyInventory(siloId){
   const asOf=document.getElementById('inv-date')?.value;
   if(!asOf||isNaN(value)||value<0){ statMsg('Enter a valid date and a non-negative inventory level'); return; }
   const eodDate=_invEodDate(asOf);
-  const facId=getEl(siloId)?.facility_id||S.facility_id;
+  const facId=getEl(siloId)?.assigned_facility_id||getEl(siloId)?.facility_id||S.facility_id;
   const now=new Date().toISOString();
   const existing=(DB.real_inventory_daily||[]).find(r=>r.date===eodDate&&r.silo_id===siloId&&r.product_id===productId);
   if(existing){ existing.eod_volume_t=value; existing.updated_at=now; }
@@ -7168,7 +7168,7 @@ function applyCampaign(elId){
   if(window._campMode==='real'){
     if(DOWNTIME_PRODUCTS[productId]){ _campWarn('Down For Repairs / PM Day is a plan, not a measured value — switch to 📈 Forecast Campaign to save it'); return; }
     if(!productId||!fromDate){ _campWarn('Please choose a product and date'); return; }
-    const facId=getEl(elId)?.facility_id||S.facility_id;
+    const facId=getEl(elId)?.assigned_facility_id||getEl(elId)?.facility_id||S.facility_id;
     const now=new Date().toISOString();
     // Upsert: one row per element+product+date.
     const existing=(DB.real_production_daily||[]).find(r=>r.date===fromDate&&r.element_id===elId&&r.product_id===productId);
@@ -33329,13 +33329,20 @@ function _acElFacility(e, facByName){
     const hit=facByName.get(code) || facByName.get(code.split('-').pop());
     if(hit) return hit;
   }
-  return e.facility_id||e.assigned_facility_id||null;
+  // Every element sits on the main plant's canvas (facility_id = BRS); where it really is lives
+  // in assigned_facility_id — a PEV silo is facility_id BRS, assigned PEV.
+  return e.assigned_facility_id||e.facility_id||null;
 }
 function _acFacByName(){ const m=new Map(); for(const f of (DB.facilities||[])) if(f && f.name) m.set(String(f.name).trim().toUpperCase(), f.id); return m; }
 function _acRowFacility(table, row, elFac){
   if(!row) return null;
   if(table==='facilities') return row.id||null;
   if(table==='elements') return elFac.get(row.id) || _acElFacility(row, _acFacByName());
+  // Rows tied to a piece of equipment belong where that equipment is: older rows were stamped
+  // with the canvas plant (BRS) whatever the silo's real facility.
+  for(const k of ['silo_id','element_id','berth_id','mill_id','kiln_id','equipment_id']){
+    const f=row[k]!=null && elFac.get(row[k]); if(f) return f;
+  }
   if(row.facility_id) return row.facility_id;
   if(row.origin_facility_id) return row.origin_facility_id;
   for(const k of ['element_id','silo_id','from_silo_id','berth_id','mill_id','kiln_id','equipment_id','from','dispatch_id','to_silo_id','to']){
