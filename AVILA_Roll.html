@@ -1490,7 +1490,7 @@ td.camp-drag-cut>div:first-child{opacity:.3}
     <div class="nav-sec">
       <div class="nav-sec-hdr">Results</div>
       <div class="nav-cat" onclick="switchView('dashboard')">Dashboard</div>
-      <div class="nav-cat" onclick="switchView('results')">Push to BI</div>
+      <div class="nav-cat" onclick="pushToBI()" title="Exports the Power BI workbook right away">📤 Push to BI</div>
     </div>
   </div>
 </div>
@@ -21545,7 +21545,9 @@ function renderResultsTable(){
 // multiple exports can coexist in the Power BI model.
 async function pushToBI(){
   const btn=document.getElementById('bi-push-btn');
-  const setMsg=(html)=>{ const m=document.getElementById('bi-push-msg'); if(m) m.innerHTML=html; };
+  const setMsg=(html)=>{ const m=document.getElementById('bi-push-msg'); if(m) m.innerHTML=html; _biToast(html); };
+  if(pushToBI._busy) return; // a second click while exporting would write the file twice
+  pushToBI._busy=true;
   try{
     if(btn) btn.disabled=true;
     // Resolve the destination FIRST: showDirectoryPicker() and requestPermission()
@@ -21573,7 +21575,24 @@ async function pushToBI(){
     setMsg(`<span style="color:var(--red)">Export failed: ${e.message}</span>`);
   }finally{
     if(btn) btn.disabled=false;
+    pushToBI._busy=false;
   }
+}
+
+// Progress / result of Push to BI, bottom-right — the export runs straight from the
+// menu, so there is no page to show it on. Stays while working, fades 8 s after the end.
+function _biToast(html){
+  let t=document.getElementById('bi-toast');
+  if(!t){
+    t=document.createElement('div');
+    t.id='bi-toast';
+    t.style.cssText='position:fixed;bottom:14px;right:14px;max-width:440px;background:var(--surface);color:var(--text);border:1px solid var(--border2);border-radius:6px;padding:10px 32px 10px 12px;font:11px/1.5 var(--mono);z-index:99998;box-shadow:0 4px 18px rgba(0,0,0,.35)';
+    t.innerHTML='<span style="position:absolute;top:6px;right:9px;cursor:pointer;color:var(--text-dim)" onclick="this.parentNode.remove()">✕</span><div style="color:var(--text-dim);font-size:9px;letter-spacing:1px;margin-bottom:3px">📤 PUSH TO BI</div><div id="bi-toast-body"></div>';
+    document.body.appendChild(t);
+  }
+  document.getElementById('bi-toast-body').innerHTML=html;
+  clearTimeout(_biToast._tm);
+  if(!/Loading|Building|Saving|Downloading/.test(html)) _biToast._tm=setTimeout(()=>t.remove(),8000);
 }
 
 // Destination line under the Push to BI button — mirrors the folder set in
@@ -21758,6 +21777,7 @@ function _pushBIBuildTables(){
   // Lookup map: element_id → facility_id (assigned takes priority — that's what UIs trust)
   const elFac={};
   DB.elements.forEach(e=>{ elFac[e.id]=e.assigned_facility_id||e.facility_id||''; });
+  const _elIds0=new Set(DB.elements.map(e=>e.id));
   const elType={}; DB.elements.forEach(e=>{ elType[e.id]=e.type; });
   const elPrimary={}; DB.elements.forEach(e=>{ elPrimary[e.id]=elProducts(e)[0]||''; });
   // Fallbacks for elements with nothing configured: a demand point takes the product the
@@ -21850,10 +21870,21 @@ function _pushBIBuildTables(){
 
   // ── FACT: INVENTORY ────────────────────────────────────
   const fact_inventory=[];
+  // A reading belongs to its silo's facility. Older records were stamped with the main
+  // (BRS) facility, which filed MIA/PEV/SUT… silos under BRS in Power BI, and some
+  // silo-days were saved twice (once per facility) — keep the newest per silo·day·product.
+  // Silos no longer in the topology are skipped.
+  const _invAct={};
   (DB.real_inventory_daily||[]).forEach(row=>{
+    if(!_elIds0.has(row.silo_id)) return;
+    const k=row.silo_id+'|'+row.date+'|'+(row.product_id||'');
+    const prev=_invAct[k];
+    if(!prev||String(row.updated_at||'')>=String(prev.updated_at||'')) _invAct[k]=row;
+  });
+  Object.values(_invAct).forEach(row=>{
     fact_inventory.push(stamp({
       scenario_type:'actual', date:row.date,
-      facility_id:row.facility_id||elFac[row.silo_id]||'',
+      facility_id:elFac[row.silo_id]||row.facility_id||'',
       element_id:row.silo_id, element_type:elType[row.silo_id]||'',
       product_id:row.product_id||'',
       tonnes_eod:parseFloat(row.eod_volume_t)||0
@@ -22409,7 +22440,7 @@ const EXPORT_SLOTS={
     dirKey:'__bi_export_dir__', nameKey:'avila_bi_dir_name',
     file:'Avila Power BI.xlsx', pickerId:'avila-bi-export', rowId:'bi-export-dir-row',
     label:'Power BI export folder',
-    desc:'Where <b style="color:var(--text)">📤 Push to BI</b> on the Results page writes. Point Power BI at this file once and refresh it from there.'
+    desc:'Where <b style="color:var(--text)">📤 Push to BI</b> (Results menu) writes. Point Power BI at this file once and refresh it from there.'
   },
   // Publish (Configuration → Demand Mapping) writes several files into this one folder —
   // see XLPUB_FILES; `file` is only the one named in the generic folder row.
@@ -29918,7 +29949,7 @@ function switchTopSection(section){
     results:[
       {label:'Dashboard',view:'dashboard'},
       {label:'Data Table',view:'datatable'},
-      {label:'Push to BI',view:'results'}
+      {label:'📤 Push to BI',view:'pushbi'}
     ],
     configuration:[
       {label:'Organization',view:'location'},
@@ -29950,6 +29981,8 @@ function switchTopSection(section){
 function _secTabClick(el,view,tab){
   // Mill Policies is a modal action, not a view — open it and leave the tab state as-is.
   if(view==='millpolicy'){ openMillPolicyManager(); return; }
+  // Push to BI is a one-click export, not a page.
+  if(view==='pushbi'){ pushToBI(); return; }
   document.querySelectorAll('#second-row .sec-tab').forEach(b=>b.classList.remove('active'));
   el.classList.add('active');
   if(view==='cfgpanel'){
@@ -30573,7 +30606,8 @@ function processDataSubmission(facId, dateStr, clearFormAfter){
   const kUnl=_k(unloadingInputs,i=>i.dataset.elem+'|'+i.dataset.prod);
   const kSx=_k(siloXferInputs,i=>i.dataset.elem+'|'+i.dataset.subtype+'|'+i.dataset.dest);
   const onProd=r=>r.date===dateStr&&r.facility_id===facId&&kProd.has(r.element_id+'|'+r.product_id);
-  const onInv=r=>r.date===dateStr&&r.facility_id===facId&&kInv.has(r.silo_id+'|'+r.product_id);
+  // by silo, not facility: old readings of this facility's silos may carry another facility_id
+  const onInv=r=>r.date===dateStr&&kInv.has(r.silo_id+'|'+r.product_id);
   const onRail=r=>r.date===dateStr&&r.facility_id===facId&&r.type==='loading'&&kRail.has(r.product_id);
   const onShip=r=>r.date===dateStr&&r.facility_id===facId&&kShip.has(r.product_id);
   const onUnl=r=>r.date===dateStr&&r.facility_id===facId&&kUnl.has(r.berth_id+'|'+r.product_id);
