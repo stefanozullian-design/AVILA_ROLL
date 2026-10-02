@@ -316,7 +316,13 @@ input.ac-ro:focus{outline:1px dashed var(--amber)!important;}
 .sof-tbl td.h{text-align:right;font-variant-numeric:tabular-nums;color:var(--text-dim);}
 .sof-tbl tr.cnt td.h{color:var(--text);}
 .sof-tbl td.h.d{color:var(--red);}
-.sof-tbl tr.dem{background:rgba(var(--red-rgb),.04);}
+.sof-tbl tr.cnt td{background:rgba(var(--green-rgb),.09);}
+.sof-tbl tr.dem td{background:rgba(var(--red-rgb),.16);}
+.sof-tbl tr.dem td:first-child{box-shadow:inset 3px 0 0 var(--red);}
+.sof-tbl tr.cnt:not(.dem) td:first-child{box-shadow:inset 3px 0 0 rgba(var(--green-rgb),.6);}
+.sof-tbl tr.cnt input,.sof-tbl tr.cnt select{background:transparent;}
+.sof-tbl td.h.d{font-weight:700;}
+.sof-tbl select.ovr{color:var(--amber);border-color:rgba(var(--amber-rgb),.6);font-weight:700;}
 .sof-tbl input[type=datetime-local]{width:142px;}
 .sof-tbl .w-desc{width:200px;} .sof-tbl .w-note{width:150px;} .sof-tbl .w-hold{width:26px;} .sof-tbl .w-why{width:120px;}
 .sof-why{color:var(--text-dim);}
@@ -22161,7 +22167,7 @@ function _pushBIBuildTables(){
       date:starts.length?_sofIso(starts[0]).slice(0,10):String(v.arrival_date||'').slice(0,10),
       arrival_date:String(v.arrival_date||'').slice(0,10), ports:lt.nStops, sofs:lt.nSofs, complete:lt.complete, reviewed:lt.reviewed,
       laytime_start:starts.length?_sp(_sofIso(starts[0])):'', laytime_end:ends.length?_sp(_sofIso(ends[0])):'',
-      notice_h:lt.notice, allowed_h:lt.allowed, counted_h:_r2(lt.used),
+      notice_h:lt.notice, discharge_rate_tpd:lt.dischRate, discharge_t:lt.qty?Math.round(lt.qty):null, allowed_h:lt.allowed!=null?_r2(lt.allowed):null, counted_h:_r2(lt.used),
       laytime_used_h:lt.allowed!=null?_r2(Math.min(lt.used,lt.allowed)):null,
       demurrage_h:lt.allowed!=null?_r2(lt.demH):null, despatch_h:lt.allowed!=null&&lt.complete?_r2(lt.despH):null,
       dem_rate_usd_day:lt.rate||null, despatch_rate_usd_day:lt.despRate||null,
@@ -24368,7 +24374,10 @@ function _saveEditVessel(i){
 // elapsed time, so a period across a daylight-saving change is an hour shorter/longer than
 // the clock difference.
 // Laytime terms live on the vessel call (dem_rate_usd_day, despatch_rate_usd_day,
-// laytime_allowed_h, nor_notice_h) and laytime is counted for the whole voyage: every leg's
+// discharge_rate_tpd, nor_notice_h). Allowed laytime is calculated: tonnes to discharge ÷
+// contracted discharge rate × 24 h, the tonnes per port being the SOF's stated cargo, else the
+// planned quantity (older calls may still carry a typed laytime_allowed_h, used only when no
+// discharge rate is entered). Laytime is counted for the whole voyage: every leg's
 // periods in time order. Default counting (any period can be set to Y/N by hand):
 //   caused by the vessel → never counts; weather → doesn't count while laytime remains, counts
 //   once the vessel is on demurrage; everything else counts.
@@ -24466,7 +24475,7 @@ function sofLaytime(v, override){
   let rows=(DB.vessel_sof||[]).filter(s=>s.vessel_call_id===v.id);
   if(override){ rows=rows.filter(s=>s.id!==override.id); rows.push(override); }
   const noticeRaw=_sofNum(v.nor_notice_h), notice=noticeRaw==null?6:noticeRaw;
-  const allowed=_sofNum(v.laytime_allowed_h), hasAllowed=allowed!=null&&allowed>0;
+  const al=sofAllowed(v, rows), allowed=al.allowed, hasAllowed=allowed!=null&&allowed>0;
   const rate=_sofNum(v.dem_rate_usd_day)||0, despRate=_sofNum(v.despatch_rate_usd_day)||0;
   const win={}; rows.forEach(s=>{ win[s.id]=sofWindow(s, notice); });
   const items=[];
@@ -24485,6 +24494,7 @@ function sofLaytime(v, override){
     if(h<=0){ res.why=a<w.a?'before laytime starts':'after laytime ends'; return; }
     const onDem=hasAllowed&&used>=allowed-1e-9;
     let counts;
+    res.ruleCounted=p.cause==='vessel'?false:p.cause==='weather'?onDem:true;
     if(p.counts==='Y'){ counts=true; res.why='counts (set by hand)'; }
     else if(p.counts==='N'){ counts=false; res.why='does not count (set by hand)'; }
     else if(p.cause==='vessel'){ counts=false; res.why='caused by the vessel'; }
@@ -24500,9 +24510,27 @@ function sofLaytime(v, override){
   const complete=stops.every(st=>rows.some(s=>(s.leg_id||'')===(st.legId||'')));
   const demH=hasAllowed?Math.max(0,used-allowed):0;
   const despH=hasAllowed&&complete?Math.max(0,allowed-used):0;
-  return {rows, win, per, used, allowed:hasAllowed?allowed:null, notice, rate, despRate, demH, despH,
+  return {rows, win, per, used, allowed:hasAllowed?allowed:null, allowedWhy:al.why, dischRate:al.rate, qty:al.qty, notice, rate, despRate, demH, despH,
     demUsd:demH/24*rate, despUsd:despRate?despH/24*despRate:0, complete, nStops:stops.length, nSofs:rows.length,
     byCat, byCause, reviewed:rows.length>0&&rows.every(s=>s.status==='reviewed')};
+}
+
+// Allowed laytime for the voyage = tonnes to discharge (all ports) ÷ discharge rate × 24 h.
+function sofAllowed(v, rows){
+  rows=rows||(DB.vessel_sof||[]).filter(s=>s.vessel_call_id===v.id);
+  const rate=_sofNum(v.discharge_rate_tpd);
+  let qty=0, fromSof=0, fromPlan=0;
+  _sofStops(v).forEach(st=>{
+    const s=rows.find(r=>(r.leg_id||'')===(st.legId||''));
+    const sq=s?_sofNum(String((s.header||{}).cargo_t||'').replace(/[, ]/g,'')):null;
+    const pq=st.leg?_sofNum(st.leg.quantity_t):_sofNum(v.quantity_t||v.total_quantity_t);
+    if(sq>0){ qty+=sq; fromSof++; } else if(pq>0){ qty+=pq; fromPlan++; }
+  });
+  const src=fromSof&&fromPlan?'SOF + planned tonnes':fromSof?'SOF cargo':'planned tonnes';
+  if(rate>0&&qty>0) return {allowed:qty/rate*24, rate, qty, why:`${Math.round(qty).toLocaleString()} t (${src}) ÷ ${rate.toLocaleString()} t/day × 24 h`};
+  const old=_sofNum(v.laytime_allowed_h);
+  if(old>0) return {allowed:old, rate:null, qty, why:'typed on the vessel call (no discharge rate entered)'};
+  return {allowed:null, rate:rate>0?rate:null, qty, why:rate>0?'no tonnes to discharge on the call or the SOF':''};
 }
 
 // Contiguity check — gap / overlap against the previous period of the same SOF.
@@ -24620,12 +24648,13 @@ function sofRender(){
     const terms=`
       <div class="sof-terms">
         <div><b>${lt.rate?_sofMoney(lt.rate)+'/day':'—'}</b><span>demurrage rate</span></div>
-        <div><b>${lt.allowed!=null?_sofH(lt.allowed)+' h':'—'}</b><span>allowed laytime${lt.allowed!=null?' ('+(lt.allowed/24).toFixed(2)+' d)':''}</span></div>
+        <div><b>${lt.dischRate?lt.dischRate.toLocaleString()+' t/day':'—'}</b><span>discharge rate</span></div>
+        <div><b>${lt.allowed!=null?_sofH(lt.allowed)+' h':'—'}</b><span>allowed laytime${lt.allowed!=null?' ('+(lt.allowed/24).toFixed(2)+' d)':''}</span>${lt.allowedWhy?`<span style="text-transform:none;letter-spacing:0">= ${esc(lt.allowedWhy)}</span>`:''}</div>
         <div><b>${lt.notice} h</b><span>notice time after NOR</span></div>
         <div><b>${lt.despRate?_sofMoney(lt.despRate)+'/day':'—'}</b><span>despatch rate</span></div>
         ${ro?'':`<span class="tbl-act" onclick="sofEditTerms()" style="align-self:center">Edit terms</span>`}
       </div>`;
-    const missing=lt.allowed==null||!lt.rate?`<div class="sof-warn" style="margin:6px 0">Enter the demurrage rate and allowed laytime from the charter party (Edit terms) to get the demurrage figure.</div>`:'';
+    const missing=lt.allowed==null||!lt.rate?`<div class="sof-warn" style="margin:6px 0">Enter the demurrage rate and the contracted discharge rate (t/day) from the charter party (Edit terms) to get the demurrage figure — allowed laytime = tonnes ÷ rate × 24 h.</div>`:'';
     lay=`
       <div class="sof-lay">
         ${terms}${missing}
@@ -24679,7 +24708,8 @@ function sofRender(){
       <td><input class="w-hold" ${dis} value="${esc(p.hold||'')}" onchange="sofSet(${i},'hold',this.value)"></td>
       <td><input class="w-desc" ${dis} value="${esc(p.description||'')}" onchange="sofSet(${i},'description',this.value)"></td>
       <td><input class="w-note" ${dis} value="${esc(p.notes||'')}" onchange="sofSet(${i},'notes',this.value)"></td>
-      <td>${sel([['auto','Auto'],['Y','Y'],['N','N']],p.counts||'auto',`sofSet(${i},'counts',this.value)`,dis)}</td>
+      <td>${auto?sel([['Y','Y'],['N','N']],r.counted?'Y':'N',`sofSet(${i},'counts',this.value)`,dis)
+        :`<select class="ovr" ${dis} onchange="sofSet(${i},'counts',this.value)" title="Decided by hand — the rule says ${r.ruleCounted?'Y':'N'}">${[['Y','Y'],['N','N']].map(o=>`<option value="${o[0]}" ${o[0]===p.counts?'selected':''}>${o[1]}</option>`).join('')}</select>${ro?'':` <span class="tbl-act" title="Back to the rule" onclick="sofSet(${i},'counts','auto')">↺</span>`}`}</td>
       <td class="h">${r.lay>0?_sofH(r.lay):''}</td>
       <td class="h d">${r.dem>0?_sofH(r.dem):''}</td>
       <td>${auto?`<span class="sof-why">${esc(r.why)}</span>`:`<input class="w-why" ${dis} placeholder="why?" value="${esc(p.reason||'')}" onchange="sofSet(${i},'reason',this.value)" title="${esc(r.why)}">`}</td>
@@ -24689,11 +24719,11 @@ function sofRender(){
   const table=rec?`
     <div class="sof-tbl-wrap"><table class="sof-tbl">
       <thead><tr><th>#</th><th>Start</th><th>End</th><th>h</th><th>Category</th><th>Cause</th><th>Hold</th><th>What happened</th><th>SOF notes</th>
-        <th title="Auto = the default rule; Y / N = decided by hand">Counts?</th><th>Laytime</th><th>Demurrage</th><th>Why</th><th></th></tr></thead>
+        <th title="Pre-set by the counting rule; change it to decide a period by hand (amber, ↺ goes back to the rule)">Counts?</th><th>Laytime</th><th>Demurrage</th><th>Why</th><th></th></tr></thead>
       <tbody>${rows||`<tr><td colspan="14" class="sof-dim" style="padding:12px;text-align:center">No periods yet.</td></tr>`}</tbody>
     </table></div>
     ${ro?'':`<div style="display:flex;gap:10px;margin-top:6px"><span class="tbl-act" onclick="sofAddRow()">+ Add period</span><span class="tbl-act" onclick="sofSortRows()">Sort by time</span>
-      <span class="sof-dim">Default: vessel-caused time never counts · weather counts only once on demurrage · everything else counts. Set Y / N to decide a period yourself.</span></div>`}`:'';
+      <span class="sof-dim">Counts? is pre-set by the rule: vessel-caused time never counts · weather counts only once on demurrage · everything else counts. Change it to decide a period yourself. <span style="background:rgba(var(--green-rgb),.18);padding:0 4px">green</span> = laytime · <span style="background:rgba(var(--red-rgb),.25);padding:0 4px">red</span> = demurrage.</span></div>`}`:'';
 
   document.getElementById('modal-content').innerHTML=`
     <div class="modal-hdr"><span class="modal-title">📄 Statement of Facts — ${title}</span><span class="modal-close" onclick="sofClose()">✕</span></div>
@@ -24712,13 +24742,17 @@ function sofRender(){
 // ── edits on the working copy ──
 function sofSet(i, key, val){
   const s=window._sof; if(!s||!s.rec||s.ro) return; const p=s.rec.periods[i]; if(!p) return;
+  if(key==='counts'&&val!=='auto'&&(p.counts||'auto')==='auto'){
+    const r=(sofLaytime((DB.vessel_calls||[]).find(x=>x.id===s.callId)||{id:s.callId}, s.rec).per||{})[p.id];
+    if(r&&(r.counted?'Y':'N')===val) val='auto';
+  }
   p[key]=val;
   if(key==='category') p.cause=SOF_CAUSE_OF_CAT[val]||'none';   // the category's usual cause; change it after if needed
   if(key==='counts'&&val==='auto') p.reason='';
   s.dirty=true; sofRender();
 }
 function sofSetRec(key, val){ const s=window._sof; if(!s||!s.rec||s.ro) return; s.rec[key]=val; s.dirty=true; sofRender(); }
-function sofSetHdr(key, val){ const s=window._sof; if(!s||!s.rec||s.ro) return; (s.rec.header=s.rec.header||{})[key]=val; s.dirty=true; }
+function sofSetHdr(key, val){ const s=window._sof; if(!s||!s.rec||s.ro) return; (s.rec.header=s.rec.header||{})[key]=val; s.dirty=true; if(key==='cargo_t') sofRender(); }
 function sofAddRow(){
   const s=window._sof; if(!s||!s.rec||s.ro) return;
   const per=s.rec.periods, last=per.slice().sort((a,b)=>_sofT(a.end)-_sofT(b.end)).pop();
@@ -24921,12 +24955,12 @@ function sofTermsFieldsHTML(prefix, v){
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
       ${f('dem-rate','Demurrage rate (USD / day)',v.dem_rate_usd_day,'e.g. 14500','pro rata — per hour = rate ÷ 24')}
       ${f('desp-rate','Despatch rate (USD / day)',v.despatch_rate_usd_day,'optional — often half')}
-      ${f('lay-h','Allowed laytime (hours)',v.laytime_allowed_h,'e.g. 152','for the whole voyage — every port together')}
+      ${f('disch-rate','Contracted discharge rate (t / day)',v.discharge_rate_tpd,'e.g. 2500','allowed laytime = tonnes to discharge ÷ rate × 24 h')}
       ${f('notice-h','Notice time after NOR (hours)',v.nor_notice_h,'6','laytime starts this long after the first NOR')}
     </div></div>`;
 }
 function sofReadTermsInto(prefix, rec){
-  [['dem-rate','dem_rate_usd_day'],['desp-rate','despatch_rate_usd_day'],['lay-h','laytime_allowed_h'],['notice-h','nor_notice_h']].forEach(([id,k])=>{
+  [['dem-rate','dem_rate_usd_day'],['desp-rate','despatch_rate_usd_day'],['disch-rate','discharge_rate_tpd'],['notice-h','nor_notice_h']].forEach(([id,k])=>{
     const el=document.getElementById(prefix+'-'+id); if(!el) return;
     const n=parseFloat(el.value);
     if(isFinite(n)&&n>=0) rec[k]=n; else delete rec[k];
