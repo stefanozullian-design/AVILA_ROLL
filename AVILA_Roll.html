@@ -31862,6 +31862,8 @@ function autoSaveNow(){
       // on load; the active scenario file still carries a copy — see scWriteActive)
       savedAt: _saveStamp,
       _partialTables: b.dropped,
+      // Rows of the LS_TRIM_90D tables dated before this were left out — see _scHealTrimmed.
+      _trimmedBefore: cutoffStr,
       // Which scenario this copy is of — so startup never takes it for another scenario's copy
       // (see _scLoadForeign).
       scId: (typeof SC!=='undefined' && SC.activeId) || null,
@@ -31946,6 +31948,7 @@ function loadSaved(){
   }catch(e){ try{ localStorage.removeItem('prodcast_v3'); }catch(e2){} }
 
   window._dbPartialTables = [];   // nothing restored yet ⇒ nothing known-missing
+  window._dbTrimmed = null;       // nothing restored yet ⇒ no history trimmed off
   try{
     const raw=localStorage.getItem('prodcast_v3');
     if(raw){
@@ -31967,6 +31970,14 @@ function loadSaved(){
       window._dbPartialTables = Array.isArray(saved._partialTables)
         ? saved._partialTables.slice()
         : [...LS_SKIP_ALWAYS].filter(t=>saved.DB && saved.DB[t]===undefined);
+      // The tables this cache holds only the last 90 days of (see LS_TRIM_90D). Older caches
+      // don't record the cut-off; it was at most 90 days before today.
+      {
+        const tables=[...LS_TRIM_90D].filter(t=>saved.DB && Array.isArray(saved.DB[t]));
+        let before=saved._trimmedBefore;
+        if(!before){ const d=new Date(); d.setDate(d.getDate()-90); before=d._ymd(); }
+        window._dbTrimmed = tables.length ? {before, tables} : null;
+      }
 
       // Remember when this localStorage copy was saved, so the topology data
       // source can refuse to overwrite it with an OLDER file (stale-file guard).
@@ -32588,7 +32599,7 @@ function scBuildPayload(){
 // Returns false if the file could not be read — callers must then refuse to write.
 async function _scHealPartial(handle){
   const miss=window._dbPartialTables;
-  if(!Array.isArray(miss) || !miss.length) return true;
+  if((!Array.isArray(miss) || !miss.length) && !window._dbTrimmed) return true;
   try{
     const f=await handle.getFile();
     const text=new TextDecoder().decode(await f.arrayBuffer());
@@ -32600,15 +32611,34 @@ async function _scHealPartial(handle){
     if(_scIsSalesPayload(saved)) return true;
     if(saved && saved.DB){
       let healed=0;
-      miss.forEach(t=>{ if(saved.DB[t]!==undefined){ DB[t]=saved.DB[t]; healed++; } });
+      (Array.isArray(miss)?miss:[]).forEach(t=>{ if(saved.DB[t]!==undefined){ DB[t]=saved.DB[t]; healed++; } });
       if(healed && typeof _demandCacheInvalidate==='function') _demandCacheInvalidate();
-      console.info('scenario: restored '+healed+' table(s) from file that localStorage could not cache');
+      if(healed) console.info('scenario: restored '+healed+' table(s) from file that localStorage could not cache');
+      _scHealTrimmed(saved.DB);
     }
     window._dbPartialTables=[];
     return true;
   }catch(e){
     console.warn('scenario: could not restore partial tables from file — refusing to write', e);
     return false;
+  }
+}
+// The localStorage cache keeps only the last 90 days of the LS_TRIM_90D tables (see autoSaveNow).
+// The older rows were never deleted here: put them back from `srcDB` before memory is compared
+// with, or written over, the file — otherwise the sync reads every one of them as a deletion.
+function _scHealTrimmed(srcDB){
+  const tr=window._dbTrimmed; if(!tr || !srcDB) return;
+  let n=0;
+  for(const t of tr.tables){
+    const src=srcDB[t]; if(!Array.isArray(src) || !Array.isArray(DB[t])) continue;
+    const have=new Set(DB[t].map(r=>_mgRowKey(t,r)));
+    const back=src.filter(r=>!(r && r.date>=tr.before) && !have.has(_mgRowKey(t,r)));   // what the cache left out
+    if(back.length){ DB[t]=back.concat(DB[t]); n+=back.length; }
+  }
+  window._dbTrimmed=null;
+  if(n){
+    if(typeof _demandCacheInvalidate==='function') _demandCacheInvalidate();
+    console.info('scenario: restored '+n+' row(s) older than the local cache keeps');
   }
 }
 
@@ -32912,6 +32942,7 @@ async function scLoadScenario(id, opts){
       // would read as "I deleted / reverted everything since" — so it is not used as ours:
       // the file is taken (plus anything the change log says it is missing).
       const cacheIsFromBase = window._lsScBase && window._lsScBase===_scBaseTag(id);
+      _scHealTrimmed(base.DB);   // the history the cache leaves out is the baseline's, not deleted
       let oursNow=scBuildPayload();
       if(!cacheIsFromBase){ oursNow=Object.assign(JSON.parse(baseline.text), {changeLog:oursNow.changeLog, topoSeal:oursNow.topoSeal, simResults:oursNow.simResults}); console.info('scenario: local copy predates the last sync — using the file'); }
       const res=_mgSync(base, oursNow, saved);
@@ -32974,6 +33005,7 @@ async function scLoadScenario(id, opts){
   window._scTopoSeal=(SC.activeId===id?_tsNewest(window._scTopoSeal, saved.topoSeal):(saved.topoSeal||null))||null;
   if(window._scTopoSeal && !_tsSame(_tsTables(saved), window._scTopoSeal.tables)) Object.assign(DB, window._scTopoSeal.tables);   // written back on the next save
   window._dbPartialTables=[];                          // adopted the file wholesale — memory is complete
+  window._dbTrimmed=null;
   if(typeof _demandCacheInvalidate==='function') _demandCacheInvalidate();
   SC.activeId=id; m.lastOpened=new Date().toISOString();
   window._lsSavedAt=saved.savedAt||null;
@@ -33369,9 +33401,10 @@ function _acWriteSession(user, remember){
 function _acClearSession(){ try{ sessionStorage.removeItem(_acSessKey()); localStorage.removeItem(_acSessKey()); }catch(e){} }
 // The person this browser is signed in as — only while their row still exists, is active and
 // their password has not been changed/reset since (a reset signs every other browser out).
-function _acUserFromSession(){
+// `db`: whose list of people to check against (default: the live DB).
+function _acUserFromSession(db){
   const s=_acReadSession(); if(!s) return null;
-  const u=_acUsers().find(x=>x.id===s.email);
+  const u=_acUsers(db).find(x=>x.id===s.email);
   if(!u || u.active===false || u.must_change) return null;
   if(((u.pw&&u.pw.hash)||'').slice(0,16)!==s.pwv) return null;
   return u;
@@ -33421,11 +33454,11 @@ function _acRowFacility(table, row, elFac){
 }
 // A signed-in person may change their own password; anyone (signed in or not) may add an
 // access request. Everything else in the access tables is the admin's.
-function _acAccessRowAllowed(table, b, o){
+function _acAccessRowAllowed(table, b, o, user){
   if(table==='access_requests') return !b && !!o;
-  if(table==='change_requests') return !b && !!o && !!_acUser && o.by===_acUser.id;
+  if(table==='change_requests') return !b && !!o && !!user && o.by===user.id;
   if(table==='access_users'){
-    if(!_acUser || !b || !o || b.id!==_acUser.id || o.id!==_acUser.id) return false;
+    if(!user || !b || !o || b.id!==user.id || o.id!==user.id) return false;
     const strip=r=>{ const c=Object.assign({},r); AC_PW_FIELDS.forEach(f=>delete c[f]); return _mgStr(c); };
     return strip(b)===strip(o);
   }
@@ -33440,7 +33473,10 @@ function _acSilentRow(table, row){ return table==='vessel_calls' && row && row.s
 function _acEnforce(base, ours, theirs){
   if(!base || !base.DB || !ours || !ours.DB) return ours;
   if(!_acEnabledDB(base.DB) && !_acEnabledDB(ours.DB) && !(theirs && theirs.DB && _acEnabledDB(theirs.DB))) return ours;   // sign-in is off for this scenario
-  if(_acIsAdmin()) return ours;
+  // Opening the app syncs with the file BEFORE acGate has restored the saved sign-in: take the
+  // person this browser is signed in as (checked against the file's list of people), not "nobody".
+  const user=_acUser || _acUserFromSession(theirs && theirs.DB && _acEnabledDB(theirs.DB) ? theirs.DB : base.DB);
+  if(user && user.admin) return ours;
   const elFac=new Map(), fbn=_acFacByName();
   for(const src of [base.DB.elements, ours.DB.elements]) for(const e of (src||[])) if(e && e.id!=null && !elFac.has(e.id)) elFac.set(e.id, _acElFacility(e, fbn));
   const outDB=Object.assign({}, ours.DB), undo={}, blocked=new Map();
@@ -33452,10 +33488,10 @@ function _acEnforce(base, ours, theirs){
     const om=new Map(); for(const r of oa) om.set(_mgRowKey(t,r), r);
     let changed=false, visible=false; const rows=[];
     const ok=(b,o)=>{
-      if(t==='access_users'||t==='access_requests'||t==='change_requests') return _acAccessRowAllowed(t,b,o);
+      if(t==='access_users'||t==='access_requests'||t==='change_requests') return _acAccessRowAllowed(t,b,o,user);
       const fb=b?_acRowFacility(t,b,elFac):null, fo=o?_acRowFacility(t,o,elFac):null;
       const fn=_acFunc(t, o||b);
-      const can=(!b || _acCan(_acUser, _acFunc(t,b), fb)) && (!o || _acCan(_acUser, fn, fo));
+      const can=(!b || _acCan(user, _acFunc(t,b), fb)) && (!o || _acCan(user, fn, fo));
       if(!can) block(fn, fo||fb);
       return can;
     };
@@ -33473,13 +33509,13 @@ function _acEnforce(base, ours, theirs){
     if(changed){ outDB[t]=rows; if(visible) undo[t]=rows; }
   }
   let simCfg=ours.simCfg;
-  if(_mgStr(base.simCfg||{})!==_mgStr(ours.simCfg||{}) && !_acCan(_acUser,'topology',AC_NET)){ simCfg=base.simCfg; block('topology',AC_NET); }
+  if(_mgStr(base.simCfg||{})!==_mgStr(ours.simCfg||{}) && !_acCan(user,'topology',AC_NET)){ simCfg=base.simCfg; block('topology',AC_NET); }
   const out=Object.assign({}, ours, {DB:outDB, simCfg});
   if(Object.keys(undo).length || simCfg!==ours.simCfg){
     Object.keys(undo).forEach(t=>{ DB[t]=undo[t]; });
     if(simCfg!==ours.simCfg && base.simCfg){ Object.keys(S.simCfg).forEach(k=>{ if(!(k in base.simCfg)) delete S.simCfg[k]; }); Object.assign(S.simCfg, base.simCfg); }
     if(typeof _demandCacheInvalidate==='function') _demandCacheInvalidate();
-    _acReportBlocked(blocked);
+    _acReportBlocked(blocked, user);
     setTimeout(()=>{ try{ if(typeof _acRerender==='function') _acRerender(); }catch(e){} }, 0);
   }
   return out;
@@ -33490,11 +33526,11 @@ function _acRerender(){
   if(typeof renderLocationTree==='function') renderLocationTree();
   if(S.topSection==='logistics'){ if(S.activeSchedTab==='rail' && typeof rpRender==='function') rpRender(); if(S.activeSchedTab==='vessels' && typeof vpRender==='function') vpRender(); }
 }
-function _acReportBlocked(blocked){
+function _acReportBlocked(blocked, user){
   if(!blocked.size) return;
   const parts=[...blocked.entries()].slice(0,4).map(([k,n])=>{ const [f,fac]=k.split('|'); const F=AC_FUNCS.find(x=>x.id===f); return `<b>${_scEsc(F?F.label:f)}</b> at <b>${_scEsc(_acFacName(fac))}</b>`; });
   const n=[...blocked.values()].reduce((a,b)=>a+b,0);
-  const msg=_acUser
+  const msg=user
     ? `You have <b>read-only</b> access to ${parts.join(', ')}${blocked.size>4?' and more':''} — ${n} change${n!==1?'s were':' was'} undone and not saved. Ask the administrator if you need to change this.`
     : `You are <b>not signed in</b> — ${n} change${n!==1?'s were':' was'} undone and not saved.`;
   _acBanner(msg, 'warn');
