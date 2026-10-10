@@ -1790,11 +1790,6 @@ td.camp-drag-cut>div:first-child{opacity:.3}
           title="Inventory charts show VOLUME in tonnes. Click for days of inventory.">
           <span class="k">Inv. charts</span><span class="v">Volume</span>
         </button>
-        <!-- Campaign suggestions (the amber rows above the table): shown or hidden (remembered) -->
-        <button type="button" class="sup-drop-btn" id="sup-sugg-btn" onclick="_supToggleSuggestions()"
-          title="Campaign suggestions are shown above the table. Click to hide them.">
-          <span class="k">Suggestions</span><span class="v">Shown</span>
-        </button>
         <!-- Show inactive elements -->
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-family:var(--mono);font-size:9px;color:var(--text-dim);margin-left:auto;margin-right:8px">
           <input type="checkbox" id="sup-show-inactive" onchange="window._supShowInactive=this.checked;renderSupplyView()" style="width:14px;height:14px;accent-color:var(--green);cursor:pointer">
@@ -1806,6 +1801,11 @@ td.camp-drag-cut>div:first-child{opacity:.3}
 
       <!-- Active-filter tokens — what is on right now; click a token's ✕ to drop it. -->
       <div id="flt-sup-toks" class="sup-toks"></div>
+
+      <!-- ── KPI DASHBOARD ──────────────────────────────────── -->
+      <div id="sup-kpi-bar" style="flex-shrink:0;background:var(--bg);border-bottom:2px solid var(--border2);padding:8px 14px;display:flex;gap:10px;align-items:stretch;flex-wrap:wrap">
+        <!-- KPI cards populated by renderSupplyKPIs() -->
+      </div>
 
       <!-- ── CAMPAIGN CAPACITY WARNINGS ──────────────────── -->
       <div id="sup-campaign-warnings" style="flex-shrink:0"></div>
@@ -7401,37 +7401,13 @@ function _shortenCampaign(campId, newEndDate){
   statMsg('Campaign shortened to '+newEndDate+' — re-run simulation to update projections');
 }
 
-// The suggestions can be hidden from the toolbar — a per-browser choice, remembered like the
-// inventory-chart mode. Hidden, the button still counts them so new ones are not missed.
-const SUGG_HIDE_KEY='avila_sup_sugg_hidden';
-function _supSuggHidden(){
-  if(window._supSuggHide===undefined){
-    let v=null; try{ v=localStorage.getItem(SUGG_HIDE_KEY); }catch(e){}
-    window._supSuggHide=v==='1';
-  }
-  return window._supSuggHide;
-}
-function _supToggleSuggestions(){
-  window._supSuggHide=!_supSuggHidden();
-  try{ localStorage.setItem(SUGG_HIDE_KEY,window._supSuggHide?'1':'0'); }catch(e){}
-  _renderSupCampaignWarnings();
-}
-function _supSyncSuggBtn(n){
-  const b=document.getElementById('sup-sugg-btn'); if(!b) return;
-  const hidden=_supSuggHidden();
-  const v=b.querySelector('.v'); if(v) v.textContent=(hidden?'Hidden':'Shown')+(n?' · '+n:'');
-  b.classList.toggle('set',hidden);   // non-default state reads like an active filter
-  b.title=(n?n+' campaign suggestion'+(n===1?'':'s')+' (silo reaches capacity before the campaign ends). ':'No campaign suggestions right now. ')
-    +(hidden?'Click to show them above the table.':'Click to hide them.');
-}
-
 // Scan production campaigns against sim inventory history and render overflow warnings
 function _renderSupCampaignWarnings(){
   const el=document.getElementById('sup-campaign-warnings');
   if(!el) return;
   const r=S.simResults;
   const camps=DB.production_campaigns||[];
-  if(!camps.length||!r?.inventoryHistory){el.innerHTML='';_supSyncSuggBtn(0);return;}
+  if(!camps.length||!r?.inventoryHistory){el.innerHTML='';return;}
 
   const simStart=new Date(S.simCfg.start_date+'T00:00:00');
   const horizon=S.simCfg.horizon||365;
@@ -7501,8 +7477,7 @@ function _renderSupCampaignWarnings(){
     });
   });
 
-  _supSyncSuggBtn(warnings.length);
-  if(!warnings.length || _supSuggHidden()){el.innerHTML='';return;}
+  if(!warnings.length){el.innerHTML='';return;}
 
   el.innerHTML=warnings.map(w=>`
     <div style="display:flex;align-items:center;gap:10px;background:rgba(255,177,0,.07);border-left:3px solid var(--amber);border-bottom:1px solid rgba(255,177,0,.15);padding:6px 14px">
@@ -8560,6 +8535,158 @@ FLT_PAGES.sup={
   proc:()=>SUP_PROCESSES.map(o=>o.key),
   rerender:()=>renderSupplyView()
 };
+
+function renderSupplyKPIs(){
+  const bar=document.getElementById('sup-kpi-bar'); if(!bar) return;
+  const r=S.simResults;
+  const today=new Date();
+  const todayStr=today._ymd();
+  // Same facility set the table uses (null = every facility), so the cards agree with
+  // what is rendered below them.
+  const _kpiFacs=fltFacIdSet();
+  // Same allowed-product set the table uses, so the KPI cards agree with what is
+  // rendered below them under a Family or Category filter (not just a single product).
+  const _kpiPids=fltAllowedProdIds();
+  const pidOk=pid=>!_kpiPids||_kpiPids.has(pid);
+
+  // Elements in scope
+  const millEls=DB.elements.filter(e=>
+    ['finish_mill','kiln'].includes(e.type)&&
+    (!_kpiFacs||_kpiFacs.has(e.facility_id)||_kpiFacs.has(e.assigned_facility_id))
+  );
+
+  // ── MTD Production ─────────────────────────────────────────
+  const mtdStart=new Date(today.getFullYear(),today.getMonth(),1)._ymd();
+  let mtdActual=0, mtdRated=0;
+  const mtdDates=[];
+  // Calendar days (setDate), not +24h: from the November DST change +24h lands on 23:00 the
+  // day before, repeating Nov 1 and dropping today.
+  for(let d=new Date(mtdStart+'T00:00:00');d<=today;d.setDate(d.getDate()+1))
+    mtdDates.push(d._ymd());
+
+  millEls.forEach(el=>{
+    const caps=DB.element_product_capacities.filter(c=>c.element_id===el.id&&pidOk(c.product_id));
+    const ratedMax=caps.reduce((s,c)=>s+(parseFloat(c.capacity_tpd)||0),0);
+    mtdDates.forEach(ds=>{
+      // Actual data
+      const actual=_idxRows('real_production_daily','element_id',el.id,'date',ds).filter(rp=>pidOk(rp.product_id));
+      if(actual.length) mtdActual+=actual.reduce((s,rp)=>s+(parseFloat(rp.volume_t)||0),0);
+      // Rated (skip maintenance days)
+      const isMaint=DB.element_maintenance_events.some(m=>{
+        const dur=Math.max(1,Math.ceil(parseFloat(m.duration_days)||1));
+        return m.element_id===el.id&&ds>=m.start_date&&ds<=_addDays(m.start_date,dur-1);
+      });
+      if(!isMaint) mtdRated+=ratedMax;
+    });
+  });
+
+  // ── Forecasted Full Month ───────────────────────────────────
+  const eomStr=new Date(today.getFullYear(),today.getMonth()+1,0)._ymd();
+  let forecastRem=0;
+  if(r?.millProductHistory){
+    // Tomorrow → end of month by calendar day at local midnight. The old +24h steps carried the
+    // current time of day: after noon every day read the NEXT simulated day, the last day of the
+    // month was never reached, and from the November DST change dates repeated.
+    for(let d=new Date(today.getFullYear(),today.getMonth(),today.getDate()+1);d._ymd()<=eomStr;d.setDate(d.getDate()+1)){
+      const ds=d._ymd();
+      const dayIdx=dateToDayOffset(ds,S.simCfg.start_date);
+      millEls.forEach(el=>{
+        const pid=r.millProductHistory[el.id]?.[dayIdx]||null;
+        if(pid&&pidOk(pid)){
+          const cap=DB.element_product_capacities.find(c=>c.element_id===el.id&&c.product_id===pid);
+          forecastRem+=parseFloat(cap?.capacity_tpd)||0;
+        }
+      });
+    }
+  }
+  const fullMonthForecast=mtdActual+forecastRem;
+
+  // ── Effectiveness ───────────────────────────────────────────
+  const effectiveness=mtdRated>0?Math.round(mtdActual/mtdRated*100):null;
+  const effColor=effectiveness==null?'var(--text-dim)':effectiveness>=90?'var(--green)':effectiveness>=75?'var(--amber)':'var(--red)';
+
+  // ── Days of Inventory by Product ───────────────────────────
+  const invByProd=[];
+  const cemSilos=DB.elements.filter(e=>
+    e.type==='bulk_silo'&&
+    (!_kpiFacs||_kpiFacs.has(e.facility_id)||_kpiFacs.has(e.assigned_facility_id))
+  );
+  const prodIds=[...new Set(
+    millEls.flatMap(el=>DB.element_product_capacities.filter(c=>c.element_id===el.id).map(c=>c.product_id))
+  )].filter(pidOk);
+
+  prodIds.forEach(pid=>{
+    const prod=DB.products.find(p=>p.id===pid); if(!prod) return;
+    if(!['cement_bulk','cement_packed'].includes(prod.category||'')) return;
+    // Current inventory across silos holding this product
+    let inv=0;
+    cemSilos.forEach(silo=>{
+      const siloProds=silo.props?.products||[];
+      if(silo.props?.product_id===pid||siloProds.includes(pid)){
+        if(r?.inventoryHistory?.[silo.id]){
+          const dayOff=todayDayOffset();
+          inv+=r.inventoryHistory[silo.id][dayOff-1]??(parseFloat(silo.props?.start_inventory)||0);
+        } else {
+          inv+=parseFloat(silo.props?.start_inventory)||0;
+        }
+      }
+    });
+    // Avg daily demand next 30 days
+    const demEls=DB.elements.filter(e=>e.type==='demand_point'&&
+      (!_kpiFacs||_kpiFacs.has(e.facility_id)||_kpiFacs.has(e.assigned_facility_id)));
+    let totalDemand=0; let demDays=0;
+    for(let i=0;i<30;i++){
+      const d=new Date(today.getFullYear(),today.getMonth(),today.getDate()+i)._ymd();
+      const dayDem=demEls.reduce((s,el)=>s+(_demandRate(el.id,d)||0),0);
+      if(dayDem>0){ totalDemand+=dayDem; demDays++; }
+    }
+    const avgDailyDem=demDays>0?totalDemand/demDays:0;
+    const daysOfInv=avgDailyDem>0?Math.round(inv/avgDailyDem):null;
+    invByProd.push({pid, name:prod.name||pid, inv:Math.round(inv), days:daysOfInv});
+  });
+
+  // ── Render KPI cards ────────────────────────────────────────
+  const kpiCard=(title,value,sub,color,extra='')=>`
+    <div style="background:var(--surface);border:1px solid var(--border2);border-radius:4px;padding:8px 14px;min-width:140px;flex:1">
+      <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);letter-spacing:1px;text-transform:uppercase;margin-bottom:4px">${title}</div>
+      <div style="font-family:var(--mono);font-size:18px;font-weight:700;color:${color||'var(--text)'}">${value}</div>
+      <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-top:2px">${sub}</div>
+      ${extra}
+    </div>`;
+
+  let html='';
+  html+=kpiCard(
+    'Production MTD',
+    mtdActual>0?Math.round(mtdActual).toLocaleString()+'t':'—',
+    'Actual this month',
+    'var(--green)'
+  );
+  html+=kpiCard(
+    'Full Month Forecast',
+    fullMonthForecast>0?Math.round(fullMonthForecast).toLocaleString()+'t':'—',
+    'Actual + simulated rest',
+    'var(--blue)'
+  );
+  html+=kpiCard(
+    'Effectiveness',
+    effectiveness!=null?effectiveness+'%':'—',
+    'Actual ÷ Rated capacity',
+    effColor
+  );
+
+  // Days of inventory cards
+  invByProd.slice(0,4).forEach(({name,inv,days})=>{
+    const dColor=days==null?'var(--text-dim)':days>=14?'var(--green)':days>=7?'var(--amber)':'var(--red)';
+    html+=kpiCard(
+      'Days Inv · '+name.replace(/[\/\|]/g,' ').slice(0,14),
+      days!=null?days+'d':'—',
+      inv.toLocaleString()+'t on hand',
+      dColor
+    );
+  });
+
+  bar.innerHTML=html;
+}
 
 // CATALOGS
 // ═══════════════════════════════════════════════════════
@@ -9892,6 +10019,7 @@ function renderSupplyView(){
   const wrap=document.getElementById('supply-table-wrap'); if(!wrap) return;
   fltRender('sup');
   _supSyncInvModeBtn();
+  renderSupplyKPIs();
   _renderSupCampaignWarnings();
   _renderSupplyViewInner(wrap);
 }
@@ -22190,13 +22318,29 @@ function importJSON(input){
   const file=input.files[0]; if(!file) return;
   const reader=new FileReader();
   reader.onload=e=>{
+    let saved;
+    try{ saved=JSON.parse(e.target.result); }
+    catch(err){ statMsg('Import failed — not a valid JSON file'); console.error(err); input.value=''; return; }
+    // Everything that can be checked is checked BEFORE the live DB is touched.
+    if(!saved || typeof saved.DB!=='object' || saved.DB===null || Array.isArray(saved.DB)){ statMsg('Invalid file — no DB found'); input.value=''; return; }
+    if(_scIsSalesPayload(saved)){ statMsg('⚠ That is an Avila Sales file, not an Avila Roll scenario — nothing was imported'); input.value=''; return; }
+    const kind=v=>Array.isArray(v)?'array':(v===null?'null':typeof v);
+    const bad=[];
+    Object.keys(DB).forEach(table=>{
+      if(saved.DB[table]===undefined) return;
+      const want=kind(DB[table]), got=kind(saved.DB[table]);
+      if(want!=='null' && want!=='undefined' && want!==got) bad.push(table+' (expected '+want+', file has '+got+')');
+    });
+    if(bad.length){
+      statMsg('Import refused — the file does not match this app\'s data layout; nothing was changed ('+bad.slice(0,3).join('; ')+(bad.length>3?'; …':'')+')');
+      console.error('importJSON: table type mismatch', bad);
+      input.value=''; return;
+    }
+    // Apply, remembering what was replaced so a failure puts everything back.
+    const prev={}, prevSim=S.simResults, prevCfg=JSON.parse(JSON.stringify(S.simCfg)), prevCounter=S.elCounter;
     try{
-      const saved=JSON.parse(e.target.result);
-      if(!saved.DB){statMsg('Invalid file — no DB found');return;}
-      if(_scIsSalesPayload(saved)){ statMsg('⚠ That is an Avila Sales file, not an Avila Roll scenario — nothing was imported'); input.value=''; return; }
-      // Merge DB tables
       Object.keys(DB).forEach(table=>{
-        if(saved.DB[table]!==undefined) DB[table]=saved.DB[table];
+        if(saved.DB[table]!==undefined){ prev[table]=DB[table]; DB[table]=saved.DB[table]; }
       });
       // Every table was just replaced — drop the memoised demand / holiday lookups, or the
       // pages below (and the next typed demand cell) would still read the pre-import values.
@@ -22205,7 +22349,6 @@ function importJSON(input){
       if(saved.simCfg) Object.assign(S.simCfg,saved.simCfg);
       if(saved.counter) S.elCounter=saved.counter;
       syncElCounter();
-      autoSave();
       // Reset canvas and re-render everything. Restore the forecasted inventory
       // (simResults) if the file carried one — otherwise fall back to null so the
       // page schedules a fresh simulation run (see the DOMContentLoaded handler).
@@ -22216,9 +22359,15 @@ function importJSON(input){
       renderLocationTree();
       updateNavFacilities();
       switchTopSection('production');
+      autoSave();   // only once the imported state has actually rendered
       statMsg(`Loaded: ${file.name}`);
     }catch(err){
-      statMsg('Import failed — invalid JSON');
+      Object.keys(prev).forEach(t=>{ DB[t]=prev[t]; });
+      S.simResults=prevSim; S.elCounter=prevCounter;
+      Object.keys(S.simCfg).forEach(k=>delete S.simCfg[k]); Object.assign(S.simCfg,prevCfg);
+      try{ _demandCacheInvalidate(); syncElCounter(); }catch(e2){}
+      try{ if(DB.facilities.length) selectFacility(DB.facilities[0].id); updateStatusBar(); renderLocationTree(); updateNavFacilities(); }catch(e3){}
+      statMsg('Import failed — '+(err&&err.message||err)+'; the previous data was restored');
       console.error(err);
     }
     input.value=''; // reset so same file can be re-imported
@@ -31734,8 +31883,6 @@ function autoSaveNow(){
       // on load; the active scenario file still carries a copy — see scWriteActive)
       savedAt: _saveStamp,
       _partialTables: b.dropped,
-      // Rows of the LS_TRIM_90D tables dated before this were left out — see _scHealTrimmed.
-      _trimmedBefore: cutoffStr,
       // Which scenario this copy is of — so startup never takes it for another scenario's copy
       // (see _scLoadForeign).
       scId: (typeof SC!=='undefined' && SC.activeId) || null,
@@ -31820,7 +31967,6 @@ function loadSaved(){
   }catch(e){ try{ localStorage.removeItem('prodcast_v3'); }catch(e2){} }
 
   window._dbPartialTables = [];   // nothing restored yet ⇒ nothing known-missing
-  window._dbTrimmed = null;       // nothing restored yet ⇒ no history trimmed off
   try{
     const raw=localStorage.getItem('prodcast_v3');
     if(raw){
@@ -31842,14 +31988,6 @@ function loadSaved(){
       window._dbPartialTables = Array.isArray(saved._partialTables)
         ? saved._partialTables.slice()
         : [...LS_SKIP_ALWAYS].filter(t=>saved.DB && saved.DB[t]===undefined);
-      // The tables this cache holds only the last 90 days of (see LS_TRIM_90D). Older caches
-      // don't record the cut-off; it was at most 90 days before today.
-      {
-        const tables=[...LS_TRIM_90D].filter(t=>saved.DB && Array.isArray(saved.DB[t]));
-        let before=saved._trimmedBefore;
-        if(!before){ const d=new Date(); d.setDate(d.getDate()-90); before=d._ymd(); }
-        window._dbTrimmed = tables.length ? {before, tables} : null;
-      }
 
       // Remember when this localStorage copy was saved, so the topology data
       // source can refuse to overwrite it with an OLDER file (stale-file guard).
@@ -32471,7 +32609,7 @@ function scBuildPayload(){
 // Returns false if the file could not be read — callers must then refuse to write.
 async function _scHealPartial(handle){
   const miss=window._dbPartialTables;
-  if((!Array.isArray(miss) || !miss.length) && !window._dbTrimmed) return true;
+  if(!Array.isArray(miss) || !miss.length) return true;
   try{
     const f=await handle.getFile();
     const text=new TextDecoder().decode(await f.arrayBuffer());
@@ -32483,34 +32621,15 @@ async function _scHealPartial(handle){
     if(_scIsSalesPayload(saved)) return true;
     if(saved && saved.DB){
       let healed=0;
-      (Array.isArray(miss)?miss:[]).forEach(t=>{ if(saved.DB[t]!==undefined){ DB[t]=saved.DB[t]; healed++; } });
+      miss.forEach(t=>{ if(saved.DB[t]!==undefined){ DB[t]=saved.DB[t]; healed++; } });
       if(healed && typeof _demandCacheInvalidate==='function') _demandCacheInvalidate();
-      if(healed) console.info('scenario: restored '+healed+' table(s) from file that localStorage could not cache');
-      _scHealTrimmed(saved.DB);
+      console.info('scenario: restored '+healed+' table(s) from file that localStorage could not cache');
     }
     window._dbPartialTables=[];
     return true;
   }catch(e){
     console.warn('scenario: could not restore partial tables from file — refusing to write', e);
     return false;
-  }
-}
-// The localStorage cache keeps only the last 90 days of the LS_TRIM_90D tables (see autoSaveNow).
-// The older rows were never deleted here: put them back from `srcDB` before memory is compared
-// with, or written over, the file — otherwise the sync reads every one of them as a deletion.
-function _scHealTrimmed(srcDB){
-  const tr=window._dbTrimmed; if(!tr || !srcDB) return;
-  let n=0;
-  for(const t of tr.tables){
-    const src=srcDB[t]; if(!Array.isArray(src) || !Array.isArray(DB[t])) continue;
-    const have=new Set(DB[t].map(r=>_mgRowKey(t,r)));
-    const back=src.filter(r=>!(r && r.date>=tr.before) && !have.has(_mgRowKey(t,r)));   // what the cache left out
-    if(back.length){ DB[t]=back.concat(DB[t]); n+=back.length; }
-  }
-  window._dbTrimmed=null;
-  if(n){
-    if(typeof _demandCacheInvalidate==='function') _demandCacheInvalidate();
-    console.info('scenario: restored '+n+' row(s) older than the local cache keeps');
   }
 }
 
@@ -32814,7 +32933,6 @@ async function scLoadScenario(id, opts){
       // would read as "I deleted / reverted everything since" — so it is not used as ours:
       // the file is taken (plus anything the change log says it is missing).
       const cacheIsFromBase = window._lsScBase && window._lsScBase===_scBaseTag(id);
-      _scHealTrimmed(base.DB);   // the history the cache leaves out is the baseline's, not deleted
       let oursNow=scBuildPayload();
       if(!cacheIsFromBase){ oursNow=Object.assign(JSON.parse(baseline.text), {changeLog:oursNow.changeLog, topoSeal:oursNow.topoSeal, simResults:oursNow.simResults}); console.info('scenario: local copy predates the last sync — using the file'); }
       const res=_mgSync(base, oursNow, saved);
@@ -32877,7 +32995,6 @@ async function scLoadScenario(id, opts){
   window._scTopoSeal=(SC.activeId===id?_tsNewest(window._scTopoSeal, saved.topoSeal):(saved.topoSeal||null))||null;
   if(window._scTopoSeal && !_tsSame(_tsTables(saved), window._scTopoSeal.tables)) Object.assign(DB, window._scTopoSeal.tables);   // written back on the next save
   window._dbPartialTables=[];                          // adopted the file wholesale — memory is complete
-  window._dbTrimmed=null;
   if(typeof _demandCacheInvalidate==='function') _demandCacheInvalidate();
   SC.activeId=id; m.lastOpened=new Date().toISOString();
   window._lsSavedAt=saved.savedAt||null;
@@ -33273,10 +33390,9 @@ function _acWriteSession(user, remember){
 function _acClearSession(){ try{ sessionStorage.removeItem(_acSessKey()); localStorage.removeItem(_acSessKey()); }catch(e){} }
 // The person this browser is signed in as — only while their row still exists, is active and
 // their password has not been changed/reset since (a reset signs every other browser out).
-// `db`: whose list of people to check against (default: the live DB).
-function _acUserFromSession(db){
+function _acUserFromSession(){
   const s=_acReadSession(); if(!s) return null;
-  const u=_acUsers(db).find(x=>x.id===s.email);
+  const u=_acUsers().find(x=>x.id===s.email);
   if(!u || u.active===false || u.must_change) return null;
   if(((u.pw&&u.pw.hash)||'').slice(0,16)!==s.pwv) return null;
   return u;
@@ -33326,11 +33442,11 @@ function _acRowFacility(table, row, elFac){
 }
 // A signed-in person may change their own password; anyone (signed in or not) may add an
 // access request. Everything else in the access tables is the admin's.
-function _acAccessRowAllowed(table, b, o, user){
+function _acAccessRowAllowed(table, b, o){
   if(table==='access_requests') return !b && !!o;
-  if(table==='change_requests') return !b && !!o && !!user && o.by===user.id;
+  if(table==='change_requests') return !b && !!o && !!_acUser && o.by===_acUser.id;
   if(table==='access_users'){
-    if(!user || !b || !o || b.id!==user.id || o.id!==user.id) return false;
+    if(!_acUser || !b || !o || b.id!==_acUser.id || o.id!==_acUser.id) return false;
     const strip=r=>{ const c=Object.assign({},r); AC_PW_FIELDS.forEach(f=>delete c[f]); return _mgStr(c); };
     return strip(b)===strip(o);
   }
@@ -33345,10 +33461,7 @@ function _acSilentRow(table, row){ return table==='vessel_calls' && row && row.s
 function _acEnforce(base, ours, theirs){
   if(!base || !base.DB || !ours || !ours.DB) return ours;
   if(!_acEnabledDB(base.DB) && !_acEnabledDB(ours.DB) && !(theirs && theirs.DB && _acEnabledDB(theirs.DB))) return ours;   // sign-in is off for this scenario
-  // Opening the app syncs with the file BEFORE acGate has restored the saved sign-in: take the
-  // person this browser is signed in as (checked against the file's list of people), not "nobody".
-  const user=_acUser || _acUserFromSession(theirs && theirs.DB && _acEnabledDB(theirs.DB) ? theirs.DB : base.DB);
-  if(user && user.admin) return ours;
+  if(_acIsAdmin()) return ours;
   const elFac=new Map(), fbn=_acFacByName();
   for(const src of [base.DB.elements, ours.DB.elements]) for(const e of (src||[])) if(e && e.id!=null && !elFac.has(e.id)) elFac.set(e.id, _acElFacility(e, fbn));
   const outDB=Object.assign({}, ours.DB), undo={}, blocked=new Map();
@@ -33360,10 +33473,10 @@ function _acEnforce(base, ours, theirs){
     const om=new Map(); for(const r of oa) om.set(_mgRowKey(t,r), r);
     let changed=false, visible=false; const rows=[];
     const ok=(b,o)=>{
-      if(t==='access_users'||t==='access_requests'||t==='change_requests') return _acAccessRowAllowed(t,b,o,user);
+      if(t==='access_users'||t==='access_requests'||t==='change_requests') return _acAccessRowAllowed(t,b,o);
       const fb=b?_acRowFacility(t,b,elFac):null, fo=o?_acRowFacility(t,o,elFac):null;
       const fn=_acFunc(t, o||b);
-      const can=(!b || _acCan(user, _acFunc(t,b), fb)) && (!o || _acCan(user, fn, fo));
+      const can=(!b || _acCan(_acUser, _acFunc(t,b), fb)) && (!o || _acCan(_acUser, fn, fo));
       if(!can) block(fn, fo||fb);
       return can;
     };
@@ -33381,13 +33494,13 @@ function _acEnforce(base, ours, theirs){
     if(changed){ outDB[t]=rows; if(visible) undo[t]=rows; }
   }
   let simCfg=ours.simCfg;
-  if(_mgStr(base.simCfg||{})!==_mgStr(ours.simCfg||{}) && !_acCan(user,'topology',AC_NET)){ simCfg=base.simCfg; block('topology',AC_NET); }
+  if(_mgStr(base.simCfg||{})!==_mgStr(ours.simCfg||{}) && !_acCan(_acUser,'topology',AC_NET)){ simCfg=base.simCfg; block('topology',AC_NET); }
   const out=Object.assign({}, ours, {DB:outDB, simCfg});
   if(Object.keys(undo).length || simCfg!==ours.simCfg){
     Object.keys(undo).forEach(t=>{ DB[t]=undo[t]; });
     if(simCfg!==ours.simCfg && base.simCfg){ Object.keys(S.simCfg).forEach(k=>{ if(!(k in base.simCfg)) delete S.simCfg[k]; }); Object.assign(S.simCfg, base.simCfg); }
     if(typeof _demandCacheInvalidate==='function') _demandCacheInvalidate();
-    _acReportBlocked(blocked, user);
+    _acReportBlocked(blocked);
     setTimeout(()=>{ try{ if(typeof _acRerender==='function') _acRerender(); }catch(e){} }, 0);
   }
   return out;
@@ -33398,11 +33511,11 @@ function _acRerender(){
   if(typeof renderLocationTree==='function') renderLocationTree();
   if(S.topSection==='logistics'){ if(S.activeSchedTab==='rail' && typeof rpRender==='function') rpRender(); if(S.activeSchedTab==='vessels' && typeof vpRender==='function') vpRender(); }
 }
-function _acReportBlocked(blocked, user){
+function _acReportBlocked(blocked){
   if(!blocked.size) return;
   const parts=[...blocked.entries()].slice(0,4).map(([k,n])=>{ const [f,fac]=k.split('|'); const F=AC_FUNCS.find(x=>x.id===f); return `<b>${_scEsc(F?F.label:f)}</b> at <b>${_scEsc(_acFacName(fac))}</b>`; });
   const n=[...blocked.values()].reduce((a,b)=>a+b,0);
-  const msg=user
+  const msg=_acUser
     ? `You have <b>read-only</b> access to ${parts.join(', ')}${blocked.size>4?' and more':''} — ${n} change${n!==1?'s were':' was'} undone and not saved. Ask the administrator if you need to change this.`
     : `You are <b>not signed in</b> — ${n} change${n!==1?'s were':' was'} undone and not saved.`;
   _acBanner(msg, 'warn');
@@ -34403,338 +34516,6 @@ async function scInit(){
   if(pref && SC.meta[pref]){ SC.activeId=pref; if(await scLoadScenario(pref,{guard:true})) return; }
   scOpenStartup(false);                                          // ask which scenario
 }
-</script>
-
-<!-- ═══════════════════════════════════════════════════════════════════
-     DESIGN MODE PANEL v2 — smarter selectors + !important exports
-     Activate: Ctrl+Shift+D  |  Pick: click any element  |  Esc: cancel
-     Zero impact on app logic — purely additive
-     ═══════════════════════════════════════════════════════════════════ -->
-<style id="dm-styles">
-#dm-toggle-btn{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);z-index:99998;padding:5px 14px;font-family:monospace;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;background:#1a1a2e;color:#a78bfa;border:1px solid #a78bfa;border-radius:20px;cursor:pointer;opacity:.55;transition:opacity .2s;user-select:none;}
-#dm-toggle-btn:hover{opacity:1;}
-#dm-toggle-btn.active{background:#a78bfa;color:#1a1a2e;opacity:1;}
-#dm-panel{position:fixed;top:60px;right:10px;width:285px;max-height:calc(100vh - 80px);z-index:99999;background:#0f0f1a;border:1px solid #a78bfa;border-radius:6px;display:none;flex-direction:column;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,.6);font-family:monospace;font-size:11px;}
-#dm-panel.visible{display:flex;}
-#dm-header{padding:8px 12px;background:#1a1a2e;border-bottom:1px solid #a78bfa;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;}
-#dm-header span{color:#a78bfa;font-weight:700;letter-spacing:1px;font-size:10px;}
-#dm-header-btns{display:flex;gap:6px;align-items:center;}
-#dm-pick-btn{padding:3px 8px;background:transparent;border:1px solid #a78bfa;color:#a78bfa;cursor:pointer;border-radius:3px;font-size:9px;font-family:monospace;font-weight:700;letter-spacing:.5px;transition:all .15s;}
-#dm-pick-btn:hover,#dm-pick-btn.active{background:#a78bfa;color:#1a1a2e;}
-#dm-close-btn{background:transparent;border:none;color:#666;cursor:pointer;font-size:14px;line-height:1;padding:0 2px;}
-#dm-close-btn:hover{color:#fff;}
-#dm-selected-label{padding:5px 12px;font-size:9px;color:#666;background:#0a0a14;border-bottom:1px solid #1e1e30;flex-shrink:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-#dm-selected-label .dm-sel-tag{color:#a78bfa;font-weight:700;}
-#dm-selected-label .dm-sel-path{color:#555;font-size:8px;display:block;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-#dm-props{flex:1;overflow-y:auto;padding:8px;}
-.dm-group-title{font-size:8px;letter-spacing:1.5px;text-transform:uppercase;color:#555;margin:10px 0 5px;padding-bottom:3px;border-bottom:1px solid #1e1e30;}
-.dm-row{display:flex;align-items:center;margin-bottom:5px;gap:6px;}
-.dm-label{color:#888;font-size:9px;width:95px;flex-shrink:0;}
-.dm-input{flex:1;background:#1a1a2e;border:1px solid #2a2a40;color:#e0e0ff;font-family:monospace;font-size:10px;padding:3px 6px;border-radius:3px;outline:none;transition:border-color .15s;min-width:0;}
-.dm-input:focus{border-color:#a78bfa;}
-.dm-input.dm-changed{border-color:#4ade80;color:#4ade80;}
-#dm-footer{padding:8px 12px;background:#0a0a14;border-top:1px solid #1e1e30;flex-shrink:0;display:flex;flex-direction:column;gap:6px;}
-#dm-changes-count{font-size:9px;color:#666;}
-#dm-changes-count span{color:#a78bfa;font-weight:700;}
-#dm-footer-btns{display:flex;gap:6px;}
-#dm-export-btn,#dm-clear-btn{flex:1;padding:4px 8px;font-family:monospace;font-size:9px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;cursor:pointer;border-radius:3px;transition:all .15s;}
-#dm-export-btn{background:#a78bfa;color:#1a1a2e;border:none;}
-#dm-export-btn:hover{background:#c4b5fd;}
-#dm-clear-btn{background:transparent;border:1px solid #333;color:#666;}
-#dm-clear-btn:hover{border-color:#666;color:#999;}
-#dm-export-modal{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:100000;background:#0f0f1a;border:1px solid #a78bfa;border-radius:6px;padding:16px;width:520px;max-width:90vw;display:none;box-shadow:0 16px 48px rgba(0,0,0,.8);font-family:monospace;}
-#dm-export-modal.visible{display:block;}
-#dm-export-title{color:#a78bfa;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;}
-#dm-export-close{background:transparent;border:none;color:#666;cursor:pointer;font-size:14px;}
-#dm-export-note-top{font-size:9px;color:#4ade80;margin-bottom:8px;}
-#dm-export-textarea{width:100%;height:240px;background:#1a1a2e;border:1px solid #2a2a40;color:#e0e0ff;font-family:monospace;font-size:10px;padding:8px;border-radius:3px;resize:none;box-sizing:border-box;}
-#dm-export-copy{margin-top:8px;width:100%;padding:6px;background:#a78bfa;color:#1a1a2e;border:none;font-family:monospace;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;cursor:pointer;border-radius:3px;}
-#dm-export-copy:hover{background:#c4b5fd;}
-#dm-export-note{margin-top:6px;font-size:9px;color:#666;text-align:center;}
-body.dm-picking *:hover{outline:2px dashed #a78bfa !important;outline-offset:1px !important;cursor:crosshair !important;}
-.dm-selected-el{outline:2px solid #4ade80 !important;outline-offset:1px !important;}
-</style>
-
-<button id="dm-toggle-btn" title="Toggle Design Mode (Ctrl+Shift+D)">⬡ Design</button>
-
-<div id="dm-panel">
-  <div id="dm-header">
-    <span>⬡ DESIGN MODE v2</span>
-    <div id="dm-header-btns">
-      <button id="dm-pick-btn" title="Click any element">↖ Pick</button>
-      <button id="dm-close-btn">✕</button>
-    </div>
-  </div>
-  <div id="dm-selected-label">No element selected — click ↖ Pick</div>
-  <div id="dm-props">
-    <div class="dm-group-title">Size</div>
-    <div class="dm-row"><span class="dm-label">Width</span><input class="dm-input" data-prop="width" placeholder="e.g. 200px or 60%"></div>
-    <div class="dm-row"><span class="dm-label">Height</span><input class="dm-input" data-prop="height" placeholder="auto"></div>
-    <div class="dm-row"><span class="dm-label">Min Width</span><input class="dm-input" data-prop="minWidth" placeholder=""></div>
-    <div class="dm-row"><span class="dm-label">Max Width</span><input class="dm-input" data-prop="maxWidth" placeholder=""></div>
-    <div class="dm-group-title">Typography</div>
-    <div class="dm-row"><span class="dm-label">Font Size</span><input class="dm-input" data-prop="fontSize" placeholder="e.g. 11px"></div>
-    <div class="dm-row"><span class="dm-label">Font Weight</span><input class="dm-input" data-prop="fontWeight" placeholder="400 / 700"></div>
-    <div class="dm-row"><span class="dm-label">Letter Spacing</span><input class="dm-input" data-prop="letterSpacing" placeholder="e.g. 1px"></div>
-    <div class="dm-row"><span class="dm-label">Color</span><input class="dm-input" data-prop="color" placeholder="e.g. #ff0 or var(--green)"></div>
-    <div class="dm-row"><span class="dm-label">Text Transform</span><input class="dm-input" data-prop="textTransform" placeholder="uppercase / none"></div>
-    <div class="dm-group-title">Spacing</div>
-    <div class="dm-row"><span class="dm-label">Padding</span><input class="dm-input" data-prop="padding" placeholder="e.g. 4px 8px"></div>
-    <div class="dm-row"><span class="dm-label">Pad Top</span><input class="dm-input" data-prop="paddingTop" placeholder=""></div>
-    <div class="dm-row"><span class="dm-label">Pad Right</span><input class="dm-input" data-prop="paddingRight" placeholder=""></div>
-    <div class="dm-row"><span class="dm-label">Pad Bottom</span><input class="dm-input" data-prop="paddingBottom" placeholder=""></div>
-    <div class="dm-row"><span class="dm-label">Pad Left</span><input class="dm-input" data-prop="paddingLeft" placeholder=""></div>
-    <div class="dm-row"><span class="dm-label">Margin</span><input class="dm-input" data-prop="margin" placeholder="e.g. 0 auto"></div>
-    <div class="dm-row"><span class="dm-label">Margin Top</span><input class="dm-input" data-prop="marginTop" placeholder=""></div>
-    <div class="dm-row"><span class="dm-label">Margin Right</span><input class="dm-input" data-prop="marginRight" placeholder=""></div>
-    <div class="dm-row"><span class="dm-label">Margin Bottom</span><input class="dm-input" data-prop="marginBottom" placeholder=""></div>
-    <div class="dm-row"><span class="dm-label">Margin Left</span><input class="dm-input" data-prop="marginLeft" placeholder=""></div>
-    <div class="dm-group-title">Layout</div>
-    <div class="dm-row"><span class="dm-label">Display</span><input class="dm-input" data-prop="display" placeholder="flex / grid / block"></div>
-    <div class="dm-row"><span class="dm-label">Gap</span><input class="dm-input" data-prop="gap" placeholder="e.g. 8px"></div>
-    <div class="dm-row"><span class="dm-label">Flex Direction</span><input class="dm-input" data-prop="flexDirection" placeholder="row / column"></div>
-    <div class="dm-row"><span class="dm-label">Align Items</span><input class="dm-input" data-prop="alignItems" placeholder="center / start / end"></div>
-    <div class="dm-row"><span class="dm-label">Grid Columns</span><input class="dm-input" data-prop="gridTemplateColumns" placeholder="e.g. 1fr 2fr"></div>
-    <div class="dm-row"><span class="dm-label">Align Self</span><input class="dm-input" data-prop="alignSelf" placeholder="center / flex-end"></div>
-    <div class="dm-group-title">Appearance</div>
-    <div class="dm-row"><span class="dm-label">Background</span><input class="dm-input" data-prop="background" placeholder="e.g. #1a1a2e"></div>
-    <div class="dm-row"><span class="dm-label">Border</span><input class="dm-input" data-prop="border" placeholder="e.g. 1px solid red"></div>
-    <div class="dm-row"><span class="dm-label">Border Radius</span><input class="dm-input" data-prop="borderRadius" placeholder="e.g. 4px"></div>
-    <div class="dm-row"><span class="dm-label">Opacity</span><input class="dm-input" data-prop="opacity" placeholder="0 – 1"></div>
-    <div class="dm-row"><span class="dm-label">Box Shadow</span><input class="dm-input" data-prop="boxShadow" placeholder="0 4px 12px #000"></div>
-  </div>
-  <div id="dm-footer">
-    <div id="dm-changes-count">Changes: <span id="dm-count">0</span> &nbsp;|&nbsp; Elements: <span id="dm-el-count">0</span></div>
-    <div id="dm-footer-btns">
-      <button id="dm-export-btn">↓ Export CSS</button>
-      <button id="dm-clear-btn">✕ Clear All</button>
-    </div>
-  </div>
-</div>
-
-<div id="dm-export-modal">
-  <div id="dm-export-title">
-    <span>Export CSS — Ready to Apply</span>
-    <button id="dm-export-close">✕</button>
-  </div>
-  <div id="dm-export-note-top">✓ All rules use !important — will match exactly what you see on screen</div>
-  <textarea id="dm-export-textarea" readonly></textarea>
-  <button id="dm-export-copy">Copy to Clipboard</button>
-  <div id="dm-export-note">Paste to Claude → applied permanently to your HTML file</div>
-</div>
-
-<script>
-// ═══════════════════════════════════════════════════════════════════
-// DESIGN MODE v2 — smarter selectors, !important exports
-// Isolated namespace — zero impact on existing app logic
-// ═══════════════════════════════════════════════════════════════════
-(function(){
-  'use strict';
-  const _dm={ active:false, picking:false, target:null, changes:new Map() };
-
-  // ── Smart selector: walks up tree to nearest ID ancestor ──────────
-  function _dmSmartSelector(el){
-    if(!el||el===document.body) return 'body';
-    if(el.id) return '#'+el.id;
-
-    // Build child path upward until we hit an ID or body
-    const path=[];
-    let cur=el;
-    let limit=6;
-    while(cur && cur!==document.body && !cur.id && limit-->0){
-      const tag=cur.tagName.toLowerCase();
-      const cls=Array.from(cur.classList)
-        .filter(c=>!c.startsWith('dm-')&&c.length>0).slice(0,2).join('.');
-      const parent=cur.parentElement;
-      let seg=tag+(cls?'.'+cls:'');
-      // Add nth-of-type if siblings of same tag exist
-      if(parent){
-        const sibs=Array.from(parent.children).filter(c=>c.tagName===cur.tagName);
-        if(sibs.length>1){
-          const idx=sibs.indexOf(cur)+1;
-          seg+=':nth-of-type('+idx+')';
-        }
-      }
-      path.unshift(seg);
-      cur=cur.parentElement;
-    }
-    const anchor=cur&&cur.id?'#'+cur.id:(cur===document.body?'body':'');
-    return anchor?(anchor+' '+path.join(' > ')):path.join(' > ');
-  }
-
-  // ── Friendly label for selected element ──────────────────────────
-  function _dmLabel(el){
-    const tag=el.tagName.toLowerCase();
-    const id=el.id?'#'+el.id:'';
-    const cls=Array.from(el.classList).filter(c=>!c.startsWith('dm-')).slice(0,2).join('.');
-    return tag+id+(cls?'.'+cls:'');
-  }
-
-  // ── Read computed values into panel inputs ────────────────────────
-  function _dmReadValues(el){
-    const cs=getComputedStyle(el);
-    document.querySelectorAll('#dm-props .dm-input').forEach(inp=>{
-      const prop=inp.dataset.prop;
-      const inline=el.style[prop];
-      inp.value=inline||'';
-      inp.placeholder=cs[prop]||'';
-      inp.classList.toggle('dm-changed', !!inline);
-    });
-  }
-
-  function _dmUpdateCount(){
-    let props=0;
-    _dm.changes.forEach(e=>{ props+=Object.keys(e.props).length; });
-    document.getElementById('dm-count').textContent=props;
-    document.getElementById('dm-el-count').textContent=_dm.changes.size;
-  }
-
-  // ── Toggle ────────────────────────────────────────────────────────
-  function _dmToggle(){
-    _dm.active=!_dm.active;
-    document.getElementById('dm-panel').classList.toggle('visible',_dm.active);
-    document.getElementById('dm-toggle-btn').classList.toggle('active',_dm.active);
-    if(!_dm.active) _dmStopPicking();
-  }
-
-  // ── Picking ───────────────────────────────────────────────────────
-  function _dmStartPicking(){
-    _dm.picking=true;
-    document.body.classList.add('dm-picking');
-    document.getElementById('dm-pick-btn').classList.add('active');
-    document.addEventListener('click',_dmOnPick,true);
-  }
-  function _dmStopPicking(){
-    _dm.picking=false;
-    document.body.classList.remove('dm-picking');
-    document.getElementById('dm-pick-btn').classList.remove('active');
-    document.removeEventListener('click',_dmOnPick,true);
-  }
-  function _dmOnPick(e){
-    const panel=document.getElementById('dm-panel');
-    const modal=document.getElementById('dm-export-modal');
-    if(panel.contains(e.target)||modal.contains(e.target)) return;
-    e.preventDefault(); e.stopPropagation();
-    if(_dm.target) _dm.target.classList.remove('dm-selected-el');
-    _dm.target=e.target;
-    _dm.target.classList.add('dm-selected-el');
-    const sel=_dmSmartSelector(_dm.target);
-    const lbl=document.getElementById('dm-selected-label');
-    lbl.innerHTML='<span class="dm-sel-tag">'+_dmLabel(_dm.target)+'</span>'
-      +'<span class="dm-sel-path">'+sel+'</span>';
-    _dmReadValues(_dm.target);
-    _dmStopPicking();
-  }
-
-  // ── Apply a CSS change live + record it ───────────────────────────
-  function _dmApply(prop, value){
-    if(!_dm.target) return;
-    // Apply directly as inline style (highest specificity, guaranteed to show)
-    _dm.target.style[prop]=value;
-    // Record with smart selector
-    const sel=_dmSmartSelector(_dm.target);
-    const key=sel+'__'+_dm.target.tagName;
-    if(!_dm.changes.has(key)) _dm.changes.set(key,{el:_dm.target, sel, props:{}});
-    const entry=_dm.changes.get(key);
-    if(value===''||value===null){ delete entry.props[prop]; }
-    else { entry.props[prop]=value; }
-    if(!Object.keys(entry.props).length) _dm.changes.delete(key);
-    _dmUpdateCount();
-    // Highlight input as changed
-    const inp=document.querySelector('#dm-props .dm-input[data-prop="'+prop+'"]');
-    if(inp) inp.classList.toggle('dm-changed', !!value);
-  }
-
-  // ── Build export CSS with !important ─────────────────────────────
-  function _dmBuildExport(){
-    if(!_dm.changes.size) return '/* No changes recorded */';
-    let out='/* ═══ DESIGN MODE EXPORT ═══ */\n'
-          +'/* All rules use !important — will override existing styles */\n'
-          +'/* Send to Claude to apply permanently */\n\n';
-    _dm.changes.forEach(entry=>{
-      const props=entry.props;
-      if(!Object.keys(props).length) return;
-      out+=entry.sel+' {\n';
-      Object.entries(props).forEach(([prop,val])=>{
-        const kebab=prop.replace(/([A-Z])/g,'-$1').toLowerCase();
-        out+='  '+kebab+': '+val+' !important;\n';
-      });
-      out+='}\n\n';
-    });
-    return out;
-  }
-
-  // ── Clear all changes ─────────────────────────────────────────────
-  function _dmClearAll(){
-    _dm.changes.forEach(entry=>{
-      Object.keys(entry.props).forEach(prop=>{ entry.el.style[prop]=''; });
-    });
-    _dm.changes.clear();
-    _dmUpdateCount();
-    if(_dm.target) _dmReadValues(_dm.target);
-    document.querySelectorAll('#dm-props .dm-input').forEach(i=>i.classList.remove('dm-changed'));
-  }
-
-  // ── Wire up events ────────────────────────────────────────────────
-  document.addEventListener('DOMContentLoaded',function(){
-    document.getElementById('dm-toggle-btn').addEventListener('click',_dmToggle);
-    document.getElementById('dm-close-btn').addEventListener('click',function(){
-      _dm.active=false;
-      document.getElementById('dm-panel').classList.remove('visible');
-      document.getElementById('dm-toggle-btn').classList.remove('active');
-      _dmStopPicking();
-    });
-    document.getElementById('dm-pick-btn').addEventListener('click',function(){
-      _dm.picking?_dmStopPicking():_dmStartPicking();
-    });
-
-    // Live update on input change
-    document.querySelectorAll('#dm-props .dm-input').forEach(inp=>{
-      inp.addEventListener('input',function(){ _dmApply(this.dataset.prop,this.value.trim()); });
-      inp.addEventListener('keydown',function(e){
-        const m=this.value.match(/^(-?[\d.]+)(px|%|em|rem|vw|vh)?$/);
-        if(m&&(e.key==='ArrowUp'||e.key==='ArrowDown')){
-          e.preventDefault();
-          const step=e.shiftKey?10:1;
-          const n=parseFloat(m[1])+(e.key==='ArrowUp'?step:-step);
-          const u=m[2]||'px';
-          this.value=n+u;
-          _dmApply(this.dataset.prop,this.value);
-        }
-      });
-    });
-
-    // Export
-    document.getElementById('dm-export-btn').addEventListener('click',function(){
-      document.getElementById('dm-export-textarea').value=_dmBuildExport();
-      document.getElementById('dm-export-modal').classList.add('visible');
-    });
-    document.getElementById('dm-export-close').addEventListener('click',function(){
-      document.getElementById('dm-export-modal').classList.remove('visible');
-    });
-    document.getElementById('dm-export-copy').addEventListener('click',function(){
-      const ta=document.getElementById('dm-export-textarea');
-      ta.select();
-      try{ document.execCommand('copy'); }catch(e){ navigator.clipboard?.writeText(ta.value); }
-      this.textContent='✓ Copied!';
-      setTimeout(()=>{ this.textContent='Copy to Clipboard'; },2000);
-    });
-    document.getElementById('dm-clear-btn').addEventListener('click',function(){
-      if(confirm('Reset all visual changes?')) _dmClearAll();
-    });
-
-    // Keyboard shortcuts
-    document.addEventListener('keydown',function(e){
-      if(e.ctrlKey&&e.shiftKey&&e.key==='D'){ e.preventDefault(); _dmToggle(); }
-      if(e.key==='Escape'){
-        if(_dm.picking){ _dmStopPicking(); return; }
-        if(_dm.active) _dmToggle();
-      }
-    });
-  });
-
-  window._designMode={ toggle:_dmToggle, clear:_dmClearAll, export:()=>console.log(_dmBuildExport()) };
-})();
 </script>
 
 </body>
