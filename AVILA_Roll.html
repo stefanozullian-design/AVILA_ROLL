@@ -1790,6 +1790,11 @@ td.camp-drag-cut>div:first-child{opacity:.3}
           title="Inventory charts show VOLUME in tonnes. Click for days of inventory.">
           <span class="k">Inv. charts</span><span class="v">Volume</span>
         </button>
+        <!-- Campaign suggestions (the amber rows above the table): shown or hidden (remembered) -->
+        <button type="button" class="sup-drop-btn" id="sup-sugg-btn" onclick="_supToggleSuggestions()"
+          title="Campaign suggestions are shown above the table. Click to hide them.">
+          <span class="k">Suggestions</span><span class="v">Shown</span>
+        </button>
         <!-- Show inactive elements -->
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-family:var(--mono);font-size:9px;color:var(--text-dim);margin-left:auto;margin-right:8px">
           <input type="checkbox" id="sup-show-inactive" onchange="window._supShowInactive=this.checked;renderSupplyView()" style="width:14px;height:14px;accent-color:var(--green);cursor:pointer">
@@ -1801,11 +1806,6 @@ td.camp-drag-cut>div:first-child{opacity:.3}
 
       <!-- Active-filter tokens — what is on right now; click a token's ✕ to drop it. -->
       <div id="flt-sup-toks" class="sup-toks"></div>
-
-      <!-- ── KPI DASHBOARD ──────────────────────────────────── -->
-      <div id="sup-kpi-bar" style="flex-shrink:0;background:var(--bg);border-bottom:2px solid var(--border2);padding:8px 14px;display:flex;gap:10px;align-items:stretch;flex-wrap:wrap">
-        <!-- KPI cards populated by renderSupplyKPIs() -->
-      </div>
 
       <!-- ── CAMPAIGN CAPACITY WARNINGS ──────────────────── -->
       <div id="sup-campaign-warnings" style="flex-shrink:0"></div>
@@ -7401,13 +7401,37 @@ function _shortenCampaign(campId, newEndDate){
   statMsg('Campaign shortened to '+newEndDate+' — re-run simulation to update projections');
 }
 
+// The suggestions can be hidden from the toolbar — a per-browser choice, remembered like the
+// inventory-chart mode. Hidden, the button still counts them so new ones are not missed.
+const SUGG_HIDE_KEY='avila_sup_sugg_hidden';
+function _supSuggHidden(){
+  if(window._supSuggHide===undefined){
+    let v=null; try{ v=localStorage.getItem(SUGG_HIDE_KEY); }catch(e){}
+    window._supSuggHide=v==='1';
+  }
+  return window._supSuggHide;
+}
+function _supToggleSuggestions(){
+  window._supSuggHide=!_supSuggHidden();
+  try{ localStorage.setItem(SUGG_HIDE_KEY,window._supSuggHide?'1':'0'); }catch(e){}
+  _renderSupCampaignWarnings();
+}
+function _supSyncSuggBtn(n){
+  const b=document.getElementById('sup-sugg-btn'); if(!b) return;
+  const hidden=_supSuggHidden();
+  const v=b.querySelector('.v'); if(v) v.textContent=(hidden?'Hidden':'Shown')+(n?' · '+n:'');
+  b.classList.toggle('set',hidden);   // non-default state reads like an active filter
+  b.title=(n?n+' campaign suggestion'+(n===1?'':'s')+' (silo reaches capacity before the campaign ends). ':'No campaign suggestions right now. ')
+    +(hidden?'Click to show them above the table.':'Click to hide them.');
+}
+
 // Scan production campaigns against sim inventory history and render overflow warnings
 function _renderSupCampaignWarnings(){
   const el=document.getElementById('sup-campaign-warnings');
   if(!el) return;
   const r=S.simResults;
   const camps=DB.production_campaigns||[];
-  if(!camps.length||!r?.inventoryHistory){el.innerHTML='';return;}
+  if(!camps.length||!r?.inventoryHistory){el.innerHTML='';_supSyncSuggBtn(0);return;}
 
   const simStart=new Date(S.simCfg.start_date+'T00:00:00');
   const horizon=S.simCfg.horizon||365;
@@ -7477,7 +7501,8 @@ function _renderSupCampaignWarnings(){
     });
   });
 
-  if(!warnings.length){el.innerHTML='';return;}
+  _supSyncSuggBtn(warnings.length);
+  if(!warnings.length || _supSuggHidden()){el.innerHTML='';return;}
 
   el.innerHTML=warnings.map(w=>`
     <div style="display:flex;align-items:center;gap:10px;background:rgba(255,177,0,.07);border-left:3px solid var(--amber);border-bottom:1px solid rgba(255,177,0,.15);padding:6px 14px">
@@ -8535,158 +8560,6 @@ FLT_PAGES.sup={
   proc:()=>SUP_PROCESSES.map(o=>o.key),
   rerender:()=>renderSupplyView()
 };
-
-function renderSupplyKPIs(){
-  const bar=document.getElementById('sup-kpi-bar'); if(!bar) return;
-  const r=S.simResults;
-  const today=new Date();
-  const todayStr=today._ymd();
-  // Same facility set the table uses (null = every facility), so the cards agree with
-  // what is rendered below them.
-  const _kpiFacs=fltFacIdSet();
-  // Same allowed-product set the table uses, so the KPI cards agree with what is
-  // rendered below them under a Family or Category filter (not just a single product).
-  const _kpiPids=fltAllowedProdIds();
-  const pidOk=pid=>!_kpiPids||_kpiPids.has(pid);
-
-  // Elements in scope
-  const millEls=DB.elements.filter(e=>
-    ['finish_mill','kiln'].includes(e.type)&&
-    (!_kpiFacs||_kpiFacs.has(e.facility_id)||_kpiFacs.has(e.assigned_facility_id))
-  );
-
-  // ── MTD Production ─────────────────────────────────────────
-  const mtdStart=new Date(today.getFullYear(),today.getMonth(),1)._ymd();
-  let mtdActual=0, mtdRated=0;
-  const mtdDates=[];
-  // Calendar days (setDate), not +24h: from the November DST change +24h lands on 23:00 the
-  // day before, repeating Nov 1 and dropping today.
-  for(let d=new Date(mtdStart+'T00:00:00');d<=today;d.setDate(d.getDate()+1))
-    mtdDates.push(d._ymd());
-
-  millEls.forEach(el=>{
-    const caps=DB.element_product_capacities.filter(c=>c.element_id===el.id&&pidOk(c.product_id));
-    const ratedMax=caps.reduce((s,c)=>s+(parseFloat(c.capacity_tpd)||0),0);
-    mtdDates.forEach(ds=>{
-      // Actual data
-      const actual=_idxRows('real_production_daily','element_id',el.id,'date',ds).filter(rp=>pidOk(rp.product_id));
-      if(actual.length) mtdActual+=actual.reduce((s,rp)=>s+(parseFloat(rp.volume_t)||0),0);
-      // Rated (skip maintenance days)
-      const isMaint=DB.element_maintenance_events.some(m=>{
-        const dur=Math.max(1,Math.ceil(parseFloat(m.duration_days)||1));
-        return m.element_id===el.id&&ds>=m.start_date&&ds<=_addDays(m.start_date,dur-1);
-      });
-      if(!isMaint) mtdRated+=ratedMax;
-    });
-  });
-
-  // ── Forecasted Full Month ───────────────────────────────────
-  const eomStr=new Date(today.getFullYear(),today.getMonth()+1,0)._ymd();
-  let forecastRem=0;
-  if(r?.millProductHistory){
-    // Tomorrow → end of month by calendar day at local midnight. The old +24h steps carried the
-    // current time of day: after noon every day read the NEXT simulated day, the last day of the
-    // month was never reached, and from the November DST change dates repeated.
-    for(let d=new Date(today.getFullYear(),today.getMonth(),today.getDate()+1);d._ymd()<=eomStr;d.setDate(d.getDate()+1)){
-      const ds=d._ymd();
-      const dayIdx=dateToDayOffset(ds,S.simCfg.start_date);
-      millEls.forEach(el=>{
-        const pid=r.millProductHistory[el.id]?.[dayIdx]||null;
-        if(pid&&pidOk(pid)){
-          const cap=DB.element_product_capacities.find(c=>c.element_id===el.id&&c.product_id===pid);
-          forecastRem+=parseFloat(cap?.capacity_tpd)||0;
-        }
-      });
-    }
-  }
-  const fullMonthForecast=mtdActual+forecastRem;
-
-  // ── Effectiveness ───────────────────────────────────────────
-  const effectiveness=mtdRated>0?Math.round(mtdActual/mtdRated*100):null;
-  const effColor=effectiveness==null?'var(--text-dim)':effectiveness>=90?'var(--green)':effectiveness>=75?'var(--amber)':'var(--red)';
-
-  // ── Days of Inventory by Product ───────────────────────────
-  const invByProd=[];
-  const cemSilos=DB.elements.filter(e=>
-    e.type==='bulk_silo'&&
-    (!_kpiFacs||_kpiFacs.has(e.facility_id)||_kpiFacs.has(e.assigned_facility_id))
-  );
-  const prodIds=[...new Set(
-    millEls.flatMap(el=>DB.element_product_capacities.filter(c=>c.element_id===el.id).map(c=>c.product_id))
-  )].filter(pidOk);
-
-  prodIds.forEach(pid=>{
-    const prod=DB.products.find(p=>p.id===pid); if(!prod) return;
-    if(!['cement_bulk','cement_packed'].includes(prod.category||'')) return;
-    // Current inventory across silos holding this product
-    let inv=0;
-    cemSilos.forEach(silo=>{
-      const siloProds=silo.props?.products||[];
-      if(silo.props?.product_id===pid||siloProds.includes(pid)){
-        if(r?.inventoryHistory?.[silo.id]){
-          const dayOff=todayDayOffset();
-          inv+=r.inventoryHistory[silo.id][dayOff-1]??(parseFloat(silo.props?.start_inventory)||0);
-        } else {
-          inv+=parseFloat(silo.props?.start_inventory)||0;
-        }
-      }
-    });
-    // Avg daily demand next 30 days
-    const demEls=DB.elements.filter(e=>e.type==='demand_point'&&
-      (!_kpiFacs||_kpiFacs.has(e.facility_id)||_kpiFacs.has(e.assigned_facility_id)));
-    let totalDemand=0; let demDays=0;
-    for(let i=0;i<30;i++){
-      const d=new Date(today.getFullYear(),today.getMonth(),today.getDate()+i)._ymd();
-      const dayDem=demEls.reduce((s,el)=>s+(_demandRate(el.id,d)||0),0);
-      if(dayDem>0){ totalDemand+=dayDem; demDays++; }
-    }
-    const avgDailyDem=demDays>0?totalDemand/demDays:0;
-    const daysOfInv=avgDailyDem>0?Math.round(inv/avgDailyDem):null;
-    invByProd.push({pid, name:prod.name||pid, inv:Math.round(inv), days:daysOfInv});
-  });
-
-  // ── Render KPI cards ────────────────────────────────────────
-  const kpiCard=(title,value,sub,color,extra='')=>`
-    <div style="background:var(--surface);border:1px solid var(--border2);border-radius:4px;padding:8px 14px;min-width:140px;flex:1">
-      <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);letter-spacing:1px;text-transform:uppercase;margin-bottom:4px">${title}</div>
-      <div style="font-family:var(--mono);font-size:18px;font-weight:700;color:${color||'var(--text)'}">${value}</div>
-      <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-top:2px">${sub}</div>
-      ${extra}
-    </div>`;
-
-  let html='';
-  html+=kpiCard(
-    'Production MTD',
-    mtdActual>0?Math.round(mtdActual).toLocaleString()+'t':'—',
-    'Actual this month',
-    'var(--green)'
-  );
-  html+=kpiCard(
-    'Full Month Forecast',
-    fullMonthForecast>0?Math.round(fullMonthForecast).toLocaleString()+'t':'—',
-    'Actual + simulated rest',
-    'var(--blue)'
-  );
-  html+=kpiCard(
-    'Effectiveness',
-    effectiveness!=null?effectiveness+'%':'—',
-    'Actual ÷ Rated capacity',
-    effColor
-  );
-
-  // Days of inventory cards
-  invByProd.slice(0,4).forEach(({name,inv,days})=>{
-    const dColor=days==null?'var(--text-dim)':days>=14?'var(--green)':days>=7?'var(--amber)':'var(--red)';
-    html+=kpiCard(
-      'Days Inv · '+name.replace(/[\/\|]/g,' ').slice(0,14),
-      days!=null?days+'d':'—',
-      inv.toLocaleString()+'t on hand',
-      dColor
-    );
-  });
-
-  bar.innerHTML=html;
-}
 
 // CATALOGS
 // ═══════════════════════════════════════════════════════
@@ -10019,7 +9892,6 @@ function renderSupplyView(){
   const wrap=document.getElementById('supply-table-wrap'); if(!wrap) return;
   fltRender('sup');
   _supSyncInvModeBtn();
-  renderSupplyKPIs();
   _renderSupCampaignWarnings();
   _renderSupplyViewInner(wrap);
 }
