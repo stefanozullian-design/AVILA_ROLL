@@ -22421,7 +22421,7 @@ const EXPORT_SLOTS={
     dirKey:'__sap_pub_dir__', nameKey:'avila_sap_pub_dir_name',
     file:'Avila_Shipments_Summary.xlsx', pickerId:'avila-sap-publish', rowId:'sap-pub-dir-row',
     label:'Sales files folder',
-    desc:'Where <b style="color:var(--text)">Publish</b> in Configuration → Demand Mapping writes the Summary, Detail and Transfers files.'
+    desc:'Where <b style="color:var(--text)">Publish</b> in Configuration → Demand Mapping writes its own "(app)" copies of the Summary, Detail and Transfers files, beside the SAP pipeline\'s.'
   },
   // Logistics → Vessel schedule → SOF files each Statement of Facts PDF here (one per port of call).
   sof:{
@@ -27612,7 +27612,7 @@ async function dsIngestDemandSales(buf,name){
     parked:{rows:parkedRows,t:parkedT}, ignored:{rows:ignoredRows,t:ignoredT},
     skipped:{rows:skipRows,t:skipT,mats:[...skipMats].map(([code,v])=>({code,...v})).sort((a,b)=>Math.abs(b.t)-Math.abs(a.t))},
     noRep:[...noRep].map(([code,v])=>({code,...v})).sort((a,b)=>Math.abs(b.t)-Math.abs(a.t)),
-    dayRows:dayCount(agg), transferRows:dayCount(aggPark), detailRows:detail.length
+    dayRows:dayCount(agg), transferRows:dayCount(aggPark), detailLoads:detail.filter(d=>d[9]>0).length
   };
   _xlUi.cmp=null;               // a comparison made against the previous read is stale
   if(document.getElementById('cfg-panel-demandmap')) xlmapRender();
@@ -27697,16 +27697,19 @@ function _xlSourceBody(){
   return h;
 }
 
-// ── Publish: the app writes the files everyone else reads ────────────────────
+// ── Publish: the app's own copies of the sales files ─────────────────────────
 // The old chain was SAP → one big workbook (INV_ROLL_NAME formula + index tab + three
-// pivots) → values pasted into three small files. Publish replaces everything after the
-// SAP dump: the export read above is translated once, here, and written as the same
-// three files, same names, same sheets, same columns — so Real Sales in every scenario,
-// the Sales page and Power BI keep reading exactly what they read before. The only
-// difference is that the three now add up to the same tonnes (the Excel Detail pivot
-// had its own material filter and collapsed identical deliveries — 90 kt short).
-const XLPUB_FILES={summary:'Avila_Shipments_Summary.xlsx', detail:'Avila_Shipments_Detail.xlsx',
-                   transfers:'Avila_Transfers_Summary.xlsx', map:'Avila_Demand_Rules.json'};
+// pivots) → values pasted into three small files. Publish translates the export read above
+// once, here, into the same three files — same sheets, same columns — so they can be compared
+// with the pipeline script's, which applies the same rules (Avila_Demand_Rules.json).
+// Since 2026-10-13 the SAP pipeline script (Avila_Sales_Pipeline.vbs, on the SAP PC) is the ONLY
+// writer of the three files everyone reads (XLPUB_PIPELINE). Publish writes its own copies, tagged
+// "(app)", next to them — so the two writers never replace each other's files. Compare reads the
+// pipeline's files; Real Sales is never pointed at the app's copies by Publish.
+const XLPUB_PIPELINE={summary:'Avila_Shipments_Summary.xlsx', detail:'Avila_Shipments_Detail.xlsx',
+                      transfers:'Avila_Transfers_Summary.xlsx'};
+const XLPUB_FILES={summary:'Avila_Shipments_Summary (app).xlsx', detail:'Avila_Shipments_Detail (app).xlsx',
+                   transfers:'Avila_Transfers_Summary (app).xlsx', map:'Avila_Demand_Rules.json'};
 const XLPUB_LAST_KEY='avila_sap_pub_last';
 
 // 'YYYY-MM-DD' → Excel date serial, from calendar parts (no local-midnight maths).
@@ -27728,16 +27731,29 @@ function _xlDaySheet(byName){
   const ws=XLSX.utils.aoa_to_sheet(aoa); _xlDateCol(ws,0,out.length);
   return {ws, rows:out.length, t:out.reduce((a,r)=>a+r[2],0)};
 }
+// Same rows as the pipeline script's Detail (CollapseDetail): one per day × Ship-To × demand point
+// × DEL/FOB × Ship Pt × Carrier, tonnes summed, Loads = its deliveries with a positive quantity
+// (a return nets its tonnes but is not a load).
+function _xlDetailCollapse(detail){
+  const by=new Map();
+  for(const [so,son,sh,shn,sp,df,ca,can,ds,q,nm,rep] of detail){
+    const k=[ds,_xlCode(sh),nm,df,_xlCode(sp),_xlCode(ca)].join('\u0001');
+    let a=by.get(k);
+    if(!a){ a=[so,son,sh,shn,sp,df,ca,can,ds,0,nm,rep,0]; by.set(k,a); }
+    a[9]+=q; if(q>0) a[12]++;
+  }
+  return [...by.values()];
+}
 function _xlDetailSheet(detail){
-  const out=detail.map(([so,son,sh,shn,sp,df,ca,can,ds,q,nm,rep])=>
-    [_xlCode(so),son,_xlCode(sh),shn,_xlCode(sp),df,_xlCode(ca),can,ds,_xlQty(q),nm,rep]);
+  const out=_xlDetailCollapse(detail).map(([so,son,sh,shn,sp,df,ca,can,ds,q,nm,rep,loads])=>
+    [_xlCode(so),son,_xlCode(sh),shn,_xlCode(sp),df,_xlCode(ca),can,ds,_xlQty(q),nm,rep,loads]);
   const cmp=(x,y)=>typeof x==='number'&&typeof y==='number'?x-y:(String(x)<String(y)?-1:String(x)>String(y)?1:0);
   out.sort((a,b)=>cmp(a[0],b[0])||cmp(a[2],b[2])||cmp(a[8],b[8]));   // Sold-To, Ship-To, day
   out.forEach(r=>{ r[8]=_xlSerial(r[8]); });
   const aoa=[['Sold-To','Sold-To Name','Ship-To','Ship-To Name','Ship Pt','DEL/FOB','Carrier','Carrier Name',
-              'Delivery Date','Report Qty','INV_ROLL_NAME','SalesRep']].concat(out);
+              'Delivery Date','Report Qty','INV_ROLL_NAME','SalesRep','Loads']].concat(out);
   const ws=XLSX.utils.aoa_to_sheet(aoa); _xlDateCol(ws,8,out.length);
-  return {ws, rows:out.length};
+  return {ws, rows:out.length, loads:out.reduce((a,r)=>a+r[12],0)};
 }
 const _xlBook=(sheet,ws)=>{ const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,sheet); return wb; };
 
@@ -27835,7 +27851,7 @@ async function _xlCompare(){
   if(!dir){ statMsg('Choose the folder the sales files live in first'); return; }
   statMsg('Comparing with the files in '+dir.name+'…');
   await loadLib('xlsx');
-  const [curS,curT]=await Promise.all([_xlReadDayFile(dir,XLPUB_FILES.summary),_xlReadDayFile(dir,XLPUB_FILES.transfers)]);
+  const [curS,curT]=await Promise.all([_xlReadDayFile(dir,XLPUB_PIPELINE.summary),_xlReadDayFile(dir,XLPUB_PIPELINE.transfers)]);
   const newS=_xlPubTotals(pub.summary), newT=_xlPubTotals(pub.transfers);
   _xlUi.cmp={at:Date.now(), folder:dir.name, curS, curT, newS, newT,
     names:curS?_xlDiffRows(curS.byName,newS.byName).sort((a,b)=>Math.abs(b.d)-Math.abs(a.d)):[],
@@ -27853,13 +27869,13 @@ async function _xlPublish(){
   const p=window._dsDemandPreview||{};
   const n=v=>Math.round(v).toLocaleString();
   const unplaced=(p.reasons||[]).reduce((a,r)=>a+r.t,0);
-  if(!confirm(`Replace the sales files in "${dir.name}"?\n\n`+
+  if(!confirm(`Write the app's copies of the sales files in "${dir.name}"?\n\n`+
     `${XLPUB_FILES.summary} — ${n(p.dayRows||0)} rows · ${n(p.mappedT||0)} t\n`+
-    `${XLPUB_FILES.detail} — ${n(p.detailRows||0)} lines\n`+
+    `${XLPUB_FILES.detail} — ${n(p.detailLoads||0)} loads, one row per day × ship-to × point × DEL/FOB × plant × carrier\n`+
     `${XLPUB_FILES.transfers} — ${n(p.transferRows||0)} rows\n`+
     `${XLPUB_FILES.map} — the translation tables\n\n`+
     (unplaced?`${n(unplaced)} t could not be placed and is left out (listed under the source file).\n`:'')+
-    `The current files are copied to Backup/ first. Every scenario that reads the Summary will be offered the update.`)) return;
+    `The SAP pipeline's own files (${XLPUB_PIPELINE.summary}, …) are not touched. Previous "(app)" copies go to Backup/ first.`)) return;
   const btn=document.getElementById('xl-pub-btn');
   const say=t=>{ if(btn) btn.textContent=t; };
   try{
@@ -27890,17 +27906,16 @@ async function _xlPublish(){
       await w.write(data); await w.close();
     }
     const last={at:_xlLocalStamp(), folder:dir.name, source:pub.file,
-      summaryRows:s.rows, summaryT:s.t, detailRows:de.rows, transferRows:tr.rows, dateMin:pub.dateMin, dateMax:pub.dateMax};
+      summaryRows:s.rows, summaryT:s.t, detailRows:de.rows, detailLoads:de.loads, transferRows:tr.rows, dateMin:pub.dateMin, dateMax:pub.dateMax};
     try{ localStorage.setItem(XLPUB_LAST_KEY,JSON.stringify(last)); }catch(e){}
     _xlUi.cmp=null;
 
-    // This scenario takes the new Summary through Real Sales — the very path every
-    // other scenario and computer uses — so there is one way actuals land, not two.
+    // Actuals come from the pipeline's Summary through Real Sales. Only a scenario whose Real Sales
+    // was deliberately pointed at the app's copy is refreshed here; Publish never re-points it.
     say('Updating this scenario…');
     const sh=await dir.getFileHandle(XLPUB_FILES.summary);
     let same=false; const cur=DS.handles.realSales;
     if(cur){ try{ same=await cur.isSameEntry(sh); }catch(e){} }
-    else{ DS.handles.realSales=sh; await dsSaveHandle('realSales',sh); same=true; }
     if(same){
       await dsRefreshSlot('realSales',true);
       delete DS.pending.realSales;
@@ -27909,7 +27924,7 @@ async function _xlPublish(){
       scheduleSimulation(300);
       statMsg(`Published to ${dir.name} — this scenario's actual demand is updated`);
     }else{
-      statMsg(`Published to ${dir.name}. Real Sales here reads ${DS.meta.realSales?.fileName||'another file'} from a different place, so this scenario was not updated.`);
+      statMsg(`App copies written to ${dir.name}. Real Sales here keeps reading ${DS.meta.realSales?.fileName||'the pipeline\'s Summary'}.`);
     }
   }catch(e){
     console.error('publish',e);
@@ -27928,17 +27943,17 @@ function _xlPubHTML(){
   let last=null; try{ last=JSON.parse(localStorage.getItem(XLPUB_LAST_KEY)||'null'); }catch(e){}
   const ready=!!window._dsDemandPub;
   let h=`<div style="padding:10px 12px;border-bottom:1px solid var(--border)">
-    <div style="font-family:var(--mono);font-size:8px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase;margin-bottom:6px">Publish from the app — the files every scenario, the Sales page and Power BI read${folder?'':' (choose the folder above first)'}</div>
+    <div style="font-family:var(--mono);font-size:8px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase;margin-bottom:6px">Publish from the app — its own "(app)" copies, beside the SAP pipeline's files${folder?'':' (choose the folder above first)'}</div>
     <div style="font-family:var(--mono);font-size:9px;color:var(--text-dim);line-height:1.6;margin-bottom:8px">
       ${ready&&p?`Writes <span style="color:var(--text)">${XLPUB_FILES.summary}</span> (${n(p.dayRows)} rows · ${n(p.mappedT)} t),
-        <span style="color:var(--text)">${XLPUB_FILES.detail}</span> (${n(p.detailRows)} lines),
+        <span style="color:var(--text)">${XLPUB_FILES.detail}</span> (${n(p.detailLoads)} loads, one row per day × ship-to × point × DEL/FOB × plant × carrier),
         <span style="color:var(--text)">${XLPUB_FILES.transfers}</span> (${n(p.transferRows)} rows) and
-        <span style="color:var(--text)">${XLPUB_FILES.map}</span>. The current copies go to Backup/ first.
-        This scenario then re-reads the Summary; other scenarios and computers are offered it on their next check.`
+        <span style="color:var(--text)">${XLPUB_FILES.map}</span>. Previous "(app)" copies go to Backup/ first.
+        The SAP pipeline's own files — the ones Real Sales, the Sales page and Power BI read — are never replaced from here.`
       :`Re-read the export above first — publishing writes what was read in this session.`}
     </div>
     <div style="display:flex;gap:8px;align-items:center">
-      <button class="tb-btn sec" style="font-size:9px;padding:4px 12px" ${ready?'':'disabled'} onclick="_xlCompare()">Compare with the files there now</button>
+      <button class="tb-btn sec" style="font-size:9px;padding:4px 12px" ${ready?'':'disabled'} onclick="_xlCompare()">Compare with the pipeline's files</button>
       <button class="tb-btn" id="xl-pub-btn" style="font-size:9px;padding:4px 14px" ${ready?'':'disabled'} onclick="_xlPublish()">Publish</button>
       ${last?`<span style="font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-left:6px">last published ${esc(last.at)} to ${esc(last.folder)} · ${n(last.summaryRows)} rows · ${n(last.summaryT)} t</span>`:''}
     </div>`;

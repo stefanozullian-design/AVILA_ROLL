@@ -953,8 +953,9 @@ function _thDerive(p){
   v['--bn-err-fg2']=p.red;
   v['--h-maint-a']=_cx.mix(p.surface,p.textDim,.55); v['--h-maint-b']=_cx.mix(p.surface,p.textDim,.2);
   v['--h-starved-b']=_cx.mix(p.surface,p.red,.6); v['--h-blocked-a']=_cx.mix(p.surface,p.amber,.25); v['--h-blocked-b']=_cx.mix(p.surface,p.amber,.75);
-  v['--h-repair-a']=_cx.mix(p.surface,p.red,.25); v['--h-repair-b']=_cx.mix(p.surface,p.amber,.8);
-  v['--h-pm-a']=_cx.mix(p.surface,p.blue,.18); v['--h-pm-b']=_cx.mix(p.surface,p.blue,.5); v['--h-red-dk']=_cx.mix(p.red,p.surface,.75);
+  v['--h-repair-a']=_cx.mix(p.surface,p.red,.3); v['--h-repair-b']=_cx.mix(p.surface,p.red,.95);
+  v['--h-pm-a']=_cx.mix(p.surface,p.green,.25); v['--h-pm-b']=_cx.mix(p.surface,p.green,.85);
+  v['--h-inv-a']=_cx.mix(p.surface,p.amber,.3); v['--h-inv-b']=_cx.mix(p.surface,p.amber,1); v['--h-red-dk']=_cx.mix(p.red,p.surface,.75);
   return v;
 }
 // ── Real-vs-forecast look (Supply page) — the colour-trial controls, part of a custom palette ──
@@ -1182,7 +1183,13 @@ function _c0wApply(){
   }).join('');
   st.textContent=css;
 }
-function _c0wSave(){ try{ localStorage.setItem(C0W_KEY,JSON.stringify(_c0w)); }catch(e){} }
+// Avila Roll keeps its tables' widths under the same key: write only this page's tables over what is
+// stored NOW, so widths Roll saved after this page loaded are not replaced by the copy read at load.
+function _c0wSave(){ try{
+  const all=JSON.parse(localStorage.getItem(C0W_KEY)||'{}')||{};
+  C0W_TABLES.forEach(t=>{ if(_c0w[t.key]>0) all[t.key]=_c0w[t.key]; else delete all[t.key]; });
+  localStorage.setItem(C0W_KEY,JSON.stringify(all));
+}catch(e){} }
 // The first-column header whose right border is under the pointer (a few px either side).
 function _c0At(e){
   const th=e.target&&e.target.closest?e.target.closest('th'):null; if(!th) return null;
@@ -1293,10 +1300,15 @@ function statMsg(msg, color) {
 function showModal(id) { /* no-op in standalone */ }
 function closeModal() { /* no-op in standalone */ }
 function switchView(v) { /* no-op in standalone */ }
+// localStorage is shared with Avila Roll (same site) and Roll's own cache needs most of it — when
+// Roll's save no longer fits there, it stops writing its scenario file. So the browser copy of the
+// shipments is kept only while small; bigger data lives in the Sales file / pinned Excel only.
+const SALES_LS_MAX = 1000000;   // characters
 function autoSave() {
   try {
-    const payload = { real_shipments_daily: DB.real_shipments_daily, real_shipments_meta: DB.real_shipments_meta };
-    localStorage.setItem('avila_sales_db', JSON.stringify(payload));
+    const text = JSON.stringify({ real_shipments_daily: DB.real_shipments_daily, real_shipments_meta: DB.real_shipments_meta });
+    if(text.length > SALES_LS_MAX) localStorage.removeItem('avila_sales_db');
+    else localStorage.setItem('avila_sales_db', text);
   } catch(e) { console.warn('autoSave failed', e); }
   if(typeof scScheduleWrite==='function') scScheduleWrite();  // mirror into the active scenario file
 }
@@ -1942,8 +1954,12 @@ function pushForecastToMain(){
     const el=lf.dpKey; if(!known.has(el)){ skipped++; return; }
     dates.forEach(ds=>{ const v=spLeafFcDay(lf,ds)||0; if(v>0){ const k=el+'|'+ds; sums.set(k,(sums.get(k)||0)+v); } });
   });
-  const values=[...sums].map(([k,v])=>{ const [element_id,date]=k.split('|'); return {element_id,date,value_t:Math.round(v*10)/10}; });
-  const nDp=new Set(values.map(v=>v.element_id)).size;
+  // A pushed point gets EVERY day of the window, its no-sale days as 0: Roll replaces exactly the
+  // days it is sent, so a day left out kept Roll's old forecast (e.g. Saturdays) beside this one.
+  const pushedEls=new Set([...sums.keys()].map(k=>k.split('|')[0]));
+  const values=[];
+  pushedEls.forEach(el=>dates.forEach(ds=>values.push({element_id:el, date:ds, value_t:Math.round((sums.get(el+'|'+ds)||0)*10)/10})));
+  const nDp=pushedEls.size;
   if(!values.length){ statMsg('Nothing to push — no forecast days for matched demand points in view'); return; }
   const msg=`Push the forecast of ${nDp} demand point${nDp===1?'':'s'} (as filtered on screen) into Avila Roll scenario "${cat.name}"?\n\n`+
     `${fltFmt(dates[0])} → ${fltFmt(dates[dates.length-1])} · ${values.length} day values`+
@@ -4951,6 +4967,10 @@ async function spIngestFile(buf, fileName){
   const isNew    = !isCEMEX && !isSimple && cols.includes('Abrev') && cols.includes('Volume*');
   const isOld    = !isCEMEX && !isSimple && !isNew && cols.includes('ORIGIN') && cols.includes('Volume');
   if(!isCEMEX && !isSimple && !isNew && !isOld) throw new Error('Unrecognised column format — expected InvRoll Name/Delivery Date/volume, or INV_ROLL_NAME/Report Qty/Delivery Date, or Abrev/Volume*, or ORIGIN/Volume');
+  // Loads: the Detail carries them since 2026-10-13 (one row per day × ship-to × point × DEL/FOB ×
+  // plant × carrier); an older Detail has one line per delivery, so each positive line is a load.
+  const hasLoads    = cols.includes('Loads');
+  const perDelivery = !hasLoads && cols.includes('Ship-To');
 
   function normDate(v){
     if(!v && v!==0) return null;
@@ -4971,13 +4991,15 @@ async function spIngestFile(buf, fileName){
   const origins=new Set(), products=new Set();
 
   raw.forEach(r=>{
-    let vol, date, product, origin, custType, shipTo, shipToName, rep;
+    let vol, date, product, origin, custType, shipTo, shipToName, rep, loads=0;
 
     if(isCEMEX){
       // SAP export: INV_ROLL_NAME = "BRS/DEM/BRS_IL(12)/BLK/INT"
       // origin = first segment, custType = last segment (INT|EXT)
+      // A return is a negative quantity: it nets into its day below instead of being dropped.
       vol = parseFloat(r['Report Qty']) || 0;
-      if(vol <= 0){ skipped++; return; }
+      if(!vol){ skipped++; return; }
+      loads = hasLoads ? (parseInt(r['Loads'])||0) : (perDelivery && vol>0 ? 1 : 0);
       date = normDate(r['Delivery Date']);
       const invRoll = (r['INV_ROLL_NAME'] || '').trim();
       if(!invRoll || invRoll.toUpperCase()==='N/A' || invRoll.startsWith('N/A/')){ skipped++; return; }
@@ -5024,13 +5046,15 @@ async function spIngestFile(buf, fileName){
     const soldToName= (r['Sold-To Name'] || '').trim();
     const key = `${date}|${origin}|${product}|${custType}|${shipTo}`;
     if(!aggMap[key]) aggMap[key]={date,origin,product,customer_type:custType,
-      ship_to:parseInt(shipTo)||0,ship_to_name:shipToName,sales_manager:rep,volume:0,
+      ship_to:parseInt(shipTo)||0,ship_to_name:shipToName,sales_manager:rep,volume:0,loads:0,
       sold_to:parseInt(soldTo)||0,sold_to_name:soldToName};
     aggMap[key].volume += vol;
+    aggMap[key].loads  += loads;
     origins.add(origin); products.add(product);
   });
 
-  DB.real_shipments_daily = Object.values(aggMap).map(r=>({...r,volume:Math.round(r.volume)}));
+  // A day whose returns cancel (or exceed) its shipments is not a shipment day.
+  DB.real_shipments_daily = Object.values(aggMap).filter(r=>r.volume>0).map(r=>({...r,volume:Math.round(r.volume)}));
   DB.real_shipments_meta  = {
     loaded_at: new Date().toISOString().slice(0,16).replace('T',' '),
     row_count: raw.length, agg_count: DB.real_shipments_daily.length,
