@@ -21858,6 +21858,8 @@ function _pushBIBuildTables(){
   // (demandSwapHistory), so emit it as signed adjustment rows - negative at the source, positive
   // at the receiving point, in that point's own product. SUM(demand_t) then equals the
   // effective demand the app shows; filter adjustment = '' for the untouched planned demand.
+  // Days before today are REAL data (actual demand / shipments) - a swap is a plan, so it is
+  // never applied to them in the export.
   if(r&&r.demandSwapHistory){
     Object.entries(r.demandSwapHistory).forEach(([dpId,arr])=>{
       if(!_elIds.has(dpId)) return;
@@ -21870,6 +21872,7 @@ function _pushBIBuildTables(){
       };
       (arr||[]).forEach((h,i)=>{
         if(!h) return;
+        if(offsetToDate(i)<asOf) return; // past = real data only
         const out=parseFloat(h.swappedOut)||0, inn=parseFloat(h.swappedIn)||0;
         if(out>0.0005) fact_demand.push(stamp({...base, date:offsetToDate(i), demand_t:-Math.round(out*1000)/1000, adjustment:'swap_out', swap_to_id:h.toElement||''}));
         if(inn>0.0005) fact_demand.push(stamp({...base, date:offsetToDate(i), demand_t:Math.round(inn*1000)/1000, adjustment:'swap_in'}));
