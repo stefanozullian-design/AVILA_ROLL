@@ -269,6 +269,14 @@ input.ac-ro:focus{outline:1px dashed var(--amber)!important;}
 .ac-step-b b{color:var(--text);}
 .ac-wf-msg{font-size:10px;color:var(--text);margin-top:8px;min-height:13px;line-height:1.5;}
 .ac-wf-list{display:flex;flex-direction:column;gap:6px;margin-top:8px;max-height:220px;overflow:auto;}
+.tb-menu{position:relative;}
+#tb-menu-btn{display:inline-flex;align-items:center;gap:6px;max-width:170px;}
+#tb-menu-lbl{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.tb-menu-caret{font-size:9px;opacity:.7;}
+.tb-menu-dd{position:absolute;top:calc(100% + 6px);right:0;min-width:190px;background:var(--surface);border:1px solid var(--border2);border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,.45);z-index:9100;font-family:var(--mono);padding:4px;}
+.tb-menu-it{display:flex;justify-content:space-between;align-items:center;gap:14px;padding:8px 10px;font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--text);cursor:pointer;border-radius:5px;white-space:nowrap;}
+.tb-menu-it:hover{background:var(--surface2);}
+.tb-menu-sub{font-size:9px;letter-spacing:0;text-transform:none;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;max-width:110px;}
 #ac-chip{max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .ac-mi{padding:7px 8px;font-size:11px;color:var(--text);cursor:pointer;border-radius:4px;}
 .ac-mi:hover{background:var(--surface2);}
@@ -1456,9 +1464,15 @@ td.camp-drag-cut>div:first-child{opacity:.3}
   <button id="ai-fab" onclick="toggleChat()" title="AI Agent"><svg viewBox="0 0 9 9" width="16" height="16" shape-rendering="crispEdges" style="pointer-events:none"><g fill="currentColor"><rect x="4" y="0" width="1" height="1"/><rect x="4" y="1" width="1" height="1"/><rect x="2" y="2" width="1" height="1"/><rect x="3" y="2" width="1" height="1"/><rect x="4" y="2" width="1" height="1"/><rect x="5" y="2" width="1" height="1"/><rect x="6" y="2" width="1" height="1"/><rect x="2" y="3" width="1" height="1"/><rect x="6" y="3" width="1" height="1"/><rect x="2" y="4" width="1" height="1"/><rect x="3" y="4" width="1" height="1"/><rect x="5" y="4" width="1" height="1"/><rect x="6" y="4" width="1" height="1"/><rect x="2" y="5" width="1" height="1"/><rect x="6" y="5" width="1" height="1"/><rect x="2" y="6" width="1" height="1"/><rect x="3" y="6" width="1" height="1"/><rect x="4" y="6" width="1" height="1"/><rect x="5" y="6" width="1" height="1"/><rect x="6" y="6" width="1" height="1"/><rect x="2" y="7" width="1" height="1"/><rect x="3" y="7" width="1" height="1"/><rect x="4" y="7" width="1" height="1"/><rect x="5" y="7" width="1" height="1"/><rect x="6" y="7" width="1" height="1"/></g></svg></button>
   <div class="mode-wrap">
     <span class="mode-lbl" id="mode-lbl" style="display:none"></span>
-    <button class="tb-btn sec" id="ac-chip" onclick="acChipClick(event)" title="Sign-in">👤</button>
-    <button class="tb-btn sec" id="sc-save-btn" onclick="scManualSave()" title="Save the current scenario to its file now">💾 Save</button>
-    <button class="tb-btn sec" onclick="scOpenHistoryPanel()" title="Browse and restore saved versions of this scenario">🕒 History</button>
+    <div class="tb-menu" id="tb-menu">
+      <button class="tb-btn sec" id="tb-menu-btn" onclick="tbMenuToggle(event)" title="User, save, history and Push to BI"><span id="tb-menu-lbl">Menu</span><span id="tb-menu-badge"></span><span class="tb-menu-caret">▾</span></button>
+      <div class="tb-menu-dd" id="tb-menu-dd" style="display:none">
+        <div class="tb-menu-it" onclick="tbMenuPick('user')"><span>User</span><span class="tb-menu-sub" id="tb-mi-user-sub"></span></div>
+        <div class="tb-menu-it" onclick="tbMenuPick('save')" title="Save the current scenario to its file now"><span>Save</span></div>
+        <div class="tb-menu-it" onclick="tbMenuPick('history')" title="Browse and restore saved versions of this scenario"><span>History</span></div>
+        <div class="tb-menu-it" onclick="tbMenuPick('bi')" title="Exports the Power BI workbook right away"><span>Push to BI</span></div>
+      </div>
+    </div>
     <div class="sc-pill" id="sc-switcher" onclick="scToggleDropdown(event)" title="Switch scenario">
       <span class="sc-dot none" id="sc-dot" title="Save status"></span>
       <span class="sc-name" id="sc-name">No scenario</span>
@@ -1497,7 +1511,6 @@ td.camp-drag-cut>div:first-child{opacity:.3}
     <div class="nav-sec">
       <div class="nav-sec-hdr">Results</div>
       <div class="nav-cat" onclick="switchView('dashboard')">Dashboard</div>
-      <div class="nav-cat" onclick="pushToBI()" title="Exports the Power BI workbook right away">📤 Push to BI</div>
     </div>
   </div>
 </div>
@@ -33625,13 +33638,42 @@ function acSignOut(){
 // ── Top-bar chip ──
 function acUpdateChip(){
   if(typeof acScheduleSweep==='function') acScheduleSweep();   // re-lock / unlock inputs for this person
-  const c=document.getElementById('ac-chip'); if(!c) return;
+  // The top-bar "Menu" button (User · Save · History · Push to BI) carries the signed-in
+  // first name and the admin's pending-request badge.
+  const lbl=document.getElementById('tb-menu-lbl'), badge=document.getElementById('tb-menu-badge');
+  const btn=document.getElementById('tb-menu-btn'), sub=document.getElementById('tb-mi-user-sub');
+  if(!lbl) return;
   const pend=_acIsAdmin()?_acPendingRequests().length+(typeof _tsPending==='function'?_tsPending().length:0):0;
-  if(!_acEnabledDB()){ c.innerHTML='👤'; c.title='Sign-in is not turned on for this scenario — click to set it up'; return; }
-  if(!_acUser){ c.innerHTML='👤 Sign in'; c.title='Sign in'; return; }
-  const first=String(_acUser.name||_acUser.email).split(/[\s@]/)[0];
-  c.innerHTML=`👤 ${_scEsc(first)}${pend?` <span class="ac-badge">${pend}</span>`:''}`;
-  c.title=(_acUser.name||'')+' · '+_acUser.email+(_acUser.admin?' · administrator':'')+(pend?` — ${pend} access request${pend>1?'s':''} waiting`:'');
+  let name='', title='';
+  if(!_acEnabledDB()){ title='Sign-in is not turned on for this scenario'; }
+  else if(!_acUser){ name='Sign in'; title='Sign in'; }
+  else {
+    name=String(_acUser.name||_acUser.email).split(/[\s@]/)[0];
+    title=(_acUser.name||'')+' · '+_acUser.email+(_acUser.admin?' · administrator':'')+(pend?` — ${pend} access request${pend>1?'s':''} waiting`:'');
+  }
+  lbl.textContent=name||'Menu';
+  if(badge) badge.innerHTML=pend?` <span class="ac-badge">${pend}</span>`:'';
+  if(sub) sub.textContent=name;
+  if(btn) btn.title=title||'User, save, history and Push to BI';
+}
+// Top-bar menu: one button that opens User / Save / History / Push to BI.
+function tbMenuClose(){ const d=document.getElementById('tb-menu-dd'); if(d) d.style.display='none'; }
+function tbMenuToggle(ev){
+  if(ev) ev.stopPropagation();
+  const d=document.getElementById('tb-menu-dd'); if(!d) return;
+  if(d.style.display!=='none'){ d.style.display='none'; return; }
+  d.style.display='block';
+  setTimeout(()=>document.addEventListener('click',tbMenuClose,{once:true}),0);
+}
+function tbMenuPick(what){
+  tbMenuClose();
+  if(what==='save') scManualSave();
+  else if(what==='history') scOpenHistoryPanel();
+  else if(what==='bi') pushToBI();
+  else if(what==='user'){
+    const btn=document.getElementById('tb-menu-btn');
+    acChipClick({stopPropagation(){}, currentTarget:btn});
+  }
 }
 function acChipClick(ev){
   ev.stopPropagation();
