@@ -21852,6 +21852,31 @@ function _pushBIBuildTables(){
     }));
   });
 
+  // Demand swaps (material substitution). demand_values holds each point's OWN demand, so on
+  // its own fact_demand ignored the relocation: the source kept the full tonnes and the
+  // receiving point none of them. The simulation already settles the swap per day
+  // (demandSwapHistory), so emit it as signed adjustment rows - negative at the source, positive
+  // at the receiving point, in that point's own product. SUM(demand_t) then equals the
+  // effective demand the app shows; filter adjustment = '' for the untouched planned demand.
+  if(r&&r.demandSwapHistory){
+    Object.entries(r.demandSwapHistory).forEach(([dpId,arr])=>{
+      if(!_elIds.has(dpId)) return;
+      const dp=DB.demand_points.find(d=>d.element_id===dpId);
+      const base={
+        scenario_type:'forecast',
+        facility_id:dp?(dp.assigned_facility_id||dp.facility_id):elFac[dpId]||'',
+        demand_point_id:dpId, product_id:elPrimary[dpId]||'',
+        channel:elChan[dpId]||'', ship_to:''
+      };
+      (arr||[]).forEach((h,i)=>{
+        if(!h) return;
+        const out=parseFloat(h.swappedOut)||0, inn=parseFloat(h.swappedIn)||0;
+        if(out>0.0005) fact_demand.push(stamp({...base, date:offsetToDate(i), demand_t:-Math.round(out*1000)/1000, adjustment:'swap_out', swap_to_id:h.toElement||''}));
+        if(inn>0.0005) fact_demand.push(stamp({...base, date:offsetToDate(i), demand_t:Math.round(inn*1000)/1000, adjustment:'swap_in'}));
+      });
+    });
+  }
+
   // ── FACT: UNLOADING ────────────────────────────────────
   const fact_unloading=[];
   (DB.real_unloading_daily||[]).forEach(row=>{
@@ -22148,6 +22173,7 @@ function _pushBIBuildTables(){
     {key:'note_forecast_scope',value:'Forecast rows cover only the simulation\'s active facility. Actuals span every facility present in real_* tables.'},
     {key:'note_inventory_breakdown',value:'Forecast inventory is total per silo (product breakdown is not retained after the run). Actual inventory carries product_id.'},
     {key:'note_mill_tonnes',value:'Forecast mill tonnes are estimated as rated_tpd for the chosen product on running days. Kiln tonnes are actual simulation outputs.'},
+    {key:'note_demand_swaps',value:'fact_demand: demand swaps are signed adjustment rows (adjustment = swap_out / swap_in, negative at the source point, positive at the receiving point in its own product). SUM(demand_t) is the effective demand; the planned demand rows have adjustment blank.'},
     {key:'note_dim_date',value:'dim_date is a contiguous day-by-day calendar covering every date referenced by any fact (including rail departure/arrival and forecast demand). Safe to mark as the Power BI date table.'},
     {key:'note_scm_type',value:'dim_product.scm_type splits category=additive into slag/ash. Blank means the product has not been tagged yet in the product editor.'},
     {key:'note_sof',value:'fact_sof_period: the Statement-of-Facts time accounting, one row per period, times on the port clock. counted / laytime_h / demurrage_h follow the default rule (time caused by the vessel never counts; weather counts only once the vessel is on demurrage; everything else counts) unless a period was set Y/N by hand (counts_setting). fact_laytime: one row per vessel call, the whole voyage (all ports together); demurrage_usd is blank until the charter terms are entered on the vessel call.'},
