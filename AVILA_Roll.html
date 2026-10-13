@@ -875,6 +875,13 @@ body.c0-drag,body.c0-drag *{cursor:col-resize!important;user-select:none!importa
 .d2-cell{flex:1;min-width:3px;height:13px;border-radius:1px;}
 .d2-inert{border:1px dashed var(--border2);}
 .d2-now{outline:1px solid rgba(var(--ink-rgb),.55);outline-offset:0;}
+.d2-hdr-row{display:flex;align-items:flex-end;gap:6px;min-width:max-content;position:sticky;top:0;z-index:2;background:var(--surface);padding-bottom:3px;border-bottom:1px solid var(--border);margin-bottom:2px;}
+.d2-hdr-cells{display:flex;gap:1px;flex:1;min-width:0;}
+.d2-hdr-c{flex:1;min-width:3px;position:relative;height:22px;font-family:var(--mono);font-size:7px;color:var(--text-dim);font-variant-numeric:tabular-nums;}
+.d2-hdr-c span{position:absolute;bottom:0;left:0;white-space:nowrap;}
+.d2-hdr-c.d2-hdr-mon span{color:var(--text);font-weight:700;top:0;bottom:auto;letter-spacing:.6px;text-transform:uppercase;}
+.d2-hdr-c.d2-hdr-mon{border-left:1px solid var(--border2);}
+.d2-hdr-c.d2-hdr-now span{color:var(--green);font-weight:700;}
 .d2-util{width:40px;flex-shrink:0;text-align:right;font-family:var(--mono);font-size:8px;color:var(--text-dim);font-variant-numeric:tabular-nums;}
 /* position board */
 .d2-board{display:flex;flex-direction:column;gap:3px;}
@@ -9657,12 +9664,22 @@ function _demToggleMonth(ym){
   renderDemandView();
 }
 
+// Shared by the Today buttons (Demand + Supply): put today's column exactly 7 day-columns
+// to the right of the sticky row-header column, so the user sees the week before today.
+function _scrollTodayInWrap(wrap){
+  const th=wrap.querySelector('th[style*="border-left:2px solid var(--green)"]');
+  if(!th) return false;
+  const first=wrap.querySelector('thead th, tr th');           // sticky row-title header
+  const stickyW=first?first.getBoundingClientRect().width:0;
+  const wr=wrap.getBoundingClientRect(), tr=th.getBoundingClientRect();
+  const delta=tr.left-(wr.left+stickyW+7*tr.width);
+  wrap.scrollTo({left:Math.max(0,wrap.scrollLeft+delta),behavior:'smooth'});
+  return true;
+}
 function demandScrollToday(){
   const todayStr=new Date()._ymd();
   const wrap=document.getElementById('demand-table-wrap'); if(!wrap) return;
-  const th=wrap.querySelector(`th[style*="border-left:2px solid var(--green)"]`);
-  if(th) th.scrollIntoView({behavior:'smooth',inline:'center',block:'nearest'});
-  else statMsg('Today is outside the selected time frame (or its month is collapsed)');
+  if(!_scrollTodayInWrap(wrap)) statMsg('Today is outside the selected time frame (or its month is collapsed)');
 }
 
 // Every demand-writing path should end here. Demand values are shown on THREE pages —
@@ -12551,9 +12568,7 @@ function _supToggleGrp(id){
 function supplyScrollToday(){
   const wrap=document.getElementById('supply-table-wrap'); if(!wrap) return;
   const todayStr=new Date()._ymd();
-  const th=wrap.querySelector(`th[style*="border-left:2px solid var(--green)"]`);
-  if(th) th.scrollIntoView({behavior:'smooth',inline:'center',block:'nearest'});
-  else statMsg('Today is outside the selected time frame');
+  if(!_scrollTodayInWrap(wrap)) statMsg('Today is outside the selected time frame');
 }
 
 // ── Demand Builder modal ─────────────────────────────────
@@ -20762,6 +20777,24 @@ function _dashClass(s,v){
   if(s.cap>0&&v<s.cap*0.2) return {k:'low',c:DASH_ST.low,l:'low (under 20%)'};
   return {k:'ok',c:DASH_ST.ok,l:'healthy'};
 }
+// Date header for the heat-strips: day numbers (every Nth when columns are tight),
+// a month tag where the month changes, today's column in green.
+function _dashHdrHTML(m,withUtil){
+  const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const nb=m.buckets.length, step=nb<=31?1:nb<=62?2:nb<=100?4:7;
+  let prevYm=null;
+  const cells=m.buckets.map((b,bi)=>{
+    const ym=b.start.slice(0,7), newMon=ym!==prevYm; prevYm=ym;
+    const day=parseInt(b.start.slice(8),10), mon=MON[parseInt(b.start.slice(5,7),10)-1];
+    const isNow=bi===m.todayBucket;
+    const tip=b.start+(b.end!==b.start?' → '+b.end:'')+(isNow?' · today':'');
+    const showDay=bi%step===0||isNow;
+    const mark=(newMon?`<span style="top:0;bottom:auto">${mon}${b.start.slice(2,4)!==(m.buckets[0].start.slice(2,4))?" '"+b.start.slice(2,4):''}</span>`:'')+(showDay?`<span>${day}</span>`:'');
+    return `<div class="d2-hdr-c${newMon?' d2-hdr-mon':''}${isNow?' d2-hdr-now':''}" title="${tip}">${mark}</div>`;
+  }).join('');
+  return `<div class="d2-hdr-row"><div class="d2-heat-lbl">${m.weekly?'week of':'date'}</div><div class="d2-hdr-cells">${cells}</div>${withUtil?'<div class="d2-util"></div>':''}</div>`;
+}
+
 function _dashHeatHTML(m){
   const silos=m.silos.slice().sort((a,b)=>(a.facName||'').localeCompare(b.facName||'')||(a.name||'').localeCompare(b.name||''));
   if(!silos.length) return `<div class="d2-empty">No silos in this slice.</div>`;
@@ -20786,7 +20819,7 @@ function _dashHeatHTML(m){
   });
   const legend=[['empty',DASH_ST.empty],['below floor',DASH_ST.floor],['low (<20%)',DASH_ST.low],['healthy',DASH_ST.ok],['at capacity',DASH_ST.cap]]
     .map(([l,c])=>`<span class="d2-lg"><i style="background:${c}"></i>${l}</span>`).join('');
-  return `<div class="d2-heat">${rows}</div>
+  return `<div class="d2-heat">${_dashHdrHTML(m,false)}${rows}</div>
     <div class="d2-legend">${legend}<span class="d2-lg"><i class="d2-lg-inert"></i>holds nothing, feeds no demand</span>
     <span class="d2-lg-note">${m.weekly?'one column per week · worst day decides the colour':'one column per day'}</span></div>`;
 }
@@ -20887,7 +20920,7 @@ function _dashTimelineHTML(m){
   }).join('');
   const legend=[['maintenance',DASH_ST.maint],['starved',DASH_ST.low],['blocked',DASH_ST.empty],['idle',DASH_ST.idle]]
     .map(([l,c])=>`<span class="d2-lg"><i style="background:${c}"></i>${l}</span>`).join('');
-  return `<div class="d2-heat">${rows}</div>
+  return `<div class="d2-heat">${_dashHdrHTML(m,true)}${rows}</div>
     <div class="d2-legend"><span class="d2-lg-note">running mills wear the colour of the product they grind · kilns green</span>${legend}
     <span class="d2-lg-note">utilisation on the right excludes maintenance days</span></div>`;
 }
