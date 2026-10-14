@@ -19683,6 +19683,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
         if(_ulRows.length&&_ulRows.some(u=>(parseFloat(u.value)||0)>0)){
           const _downS=(dn[berth.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='bulk_silo');
           let totUL=0;
+          const _realByPid={};
           [...new Set(_ulRows.map(u=>u.product_id))].forEach(pid=>{
             const amt=realUnloadTonnesBerthProdDay(berth.id,pid,_ulDate);
             if(amt<=0) return;
@@ -19692,10 +19693,39 @@ function simulate(elements, connections, horizon, includeProposed=false){
             state[sil.id].composition[pid]=(state[sil.id].composition[pid]||0)+amt;
             if(r.siloUnloadHistory[sil.id]!==undefined){ const li=r.siloUnloadHistory[sil.id].length-1; if(li>=0) r.siloUnloadHistory[sil.id][li]=(r.siloUnloadHistory[sil.id][li]||0)+Math.round(amt); }
             totUL+=amt;
+            _realByPid[pid]=(_realByPid[pid]||0)+amt;
           });
-          // Consume forecast berth queue by the real unloaded amount (so it isn't re-unloaded later).
-          const _q=Object.values(bs.berthQueue||{}).reduce((a,b)=>a+b,0);
-          if(_q>0&&totUL>0){ const _ratio=Math.min(1,totUL/_q); Object.keys(bs.berthQueue).forEach(p=>{ bs.berthQueue[p]=Math.max(0,(bs.berthQueue[p]||0)*(1-_ratio)); }); }
+          // Consume the berth queue by the real unloaded amount (so it isn't re-unloaded later) —
+          // off the vessel CARRYING that product. A real entry also says which vessel is alongside:
+          // when the docked one doesn't carry the product (or none is docked) and a waiting vessel
+          // does, that vessel docks now — real data wins over queue order and campaigns — and the one
+          // it replaces goes back to the front of the queue if it still has cargo. Before, the tonnes
+          // came off whatever was docked: on a hand-over day they came off the departing vessel's empty
+          // hold (PEV 13 Oct: 1,585 t of YASA YASMEEN's MED left Unity Light's slag queue instead).
+          const _qSum=()=>Object.values(bs.berthQueue||{}).reduce((a,b)=>a+b,0);
+          const _samePid=(a,b)=>a===b||(!!a&&!!b&&_pidCanon(a)===_pidCanon(b));
+          Object.entries(_realByPid).forEach(([pid,amt])=>{
+            let qp=Object.keys(bs.berthQueue||{}).find(p=>_samePid(p,pid)&&(bs.berthQueue[p]||0)>=0.5);
+            if(!qp){
+              const wi=(bs.vesselPending||[]).findIndex(p=>_samePid(p.productId,pid)&&(p.quantity_t||0)>=0.5);
+              if(wi>=0){
+                const inc=bs.vesselPending.splice(wi,1)[0];
+                const curProd=Object.keys(bs.berthQueue||{}).find(p=>(bs.berthQueue[p]||0)>=0.5);
+                if(curProd&&bs.currentVessel) bs.vesselPending.unshift({productId:curProd, quantity_t:bs.berthQueue[curProd], rateTPH:bs.currentVesselRate, name:bs.currentVessel, vesselCallId:bs.currentVesselCallId});
+                bs.berthQueue={[inc.productId]:inc.quantity_t||0};
+                bs.currentVessel=inc.name; bs.currentVesselRate=inc.rateTPH; bs.currentVesselCallId=inc.vesselCallId||null;
+                qp=inc.productId;
+              }
+            }
+            if(qp){ bs.berthQueue[qp]=Math.max(0,bs.berthQueue[qp]-amt); return; }
+            // No vessel carries this product (e.g. an entry without a product): off whatever is docked.
+            const q=_qSum();
+            if(q>0){ const k=Math.min(1,amt/q); Object.keys(bs.berthQueue).forEach(p=>{ bs.berthQueue[p]=(bs.berthQueue[p]||0)*(1-k); }); }
+          });
+          // A hold emptied by real unloading is a finished vessel (as in the forecast unload below):
+          // clear it — a 0 t vessel left "docked" kept the next one waiting another day.
+          Object.keys(bs.berthQueue||{}).forEach(p=>{ if((bs.berthQueue[p]||0)<0.5) delete bs.berthQueue[p]; });
+          if(_qSum()<0.5){ bs.berthQueue={}; bs.currentVessel=null; bs.currentVesselRate=0; bs.currentVesselCallId=null; }
           r.berthUnloadHistory[berth.id].push(Math.round(totUL));
           bs.status=totUL>0?'running':'idle';
           bs.runDays=(bs.runDays||0)+(totUL>0?1:0);
