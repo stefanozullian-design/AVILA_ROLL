@@ -6446,8 +6446,11 @@ function showCampaignPopup(elId, dateStr, runStart, runEnd, runProduct){
 
   // Existing REAL production already entered for the clicked day (single date = dateStr).
   const existingReal=(DB.real_production_daily||[]).filter(r=>r.date===dateStr&&r.element_id===elId);
-  // Default the toggle to Real when real data already exists for this day, else Forecast.
-  const defaultMode=existingReal.length?'real':'forecast';
+  // Default the toggle to Real when real data already exists for this day, else Forecast —
+  // except a day that produced nothing and already carries a Down… reason: open on that
+  // reason (its campaign, with Delete), since the reason is what the cell shows.
+  const realZeroWithReason=existingReal.length&&existingReal.every(r=>!(parseFloat(r.volume_t)>0))&&existing&&DOWNTIME_PRODUCTS[existing.product_id];
+  const defaultMode=existingReal.length&&!realZeroWithReason?'real':'forecast';
 
   // Pre-fill from the saved campaign if any, otherwise from the clicked Gantt run.
   const selProd=(defaultMode==='real'&&existingReal[0]?.product_id)||existing?.product_id||runProduct||caps[0].product_id;
@@ -7190,11 +7193,14 @@ function applyCampaign(elId){
   const productId=document.getElementById('camp-product')?.value;
   const rateTpd=parseFloat(document.getElementById('camp-rate')?.value)||0;
   const fromDate=document.getElementById('camp-from')?.value;
-  const toDate=document.getElementById('camp-to')?.value;
+  let toDate=document.getElementById('camp-to')?.value;
 
   // REAL mode: write a single-day actual to real_production_daily (Tier 0 — same as Daily Data / Excel).
-  if(window._campMode==='real'){
-    if(DOWNTIME_PRODUCTS[productId]){ _campWarn('Down For Repairs / PM Day / Inventory Control is a plan, not a measured value — switch to 📈 Forecast Campaign to save it'); return; }
+  // A Down… reason picked here is not a measured value: the day's actual stays as it is (often
+  // the production feed's 0 t) and the reason is saved below as a ONE-day downtime campaign —
+  // what the Production page shows on that 0 t day and what Push to BI reports as its reason.
+  if(window._campMode==='real'&&DOWNTIME_PRODUCTS[productId]) toDate=fromDate;
+  else if(window._campMode==='real'){
     if(!productId||!fromDate){ _campWarn('Please choose a product and date'); return; }
     const facId=getEl(elId)?.assigned_facility_id||getEl(elId)?.facility_id||S.facility_id;
     const now=new Date().toISOString();
@@ -7259,6 +7265,73 @@ const _CAMP_STORES={
   vessel:{key:'vessel_campaigns',     same:c=>x=>x.vessel_call_id===c.vessel_call_id},
   xfer:  {key:'silo_transfer_plans',  same:c=>x=>x.link_id===c.link_id&&x.from_silo_id===c.from_silo_id&&x.to_silo_id===c.to_silo_id},
 };
+
+// ── Campaign tidy-up: one campaign per day per element / vessel / transfer link ──────────
+// Saving from a popup or dragging an edge trims whatever the new campaign overlaps
+// (_campSplice), so one browser never keeps two campaigns on the same day. Two browsers
+// entering campaigns at the same time each add their own row and the shared-file merge keeps
+// both — then the simulation used whichever came first in the list (seen 7 Oct: YASA YASMEEN
+// Anchorage 2–11 Oct twice, Unloading 12–20 and 12–24). After every load and merge, a group
+// that overlaps is replayed in the order its campaigns were CREATED (the timestamp in the id)
+// through the same trimming rule: the campaign added LAST wins where they overlap, an exact
+// duplicate collapses to one, and touching pieces with the same content join up again. Piece
+// ids derive from the original ids, so every browser tidies to identical rows (random ids
+// would look like new rows to the merge and the duplicates would keep coming back).
+const _CAMP_GROUP={prod:c=>c.element_id, vessel:c=>c.vessel_call_id, xfer:c=>c.link_id+'|'+c.from_silo_id+'|'+c.to_silo_id};
+const _campCreated=c=>{ const m=/_(\d{12,14})(?:_|$)/.exec(c.id||''); return m?+m[1]:0; };
+function _campTidy(){
+  const tidied=[];
+  const same=(a,b)=>{ const ks=new Set([...Object.keys(a),...Object.keys(b)]);
+    for(const k of ks){ if(k==='id'||k==='start_date'||k==='end_date') continue; if(JSON.stringify(a[k])!==JSON.stringify(b[k])) return false; } return true; };
+  Object.entries(_CAMP_STORES).forEach(([store,st])=>{
+    const list=DB[st.key]; if(!Array.isArray(list)||list.length<2) return;
+    const groups=new Map();
+    list.forEach(c=>{ const k=_CAMP_GROUP[store](c); if(!groups.has(k)) groups.set(k,[]); groups.get(k).push(c); });
+    const redo=new Map();
+    groups.forEach((g,k)=>{
+      if(g.length<2) return;
+      const byStart=[...g].sort((a,b)=>a.start_date<b.start_date?-1:a.start_date>b.start_date?1:0);
+      let maxEnd='', overlap=false;
+      byStart.forEach(c=>{ if(maxEnd&&c.start_date<=maxEnd) overlap=true; if(c.end_date>maxEnd) maxEnd=c.end_date; });
+      if(!overlap) return;
+      const byAge=[...g].sort((a,b)=>_campCreated(a)-_campCreated(b)||String(a.id).localeCompare(String(b.id)));
+      let kept=[];
+      byAge.forEach(c=>{
+        const nx=[];
+        kept.forEach(o=>{
+          if(o.end_date<c.start_date||o.start_date>c.end_date){ nx.push(o); return; }
+          if(o.start_date<c.start_date) nx.push({...o, end_date:_addDays(c.start_date,-1)});
+          if(o.end_date>c.end_date){ const s=_addDays(c.end_date,1); nx.push({...o, id:o.id+'_t'+s.replace(/-/g,''), start_date:s}); }
+        });
+        nx.push({...c}); kept=nx;
+      });
+      kept.sort((a,b)=>a.start_date<b.start_date?-1:a.start_date>b.start_date?1:0);
+      const joined=[];
+      kept.forEach(c=>{ const p=joined[joined.length-1];
+        if(p&&_addDays(p.end_date,1)===c.start_date&&same(p,c)) p.end_date=c.end_date; else joined.push(c); });
+      redo.set(k, joined);
+      const nm=store==='vessel'?(DB.vessel_calls.find(v=>v.id===k)?.name||'vessel').trim()
+              :store==='prod'?(DB.elements.find(e=>e.id===k)?.name||'equipment'):'silo transfer';
+      tidied.push(nm);
+    });
+    if(!redo.size) return;
+    const out=[], done=new Set();
+    list.forEach(c=>{ const k=_CAMP_GROUP[store](c);
+      if(!redo.has(k)){ out.push(c); return; }
+      if(!done.has(k)){ done.add(k); out.push(...redo.get(k)); } });
+    DB[st.key]=out;
+  });
+  return tidied;
+}
+// After a load or a merge: tidy, and when anything changed save it (so it reaches every
+// computer as an ordinary edit) and re-run the simulation on the cleaned campaigns.
+function _campTidyAfterLoad(){
+  let t=[]; try{ t=_campTidy(); }catch(e){ console.warn('campaign tidy-up', e); return; }
+  if(!t.length) return;
+  console.info('Campaign tidy-up:', t);
+  statMsg(`Tidied overlapping campaigns (${[...new Set(t)].join(', ')}) — the campaign added last wins`);
+  setTimeout(()=>{ try{ autoSave(); scheduleSimulation(); }catch(e){ console.warn('campaign tidy-up save', e); } },0);
+}
 function _campGrips(store,c,ds){
   if(!c) return '';
   const id=esc(c.id); let g='';
@@ -9917,6 +9990,38 @@ const _DOWN_TIP = {
 };
 // Sentinel product_ids used by downtime campaigns (0 production, tagged reason).
 const DOWNTIME_PRODUCTS = {'__down_repair__':'repair','__down_pm__':'pm','__down_inv__':'inv'};
+// The downtime campaign covering an element's day (its reason for being down), or null.
+function _downCampaignAt(elId, ds){
+  return (DB.production_campaigns||[]).find(c=>c.element_id===elId&&DOWNTIME_PRODUCTS[c.product_id]&&ds>=c.start_date&&ds<=c.end_date)||null;
+}
+// Days an element sits in a Maintenance Calendar event → Map(date → event id), over the
+// simulation horizon (recurring events expanded). Steps by CALENDAR day (setDate): adding
+// +24h to a midnight lands on 23:00 the day before once the clocks fall back (Nov 1).
+function _maintDayMap(elId){
+  const evts=DB.element_maintenance_events.filter(m=>m.element_id===elId);
+  const days=new Map();
+  const start=new Date(S.simCfg.start_date+'T00:00:00');
+  const horizon=S.simCfg.horizon||365;
+  evts.forEach(ev=>{
+    const sd=new Date((ev.start_date||'')+'T00:00:00');
+    // ceil so a fractional/partial day (e.g. 0.5) still counts as a maintenance day.
+    const dur=Math.max(1,Math.ceil(parseFloat(ev.duration_days)||1));
+    const freq=parseInt(ev.frequency_days)||0;
+    const addOccurrence=(occStart)=>{
+      const dt=new Date(occStart);
+      for(let d=0;d<dur;d++){ days.set(dt._ymd(), ev.id); dt.setDate(dt.getDate()+1); }
+    };
+    addOccurrence(sd);
+    if(ev.type==='recurring'&&freq>0){
+      const recEnd=ev.recurrence_end_date
+        ?new Date(ev.recurrence_end_date+'T00:00:00')
+        :new Date(start.getFullYear(),start.getMonth(),start.getDate()+horizon);
+      const next=new Date(sd); next.setDate(next.getDate()+freq);
+      while(next<=recEnd){ addOccurrence(next); next.setDate(next.getDate()+freq); }
+    }
+  });
+  return days;
+}
 
 // ═══════════════════════════════════════════════════════
 // SUPPLY / PRODUCTION VIEW
@@ -10311,43 +10416,8 @@ function _renderSupplyViewInner(wrap){
   const hasSim=!!(r&&r.millProductHistory);
   const dataSource=hasSim?'Simulated output':'Planned schedule / rated capacity (default)';
 
-  const maintSetFor=(elId)=>{
-    const evts=DB.element_maintenance_events.filter(m=>m.element_id===elId);
-    // Returns a Map: dateString -> event_id (for clickable MAINT badge)
-    const days=new Map();
-    const start=new Date(S.simCfg.start_date+'T00:00:00');
-    const horizon=S.simCfg.horizon||365;
-    // Every date below steps by CALENDAR day (setDate), like the simulation's whole-day offsets.
-    // Adding +24h to a midnight lands on 23:00 the day before once the clocks fall back (Nov 1),
-    // so badges after it sat a day early (a 5-day event from Oct 30 showed Nov 1 twice, no Nov 3).
-    evts.forEach(ev=>{
-      const sd=new Date((ev.start_date||'')+'T00:00:00');
-      // ceil so a fractional/partial day (e.g. 0.5) still gets a MAINT badge.
-      const dur=Math.max(1,Math.ceil(parseFloat(ev.duration_days)||1));
-      const freq=parseInt(ev.frequency_days)||0;
-      // Add all days for one occurrence starting at 'occStart'
-      const addOccurrence=(occStart)=>{
-        const dt=new Date(occStart);
-        for(let d=0;d<dur;d++){
-          days.set(dt._ymd(), ev.id);
-          dt.setDate(dt.getDate()+1);
-        }
-      };
-      addOccurrence(sd);
-      // Expand recurring occurrences
-      if(ev.type==='recurring'&&freq>0){
-        const recEnd=ev.recurrence_end_date
-          ?new Date(ev.recurrence_end_date+'T00:00:00')
-          :new Date(start.getFullYear(),start.getMonth(),start.getDate()+horizon);
-        const next=new Date(sd); next.setDate(next.getDate()+freq);
-        while(next<=recEnd){
-          addOccurrence(next);
-          next.setDate(next.getDate()+freq);
-        }
-      }
-    });
-    return days;
-  };
+  // Map dateString → event_id (for the clickable MAINT badge) — shared with Push to BI.
+  const maintSetFor=(elId)=>_maintDayMap(elId);
 
   // Returns {product_id, capacity_tpd} for element on a given date
   // Uses four-tier resolution: ACTUAL > SIM > SCHEDULE > DEFAULT
@@ -10359,6 +10429,13 @@ function _renderSupplyViewInner(wrap){
     if(realProduction.length>0){
       const totalActual=realProduction.reduce((sum,r)=>sum+(parseFloat(r.volume_t)||0),0);
       const firstProd=realProduction[0];
+      // A day that produced NOTHING can carry its reason: a Down For Repairs / PM / Inventory
+      // Control campaign entered for that day. The actual 0 stays the number; the reason is
+      // what the cell shows (it used to be hidden behind the blank actual).
+      if(totalActual<=0){
+        const dc=_downCampaignAt(el.id, ds);
+        if(dc) return {product_id:null, capacity_tpd:0, isActual:true, downtime:DOWNTIME_PRODUCTS[dc.product_id], products:realProduction};
+      }
       return {product_id:firstProd.product_id, capacity_tpd:totalActual, isActual:true, products:realProduction};
     }
 
@@ -10531,10 +10608,11 @@ function _renderSupplyViewInner(wrap){
           const lockBadge=isCamp?'<span style="font-size:7px;color:var(--lime);margin-left:2px" title="Manager campaign">🔒</span>':'';
           const isBlocked=(!isMaint&&!dt&&v<=0&&blockedDays.has(ds));
           const downKind=isMaint?'maint':dt?dt:isBlocked?'blocked':null;
-          const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?_DOWN_TIP[dt]+(v>0?` · ${prod?.name?esc(prod.name)+' ':''}${Math.round(v).toLocaleString()} t`:''):isBlocked?_DOWN_TIP.blocked:isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name||''));
+          const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?(res.isActual?_DOWN_TIP[dt].replace(/ \(manual\) — .*$/,'')+' — actual: no production that day':_DOWN_TIP[dt]+(v>0?` · ${prod?.name?esc(prod.name)+' ':''}${Math.round(v).toLocaleString()} t`:'')):isBlocked?_DOWN_TIP.blocked:isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name||''));
           let inner, cAlign='text-align:right;', cPad='padding:4px 6px;';
           if(downKind){ cAlign=''; cPad='padding:3px 0;';
-            inner=`<div style="position:relative;height:10px;background:${_DOWN_HATCH[downKind]}"></div>`; }
+            // a reason on a day with actuals keeps the real-data bottom edge
+            inner=`<div style="position:relative;height:10px;background:${_DOWN_HATCH[downKind]}${res.isActual?';box-shadow:inset 0 -2px 0 var(--real)':''}"></div>`; }
           else { inner = v>0?prodIcon(prod)+Math.round(v).toLocaleString()+lockBadge:'0'; }
           h+=`<td ${dAttr} class="sup-day-${mon.ym} ${(res.isActual&&v>0)?'cell-real':((!downKind&&v>0&&ds<todayStr)?'cell-gap':'')}" title="${cellTitle}${(res.isActual&&v>0)?' · actual':''}" onclick="event.stopPropagation();${clickFn}" style="${gPos}cursor:pointer;font-size:9px;color:${v>0?o.color:'rgba(var(--red-rgb),calc(var(--zero-k)*.4))'};${cAlign}${cPad}border-bottom:1px solid var(--border);overflow:visible;${campBorder}${tdSty(ds)}">${inner}${grips}</td>`;
           return;
@@ -10565,8 +10643,9 @@ function _renderSupplyViewInner(wrap){
         const barBg=downKind?(_DOWN_HATCH[downKind]||'transparent'):(v>0?_hatchBar(barColor):'transparent');
         const isGap=(!downKind&&v>0&&ds<todayStr); // simulated on a day that should have an actual
         const _edges=[]; if(isCamp&&!isMaint) _edges.push('inset 0 2px 0 var(--plan)'); if(isGap) _edges.push('inset 0 -2px 0 var(--simulated)');
+        if(res.isActual&&downKind) _edges.push('inset 0 -2px 0 var(--real)');   // the reason for a real 0 t day
         const campMark=_edges.length?`box-shadow:${_edges.join(',')};`:'';
-        const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?_DOWN_TIP[dt]+(v>0?` · ${prod?.name?esc(prod.name)+' ':''}${Math.round(v).toLocaleString()} t`:''):isBlocked?_DOWN_TIP.blocked:isStarved?starvedTip:(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name?`${esc(prod.name)} · ${Math.round(v)} t/d`:'Idle')));
+        const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?(res.isActual?_DOWN_TIP[dt].replace(/ \(manual\) — .*$/,'')+' — actual: no production that day':_DOWN_TIP[dt]+(v>0?` · ${prod?.name?esc(prod.name)+' ':''}${Math.round(v).toLocaleString()} t`:'')):isBlocked?_DOWN_TIP.blocked:isStarved?starvedTip:(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name?`${esc(prod.name)} · ${Math.round(v)} t/d`:'Idle')));
         const zpos=isRunStart?'position:relative;z-index:2;':gPos;
         // Product name only (no rate) in the middle of each production run — small, without the
         // plant prefix ("BRS_IL(12)/BLK" → "IL(12)/BLK") and clipped to its own day cell; the
@@ -21821,6 +21900,49 @@ function _pushBIBuildTables(){
     });
   }
 
+  // ── FACT: DOWNTIME ─────────────────────────────────────
+  // One row per kiln / finish mill / packing machine and DOWN day, with its reason — the
+  // same reasons the Production page shows on that day.
+  //  actual   — a day the production feed / Daily Data reported 0 t. Reason: a Maintenance
+  //             Calendar event, else a Down For Repairs / PM Day / Inventory Control campaign
+  //             entered for it, else "No reason given". down_days = 1.
+  //  forecast — PLANNED downtime from today on, simulation's active facility: maintenance and
+  //             downtime campaigns (PM Day = ½ day, it runs at 50%). The simulation's own stops
+  //             (silo full / no feed) are left out: past the loaded demand they turn into months
+  //             of "down" days that nobody planned. A day that already has actuals is never forecast.
+  const _DT_LBL={repair:'Repairs', pm:'PM day', inv:'Inventory control', maint:'Maintenance (calendar)', none:'No reason given'};
+  const _DT_ORD={repair:1, pm:2, inv:3, maint:4, none:9};
+  const fact_downtime=[];
+  const _dtRow=(scen,ds,elId,code,source,down)=>fact_downtime.push(stamp({
+    scenario_type:scen, date:ds, facility_id:elFac[elId]||'', element_id:elId, element_type:elType[elId]||'',
+    reason_code:code, reason:_DT_LBL[code], reason_order:_DT_ORD[code], source, down_days:down }));
+  const _prodEls=DB.elements.filter(e=>(e.type==='kiln'||e.type==='finish_mill'||e.type==='packing_plant')&&e.is_active!==false);
+  const _realDays={};   // elId → Set of dates with actuals (any tonnes)
+  (DB.real_production_daily||[]).forEach(row=>{ (_realDays[row.element_id]=_realDays[row.element_id]||new Set()).add(row.date); });
+  _prodEls.forEach(el=>{
+    const maint=_maintDayMap(el.id);
+    (_realDays[el.id]||new Set()).forEach(ds=>{
+      const tot=_dedupRealProd(el.id, ds).reduce((s,x)=>s+(parseFloat(x.volume_t)||0),0);
+      if(tot>0) return;
+      const dc=maint.has(ds)?null:_downCampaignAt(el.id, ds);
+      if(maint.has(ds)) _dtRow('actual',ds,el.id,'maint','maintenance',1);
+      else if(dc) _dtRow('actual',ds,el.id,DOWNTIME_PRODUCTS[dc.product_id],'campaign',1);
+      else _dtRow('actual',ds,el.id,'none','not recorded',1);
+    });
+  });
+  if(r){
+    _prodEls.filter(el=>r.elementStates?.[el.id]).forEach(el=>{
+      const maint=_maintDayMap(el.id), real=_realDays[el.id]||new Set();
+      for(let i=0;i<horizon;i++){
+        const ds=offsetToDate(i);
+        if(ds<asOf||real.has(ds)) continue;
+        const dc=_downCampaignAt(el.id, ds);
+        if(maint.has(ds)) _dtRow('forecast',ds,el.id,'maint','maintenance',1);
+        else if(dc){ const k=DOWNTIME_PRODUCTS[dc.product_id]; _dtRow('forecast',ds,el.id,k,'campaign',k==='pm'?0.5:1); }
+      }
+    });
+  }
+
   // ── FACT: INVENTORY ────────────────────────────────────
   const fact_inventory=[];
   // A reading belongs to its silo's facility. Older records were stamped with the main
@@ -22214,7 +22336,7 @@ function _pushBIBuildTables(){
     {key:'simulation_start_date',value:simStart},
     {key:'simulation_horizon_days',value:horizon},
     {key:'simulation_active_facility',value:getFacility()?.name||''},
-    {key:'export_version',value:'4'},
+    {key:'export_version',value:'5'},
     {key:'skipped_orphan_demand_rows',value:String(_orphanDemand)},
     {key:'note_forecast_scope',value:'Forecast rows cover only the simulation\'s active facility. Actuals span every facility present in real_* tables.'},
     {key:'note_inventory_breakdown',value:'Forecast inventory is total per silo (product breakdown is not retained after the run). Actual inventory carries product_id.'},
@@ -22223,13 +22345,14 @@ function _pushBIBuildTables(){
     {key:'note_dim_date',value:'dim_date is a contiguous day-by-day calendar covering every date referenced by any fact (including rail departure/arrival and forecast demand). Safe to mark as the Power BI date table.'},
     {key:'note_scm_type',value:'dim_product.scm_type splits category=additive into slag/ash. Blank means the product has not been tagged yet in the product editor.'},
     {key:'note_sof',value:'fact_sof_period: the Statement-of-Facts time accounting, one row per period, times on the port clock. counted / laytime_h / demurrage_h follow the default rule (time caused by the vessel never counts; weather counts only once the vessel is on demurrage; everything else counts) unless a period was set Y/N by hand (counts_setting). fact_laytime: one row per vessel call, the whole voyage (all ports together); demurrage_usd is blank until the charter terms are entered on the vessel call.'},
+    {key:'note_downtime',value:'fact_downtime: one row per kiln / finish mill / packing machine and down day. actual = a day reported at 0 t (reason: Maintenance Calendar event, else a Down For Repairs / PM Day / Inventory Control campaign entered for it, else "No reason given"). forecast = PLANNED downtime from as_of_date on, simulation facility only: maintenance and downtime campaigns (PM day counts 0.5); simulation stops are not included. SUM(down_days) = days down.'},
     {key:'note_silo_transfer',value:'fact_silo_transfer: one row per silo link, direction and day. actual = tonnes recorded as moved; forecast = tonnes the simulation moved (planned_t = asked, short_t = could not move). facility_id = origin facility, to_facility_id = receiving facility; cross_facility=true rows are inbound supply for the receiver. Their effect is already inside fact_inventory — do not add them to stock.'}
   ];
 
   return {
     meta,
     dim_date, dim_facility, dim_element, dim_product, dim_silo_link,
-    fact_production, fact_inventory, fact_demand,
+    fact_production, fact_downtime, fact_inventory, fact_demand,
     fact_unloading, fact_rail_movement, fact_stop_events,
     fact_service, fact_rail_sim, fact_vessel_call, fact_silo_transfer,
     fact_sof_period, fact_laytime
@@ -22328,6 +22451,7 @@ function importJSON(input){
       // pages below (and the next typed demand cell) would still read the pre-import values.
       _demandCacheInvalidate();
       _slResetIfAbsent(saved.DB);
+      _campTidyAfterLoad();
       if(saved.simCfg) Object.assign(S.simCfg,saved.simCfg);
       if(saved.counter) S.elCounter=saved.counter;
       syncElCounter();
@@ -32446,6 +32570,7 @@ function _mgApplyPayloadToApp(payload){
   // Tables the payload lacks are KEPT as they are (a copy written by an older app version
   // has no silo_links etc.; wiping ours made transfers vanish — see _slResetIfAbsent).
   Object.keys(DB).forEach(t=>{ if(payload.DB[t]!==undefined) DB[t]=payload.DB[t]; });
+  _campTidyAfterLoad();   // a merge is where two browsers' overlapping campaigns meet
   if(payload.simCfg) Object.assign(S.simCfg, payload.simCfg);
   if(payload.counter) S.elCounter=payload.counter;
   if(typeof syncElCounter==='function') syncElCounter();
@@ -32863,6 +32988,7 @@ async function scRetryWrite(id){
 // ── Re-render the whole app after loading a scenario's state ──
 function scAfterLoad(){
   S.selectedEl=null;  // Keep simResults if loaded from file; they're now persistent
+  _campTidyAfterLoad();
   if(DB.facilities.length) selectFacility(DB.facilities[0].id);
   updateStatusBar(); renderLocationTree(); updateNavFacilities();
   if(typeof initRealDataFacilitySelector==='function') initRealDataFacilitySelector();
