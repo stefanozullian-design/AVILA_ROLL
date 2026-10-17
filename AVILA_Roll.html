@@ -6010,9 +6010,15 @@ function getActiveDemandSwap(elementId, dateStr){
 // read, so what the destinations receive always equals what the source gives up. Swaps that
 // together ask for more than the point's demand (60% + 60%, or 300 + 300 t/d on 500 t) are
 // scaled down in proportion; a single swap is capped at the demand exactly as before.
+// FORECAST DAYS ONLY: a swap predicts volume that has not shipped yet. Once either end has
+// actual shipments for the day, the actuals are what happened (any real substitution is
+// already inside them), so that swap is ignored on both sides — moving it again would
+// count it twice at the destination and take it off the source a second time.
 function _demandSwapAlloc(fromElId, rate, dateStr){
   if(!(rate>0)) return [];
-  const list=getActiveDemandSwaps(fromElId, dateStr).map(s=>({swap:s,
+  if(_dmdIsActual(fromElId, dateStr)) return [];
+  const list=getActiveDemandSwaps(fromElId, dateStr)
+    .filter(s=>!(s.to_element_id&&_dmdIsActual(s.to_element_id, dateStr))).map(s=>({swap:s,
     qty:Math.max(0, s.mode==='percent' ? rate*(parseFloat(s.amount)||0)/100 : (parseFloat(s.amount)||0))
   })).filter(x=>x.qty>0);
   const total=list.reduce((a,x)=>a+x.qty,0);
@@ -11294,16 +11300,21 @@ function _renderSupplyViewInner(wrap){
           // Drop products the Family/Category/Product filters exclude.
           [...productsSet].forEach(pid=>{ if(!_supProdAllows(pid)) productsSet.delete(pid); });
 
+          // A product's requirement HERE = its own need (+ rail loading) + whatever a swap moves
+          // INTO this facility's demand points, so the ↳ own / ↳ swapped in rows add up to it.
+          // Swaps only run on forecast days — actual days are just the actuals.
+          const needHere=(prodId, ds)=>totalNeed(prodId,ds)+swappedIn(prodId,ds);
+
           if(productsSet.size>0){
             // Section header row
             h+=`<tr class="sup-sec-hdr" data-seckey="cementNeed" onclick="_supToggleSec('cementNeed')" style="cursor:pointer;background:rgba(var(--blue-rgb),.05);border-top:2px solid rgba(var(--blue-rgb),.3)">
               <td title="Direct + Transfer Demand" style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${prodReqColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('cementNeed')}</span> CEMENT REQUIREMENTS <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>`;
             months.forEach(mon=>{
               const isCol=collapsed.has(mon.ym);
-              const mt=[...productsSet].reduce((s,pid)=>s+mon.dates.reduce((a,ds)=>a+totalNeed(pid,ds),0),0);
+              const mt=[...productsSet].reduce((s,pid)=>s+mon.dates.reduce((a,ds)=>a+needHere(pid,ds),0),0);
               h+=`<td style="border-left:2px solid rgba(var(--blue-rgb),.2);font-size:9px;font-weight:700;color:${prodReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
               if(!isCol) mon.dates.forEach(ds=>{
-                const v=[...productsSet].reduce((s,pid)=>s+totalNeed(pid,ds),0);
+                const v=[...productsSet].reduce((s,pid)=>s+needHere(pid,ds),0);
                 h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${prodReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`;
               });
             });
@@ -11327,11 +11338,12 @@ function _renderSupplyViewInner(wrap){
                 <td ondblclick="_openSwapForProduct('${prodId}','')" title="Double-click to cover part of this material's demand with a substitute" style="cursor:pointer;${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${prodReqColor};font-size:9px">${esc(prodName)}${(_dpnDpts.length||_dpnExtra.length)?_supDpnArrow(_dpnBase,_dpnDpts.length,_dpnExtra.length):''}</td>`;
               months.forEach(mon=>{
                 const isCol=collapsed.has(mon.ym);
-                const mt=mon.dates.reduce((s,ds)=>s+totalNeed(prodId,ds),0);
+                const mt=mon.dates.reduce((s,ds)=>s+needHere(prodId,ds),0);
                 h+=`<td ondblclick="_openSwapForProduct('${prodId}','${mon.dates[0]||''}')" title="Double-click to swap part of this demand to another material" style="cursor:pointer;border-left:2px solid rgba(var(--blue-rgb),.1);font-size:9px;color:${prodReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
                 if(!isCol) mon.dates.forEach(ds=>{
-                  const v=totalNeed(prodId,ds);
+                  const v=needHere(prodId,ds);
                   const _acts=_dmdActs(_dpnDpts,ds); if(_railLoadT(prodId,ds)>0) _acts.push(_railReal(node.id,ds));
+                  if(swappedIn(prodId,ds)>0) _acts.push(..._swapInActs(_dpnDpts,ds));
                   h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_acts)}" ondblclick="_openSwapForProduct('${prodId}','${ds}')" title="Double-click to swap part of this demand to another material" style="cursor:pointer;font-size:9px;color:${v>0?prodReqColor:'rgba(var(--blue-rgb),calc(var(--zero-k)*.3))'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
                 });
               });
@@ -11358,10 +11370,8 @@ function _renderSupplyViewInner(wrap){
                 const ownActs=ds=>_dmdActs(_dpnDpts,ds), inActs=ds=>_swapInActs(_dpnDpts,ds);
                 h+=swapChild('↳ '+prodName+' · own','var(--green)','rgba(76,175,80,.03)',ownFn,ownActs);
                 if(hasOut) h+=swapChild('↳ ⇄ swapped out → '+(_outTargets(prodId)||'substitute'),'var(--amber)','rgba(var(--amber-rgb),.05)',ds=>outArr[idxOf[ds]]||0,ownActs);
-                if(hasIn){
-                  h+=swapChild('↳ ⇄ swapped in ← '+(_inSources(prodId)||'other demand'),'var(--cyan)','rgba(var(--cyan-rgb),.06)',ds=>inArr[idxOf[ds]]||0,inActs);
-                  h+=swapChild('↳ = to produce (own+in)','var(--blue)','rgba(var(--blue-rgb),.06)',ds=>{ const i=idxOf[ds]; return ownFn(ds)+(inArr[i]||0); },ds=>[...ownActs(ds),...inActs(ds)]);
-                }
+                // (no "= to produce" row: the product line above already is own + swapped in)
+                if(hasIn) h+=swapChild('↳ ⇄ swapped in ← '+(_inSources(prodId)||'other demand'),'var(--cyan)','rgba(var(--cyan-rgb),.06)',ds=>inArr[idxOf[ds]]||0,inActs);
               }
             });
           }
@@ -12334,7 +12344,10 @@ function _renderSupplyViewInner(wrap){
             const reqRgb=_isPurch?'var(--purple-rgb)':'var(--blue-rgb)';
             const reqLabel=_isPurch?'PURCHASES':'PRODUCT REQUIREMENT';
             const reqTitle=_isPurch?'What we buy from this source per day — its own demand plus anything swapped in':'Local demand per product';
-            const _reqDay=ds=>_reqPids.reduce((s,pid)=>s+totalNeed(pid,ds),0);
+            // A product's requirement HERE = own demand + whatever a swap moves INTO this
+            // terminal's demand points (forecast days only), so the ↳ rows add up to it.
+            const _needHere=(pid,ds)=>totalNeed(pid,ds)+_tSwappedIn(pid,ds);
+            const _reqDay=ds=>_reqPids.reduce((s,pid)=>s+_needHere(pid,ds),0);
             h+=`<tr class="sup-sec-hdr" data-seckey="${reqSeckey}" onclick="_supToggleSec('${reqSeckey}')" style="cursor:pointer;background:rgba(${reqRgb},.05);border-top:1px solid rgba(${reqRgb},.3)">
               <td title="${reqTitle}" style="${stickyLeft('var(--surface)',depth+1,'border-bottom:1px solid var(--border),')}color:${reqColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow(reqSeckey)}</span> ${reqLabel} ${suffix} <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>`;
             months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
@@ -12352,10 +12365,11 @@ function _renderSupplyViewInner(wrap){
               const _dpnBase=fac.id+'_'+reqSeckey+'_'+pid;
               h+=`<tr class="supsec-${reqSeckey}"><td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${reqColor};font-size:9px">${_pChip(pid)}${_pNameOf(pid)}${_dpnDpts.length?_supDpnArrow(_dpnBase,_dpnDpts.length):''}</td>`;
               months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-                const mt=mon.dates.reduce((a,ds)=>a+totalNeed(pid,ds),0);
+                const mt=mon.dates.reduce((a,ds)=>a+_needHere(pid,ds),0);
                 h+=`<td style="border-left:2px solid rgba(${reqRgb},.1);font-size:9px;color:${reqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
-                if(!isCol) mon.dates.forEach(ds=>{ const v=totalNeed(pid,ds);
-                  h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_dmdActs(_dpnDpts,ds))}" style="font-size:9px;color:${v>0?reqColor:`rgba(${reqRgb},calc(var(--zero-k)*.3))`};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+                if(!isCol) mon.dates.forEach(ds=>{ const v=_needHere(pid,ds);
+                  const _acts=_dmdActs(_dpnDpts,ds); if(_tSwappedIn(pid,ds)>0) _acts.push(..._swapInActs(_dpnDpts,ds));
+                  h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_acts)}" style="font-size:9px;color:${v>0?reqColor:`rgba(${reqRgb},calc(var(--zero-k)*.3))`};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
               });
               h+=`</tr>`;
               h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, depth+3, _dpnBase, stickyLeft);
@@ -12381,10 +12395,8 @@ function _renderSupplyViewInner(wrap){
                 const _tOwnActs=ds=>_dmdActs(_dpnDpts,ds), _tInActs=ds=>_swapInActs(_dpnDpts,ds);
                 h+=_swapChild('↳ '+_pNameOf(pid)+' · own','var(--green)','rgba(76,175,80,.03)',_ownFn,_tOwnActs);
                 if(_hasSO) h+=_swapChild('↳ ⇄ swapped out → '+(_tOutTargets(pid)||'substitute'),'var(--amber)','rgba(var(--amber-rgb),.05)',ds=>_soArr[_ix[ds]]||0,_tOwnActs);
-                if(_hasSI){
-                  h+=_swapChild('↳ ⇄ swapped in ← '+(_tInSources(pid)||'other demand'),'var(--cyan)','rgba(var(--cyan-rgb),.06)',ds=>_siArr[_ix[ds]]||0,_tInActs);
-                  h+=_swapChild(_isPurch?'↳ = bought here (own+in)':'↳ = required here (own+in)',reqColor,`rgba(${reqRgb},.06)`,ds=>_ownFn(ds)+(_siArr[_ix[ds]]||0),ds=>[..._tOwnActs(ds),..._tInActs(ds)]);
-                }
+                // (no "= required here" row: the product line above already is own + swapped in)
+                if(_hasSI) h+=_swapChild('↳ ⇄ swapped in ← '+(_tInSources(pid)||'other demand'),'var(--cyan)','rgba(var(--cyan-rgb),.06)',ds=>_siArr[_ix[ds]]||0,_tInActs);
               }
             });
           }
