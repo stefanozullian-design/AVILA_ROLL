@@ -34976,6 +34976,69 @@ function plVersionDiff(aId, bId){
   rows.sort((x,y)=>Math.abs(y.d)-Math.abs(x.d)); return rows;
 }
 function plShowDiff(){ const a=document.getElementById('plv-a')?.value, b=document.getElementById('plv-b')?.value; if(!a||!b||a===b){ statMsg('Pick two different versions'); return; } PL.ui.diff={a,b}; planRender(); }
+// ── Version comparison report (D26): what the FILE changed vs what KEYS / RULES changed, from buckets down to lines ──
+function _plBucket(l){ return l.kind==='EXT'?'External cement':'Internal '+(l.family||'cement'); }
+function _plSumBy(L, f){ const o={}; L.forEach(l=>{ const k=f(l); o[k]=(o[k]||0)+(l.fy||0); }); return o; }
+function plVersionReport(aId, bId){
+  const A=plVersions().find(v=>v.id===aId), B=plVersions().find(v=>v.id===bId); if(!A||!B) throw new Error('version not found');
+  const LA=plVersionLines(aId), LB=plVersionLines(bId);
+  // 1 · buckets and months straight from the files
+  const bA=_plSumBy(LA,_plBucket), bB=_plSumBy(LB,_plBucket);
+  const buckets=[...new Set([...Object.keys(bA),...Object.keys(bB)])].sort().map(k=>({k, a:bA[k]||0, b:bB[k]||0, d:(bB[k]||0)-(bA[k]||0)}));
+  const mo=i=>{ const s=L=>L.reduce((t,l)=>t+((l.months||[])[i]||0),0); return {m:PL_MONTHS[i], a:s(LA), b:s(LB), d:s(LB)-s(LA)}; };
+  const months=PL_MONTHS.map((_,i)=>mo(i));
+  // 2 · lines (file level)
+  const lines=plVersionDiff(aId,bId); const keysB=new Set(LB.map(l=>l.line_key)), keysA=new Set(LA.map(l=>l.line_key));
+  const nNew=lines.filter(r=>r.status==='new').length, nGone=lines.filter(r=>r.status==='gone').length, nChg=lines.filter(r=>r.status==='changed').length;
+  // 3 · per demand point: generated totals (as each version was generated) vs both files through TODAY's keys and rules
+  const genStored=vid=>{ const pd=(DB.plan_demand||[]).filter(p=>p.version_id===vid); if(!pd.length) return null; const o={}, nm={}; pd.forEach(p=>{ o[p.element_id]=(o[p.element_id]||0)+(p.total_t||0); nm[p.element_id]=p.dp_name; }); return {o, nm}; };
+  const genNow=vid=>{ const g=plGenerateMonthly(vid); const o={}; Object.keys(g.tot).forEach(el=>{ o[el]=Object.values(g.tot[el]).reduce((a,b)=>a+Math.max(0,b),0); }); return {o, nm:g.names, unalloc:g.unalloc.reduce((a,u)=>a+u.t,0)}; };
+  const nowA=genNow(aId), nowB=genNow(bId); const stA=genStored(aId)||nowA, stB=genStored(bId)||nowB;
+  const els=[...new Set([...Object.keys(stA.o),...Object.keys(stB.o),...Object.keys(nowA.o),...Object.keys(nowB.o)])];
+  const elName=el=>stB.nm[el]||stA.nm[el]||nowB.nm[el]||nowA.nm[el]||(((DB.elements||[]).find(e=>e.id===el)||{}).name)||el;
+  const points=els.map(el=>{ const a=stA.o[el]||0, b=stB.o[el]||0, fa=nowA.o[el]||0, fb=nowB.o[el]||0; const d=b-a, file=fb-fa; return {el, name:elName(el), fac:(elName(el)||'').split('/')[0], a, b, d, file, keys:d-file}; })
+    .filter(p=>Math.abs(p.d)>0.5||Math.abs(p.file)>0.5||p.a>0||p.b>0).sort((x,y)=>Math.abs(y.d)-Math.abs(x.d));
+  const facs={}; points.forEach(p=>{ const f=facs[p.fac]=facs[p.fac]||{fac:p.fac, a:0, b:0, d:0, file:0, keys:0}; f.a+=p.a; f.b+=p.b; f.d+=p.d; f.file+=p.file; f.keys+=p.keys; });
+  const facilities=Object.values(facs).sort((x,y)=>Math.abs(y.d)-Math.abs(x.d));
+  const tot={a:points.reduce((s,p)=>s+p.a,0), b:points.reduce((s,p)=>s+p.b,0)}; tot.d=tot.b-tot.a; tot.file=points.reduce((s,p)=>s+p.file,0); tot.keys=tot.d-tot.file;
+  // 4 · reassignments / exclusions that no longer find their row in B
+  const orphans=plRules().filter(r=>(r.type==='reassign'||r.type==='exclude')&&r.line_key&&!keysB.has(r.line_key)&&(!r.version_id||r.version_id===bId)).map(r=>({rule:r, inA:keysA.has(r.line_key)}));
+  const unallocA=(A.gen_report&&A.gen_report.unallocated_t)||Math.round(nowA.unalloc||0), unallocB=(B.gen_report&&B.gen_report.unallocated_t)||Math.round(nowB.unalloc||0);
+  return {A, B, buckets, months, lines, nNew, nGone, nChg, points, facilities, tot, orphans, unallocA, unallocB, generatedA:!!genStored(aId), generatedB:!!genStored(bId), at:new Date().toISOString()};
+}
+function _plD(v, dec){ const s=_plFmt(Math.abs(v), dec||0); return v>0.5?'+'+s:v<-0.5?'−'+s:'0'; }
+function _plDc(v){ return `<td class="n" style="color:${v>0.5?'var(--green)':v<-0.5?'var(--red)':'var(--text-dim)'}">${_plD(v)}</td>`; }
+function _plVersionReportHTML(r){
+  const pct=(d,a)=>a?` <span class="pl-muted">(${d>=0?'+':''}${(d/a*100).toFixed(1)}%)</span>`:'';
+  const hdr=`<div style="margin-top:10px;padding:8px 10px;border:1px solid var(--border);background:var(--surface2)"><b>${_plEsc(r.A.label)} → ${_plEsc(r.B.label)}</b> <span class="pl-muted">(${String(r.A.uploaded_at).slice(0,10)} → ${String(r.B.uploaded_at).slice(0,10)}, report ${r.at.slice(0,16).replace('T',' ')})</span><br>
+    Files: ${r.nChg} lines changed · ${r.nNew} new · ${r.nGone} gone. Budget demand on the demand points: <b>${_plD(r.tot.d)} ST</b>${pct(r.tot.d,r.tot.a)} = file changes <b>${_plD(r.tot.file)}</b> + keys / rules <b>${_plD(r.tot.keys)}</b>${r.generatedA&&r.generatedB?'':' <span class="pl-flag dim">'+(r.generatedA?'':r.A.label+' not generated · ')+(r.generatedB?'':r.B.label+' not generated · ')+'computed with today\'s keys</span>'}
+    · unallocated ${_plFmt(r.unallocA)} → ${_plFmt(r.unallocB)} ST${r.orphans.length?` · <span class="pl-flag bad">${r.orphans.length} reassignment(s) lost their row</span>`:''}</div>`;
+  const tbl=(title, head, rows)=>`<div style="margin-top:8px"><b>${title}</b><div style="max-height:260px;overflow:auto;border:1px solid var(--border);margin-top:3px"><table class="pl-tbl"><tr>${head.map(h=>`<th>${h}</th>`).join('')}</tr>${rows}</table></div></div>`;
+  const buckets=tbl('By kind and family (file totals, ST)', ['', 'A', 'B', 'Δ'], r.buckets.map(b=>`<tr><td>${b.k}</td><td class="n">${_plFmt(b.a)}</td><td class="n">${_plFmt(b.b)}</td>${_plDc(b.d)}</tr>`).join(''));
+  const months=tbl('By month (file totals, ST)', ['', 'A', 'B', 'Δ'], r.months.map(m=>`<tr><td>${m.m}</td><td class="n">${_plFmt(m.a)}</td><td class="n">${_plFmt(m.b)}</td>${_plDc(m.d)}</tr>`).join(''));
+  const facs=tbl('By facility (budget demand, ST)', ['Facility', 'A', 'B', 'Δ total', 'file', 'keys / rules'], r.facilities.map(f=>`<tr><td>${_plEsc(f.fac)}</td><td class="n">${_plFmt(f.a)}</td><td class="n">${_plFmt(f.b)}</td>${_plDc(f.d)}${_plDc(f.file)}${_plDc(f.keys)}</tr>`).join('')+`<tr><td><b>Total</b></td><td class="n"><b>${_plFmt(r.tot.a)}</b></td><td class="n"><b>${_plFmt(r.tot.b)}</b></td>${_plDc(r.tot.d)}${_plDc(r.tot.file)}${_plDc(r.tot.keys)}</tr>`);
+  const pts=tbl('By demand point (budget demand, ST) — biggest moves first', ['Demand point', 'A', 'B', 'Δ total', 'file', 'keys / rules'], r.points.slice(0,80).map(p=>`<tr><td>${_plEsc(_plDpShort(p.name))}</td><td class="n">${_plFmt(p.a)}</td><td class="n">${_plFmt(p.b)}</td>${_plDc(p.d)}${_plDc(p.file)}${_plDc(p.keys)}</tr>`).join(''));
+  const lines=tbl(`By line (file) — ${r.lines.length} differ, biggest first`, ['Line', 'Status', 'FY A', 'FY B', 'Δ'], r.lines.slice(0,200).map(l=>`<tr><td>${_plEsc(l.label)}</td><td><span class="pl-flag ${l.status==='new'?'ok':l.status==='gone'?'bad':'dim'}">${l.status}</span></td><td class="n">${_plFmt(l.fa)}</td><td class="n">${_plFmt(l.fb)}</td>${_plDc(l.d)}</tr>`).join(''));
+  const orph=r.orphans.length?tbl('Reassignments whose row is not in B (they no longer apply)', ['Row', 'Rule', 'Scope', ''], r.orphans.map(o=>`<tr><td>${_plEsc(o.rule.line_key)}</td><td>${o.rule.type==='exclude'?'excluded':'→ '+_plEsc(_plDpShort((o.rule.target||{}).dp_name||''))}</td><td class="pl-muted">${o.rule.version_id?'this version':'persistent'}${o.inA?'':' · row was not in A either'}</td><td><button class="pl-btn" onclick="plDeleteRule('${o.rule.id}')">Delete rule</button></td></tr>`).join('')):'';
+  return hdr+`<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">${buckets}${months}</div>`+facs+pts+lines+orph;
+}
+async function plExportVersionReport(){
+  if(!PL.ui.diff){ statMsg('Compare two versions first'); return; }
+  const r=plVersionReport(PL.ui.diff.a, PL.ui.diff.b); await loadLib('xlsx');
+  const wb=XLSX.utils.book_new(); const sh=(name, rows)=>XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows.length?rows:[{note:'(none)'}]), name);
+  const rd=v=>Math.round(v*10)/10;
+  sh('Summary', [{item:'From version', value:r.A.label},{item:'To version', value:r.B.label},{item:'From uploaded', value:String(r.A.uploaded_at).slice(0,16)},{item:'To uploaded', value:String(r.B.uploaded_at).slice(0,16)},{item:'Report at', value:r.at.slice(0,16)},
+    {item:'Lines changed', value:r.nChg},{item:'Lines new', value:r.nNew},{item:'Lines gone', value:r.nGone},{item:'Budget demand A (ST)', value:rd(r.tot.a)},{item:'Budget demand B (ST)', value:rd(r.tot.b)},{item:'Δ total (ST)', value:rd(r.tot.d)},{item:'Δ from file changes (ST)', value:rd(r.tot.file)},{item:'Δ from keys / rules (ST)', value:rd(r.tot.keys)},
+    {item:'Unallocated A (ST)', value:r.unallocA},{item:'Unallocated B (ST)', value:r.unallocB},{item:'Orphaned reassignments', value:r.orphans.length},{item:'Units', value:'short tons'}]);
+  sh('By bucket', r.buckets.map(b=>({bucket:b.k, A:rd(b.a), B:rd(b.b), delta:rd(b.d)})));
+  sh('By month', r.months.map(m=>({month:m.m, A:rd(m.a), B:rd(m.b), delta:rd(m.d)})));
+  sh('By facility', r.facilities.map(f=>({facility:f.fac, A:rd(f.a), B:rd(f.b), delta_total:rd(f.d), delta_file:rd(f.file), delta_keys_rules:rd(f.keys)})));
+  sh('By demand point', r.points.map(p=>({demand_point:p.name, facility:p.fac, A:rd(p.a), B:rd(p.b), delta_total:rd(p.d), delta_file:rd(p.file), delta_keys_rules:rd(p.keys)})));
+  sh('By line', r.lines.map(l=>({line_key:l.key, kind:l.kind, line:l.label, status:l.status, FY_A:rd(l.fa), FY_B:rd(l.fb), delta:rd(l.d)})));
+  sh('Orphaned reassignments', r.orphans.map(o=>({line_key:o.rule.line_key, rule:o.rule.type, target:(o.rule.target||{}).dp_name||'', scope:o.rule.version_id?'this version':'persistent', created_by:o.rule.created_by||'', created_at:o.rule.created_at||''})));
+  const name=`Budget_versions_${String(r.A.label).replace(/[^\w]+/g,'_')}_to_${String(r.B.label).replace(/[^\w]+/g,'_')}_${r.at.slice(0,10)}.xlsx`;
+  XLSX.writeFile(wb, name, {compression:true}); statMsg('Report saved — '+name); return wb;
+}
 // ═══ P3 · Allocation keys, normalisation rules, flags ═══════════════════════════
 function _plYmAdd(ym, k){ const [y,m]=ym.split('-').map(Number); const d=new Date(y, m-1+k, 1); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }
 function _plYmRange(fromYm, toYm){ const out=[]; let ym=fromYm; let g=0; while(ym<=toYm&&g++<600){ out.push(ym); ym=_plYmAdd(ym,1); } return out; }
@@ -35474,15 +35537,11 @@ function _plVersionsCardHTML(s){
       <td style="white-space:nowrap"><button class="pl-btn" onclick="plArchiveVersion('${v.id}')">${v.status==='archived'?'Unarchive':'Archive'}</button> <button class="pl-btn" onclick="plDeleteVersion('${v.id}')" ${v.status==='active'?'disabled':''}>Delete</button></td></tr>`; }).join('');
   const opts=vs.map(v=>`<option value="${v.id}">${_plEsc(v.label)}</option>`).join('');
   let diff=''; if(PL.ui.diff&&vs.some(v=>v.id===PL.ui.diff.a)&&vs.some(v=>v.id===PL.ui.diff.b)){
-    const d=plVersionDiff(PL.ui.diff.a, PL.ui.diff.b); const la=vs.find(v=>v.id===PL.ui.diff.a).label, lb=vs.find(v=>v.id===PL.ui.diff.b).label;
-    const tot=d.reduce((a,r)=>a+r.d,0);
-    diff=`<div style="margin-top:8px"><b>${_plEsc(la)} → ${_plEsc(lb)}</b>: ${d.length} lines differ, net ${tot>=0?'+':''}${_plFmt(tot)} ST (file changes; the keys/rules split appears once both versions are generated)</div>
-      <div style="max-height:240px;overflow:auto;border:1px solid var(--border);margin-top:4px"><table class="pl-tbl"><tr><th>Line</th><th>Status</th><th>FY A</th><th>FY B</th><th>Δ</th></tr>
-      ${d.slice(0,300).map(r=>`<tr><td>${_plEsc(r.label)}</td><td><span class="pl-flag ${r.status==='new'?'ok':r.status==='gone'?'bad':'dim'}">${r.status}</span></td><td class="n">${_plFmt(r.fa)}</td><td class="n">${_plFmt(r.fb)}</td><td class="n" style="color:${r.d<0?'var(--red)':'var(--green)'}">${r.d>=0?'+':''}${_plFmt(r.d)}</td></tr>`).join('')}</table></div>`;
+    try{ diff=_plVersionReportHTML(plVersionReport(PL.ui.diff.a, PL.ui.diff.b)); }catch(e){ console.warn('version report', e); diff=`<div class="pl-muted">Could not build the report — ${_plEsc(e.message)}</div>`; }
   }
   return _plCard('pl-versions','Versions','active = the one that is generated and simulated', vs.length,
     `<table class="pl-tbl"><tr><th>Version</th><th>Files</th><th>Volume</th><th>EXT mapped</th><th>Demand</th><th></th></tr>${rows}</table>
-     <div style="display:flex;gap:6px;align-items:center;margin-top:8px"><span class="pl-muted">Compare</span><select class="fi" id="plv-a" style="width:160px">${opts}</select><span class="pl-muted">→</span><select class="fi" id="plv-b" style="width:160px">${opts}</select><button class="pl-btn" onclick="plShowDiff()">Show differences</button></div>${diff}`);
+     <div style="display:flex;gap:6px;align-items:center;margin-top:8px"><span class="pl-muted">Compare</span><select class="fi" id="plv-a" style="width:160px">${opts}</select><span class="pl-muted">→</span><select class="fi" id="plv-b" style="width:160px">${opts}</select><button class="pl-btn" onclick="plShowDiff()">Compare</button>${PL.ui.diff?`<button class="pl-btn" onclick="plExportVersionReport()">↓ Excel report</button>`:''}</div>${diff}`);
 }
 function _plTranslationCardHTML(s){
   const v=plActiveVersion(); if(!v) return '';
