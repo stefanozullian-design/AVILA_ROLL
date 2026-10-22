@@ -1276,6 +1276,25 @@ select.fi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
 #cfgpanel-view .modal-body{flex:1;overflow-y:auto;max-height:none!important;}
 #cfgpanel-view .modal-footer{border-top:1px solid var(--border);padding:12px 16px;display:flex;gap:8px;justify-content:flex-end;flex-shrink:0;}
 #cfgpanel-view #cfg-panel-demandmap{flex:1;max-height:none!important;}
+#cfgpanel-view #cfg-panel-plan{flex:1;max-height:none!important;}
+.sc-role-badge{font-family:var(--mono);font-size:8px;letter-spacing:.6px;padding:1px 5px;border:1px solid var(--amber);color:var(--amber);border-radius:2px;margin-left:2px;}
+.sc-pill.planning{border-color:var(--amber);}
+.pl-tbl{width:100%;border-collapse:collapse;font-size:11px}
+.pl-tbl th{font-family:var(--mono);font-size:9px;letter-spacing:.5px;text-transform:uppercase;color:var(--text-dim);text-align:left;padding:4px 6px;border-bottom:1px solid var(--border)}
+.pl-tbl td{padding:3px 6px;border-bottom:1px solid var(--border);vertical-align:top}
+.pl-tbl td.n{font-family:var(--mono);text-align:right;white-space:nowrap}
+.pl-flag{display:inline-block;font-family:var(--mono);font-size:8px;letter-spacing:.4px;padding:0 4px;border:1px solid var(--amber);color:var(--amber);border-radius:2px;margin:0 2px 2px 0}
+.pl-flag.ok{border-color:var(--green);color:var(--green)}
+.pl-flag.bad{border-color:var(--red);color:var(--red)}
+.pl-flag.dim{border-color:var(--border2);color:var(--text-dim)}
+.pl-btn{font-family:var(--mono);font-size:10px;padding:4px 10px;border:1px solid var(--border2);background:var(--surface2);color:var(--text);cursor:pointer;border-radius:3px}
+.pl-btn:hover{border-color:var(--text-dim)}
+.pl-btn.pri{border-color:var(--green);color:var(--green)}
+.pl-btn.warn{border-color:var(--amber);color:var(--amber)}
+.pl-btn:disabled{opacity:.45;cursor:default}
+.pl-kv{display:grid;grid-template-columns:max-content 1fr;gap:3px 12px;font-size:11px}
+.pl-kv b{font-family:var(--mono);font-weight:400;color:var(--text-dim)}
+.pl-muted{color:var(--text-dim);font-size:10.5px}
 /* Panel overlay close button */
 .panel-close-btn{font-size:14px;color:var(--text-dim);cursor:pointer;padding:2px 6px;border:none;background:transparent;line-height:1;transition:color .1s;}
 .panel-close-btn:hover{color:var(--text);}
@@ -1476,6 +1495,7 @@ td.camp-drag-cut>div:first-child{opacity:.3}
     <div class="sc-pill" id="sc-switcher" onclick="scToggleDropdown(event)" title="Switch scenario">
       <span class="sc-dot none" id="sc-dot" title="Save status"></span>
       <span class="sc-name" id="sc-name">No scenario</span>
+      <span class="sc-role-badge" id="sc-role-badge" style="display:none" title="Planning scenario — budget demand drives the simulation; watcher, merge, Sales catalog and Real Sales imports are off">PLANNING</span>
       <span class="sc-caret">▾</span>
     </div>
     <div id="sc-dropdown" class="sc-dropdown" style="display:none"></div>
@@ -2168,7 +2188,7 @@ td.camp-drag-cut>div:first-child{opacity:.3}
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;font-size:10px;line-height:1.7">
             <div>
               <div style="color:var(--blue);margin-bottom:4px">DIMENSIONS</div>
-              <div style="color:var(--text-dim)">dim_date <span style="opacity:.6">(contiguous calendar)</span> · dim_facility · dim_element · dim_product · dim_silo_link</div>
+              <div style="color:var(--text-dim)">dim_date <span style="opacity:.6">(contiguous calendar)</span> · dim_facility · dim_element · dim_product · dim_silo_link · dim_scenario · dim_plan_version</div>
             </div>
             <div>
               <div style="color:var(--green);margin-bottom:4px">FACTS</div>
@@ -2778,10 +2798,15 @@ document.addEventListener('keydown',e=>{ if(e.key==='Escape') thCloseMenu(); });
 // Nothing changes until the user presses Apply on the banner here.
 const SC_CATALOG_KEY='avila_sc_catalog', FC_HANDOFF_KEY='avila_forecast_handoff';
 let _rollCatTimer=null;
+// Planning scenario? Explicit opt-in only (simCfg.role) — `simCfg.mode` is a legacy label that
+// defaults to 'planning' in every file, so it must never gate behaviour.
+function scIsPlanning(){ return !!(typeof S!=='undefined' && S && S.simCfg && S.simCfg.role==='planning'); }
+const PLAN_SLOT_IDS=new Set(['planExternal','planRmx','planDetail']);
 function _rollScId(){ return (typeof SC!=='undefined'&&SC.activeId)||'__local'; }
 function _rollPublishCatalogSoon(){ clearTimeout(_rollCatTimer); _rollCatTimer=setTimeout(_rollPublishCatalog,1200); }
 function _rollPublishCatalog(){
   try{
+    if(scIsPlanning()) return;   // the Sales page must never see the Planning scenario as active
     if(!DB||!Array.isArray(DB.facilities)||!DB.facilities.length) return;
     const id=_rollScId(), m=(typeof SC!=='undefined'&&SC.meta&&SC.meta[id])||null;
     const dpBy=new Map((DB.demand_points||[]).map(d=>[d.element_id,d]));
@@ -2811,7 +2836,7 @@ function _rollPublishCatalog(){
 function _rollReadHandoff(){ try{ const h=JSON.parse(localStorage.getItem(FC_HANDOFF_KEY)||'null'); return h&&Array.isArray(h.values)?h:null; }catch(e){ return null; } }
 function _rollCheckHandoff(){
   const h=_rollReadHandoff(); document.getElementById('fc-handoff-banner')?.remove();
-  if(!h) return;
+  if(!h || scIsPlanning()) return;
   const here=h.scenarioId===_rollScId();
   const dps=new Set(h.values.map(v=>v.element_id)).size;
   const b=document.createElement('div'); b.id='fc-handoff-banner';
@@ -2829,6 +2854,7 @@ function _rollCheckHandoff(){
 }
 function _rollDismissHandoff(){ try{ localStorage.removeItem(FC_HANDOFF_KEY); }catch(e){} document.getElementById('fc-handoff-banner')?.remove(); statMsg('Pushed forecast discarded'); }
 function _rollApplyHandoff(){
+  if(scIsPlanning()) return;
   const h=_rollReadHandoff(); if(!h||h.scenarioId!==_rollScId()){ _rollCheckHandoff(); return; }
   if(!DB.demand_values) DB.demand_values=[];
   const known=new Set(DB.elements.filter(e=>e.type==='demand_point').map(e=>e.id));
@@ -2969,6 +2995,15 @@ const DB = {
   monthly_demand: [], // legacy — kept for migration
   demand_forecasts: [], // { id, element_id, method, schedule, value, rolling_days, sat_pct, to_preset, date_from, date_to } — builder rules, ephemeral
   non_working_days: [], // { id, date:'YYYY-MM-DD', reason } — global holidays/shutdowns
+
+  // Planning module (budget today; generic: kind = budget | forecast | what-if). Short tons throughout.
+  plan_settings: [], // { id:'default', kind, budget_year, sat_pct, ships_sat, window_months, weights[], floor, pre_purchase_months, low_share_pct, short_window_months, silent_months, rmx_regions[] }
+  plan_versions: [], // { id, kind, year, label, status:'draft'|'active'|'archived', uploaded_at, uploaded_by, source_files:[{slot,name,lastModified,size,sheet,rows,fy_t}], note, generated_at, generated_hash, stale }
+  plan_lines: [],    // immutable uploaded rows — EXT {sold_to, ship_to, plant, material, incoterm, months[12], fy} · INT {family, rmx_plant, months[12]}
+  alloc_keys: [],    // { id, kind, scope, targets:[{element_id, dp_name, share}], floor, window, provenance, status, decided, version_id|null }
+  norm_rules: [],    // { id, kind, type:'purchase'|'substitution'|'reassign'|'exclude', dp_name, element_id, customer, line_key, from, to, target, decided, apply_to, version_id|null }
+  plan_demand: [],   // generated: { version_id, element_id, ym, kind, days:[31], total_t, spread_t, lines:[{line_id,t}] } — materialised into demand_values ONLY in a Planning scenario
+  plan_imports: [],  // Execution side: { id, planning_scenario_id, version_id, element_ids, from, to, replaced:[…], at, undone_at }
 
   // Production schedule
   production_schedule: [], // { id, element_id, product_id, date_from, date_to }
@@ -9556,7 +9591,7 @@ function _demMiniBars(canvasId,v,title){
 }
 function _demMiniCaption(v){
   const f=x=>x==null?'<span style="opacity:.5">—</span>':(x>=1e6?(x/1e6).toFixed(2)+'M t':x>=1000?Math.round(x/100)/10+'k t':Math.round(x)+' t');
-  return `<span style="color:rgba(var(--blue-rgb),.75)">LY</span> ${f(v.LY)} · <span style="color:var(--green)">CY</span> ${f(v.CY)} · <span style="color:var(--amber)">BGT</span> ${f(v.BGT)}`;
+  return `<span style="color:rgba(var(--blue-rgb),.75)">LY</span> ${f(v.LY)} · <span style="color:var(--green)">CY</span> ${f(v.CY)} · <span style="color:var(--amber)">BGT${v.BGTyear?' ’'+String(v.BGTyear).slice(2):''}</span> ${f(v.BGT)}`;
 }
 let _demChartInst=null;
 function renderDemandChart(){
@@ -9611,6 +9646,10 @@ function renderDemandChart(){
   const labels=[];
   for(let d=new Date(winStart+'T00:00:00'); d._ymd()<=winEnd; d.setDate(d.getDate()+1)) labels.push(d._ymd());
   if(!labels.length) return;
+  // Budget (from the linked Planning scenario's file, read-only) for the same demand points.
+  const bgt=(typeof plBgtEnsure==='function')?plBgtEnsure():null;
+  const bgtMap={}; if(bgt){ els.forEach(el=>{ const by=bgt.byEl[el.id]||bgt.byName[el.name]; if(!by) return; Object.keys(by).forEach(ym=>{ (by[ym]||[]).forEach((t,i)=>{ if(t>0){ const ds=ym+'-'+String(i+1).padStart(2,'0'); bgtMap[ds]=(bgtMap[ds]||0)+t; } }); }); }); }
+  const bgtData=labels.map(ds=>bgtMap[ds]?Math.round(bgtMap[ds]):null); const hasBgt=bgtData.some(v=>v);
 
   const actData=labels.map(ds=>actMap[ds]?Math.round(actMap[ds]):null);
   const fcData =labels.map(ds=>fcMap[ds]?Math.round(fcMap[ds]):null);
@@ -9637,6 +9676,7 @@ function renderDemandChart(){
   if(leg){
     let lh=`<span style="color:var(--green)">■ Actual</span><span style="color:var(--fc-orange)">■ Forecast</span>`;
     if(hasLY) lh+=`<span style="color:rgba(var(--hi-rgb),.85)">● Last Year</span>`;
+    if(hasBgt) lh+=`<span style="color:var(--amber)">╌ Budget ${bgt.year}</span>`;
     guides.forEach(gd=>{ lh+=`<span style="color:${gd.color}">╌ ${gd.n}WD ${gd.q>=1000?(gd.q/1000).toFixed(1)+'k':gd.q} t</span>`; });
     if(selName) lh=`<span onclick="_demClearElSel()" title="Clear selection — show all demand points" style="cursor:pointer;color:var(--amber);border:1px solid var(--amber);border-radius:3px;padding:0 5px;margin-right:4px">▸ ${selName} ✕</span>`+lh;
     leg.innerHTML=lh;
@@ -9650,12 +9690,14 @@ function renderDemandChart(){
   const y=todayStr.slice(0,4), mo=todayStr.slice(5,7);
   const sideMode=window._demSideM||'MTD';
   const lFrom=sideMode==='YTD'?`${y}-01-01`:`${y}-${mo}-01`, lTo=todayStr;
+  // BGT = the same calendar window in the budget year (the budget lives in the year after this one).
+  const bY=bgt?String(bgt.year):null, toB=ds=>bY+ds.slice(4);
   const left={ LY:Math.round(sumRange(actMap,shiftY(lFrom),shiftY(lTo))),
-               CY:Math.round(sumRange(actMap,lFrom,lTo)), BGT:null };
+               CY:Math.round(sumRange(actMap,lFrom,lTo)), BGT:bgt?Math.round(sumRange(bgtMap,toB(lFrom),toB(lTo))):null, BGTyear:bgt?bgt.year:null };
   const fFrom=`${y}-01-01`, fTo=`${y}-12-31`;
   const fcFrom=actMax?new Date(actMax+'T00:00:00'):null; if(fcFrom) fcFrom.setDate(fcFrom.getDate()+1);
   const fy={ LY:Math.round(sumRange(actMap,shiftY(fFrom),shiftY(fTo))),
-             CY:Math.round(sumRange(actMap,fFrom,fTo)+sumRange(fcMap,fcFrom?(fcFrom._ymd()>fFrom?fcFrom._ymd():fFrom):fFrom,fTo)), BGT:null };
+             CY:Math.round(sumRange(actMap,fFrom,fTo)+sumRange(fcMap,fcFrom?(fcFrom._ymd()>fFrom?fcFrom._ymd():fFrom):fFrom,fTo)), BGT:bgt?Math.round(sumRange(bgtMap,`${bY}-01-01`,`${bY}-12-31`)):null, BGTyear:bgt?bgt.year:null };
   const capL=document.getElementById('dem-side-cap-mtd'); if(capL) capL.innerHTML=_demMiniCaption(left);
   const capF=document.getElementById('dem-side-cap-fy');  if(capF) capF.innerHTML=_demMiniCaption(fy);
 
@@ -9670,6 +9712,7 @@ function renderDemandChart(){
     { label:'Actual',   data:actData, backgroundColor:_tc('rgba(0,200,120,0.75)'), stack:'v', order:3 },
     { label:'Forecast', data:fcData,  backgroundColor:_tc('rgba(255,140,50,0.78)'), stack:'v', order:3 },
   );
+  if(hasBgt) datasets.push({ type:'line', label:'Budget '+bgt.year, data:bgtData, borderColor:_tc('rgba(255,184,48,.9)'), borderWidth:1.5, borderDash:[4,3], pointRadius:0, spanGaps:false, order:1 });
 
   const todayPlugin={ id:'demToday', afterDraw(chart){ const idx=chart.data.labels.indexOf(todayStr); if(idx<0) return;
     const x=chart.scales.x.getPixelForValue(idx); const {top,bottom}=chart.chartArea; const c=chart.ctx;
@@ -9802,7 +9845,11 @@ function saveDemandCell(inp){
   DB.demand_values=DB.demand_values.filter(r=>!(r.element_id===elId&&r.date===ds));
   // On a non-working day a typed value becomes a MANUAL override (flagged), which is the only
   // way demand counts on that date. 0 clears it back to the default (no demand).
-  if(v>0) DB.demand_values.push(isNwd?{element_id:elId, date:ds, value_t:v, nwd_manual:true}:{element_id:elId, date:ds, value_t:v});
+  // In a Planning scenario the typed day is a budget override tagged with the active version:
+  // regeneration keeps it, switching the active version drops it (see plMaterialise).
+  const _plv=(scIsPlanning()&&typeof plActiveVersion==='function')?plActiveVersion():null;
+  const _tag=_plv&&_plv.generated_at?{source:'budget', version_id:_plv.id, manual:true}:{};
+  if(v>0) DB.demand_values.push(isNwd?{element_id:elId, date:ds, value_t:v, nwd_manual:true, ..._tag}:{element_id:elId, date:ds, value_t:v, ..._tag});
   autoSave();
   _demandCacheInvalidate();
   if(typeof scheduleSimulation==='function') scheduleSimulation();
@@ -11348,7 +11395,7 @@ function _renderSupplyViewInner(wrap){
                 });
               });
               h+=`</tr>`;
-              h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, node.depth+3, _dpnBase, stickyLeft, _dpnExtra);
+              h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, node.depth+3, _dpnBase, stickyLeft, _dpnExtra.concat(typeof plBgtExtra==='function'?plBgtExtra(_dpnDpts):[]));
 
               // ── Swap breakdown child rows (only when a swap touches this product) ──
               const outArr=allDates.map(ds=>swappedOut(prodId,ds));
@@ -12372,7 +12419,7 @@ function _renderSupplyViewInner(wrap){
                   h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_acts)}" style="font-size:9px;color:${v>0?reqColor:`rgba(${reqRgb},calc(var(--zero-k)*.3))`};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
               });
               h+=`</tr>`;
-              h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, depth+3, _dpnBase, stickyLeft);
+              h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, depth+3, _dpnBase, stickyLeft, typeof plBgtExtra==='function'?plBgtExtra(_dpnDpts):[]);
 
               // ── Swap breakdown child rows (only when a swap touches this product) ──
               // Mirrors the plant block so a relocation reads the same at both ends.
@@ -21643,10 +21690,10 @@ function _biToast(html){
 // Configuration → Data Sources, or says the file will download instead.
 function _biRenderDest(){
   const el=document.getElementById('bi-push-dest'); if(!el) return;
-  const cfg=exportSlot('bi'), name=exportDirName('bi');
+  const cfg=exportSlot('bi'), name=exportDirName('bi'), _file=exportFileName('bi');
   el.innerHTML = name
-    ? `Writes <span style="color:var(--text)">${esc(name)}/${cfg.file}</span>, replacing the previous file.`
-    : `Downloads as <span style="color:var(--text)">${cfg.file}</span> — `+
+    ? `Writes <span style="color:var(--text)">${esc(name)}/${_file}</span>, replacing the previous file.${scIsPlanning()?' <span style="color:var(--amber)">Planning scenario → its own workbook, beside the Execution one.</span>':''}`
+    : `Downloads as <span style="color:var(--text)">${_file}</span> — `+
       `<span style="color:var(--blue);cursor:pointer;text-decoration:underline" onclick="chooseExportDir('bi')">choose a folder</span> `+
       `to save it in place instead.`;
 }
@@ -21679,7 +21726,9 @@ function _pushBIBuildTables(){
     d.setDate(d.getDate()+off);
     return d._ymd();
   };
-  const stamp=(row)=>({as_of_date:asOf, scenario_run_id:runId, ...row});
+  const scName=(typeof scActive==='function'&&scActive()&&scActive().name)||'', scKind=scIsPlanning()?'planning':'execution';
+  const planV=(typeof plActiveVersion==='function')?plActiveVersion():null;
+  const stamp=(row)=>({as_of_date:asOf, scenario_run_id:runId, scenario_name:scName, scenario_kind:scKind, ...row});
 
   // ── DIMENSIONS ─────────────────────────────────────────
   // dim_date — a CONTIGUOUS calendar spanning every date any fact can reference.
@@ -21709,6 +21758,10 @@ function _pushBIBuildTables(){
     dateSet.add(dep);
     dateSet.add(_addDays(dep,parseInt(rm.transit_days)||1)); // arrival can exceed the horizon
   });
+  (DB.plan_demand||[]).forEach(p=>{ if(p.ym){ dateSet.add(p.ym+'-01'); dateSet.add(p.ym+'-'+String(new Date(+p.ym.slice(0,4), +p.ym.slice(5,7), 0).getDate()).padStart(2,'0')); } });
+  // The calendar always reaches the end of the budget year, so the Planning workbook's budget months have dates to join on
+  // even when this (Execution) export's own horizon ends earlier.
+  { const by=Math.max(new Date().getFullYear()+1, ((DB.plan_settings||[]).find(x=>x.id==='default')||{}).budget_year||0); dateSet.add(`${by}-12-31`); }
   // Fill the range so the calendar has no gaps
   const _dsSorted=[...dateSet].sort();
   const _allDateStrs=[];
@@ -22002,7 +22055,8 @@ function _pushBIBuildTables(){
     if(!_elIds.has(row.element_id)){ _orphanDemand++; return; }
     const dp=DB.demand_points.find(d=>d.element_id===row.element_id);
     fact_demand.push(stamp({
-      scenario_type:row.source==='actual'?'actual':'forecast',
+      scenario_type:row.source==='actual'?'actual':row.source==='budget'?'budget':'forecast',
+      plan_version_id:row.version_id||'',
       date:row.date,
       facility_id:dp?(dp.assigned_facility_id||dp.facility_id):elFac[row.element_id]||'',
       demand_point_id:row.element_id,
@@ -22348,7 +22402,12 @@ function _pushBIBuildTables(){
     {key:'simulation_start_date',value:simStart},
     {key:'simulation_horizon_days',value:horizon},
     {key:'simulation_active_facility',value:getFacility()?.name||''},
-    {key:'export_version',value:'5'},
+    {key:'scenario_name',value:scName},
+    {key:'scenario_kind',value:scKind},
+    {key:'plan_version_id',value:planV?planV.id:''},
+    {key:'plan_version_label',value:planV?planV.label:''},
+    {key:'plan_source_scenario',value:S.simCfg.plan_source_name||''},
+    {key:'export_version',value:'6'},
     {key:'skipped_orphan_demand_rows',value:String(_orphanDemand)},
     {key:'note_forecast_scope',value:'Forecast rows cover only the simulation\'s active facility. Actuals span every facility present in real_* tables.'},
     {key:'note_inventory_breakdown',value:'Forecast inventory is total per silo (product breakdown is not retained after the run). Actual inventory carries product_id.'},
@@ -22361,13 +22420,40 @@ function _pushBIBuildTables(){
     {key:'note_silo_transfer',value:'fact_silo_transfer: one row per silo link, direction and day. actual = tonnes recorded as moved; forecast = tonnes the simulation moved (planned_t = asked, short_t = could not move). facility_id = origin facility, to_facility_id = receiving facility; cross_facility=true rows are inbound supply for the receiver. Their effect is already inside fact_inventory — do not add them to stock.'}
   ];
 
+  // ── BUDGET (planning module) ──────────────────────────
+  const dim_scenario=[{scenario_run_id:runId, scenario_name:scName, scenario_kind:scKind, as_of_date:asOf, simulation_start_date:simStart, simulation_horizon_days:horizon,
+    plan_version_id:planV?planV.id:'', plan_version_label:planV?planV.label:'', plan_source_scenario:S.simCfg.plan_source_name||''}];
+  const dim_plan_version=(DB.plan_versions||[]).map(v=>({version_id:v.id, label:v.label, kind:v.kind||'budget', year:v.year, status:v.status, uploaded_at:v.uploaded_at, uploaded_by:v.uploaded_by||'', generated_at:v.generated_at||'',
+    source_files:(v.source_files||[]).map(f=>f.name).join(' | '), note:v.note||''}));
+  const _vLabel={}; (DB.plan_versions||[]).forEach(v=>{ _vLabel[v.id]=v.label; });
+  const fact_plan_line=[];
+  if(typeof plEffectiveExtTarget==='function'&&(DB.plan_lines||[]).length){
+    const _y=(DB.plan_settings||[]).find(x=>x.id==='default')?.budget_year||new Date().getFullYear()+1;
+    (DB.plan_lines||[]).forEach(l=>{
+      let targets=[];
+      if(l.kind==='INT'){ const k=plKeyFor(l.rmx_plant, l.family); targets=k?k.targets:[]; }
+      else { try{ targets=plEffectiveExtTarget(l).targets; }catch(e){ targets=[]; } }
+      if(!targets.length) targets=[{dp_name:'', element_id:'', share:1}];
+      targets.forEach(t=>{ (l.months||[]).forEach((x,m)=>{ const bt=(+x||0)*(t.share||0); if(!bt) return;
+        fact_plan_line.push(stamp({version_id:l.version_id, version_label:_vLabel[l.version_id]||'', kind:l.kind, family:l.family||'', month:`${_y}-${String(m+1).padStart(2,'0')}-01`,
+          sold_to:l.sold_to||'', sold_to_name:l.sold_to_name||'', ship_to:l.ship_to||'', ship_to_name:l.ship_to_name||'', rmx_plant:l.rmx_plant||'', rmx_name:l.rmx_name||'', district:l.district||'',
+          plant:l.plant||'', material:l.material||'', material_desc:l.material_desc||'', incoterm:l.incoterm||'',
+          demand_point_id:t.element_id||'', dp_name:t.dp_name||'', facility_id:t.element_id?(elFac[t.element_id]||''):'', product_id:t.element_id?(elPrimary[t.element_id]||''):'', channel:t.element_id?(elChan[t.element_id]||''):'',
+          share:Math.round((t.share||0)*10000)/10000, budget_t:Math.round(bt*10)/10})); }); });
+    });
+  }
+  const fact_plan_demand=[];
+  (DB.plan_demand||[]).forEach(p=>{ (p.days||[]).forEach((t,i)=>{ if(!(t>0)) return;
+    fact_plan_demand.push(stamp({version_id:p.version_id, version_label:_vLabel[p.version_id]||'', date:p.ym+'-'+String(i+1).padStart(2,'0'), demand_point_id:p.element_id, dp_name:p.dp_name||'',
+      facility_id:elFac[p.element_id]||'', product_id:elPrimary[p.element_id]||'', channel:elChan[p.element_id]||'', budget_t:t})); }); });
+
   return {
     meta,
-    dim_date, dim_facility, dim_element, dim_product, dim_silo_link,
+    dim_date, dim_facility, dim_element, dim_product, dim_silo_link, dim_scenario, dim_plan_version,
     fact_production, fact_downtime, fact_inventory, fact_demand,
     fact_unloading, fact_rail_movement, fact_stop_events,
     fact_service, fact_rail_sim, fact_vessel_call, fact_silo_transfer,
-    fact_sof_period, fact_laytime
+    fact_sof_period, fact_laytime, fact_plan_line, fact_plan_demand
   };
 }
 
@@ -22636,21 +22722,22 @@ async function exportDir(slot, prompt){
 // Write a built workbook to the slot's folder, or fall back to a download. `dir` is
 // passed in rather than resolved here because the picker needs the click's user
 // activation, which does not survive building the workbook.
+function exportFileName(slot){ const cfg=exportSlot(slot); return (slot==='bi'&&typeof scIsPlanning==='function'&&scIsPlanning())?'Avila Power BI - Planning.xlsx':cfg.file; }
 async function exportWriteWorkbook(slot, wb, dir){
-  const cfg=exportSlot(slot);
+  const cfg=exportSlot(slot); const _file=exportFileName(slot);
   if(dir){
     // compression:true — SheetJS stores the zip uncompressed by default (Push to BI came out
     // at ~23 MB). Smaller = one quick OneDrive upload instead of several partial versions
     // (each one fired the Power BI refresh flow) and a faster Power BI refresh.
     const data=XLSX.write(wb,{bookType:'xlsx',type:'array',compression:true});
-    const fh=await dir.getFileHandle(cfg.file,{create:true});
+    const fh=await dir.getFileHandle(_file,{create:true});
     const w=await fh.createWritable();
     await w.write(data);
     await w.close();
-    return {saved:true, where:dir.name+'/'+cfg.file};
+    return {saved:true, where:dir.name+'/'+_file};
   }
-  XLSX.writeFile(wb,cfg.file,{compression:true});
-  return {saved:false, where:cfg.file};
+  XLSX.writeFile(wb,_file,{compression:true});
+  return {saved:false, where:_file};
 }
 
 async function chooseExportDir(slot){
@@ -25398,11 +25485,13 @@ function _simHorizonPresets(startStr){
   const eom=new Date(today.getFullYear(),today.getMonth()+1,0);
   const e3m=new Date(today.getFullYear(),today.getMonth()+4,0);
   const eoy=new Date(today.getFullYear(),11,31);
+  const syr=new Date(startDate.getFullYear(),11,31);   // the START date's year — a Planning run starts next Jan 1
   const daysFromStart=d=>Math.max(1,Math.round((d-startDate)/(864e5))+1);
   return [
     {id:'eom',label:'End of Month',days:daysFromStart(eom),date:eom._ymd()},
     {id:'3m',label:'Next 3 Months',days:daysFromStart(e3m),date:e3m._ymd()},
     {id:'eoy',label:'End of Year',days:daysFromStart(eoy),date:eoy._ymd()},
+    {id:'year',label:'Full Year',days:daysFromStart(syr),date:syr._ymd()},
     {id:'custom',label:'Custom',days:S.simCfg.horizon,date:null}
   ];
 }
@@ -25425,6 +25514,7 @@ function simCfgHTML(){
     </button>
     <button style="${tabSty(false)}" id="cfg-tab-datasources" onclick="_cfgTab('datasources')">Data Sources</button>
     <button style="${tabSty(false)}" id="cfg-tab-demandmap" onclick="_cfgTab('demandmap')">Demand Mapping</button>
+    <button style="${tabSty(false)}" id="cfg-tab-plan" onclick="_cfgTab('plan')">Budget Planning</button>
     <button style="${tabSty(false)}" id="cfg-tab-ai" onclick="_cfgTab('ai')">AI Agent</button>
   </div>
 
@@ -25435,7 +25525,7 @@ function simCfgHTML(){
       <input class="fi" type="date" id="sc-start" value="${S.simCfg.start_date}">
     </div></div>
     <div class="fr s1"><div class="ff"><div class="fl">Simulation Horizon</div>
-      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:4px">
+      <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-top:4px">
         ${presets.map(p=>`
           <div onclick="selectHorizonPreset('${p.id}',${p.days},'${p.date||''}')" id="preset-${p.id}"
             style="padding:10px 8px;border:1px solid ${cur===p.id?'var(--green)':'var(--border2)'};
@@ -25459,6 +25549,13 @@ function simCfgHTML(){
         <option value="execution" ${S.simCfg.mode==='execution'?'selected':''}>Execution Mode</option>
         <option value="scenario" ${S.simCfg.mode==='scenario'?'selected':''}>Scenario Mode</option>
       </select></div></div>
+    <div class="fr s1"><div class="ff"><div class="fl">Scenario Role</div>
+      <select class="fi" id="sc-role">
+        <option value="" ${S.simCfg.role!=='planning'?'selected':''}>Execution — live operations (default)</option>
+        <option value="planning" ${S.simCfg.role==='planning'?'selected':''}>Planning — budget scenario</option>
+      </select>
+      <div class="fhint">Planning: budget demand drives the simulation; the file watcher, merge, Sales catalog and Real Sales / Production imports are off. Normally set by “Create Planning scenario” in Budget Planning.</div>
+    </div></div>
     <div class="fr s1"><div class="ff"><div class="fl">Conflict Resolution</div>
       <select class="fi" id="sc-conflict">
         <option value="rolling_avg" ${S.simCfg.conflict_resolution==='rolling_avg'?'selected':''}>Rolling Average Production (recommended)</option>
@@ -25494,6 +25591,11 @@ function simCfgHTML(){
     ${xlmapPanelHTML()}
   </div>
 
+  <!-- BUDGET PLANNING PANEL -->
+  <div id="cfg-panel-plan" style="display:none;max-height:480px;overflow-y:auto">
+    ${planPanelHTML()}
+  </div>
+
   <!-- AI AGENT PANEL -->
   <div id="cfg-panel-ai" style="display:none;max-height:480px;overflow-y:auto">
     ${aiCfgPanelHTML()}
@@ -25514,6 +25616,8 @@ function _cfgTab(tab){
   document.getElementById('cfg-panel-datasources').style.display=tab==='datasources'?'':'none';
   document.getElementById('cfg-panel-demandmap').style.display=tab==='demandmap'?'':'none';
   if(tab==='demandmap'&&typeof _xlSaveRules==='function') _xlSaveRules(false,'open');
+  document.getElementById('cfg-panel-plan').style.display=tab==='plan'?'':'none';
+  if(tab==='plan') planRender();
   document.getElementById('cfg-panel-ai').style.display=tab==='ai'?'':'none';
   const tabStyActive=`padding:7px 16px;font-family:var(--mono);font-size:10px;cursor:pointer;border:none;background:transparent;border-bottom:2px solid var(--green);color:var(--green);letter-spacing:.5px;text-transform:uppercase`;
   const tabStyInactive=`padding:7px 16px;font-family:var(--mono);font-size:10px;cursor:pointer;border:none;background:transparent;border-bottom:2px solid transparent;color:var(--text-dim);letter-spacing:.5px;text-transform:uppercase`;
@@ -25521,6 +25625,7 @@ function _cfgTab(tab){
   document.getElementById('cfg-tab-rules').style.cssText=tab==='rules'?tabStyActive:tabStyInactive;
   document.getElementById('cfg-tab-datasources').style.cssText=tab==='datasources'?tabStyActive:tabStyInactive;
   document.getElementById('cfg-tab-demandmap').style.cssText=tab==='demandmap'?tabStyActive:tabStyInactive;
+  document.getElementById('cfg-tab-plan').style.cssText=tab==='plan'?tabStyActive:tabStyInactive;
   document.getElementById('cfg-tab-ai').style.cssText=tab==='ai'?tabStyActive:tabStyInactive;
 }
 
@@ -25878,7 +25983,9 @@ function saveSimCfg(){
     if(p) S.simCfg.horizon=p.days;
   }
   S.simCfg.mode=document.getElementById('sc-mode')?.value||'planning';
+  { const role=document.getElementById('sc-role'); if(role){ if(role.value==='planning') S.simCfg.role='planning'; else delete S.simCfg.role; } }
   S.simCfg.conflict_resolution=document.getElementById('sc-conflict')?.value||'rolling_avg';
+  if(typeof scUpdatePill==='function') scUpdatePill();
   document.getElementById('sim-date-lbl').textContent=`Day 0 / ${S.simCfg.horizon}`;
   closeModal(); statMsg(`Simulation configured — ${S.simCfg.horizon} day horizon`);
 }
@@ -27079,6 +27186,10 @@ const DS_SLOTS = [
   { id:'realProduction', label:'Real Production',  description:'ProductionReal.xlsx — SAP export with DATE, EQUIPMENT, MATERIAL CODE, PRODUCTION columns. EQUIPMENT must match element names (e.g. BROSFM01, BROSKL02). MATERIAL CODE matched via product material_code field.', handler:'dsIngestProduction', dbKey:'real_production_daily' },
   { id:'transportCost',  label:'Transport Cost',   description:'Freight and logistics cost matrix',            handler:'dsIngestTransport',  dbKey:'transport_costs' },
   { id:'custom',         label:'Custom',           description:'User-defined data file',                       handler:'dsIngestCustom',     dbKey:'custom_data' },
+  // Budget planning (Configuration → Budget Planning). Staged in memory; a version is created explicitly.
+  { id:'planExternal',   label:'Budget — External workbook', description:'2027 Volume Budget …xlsx — sheet "External (FL)" only: plant × sold-to × ship-to × material × month, short tons', handler:'plIngestExternal', dbKey:'' },
+  { id:'planRmx',        label:'Budget — RMX workbook',      description:'US RMX Cement_Slag_FA Demand Budget …xlsx — sheets Cem_Use / Slag_Use / FA_Use, Florida rows, values in THOUSANDS of short tons', handler:'plIngestRmx', dbKey:'' },
+  { id:'planDetail',     label:'Budget — Sales history (Detail)', description:'Avila_Shipments_Detail.xlsx — customer-level history (Sold-To × Ship-To × demand point × month) for the allocation keys', handler:'plIngestDetail', dbKey:'' },
 ];
 
 // ── Persistent metadata (stored in localStorage, no handles) ──
@@ -27163,6 +27274,7 @@ async function dsInit(){
 
 // ── Auto-refresh all slots that have a handle ─────────
 async function dsAutoRefreshAll(){
+  if(scIsPlanning()){ statMsg('Planning scenario: Real Sales / Production imports are off here'); return; }
   // Flag so dsIngestTopology applies the stale-file guard ONLY during automatic
   // refresh (startup). A manual file pick/refresh must always load the file.
   window._dsAutoRefreshing = true;
@@ -27221,6 +27333,7 @@ async function dsPeekSlotChanged(id){
 // Checks every connected slot and shows the "new version available" banner
 // if any changed. Called once shortly after boot, then every hour.
 async function dsCheckAllForUpdates(){
+  if(scIsPlanning()) return;   // Planning: external feeds are not watched
   const slotsWithHandles=DS_SLOTS.filter(s=>DS.handles[s.id]);
   for(const s of slotsWithHandles) await dsPeekSlotChanged(s.id);
   if(Object.keys(DS.pending).length) _showPendingUpdateBanner();
@@ -27269,6 +27382,10 @@ async function dsApplyPendingUpdates(){
 // Returns { changed: bool, slot: id } if file changed, else null
 async function dsRefreshSlot(id, showErrors=true){
   if(DS.refreshing[id]) return null;
+  if(scIsPlanning() && !PLAN_SLOT_IDS.has(id)){   // keeps Real Sales from zeroing budget days
+    if(showErrors) statMsg('Planning scenario: Real Sales / Production imports are off here');
+    return null;
+  }
   DS.refreshing[id] = true;
   dsUpdateSlotUI(id, 'loading');
 
@@ -27539,6 +27656,7 @@ function dsScheduleWrite(id){
 
 // Fan out a write tick to every connected writable slot.
 function dsScheduleAllWrites(){
+  if(scIsPlanning()) return;   // the legacy topology file belongs to Execution
   Object.keys(_dsWritableSlots).forEach(id => { if(DS.handles[id]) dsScheduleWrite(id); });
 }
 
@@ -28242,6 +28360,7 @@ const _xlWhen=iso=>{ if(!iso) return 'never (still the defaults)'; const d=new D
 // this scenario's product catalog differs from the one the file was saved with).
 async function _xlSaveRules(prompt, mode){
   mode=mode||'edit';
+  if(scIsPlanning()) return false;   // the SAP pipeline reads Execution's demand points, never Planning's
   let ok=false, note='';
   try{
     const dir=await exportDir('sap',!!prompt);   // prompt only from a click
@@ -28881,7 +29000,10 @@ function xlmapTranslate(row){
   // Builder only: a catalog product picked by id. With a SAP code it runs exactly as
   // a real row carrying that code would (a shared code → the ship point decides).
   if(picked&&_xlCatCode(picked.material_code)) mCode=_xlCatCode(picked.material_code).sap;
-  let mat=(XLMAP.materials||[]).find(r=>String(r.code??'').trim()===mCode), catalogId=null;
+  // Several rows may share a code when the ship point decides the product (a row with a
+  // ship point wins for that ship point; the row without one is the default).
+  const _matRows=(XLMAP.materials||[]).filter(r=>String(r.code??'').trim()===mCode);
+  let mat=_matRows.find(r=>r.ship_pt&&_xlNorm(r.ship_pt)===_xlNorm(spCode))||_matRows.find(r=>!r.ship_pt), catalogId=null;
   if(!mat&&picked&&mCode.startsWith('cat:')){
     // No SAP code yet: it still composes its name (so the bench can find its demand
     // point), but no SAP row can reach it.
@@ -29132,8 +29254,9 @@ function _xlMatBody(){
   const actSel=(i,v)=>`<select class="fi" style="padding:3px 6px;font-size:9px;${v==='skip'?'color:var(--amber)':''}" title="Skip = not demand (services, supplies, lines that repeat another line's tonnes): left out of every published file" onchange="_xlSet('materials',${i},'action',this.value);xlmapRender()">
     <option value="" ${v!=='skip'?'selected':''}>demand</option><option value="skip" ${v==='skip'?'selected':''}>skip — not demand</option></select>`;
   return _xlCatalogStrip()+`<div style="padding:8px 12px;border-bottom:1px solid var(--border)">${_xlFilterBox('mat','filter code, product or "skip"…')}</div>
-  <div id="xl-body-mat">${_xlTbl(_xlHdr(['Material','Product','Pack','Counts as','Note',''])+rows.map(({r,i})=>`<tr>
+  <div id="xl-body-mat">${_xlTbl(_xlHdr(['Material','Ship pt','Product','Pack','Counts as','Note',''])+rows.map(({r,i})=>`<tr>
       ${_xlTd(_xlInp('materials',i,'code',r.code,'1606504'),'100px')}
+      ${_xlTd(_xlInp('materials',i,'ship_pt',r.ship_pt,'any'),'60px')}
       ${_xlTd(`<input class="fi" list="xl-prodlist" style="padding:3px 6px;font-size:9px" value="${esc(r.product??'')}" placeholder="${r.action==='skip'?'—':'BRS_IL(12)'}" onchange="_xlSet('materials',${i},'product',this.value)">`,'190px')}
       ${_xlTd(`<input class="fi" list="xl-preslist" style="padding:3px 6px;font-size:9px" value="${esc(r.pres??'')}" placeholder="${r.action==='skip'?'—':'BLK'}" onchange="_xlSet('materials',${i},'pres',this.value)">`,'80px')}
       ${_xlTd(actSel(i,r.action),'140px')}
@@ -30110,7 +30233,8 @@ function switchTopSection(section){
       {label:'Settings',view:'cfgpanel',tab:'settings'},
       {label:'Simulation Rules',view:'cfgpanel',tab:'rules'},
       {label:'Data Sources',view:'cfgpanel',tab:'datasources'},
-      {label:'Demand Mapping',view:'cfgpanel',tab:'demandmap'}
+      {label:'Demand Mapping',view:'cfgpanel',tab:'demandmap'},
+      {label:'Budget Planning',view:'cfgpanel',tab:'plan'}
     ]
   };
   const items=tabs[section]||[];
@@ -31961,7 +32085,7 @@ const LS_SKIP_ALWAYS = new Set(['real_shipments_daily']);
 // mill_policies and demand_substitutions — and every table added later inherited the
 // bug. Structural/config tables are now kept by default; only volume data is shed.
 const LS_SKIP_COMPACT = new Set([...LS_SKIP_ALWAYS,
-  'real_shipments_meta','forecast_commitments',
+  'real_shipments_meta','forecast_commitments','plan_demand',
   'real_production_daily','real_inventory_daily','real_transfers_daily','real_silo_transfers_daily',
   'real_rail_daily','real_shipping_daily','real_unloading_daily']);
 // Rolling window for the high-volume daily tables, applied to the SAVED COPY only.
@@ -32255,6 +32379,7 @@ let _dsTopoBaseline = null; // { text, savedAt, fileMod }
 // such rows merge as pure add/remove sets and can never conflict).
 const _MG_KEYS = {
   demand_values:         r=>['dv', r.element_id, r.date, r.source, r.ship_to??''].join('|'),
+  plan_demand:           r=>['pd', r.version_id, r.element_id, r.ym].join('|'),
   real_shipments_daily:  r=>['rs', r.date, r.origin, r.product, r.customer_type, r.ship_to??''].join('|'),
   real_production_daily: r=>['rp', r.date, r.facility_id, r.element_id, r.product_id].join('|'),
   real_inventory_daily:  r=>['ri', r.date, r.facility_id, r.silo_id, r.product_id].join('|'),
@@ -32555,6 +32680,7 @@ function _mgSync(base, ours, theirs){
 //   pull  — the file changed, we have nothing it lacks: adopt the merge result, no write.
 //   merge — write the merge result (our changes, and anything an out-of-date copy dropped).
 async function _mgPrepareWrite(handle, ours, baseline){
+  if(scIsPlanning()) return {mode:'plain'};   // no merge, no change log (a regeneration would blow CL_MAX_OPS)
   if(!baseline || !baseline.text) return {mode:'plain'};
   const base=_mgParseBaseline(baseline);
   if(!base || !base.DB) return {mode:'plain'};
@@ -32583,7 +32709,7 @@ function _mgApplyPayloadToApp(payload){
   // has no silo_links etc.; wiping ours made transfers vanish — see _slResetIfAbsent).
   Object.keys(DB).forEach(t=>{ if(payload.DB[t]!==undefined) DB[t]=payload.DB[t]; });
   _campTidyAfterLoad();   // a merge is where two browsers' overlapping campaigns meet
-  if(payload.simCfg) Object.assign(S.simCfg, payload.simCfg);
+  if(payload.simCfg){ Object.assign(S.simCfg, payload.simCfg); if(!('role' in payload.simCfg)) delete S.simCfg.role; }
   if(payload.counter) S.elCounter=payload.counter;
   if(typeof syncElCounter==='function') syncElCounter();
   // demand_values may have just been replaced wholesale — drop the memoised demand
@@ -32607,6 +32733,7 @@ function _mgApplyPayloadToApp(payload){
 
 // Green banner = clean sync (auto-dismisses); amber = conflicts (stays up).
 function _mgShowMergeBanner(fileName, info){
+  if(scIsPlanning()) return;   // never merged, never banners
   const conflicts=info.conflicts||[];
   const isConflict=conflicts.length>0;
   let b=document.getElementById('mg-merge-banner');
@@ -32733,7 +32860,7 @@ function scBuildPayload(){
   const miss=window._dbPartialTables;
   if(Array.isArray(miss)) miss.forEach(t=>{ delete dbOut[t]; });
   // Keep actual demand_values too — once imported they belong to the app.
-  return { DB:dbOut, counter:S.elCounter, simCfg:S.simCfg, simResults:S.simResults||null, savedAt:(window._lastSaveStamp||new Date().toISOString()), changeLog:window._scLog||_clEmpty(), topoSeal:window._scTopoSeal||undefined };
+  return { DB:dbOut, counter:S.elCounter, simCfg:S.simCfg, simResults:S.simResults||null, savedAt:(window._lastSaveStamp||new Date().toISOString()), changeLog:window._scLog||_clEmpty(), topoSeal:(scIsPlanning()?undefined:(window._scTopoSeal||undefined)) };
 }
 
 // Restore tables that the localStorage cache had to drop, reading them back from
@@ -33056,7 +33183,7 @@ async function scLoadScenario(id, opts){
   // other topology into this file. Such a copy says nothing about this file — adopt the file,
   // exactly as when switching to it. (Caches saved before the tag existed keep the old behaviour.)
   const cacheOfOther = window._lsScId!==undefined && window._lsScId!==id;
-  if(opts.guard && SC.activeId===id && !cacheOfOther){
+  if(opts.guard && SC.activeId===id && !cacheOfOther && !(saved.simCfg&&saved.simCfg.role==='planning')){
     const baseline=await scLoadBaseline(id);
     const base=_mgParseBaseline(baseline);
     // Reopening the scenario this browser already holds, with a record of the last sync: let the
@@ -33120,7 +33247,8 @@ async function scLoadScenario(id, opts){
   const _sameScenario = !!(opts.guard && SC.activeId===id && !cacheOfOther);
   Object.keys(DB).forEach(t=>{ if(saved.DB[t]!==undefined) DB[t]=saved.DB[t]; });
   if(!_sameScenario) _slResetIfAbsent(saved.DB);
-  if(saved.simCfg) Object.assign(S.simCfg,saved.simCfg);
+  // Reset before assigning: a flag the previous scenario carried (e.g. role:'planning') must not leak.
+  Object.keys(S.simCfg).forEach(k=>{ delete S.simCfg[k]; }); Object.assign(S.simCfg, SIMCFG_DEFAULTS(), saved.simCfg||{});
   if(saved.counter) S.elCounter=saved.counter;
   syncElCounter();
   if(saved.simResults) S.simResults=saved.simResults;  // Restore forecast results
@@ -33168,6 +33296,7 @@ function scStartRemoteWatch(){
 }
 async function scCheckRemoteChange(){
   const id=SC.activeId; if(!id || SC._writeBusy) return;
+  if(scIsPlanning()) return;   // Planning scenario: single editor, no file watcher
   const handle=SC.handles[id]; if(!handle) return;
   const baseline=await scLoadBaseline(id); if(!baseline) return;
   try{
@@ -33393,6 +33522,8 @@ function scUpdatePill(){
   if(!m) scSetSaveStatus('none');
   const sw=document.getElementById('sc-switcher');
   if(sw) sw.title = m ? ('Scenario: '+m.name+' ('+(m.fileName||'')+')') : 'No scenario — click to create or open one';
+  const pl=scIsPlanning(); const rb=document.getElementById('sc-role-badge'); if(rb) rb.style.display=pl?'':'none';
+  if(sw) sw.classList.toggle('planning', pl);
 }
 function scToggleDropdown(ev){ if(ev) ev.stopPropagation(); const dd=document.getElementById('sc-dropdown'); if(!dd) return; if(dd.style.display==='none'){ scRenderDropdown(); dd.style.display='block'; } else dd.style.display='none'; }
 function scCloseDropdown(){ const dd=document.getElementById('sc-dropdown'); if(dd) dd.style.display='none'; document.querySelectorAll('.sc-rowmenu').forEach(e=>e.remove()); }
@@ -33460,6 +33591,7 @@ const AC_FUNCS=[
 const AC_NET='__network';   // matrix row for records that belong to no single facility
 const AC_TABLE_FUNC={
   demand_values:'demand', monthly_demand:'demand', demand_forecasts:'demand', demand_substitutions:'demand', forecast_commitments:'demand',
+  plan_settings:'demand', plan_versions:'demand', plan_lines:'demand', alloc_keys:'demand', norm_rules:'demand', plan_demand:'demand', plan_imports:'demand',
   real_inventory_daily:'inventory', actual_inventory:'inventory',
   production_campaigns:'production', production_schedule:'production', mill_policies:'production', mill_product_focus:'production',
   element_maintenance_events:'production', non_working_days:'production',
@@ -34288,15 +34420,1080 @@ async function scRestoreTopologySnapshot(id, name){
     await scWriteSnapshot(id, JSON.stringify(scBuildPayload()), 'pre-restore');
     const payload=JSON.parse(await (await (await dir.getFileHandle(name)).getFile()).text());
     if(!payload || !payload.DB) throw new Error('not a valid scenario snapshot');
-    const t=_tsTables(payload); if(!t.elements || !t.elements.length) throw new Error('that version has no topology');
-    Object.assign(DB, t);
-    if(payload.counter) S.elCounter=Math.max(S.elCounter||0, payload.counter);
-    if(typeof syncElCounter==='function') syncElCounter();
-    if(typeof _demandCacheInvalidate==='function') _demandCacheInvalidate();
+    const t=_scApplyTopologyTables(payload);
     await scManualSave();
     closeModal(); _acRerender(); if(typeof renderLocationTree==='function') renderLocationTree(); if(typeof updateNavFacilities==='function') updateNavFacilities();
     statMsg('Topology restored ✓ — '+t.elements.length+' elements from '+name);
   }catch(e){ statMsg('Topology restore failed — '+e.message); console.warn('topology restore', e); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BUDGET PLANNING MODULE — generic planning objects (kind = budget | forecast | what-if)
+// Design record: ~/.claude/plans/pasted-content-id-7e26-budget-hidden-wren.md (D1–D35, P0–P6)
+// Everything here is in SHORT TONS. The RMX workbook's *_Use sheets are in THOUSANDS of ST.
+// ═══════════════════════════════════════════════════════════════════════════
+function SIMCFG_DEFAULTS(){ return {start_date:new Date()._ymd(), horizon:90, mode:'planning', conflict_resolution:'rolling_avg', autoPropose:true}; }
+const PL={ ui:{open:{}, tab:null}, hist:null, bgt:null, stage:{}, tr:{}, busy:false };
+const PL_DEFAULT_SETTINGS=()=>({ id:'default', kind:'budget', budget_year:new Date().getFullYear()+1, sat_pct:25, ships_sat:true,
+  window_months:6, weights:[2,2,2,1,1,1], floor:0.10, pre_purchase_months:3, low_share_pct:5, short_window_months:3, silent_months:3,
+  rmx_regions:['North Florida','South Florida'], updated_at:null, updated_by:null });
+function plSettings(){
+  if(!Array.isArray(DB.plan_settings)) DB.plan_settings=[];
+  let s=DB.plan_settings.find(r=>r.id==='default');
+  if(!s){ s=PL_DEFAULT_SETTINGS(); DB.plan_settings.push(s); }
+  else { const d=PL_DEFAULT_SETTINGS(); Object.keys(d).forEach(k=>{ if(s[k]===undefined) s[k]=d[k]; }); }
+  return s;
+}
+function _plWho(){ try{ return (typeof acCurrentUser==='function'&&acCurrentUser()?.name)||localStorage.getItem('avila_device_name')||'this browser'; }catch(e){ return 'this browser'; } }
+function _plFmt(n,d=0){ if(n==null||isNaN(n)) return '—'; return Number(n).toLocaleString('en-US',{maximumFractionDigits:d,minimumFractionDigits:d}); }
+function _plEsc(s){ return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function _plToggle(k){ PL.ui.open[k]=PL.ui.open[k]===false; planRender(); }
+function _plCard(key,title,sub,count,body){
+  const open=PL.ui.open[key]!==false;
+  return `<div style="border:1px solid var(--border);margin-bottom:10px;background:var(--surface)">
+    <div onclick="_plToggle('${key}')" style="display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;border-bottom:${open?'1px solid var(--border)':'none'}">
+      <span style="font-family:var(--mono);font-size:10px;color:var(--text-dim)">${open?'▾':'▸'}</span>
+      <span style="font-weight:600;font-size:12px">${title}</span>
+      ${count!=null?`<span style="font-family:var(--mono);font-size:9px;color:var(--text-dim)">${count}</span>`:''}
+      <span style="margin-left:auto;font-size:10px;color:var(--text-dim)">${sub||''}</span>
+    </div>
+    ${open?`<div style="padding:10px 12px">${body}</div>`:''}
+  </div>`;
+}
+function planRender(){ const el=document.getElementById('cfg-panel-plan'); if(el) el.innerHTML=planPanelHTML(); }
+function planPanelHTML(){
+  const planning=scIsPlanning(); const m=(typeof scActive==='function'&&scActive())||null; const s=plSettings();
+  const head=`<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">
+    <div style="font-weight:700;font-size:13px">Budget Planning</div>
+    <span class="pl-flag ${planning?'':'dim'}">${planning?'PLANNING SCENARIO':'EXECUTION SCENARIO'}</span>
+    <span class="pl-muted">${m?_plEsc(m.name):'no scenario file'} · budget year ${s.budget_year} · short tons</span>
+  </div>`;
+  if(!planning) return head+_plExecPanelHTML(s);
+  return head+_plPlanningPanelHTML(s);
+}
+// ── Execution scenario view: prerequisites, create / link the Planning scenario, budget → Execution.
+function _plExecPanelHTML(s){
+  return _plPrereqCardHTML(s)+_plCompareCardHTML(s)+_plImportCardHTML(s)+_plCard('pl-create','Planning scenario','duplicate of this scenario, budget year '+s.budget_year, null,
+    `<div class="pl-muted" style="margin-bottom:8px">A Planning scenario is a separate file duplicated from this one. It simulates the budget year from this scenario's projected 31 December state (silos, vessels at berth or waiting, rail in the yards and in transit), with the file watcher, merge, Sales catalog and Real Sales imports switched off. One editor at a time; every computer must run this app version or the budget tables are dropped on save.</div>
+     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+       <label class="pl-muted">Budget year <input class="fi" type="number" id="pl-year" value="${s.budget_year}" min="2026" max="2035" style="width:80px;display:inline-block;margin-left:4px" onchange="plSettings().budget_year=parseInt(this.value)||${s.budget_year};autoSave();planRender()"></label>
+       <button class="pl-btn pri" onclick="planCreateScenario()">Create Planning scenario…</button>
+       <span class="pl-muted">${_plOpenCheck(S.simResults, s.budget_year+'-01-01').msg}</span>
+     </div>`);
+}
+// ── P0 prerequisites in Execution ───────────────────────────────────────────
+// Power-plant ash sources: shipped straight from the plant, so purchased-type facilities (D15).
+const PL_ASH_SOURCES=[{name:'CSTRIVER',products:['GEN_ASH']},{name:'PALTKA',products:['GEN_ASH']},{name:'OUC',products:['GEN_ASH']},{name:'PTAGODA',products:['BOW_ASH','GEN_ASH']},{name:'SUW',products:['GEN_ASH']}];
+const PL_PURCHASED_HINT=/KNK|CRH|QKT|TITAN|TIT_|CLI_|NUH|JAP_SLG|HEI/i;
+function _plFacByName(name){ const k=String(name||'').toUpperCase(); return (DB.facilities||[]).find(f=>String(f.name||'').split('/')[0].trim().toUpperCase()===k)||null; }
+function _plProductByToken(tok){
+  const want=_xlNorm(tok); const ps=DB.products||[];
+  return ps.find(p=>_xlNorm(p.name)===want)||ps.find(p=>_xlNorm(p.name)===want+'/blk')||ps.find(p=>_xlNorm(p.name).startsWith(want+'/'))||ps.find(p=>_xlNorm(p.name).startsWith(want))||null;
+}
+// History demand points (last 12 months, any class) that the topology does not have — the budget cannot land on them.
+function plHistMissingPoints(){
+  const idx=_plHistIndex(); if(!idx) return null; const months=plHistWindow(12); const out=[];
+  idx.byDp.forEach((rows, dp)=>{ if(xlmapFindDp(dp)) return; let t=0; rows.forEach(r=>{ if(months.includes(r.ym)) t+=r.q; }); if(t<=0) return;
+    const src=dp.split('/')[0]; const fac=_plFacByName(src); const prodTok=dp.split('/')[2]||''; const pid=_plProductByToken(prodTok)?.id||null;
+    out.push({dp, t:Math.round(t), src, fac, pid, prodTok, fam:plFamilyOfName(dp), knownPlant:PL_ASH_SOURCES.some(a=>a.name===src.toUpperCase())}); });
+  return out.sort((a,b)=>b.t-a.t);
+}
+function plPrereqChecks(s){
+  if(!XLMAP) xlmapLoad();
+  const year=s.budget_year, out={ash:[], nuh:null, products:[], forecast:null, sim:null, missing:plHistMissingPoints()};
+  PL_ASH_SOURCES.forEach(a=>{
+    const codes=(XLMAP.ship_points||[]).filter(r=>String(r.source||'').toUpperCase()===a.name).map(r=>r.code);
+    const fac=_plFacByName(a.name)||codes.map(c=>facilityByPlantCode(c)).find(Boolean)||null;
+    const dps=a.products.map(prod=>{ const name=`${a.name}/DEM/${prod}/BLK/INT`; const el=xlmapFindDp(name); const pid=_plProductByToken(prod)?.id||null; return {name, prod, el, pid}; });
+    out.ash.push({...a, codes, fac, dps});
+  });
+  const nuh=xlmapFindDp('PEV/DEM/NUH_I-II/BLK/EXT'); out.nuh={el:nuh, active:!!(nuh&&nuh.is_active!==false)};
+  out.products=(DB.products||[]).filter(p=>['cement_bulk','cement_packed','additive'].includes(p.category)||!p.category)
+    .map(p=>({p, suggest:PL_PURCHASED_HINT.test(p.name||'')||(p.facility_id&&isPurchasedFac(p.facility_id))?'purchased':'own'}));
+  // Forecast must reach 31 Dec of the year before the budget year (the Planning run starts 1 Jan).
+  const dec=`${year-1}-12`; const act=new Set();
+  const dpEls=(DB.elements||[]).filter(e=>e.type==='demand_point'&&e.is_active!==false); const withDec=new Set(); let maxFc=null;
+  (DB.demand_values||[]).forEach(v=>{ if(v.source==='actual') return; if(String(v.date).startsWith(dec)&&v.value_t>0) withDec.add(v.element_id); if(!maxFc||v.date>maxFc) maxFc=v.date; });
+  out.forecast={points:dpEls.length, withDec:dpEls.filter(e=>withDec.has(e.id)).length, maxFc};
+  out.sim=_plOpenCheck(S.simResults, `${year}-01-01`);
+  return out;
+}
+function _plOpenCheck(r, startDate){
+  if(!r||!r.inventoryHistory) return {ok:false, d:null, morning:false, msg:'No simulation results yet — run the simulation first (horizon must reach '+startDate+').'};
+  const d=dateToDayOffset(startDate, S.simCfg.start_date)+1; const H=r.simHorizon||S.simCfg.horizon||0;
+  if(d<2) return {ok:false, d, morning:false, msg:`This scenario starts on ${S.simCfg.start_date}, after ${startDate}: the opening state cannot be copied from it.`};
+  if(H<d-1) return {ok:false, d, morning:false, msg:`The simulation ends on day ${H}, before ${startDate} (day ${d}) — set the horizon to reach 1 Jan and re-run.`};
+  return {ok:true, d, morning:H>=d, msg:H>=d?`Simulation reaches ${startDate} (day ${d} of ${H}) ✓`:`Simulation reaches 31 Dec but not ${startDate}: rail yards will be copied from the 31 Dec morning (run one day longer for the exact picture).`};
+}
+function _plPrereqCardHTML(s){
+  const c=plPrereqChecks(s); const flag=(ok,txt)=>`<span class="pl-flag ${ok?'ok':'bad'}">${txt}</span>`;
+  const ash=c.ash.map(a=>`<tr><td><b>${a.name}</b> <span class="pl-muted">${a.codes.length?'ship pt '+a.codes.join(', '):'no ship-point row'}</span></td>
+      <td>${a.fac?flag(true,isPurchasedFac(a.fac)?'purchased facility':'facility ('+(a.fac.type||'?')+')'):flag(false,'missing')+(a.codes.length||true?` <button class="pl-btn" onclick="plCreateAshFacility('${a.name}')">Create as purchased</button>`:'')}</td>
+      <td>${a.dps.map(d=>d.el?flag(true,d.prod+(d.el.is_active===false?' (inactive)':'')):flag(false,d.prod)+(a.fac&&d.pid?` <button class="pl-btn" onclick="plCreateDp('${a.fac.id}','${_plEsc(d.name)}','${d.pid}')">Create</button>`:a.fac?' <span class="pl-muted">no catalog product '+d.prod+'</span>':'')).join(' ')}</td></tr>`).join('');
+  const prodRows=c.products.map(({p,suggest})=>`<tr><td>${_plEsc(p.name)}</td><td class="pl-muted">${p.category||''}</td>
+      <td><select class="fi" style="padding:2px 6px;font-size:10px;width:120px" onchange="plSetProductSupply('${p.id}',this.value)">
+        <option value="" ${!p.supply?'selected':''}>— ${suggest==='purchased'?'(suggest: purchased)':'(suggest: own)'}</option>
+        <option value="own" ${p.supply==='own'?'selected':''}>own</option><option value="purchased" ${p.supply==='purchased'?'selected':''}>purchased</option></select></td></tr>`).join('');
+  const nUnset=c.products.filter(x=>!x.p.supply).length;
+  const miss=c.missing; if(!PL.hist) plHistLoad().then(x=>{ if(x) planRender(); });
+  const missRows=miss?miss.slice(0,40).map(m=>`<tr><td><b>${_plEsc(m.dp)}</b> <span class="pl-muted">${m.fam}</span></td><td class="n">${_plFmt(m.t)}</td>
+      <td>${m.fac?flag(true,m.fac.name+(isPurchasedFac(m.fac)?' · purchased':'')):flag(false,'no facility '+m.src)+(m.knownPlant?` <button class="pl-btn" onclick="plCreateAshFacility('${_plEsc(m.src.toUpperCase())}')">Create ${_plEsc(m.src)} as purchased</button>`:' <span class="pl-muted">add it in Configuration → Organization</span>')}</td>
+      <td>${m.fac&&m.pid?`<button class="pl-btn" onclick="plCreateDp('${m.fac.id}','${_plEsc(m.dp)}','${m.pid}')">Create point</button>`:m.fac?'<span class="pl-muted">no catalog product '+_plEsc(m.prodTok)+'</span>':''}</td></tr>`).join(''):'';
+  return _plCard('pl-prereq','Prerequisites in this scenario','before the Planning scenario is created', null,
+    `<div class="pl-muted" style="margin-bottom:6px">0 · History demand points missing from this topology (last 12 months of the sales history — load it below if the list is empty)</div>
+     ${_plSlotRow('planDetail')}
+     ${miss?(miss.length?`<div style="max-height:220px;overflow:auto;border:1px solid var(--border);margin:4px 0 8px"><table class="pl-tbl"><tr><th>Demand point</th><th>12-mo ST</th><th>Facility</th><th></th></tr>${missRows}</table></div>`:'<div class="pl-muted" style="margin:4px 0 8px">'+flag(true,'every history point exists')+'</div>'):'<div class="pl-muted" style="margin:4px 0 8px">history not loaded</div>'}
+     <div class="pl-muted" style="margin-bottom:6px">1 · Fly-ash sources shipped straight from the power plant (purchased facilities + their demand points)</div>
+     <table class="pl-tbl"><tr><th>Source</th><th>Facility</th><th>Demand points</th></tr>${ash}</table>
+     <div class="pl-muted" style="margin:10px 0 6px">2 · External NUH point at PEV: ${c.nuh.el?(c.nuh.active?flag(true,'active'):flag(false,'inactive')+` <button class="pl-btn" onclick="plActivateDp('${c.nuh.el.id}')">Activate</button>`):flag(false,'PEV/DEM/NUH_I-II/BLK/EXT not in the topology')}</div>
+     <div class="pl-muted" style="margin:10px 0 6px">3 · Products: own vs purchased (third-party cement sold from our terminals counts as purchased; slag and ash purchases are normal supply) — ${nUnset?nUnset+' not set':'all set'}
+       <button class="pl-btn" style="margin-left:6px" onclick="plApplySupplySuggestions()">Apply suggestions to the unset ones</button></div>
+     <div style="max-height:220px;overflow:auto;border:1px solid var(--border)"><table class="pl-tbl"><tr><th>Product</th><th>Category</th><th>Supply</th></tr>${prodRows}</table></div>
+     <div class="pl-muted" style="margin:10px 0 6px">4 · Demand forecast reaches December ${s.budget_year-1}: ${flag(c.forecast.withDec===c.forecast.points&&c.forecast.points>0, c.forecast.withDec+' of '+c.forecast.points+' active points')} <span class="pl-muted">latest forecast day ${c.forecast.maxFc||'—'}</span></div>
+     <div class="pl-muted" style="margin:6px 0 0">5 · Simulation reaches 1 Jan ${s.budget_year}: ${flag(c.sim.ok, c.sim.ok?'yes':'no')} <span class="pl-muted">${_plEsc(c.sim.msg)}</span></div>`);
+}
+function plCreateAshFacility(name){
+  if(_plFacByName(name)){ statMsg(name+' already exists'); planRender(); return; }
+  if(!XLMAP) xlmapLoad();
+  const codes=(XLMAP.ship_points||[]).filter(r=>String(r.source||'').toUpperCase()===name).map(r=>({code:r.code,label:name}));
+  const sub=(DB.facilities||[]).find(f=>f.type==='purchased')?.sub_region_id||(DB.facilities||[])[0]?.sub_region_id||null;
+  const fac={id:`fac_${Date.now()}`, name:`${name}/ASH`, plant_no:'', plant_nos:[], type:'purchased', sub_region_id:sub, status:'active', notes:'Fly ash shipped straight from the power plant — purchased supply (budget planning prerequisite)'};
+  setFacPlantCodes(fac, codes); DB.facilities.push(fac);
+  autoSave(); if(typeof renderLocationTree==='function') renderLocationTree(); if(typeof _xlRulesChanged==='function') _xlRulesChanged();
+  statMsg(`Facility ${fac.name} created as purchased${codes.length?' (ship points '+codes.map(c=>c.code).join(', ')+')':''}`); planRender();
+}
+// A demand point at a facility, the way Demand Mapping's bench creates one (no picker, no view switch).
+function plCreateDp(facId, name, pid){
+  const fac=(DB.facilities||[]).find(f=>f.id===facId); if(!fac){ statMsg('Facility not found'); return null; }
+  if(xlmapFindDp(name)){ statMsg(name+' already exists'); planRender(); return xlmapFindDp(name); }
+  const spot=_xlSpotFor(fac); const id=`el_${++S.elCounter}`;
+  const el={id, facility_id:mainCanvasFacilityId()||S.facility_id, assigned_facility_id:fac.id, type:'demand_point', x:spot.x, y:spot.y, name,
+    props:{}, state:'idle', maintenanceEvents:[], productCapacities:[], is_active:true};
+  DB.elements.push(el);
+  (DB.demand_points=DB.demand_points||[]).push({id:`dp_el_${id}`, facility_id:fac.id, element_id:id, element_name:name,
+    products:pid?[{product_id:pid,priority:1}]:[], mode:'Fixed Daily', daily_tonnage:0, objective:'Meet Demand Only', rolling_days:30});
+  if(S.topoFacFilter&&S.topoFacFilter.size&&!S.topoFacFilter.has(fac.id)) S.topoFacFilter.add(fac.id);
+  autoSave(); if(typeof _demandCacheInvalidate==='function') _demandCacheInvalidate(); if(typeof _xlRulesChanged==='function') _xlRulesChanged();
+  statMsg(`${name} created at ${fac.name}, ${spot.where}`); planRender(); return el;
+}
+function plActivateDp(elId){ const el=(DB.elements||[]).find(e=>e.id===elId); if(!el) return; el.is_active=true; autoSave(); if(typeof _demandCacheInvalidate==='function') _demandCacheInvalidate(); statMsg(el.name+' activated'); planRender(); }
+function plSetProductSupply(pid, val){ const p=(DB.products||[]).find(x=>x.id===pid); if(!p) return; if(val) p.supply=val; else delete p.supply; autoSave(); }
+function plApplySupplySuggestions(){ const c=plPrereqChecks(plSettings()); let k=0; c.products.forEach(({p,suggest})=>{ if(!p.supply){ p.supply=suggest; k++; } }); autoSave(); statMsg(k+' products marked'); planRender(); }
+// Purchased-ness of a demand point: its facility (purchased type) OR its product (third-party cement at our terminal).
+function plIsPurchasedDp(el){
+  if(!el) return false; const facId=el.assigned_facility_id||el.facility_id; if(isPurchasedFac(facId)) return true;
+  const dp=(DB.demand_points||[]).find(d=>d.element_id===el.id); const pid=dp&&dp.products&&dp.products[0]&&dp.products[0].product_id;
+  const p=pid&&(DB.products||[]).find(x=>x.id===pid); return !!(p&&p.supply==='purchased');
+}
+// Planning scenario view: settings only in this step; sources, versions, keys, rules, generation follow.
+function _plPlanningPanelHTML(s){
+  const w=(s.weights||[]).join(',');
+  return _plSourceCardHTML(s)+_plSourcesCardHTML(s)+_plVersionsCardHTML(s)+_plTranslationCardHTML(s)+_plCandidatesCardHTML(s)+_plIntKeysCardHTML(s)+_plExtReviewCardHTML(s)+_plRulesCardHTML(s)+_plGenerateCardHTML(s)+_plCard('pl-settings','Settings','how keys are computed and months are spread', null,
+    `<div class="pl-kv">
+      <b>Budget year</b><input class="fi" type="number" id="pls-year" value="${s.budget_year}" style="width:90px">
+      <b>Saturday %</b><span><input class="fi" type="number" id="pls-sat" value="${s.sat_pct}" min="0" max="100" style="width:70px;display:inline-block"> <label><input type="checkbox" id="pls-ships-sat" ${s.ships_sat?'checked':''}> ships on Saturdays</label></span>
+      <b>History window (months)</b><input class="fi" type="number" id="pls-win" value="${s.window_months}" min="1" max="24" style="width:70px">
+      <b>Month weights (recent first)</b><input class="fi" type="text" id="pls-weights" value="${_plEsc(w)}" style="width:160px">
+      <b>Share floor %</b><input class="fi" type="number" id="pls-floor" value="${Math.round(s.floor*100)}" min="0" max="50" style="width:70px">
+      <b>Pre-purchase window (months)</b><input class="fi" type="number" id="pls-prep" value="${s.pre_purchase_months}" min="1" max="12" style="width:70px">
+      <b>Low-share flag %</b><input class="fi" type="number" id="pls-low" value="${s.low_share_pct}" min="0" max="100" style="width:70px">
+      <b>Short-window flag (months)</b><input class="fi" type="number" id="pls-short" value="${s.short_window_months}" min="1" max="12" style="width:70px">
+      <b>Silent months before a “new” point</b><input class="fi" type="number" id="pls-silent" value="${s.silent_months}" min="1" max="12" style="width:70px">
+      <b>RMX regions (Florida rows)</b><input class="fi" type="text" id="pls-regions" value="${_plEsc((s.rmx_regions||[]).join(', '))}" style="width:260px">
+     </div>
+     <div style="margin-top:8px;display:flex;gap:8px;align-items:center"><button class="pl-btn pri" onclick="plSaveSettings()">Save settings</button>
+       <span class="pl-muted">${s.updated_at?('saved '+s.updated_at.slice(0,16).replace('T',' ')+' by '+_plEsc(s.updated_by)):'defaults'}</span></div>`);
+}
+function plSaveSettings(){
+  const s=plSettings(); const g=id=>document.getElementById(id);
+  s.budget_year=parseInt(g('pls-year')?.value)||s.budget_year;
+  s.sat_pct=Math.max(0,Math.min(100,parseFloat(g('pls-sat')?.value)||0));
+  s.ships_sat=!!g('pls-ships-sat')?.checked;
+  s.window_months=Math.max(1,parseInt(g('pls-win')?.value)||6);
+  const w=(g('pls-weights')?.value||'').split(/[,\s]+/).map(Number).filter(x=>!isNaN(x)&&x>=0);
+  s.weights=w.length?w:[2,2,2,1,1,1];
+  s.floor=Math.max(0,Math.min(0.5,(parseFloat(g('pls-floor')?.value)||0)/100));
+  s.pre_purchase_months=Math.max(1,parseInt(g('pls-prep')?.value)||3);
+  s.low_share_pct=parseFloat(g('pls-low')?.value)||0;
+  s.short_window_months=Math.max(1,parseInt(g('pls-short')?.value)||3);
+  s.silent_months=Math.max(1,parseInt(g('pls-silent')?.value)||3);
+  s.rmx_regions=(g('pls-regions')?.value||'').split(',').map(x=>x.trim()).filter(Boolean);
+  s.updated_at=new Date().toISOString(); s.updated_by=_plWho();
+  autoSave(); planRender(); statMsg('Budget settings saved');
+}
+// ── P1b: read another scenario file without loading it ──────────────────────
+// queryPermission only (never prompts unless asked from a click); never touches baselines,
+// the active scenario, or the UI. Cached per id on the file's lastModified.
+SC._peek=SC._peek||{};
+async function scPeekScenario(id, opts){
+  opts=opts||{}; if(!id) return null;
+  let handle=SC.handles[id]; if(!handle){ try{ handle=await scLoadHandle(id); if(handle) SC.handles[id]=handle; }catch(e){} }
+  if(!handle) return null;
+  try{
+    let perm=await handle.queryPermission({mode:'read'});
+    if(perm!=='granted'&&opts.prompt) perm=await handle.requestPermission({mode:'read'});
+    if(perm!=='granted') return null;
+    const f=await handle.getFile();
+    const c=SC._peek[id]; if(c&&c.fileMod===f.lastModified&&c.size===f.size) return c;
+    const text=await f.text(); if(typeof _scIsSalesPayload==='function'&&_scIsSalesPayload(text)) return null;
+    const payload=JSON.parse(text); if(!payload||!payload.DB) return null;
+    const res={id, name:(SC.meta[id]&&SC.meta[id].name)||handle.name, fileMod:f.lastModified, size:f.size, payload, at:Date.now()};
+    SC._peek[id]=res; return res;
+  }catch(e){ console.warn('scPeekScenario', e); return null; }
+}
+// Topology tables of a payload into the live DB (shared by History → "Topology only" and the Planning refresh).
+function _scApplyTopologyTables(payload){
+  const t=_tsTables(payload); if(!t.elements || !t.elements.length) throw new Error('that version has no topology');
+  Object.assign(DB, t);
+  if(payload.counter) S.elCounter=Math.max(S.elCounter||0, payload.counter);
+  if(typeof syncElCounter==='function') syncElCounter();
+  if(typeof _demandCacheInvalidate==='function') _demandCacheInvalidate();
+  return t;
+}
+function _plSourceCardHTML(s){
+  const srcId=S.simCfg.plan_source_scenario_id, srcName=S.simCfg.plan_source_name||(srcId&&SC.meta[srcId]&&SC.meta[srcId].name)||'(not linked)';
+  const rep=s.open_report||null;
+  return _plCard('pl-source','Source scenario','topology and opening state come from '+_plEsc(srcName), null,
+    `<div class="pl-kv">
+      <b>Linked to</b><span>${_plEsc(srcName)} ${srcId&&!SC.meta[srcId]?'<span class="pl-flag bad">not in this browser\'s scenario list</span>':''}</span>
+      <b>Simulation</b><span>${S.simCfg.start_date} · ${S.simCfg.horizon} days (${S.simCfg.horizonPreset||'custom'})</span>
+      <b>Opening state</b><span>${rep?_plEsc(rep.summary)+' <span class="pl-muted">('+String(rep.at||'').slice(0,16).replace('T',' ')+')</span>':'<span class="pl-muted">not copied yet</span>'}</span>
+     </div>
+     ${rep&&rep.warnings&&rep.warnings.length?`<div class="pl-muted" style="margin-top:6px">⚠ ${rep.warnings.map(_plEsc).join('<br>⚠ ')}</div>`:''}
+     <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+       <button class="pl-btn" onclick="planRefreshTopology()" ${srcId?'':'disabled'}>Refresh topology from ${_plEsc(srcName)}…</button>
+       <button class="pl-btn" onclick="planRefreshOpeningState()" ${srcId?'':'disabled'}>Refresh opening state from its latest simulation…</button>
+     </div>`);
+}
+async function planRefreshTopology(){
+  if(!scIsPlanning()){ statMsg('Only in a Planning scenario'); return; }
+  const srcId=S.simCfg.plan_source_scenario_id; const pk=await scPeekScenario(srcId,{prompt:true});
+  if(!pk){ statMsg('Could not read the source scenario file (is it in this browser\'s scenario list?)'); return; }
+  const diff=_tsTopoDiff({DB}, pk.payload); const byT={}; diff.forEach(c=>{ byT[c.t]=(byT[c.t]||0)+1; });
+  const lines=Object.keys(byT).map(t=>`${byT[t]} ${t}`).join(', ')||'no differences';
+  if(!diff.length){ statMsg('Topology already matches '+pk.name); return; }
+  if(!confirm(`Replace this Planning scenario's topology with ${pk.name}'s?\n\nChanges: ${lines}.\n\nDemand, budget versions, keys and rules stay; keys pointing at renamed or deleted demand points are re-resolved by name and reported.`)) return;
+  try{ if(SC.activeId) await scWriteSnapshot(SC.activeId, JSON.stringify(scBuildPayload()), 'pre-topology-refresh'); }catch(e){ console.warn('snapshot', e); }
+  try{
+    _scApplyTopologyTables(pk.payload);
+    const orphans=planRevalidateRefs();
+    await scManualSave(); if(typeof _acRerender==='function') _acRerender(); if(typeof renderLocationTree==='function') renderLocationTree(); if(typeof updateNavFacilities==='function') updateNavFacilities();
+    planRender(); statMsg(`Topology refreshed from ${pk.name} ✓ — ${lines}${orphans.length?'; '+orphans.length+' stored references could not be re-resolved (see the Keys card)':''}`);
+  }catch(e){ statMsg('Topology refresh failed — '+e.message); console.warn(e); }
+}
+// After a topology refresh: every stored element_id is re-resolved by demand-point name.
+function planRevalidateRefs(){
+  const orphans=[]; const fix=(o, idKey, nameKey)=>{ if(!o||!o[nameKey]) return; const el=xlmapFindDp(o[nameKey]); if(el){ o[idKey]=el.id; } else if(o[idKey]&&!(DB.elements||[]).some(e=>e.id===o[idKey])){ orphans.push(o[nameKey]); o[idKey]=null; } };
+  (DB.alloc_keys||[]).forEach(k=>(k.targets||[]).forEach(t=>fix(t,'element_id','dp_name')));
+  (DB.norm_rules||[]).forEach(r=>{ fix(r,'element_id','dp_name'); if(r.target&&typeof r.target==='object') fix(r.target,'element_id','dp_name'); });
+  (DB.plan_demand||[]).forEach(p=>fix(p,'element_id','dp_name'));
+  return orphans;
+}
+// ── Opening state: Execution's simulated 31 Dec → this file's 1 Jan (D28) ────
+function _plDayBefore(ds){ const d=new Date(ds+'T12:00:00'); d.setDate(d.getDate()-1); return d._ymd(); }
+function planCopyOpeningState(src, startDate, srcLabel){
+  const r=src.simResults, w=[], rep={silos:0, vessels:0, railRows:0, railMoves:0, yards:0, maint:0, warnings:w};
+  const chk=_plOpenCheck(r, startDate); if(!chk.d||chk.d<2||!r||!r.inventoryHistory){ w.push(chk.msg); rep.summary='nothing copied — '+chk.msg; return rep; }
+  const d=chk.d, iEnd=d-2, iMorn=chk.morning?d-1:d-2, now=new Date().toISOString();
+  const note=`Opening state copied from ${srcLabel||'the source scenario'} (${r.runId||'run'}) on ${now.slice(0,10)}`;
+  if(!chk.morning) w.push('Source run ended on 31 Dec: rail yards taken from the 31 Dec morning snapshot (run the source one day longer for the exact 1 Jan picture).');
+  const canvasEls=getFacElements(); const elById=Object.fromEntries((DB.elements||[]).map(e=>[e.id,e]));
+  // 1 · silos — end of 31 Dec. Product mix is not recorded; the engine splits evenly.
+  const multi=[];
+  canvasEls.filter(e=>e.type==='bulk_silo'||e.type==='packed_silo').forEach(el=>{
+    const h=r.inventoryHistory[el.id]; if(!h||h.length<=iEnd) return;
+    const t=Math.max(0, +h[iEnd]||0); el.props=el.props||{};
+    el.props.start_inventory=el.type==='packed_silo'?Math.round(t/_siloTPP(el)*10)/10:Math.round(t);
+    rep.silos++; if(Array.isArray(el.props.products)&&el.props.products.length>1&&t>0) multi.push(el.name);
+  });
+  if(multi.length) w.push(`${multi.length} multi-product silo(s) start with an even product split (the mix is not in the results): ${multi.slice(0,6).join(', ')}${multi.length>6?'…':''}`);
+  // 2 · vessels docked or waiting at the end of 31 Dec → calls arriving on day 1 with the tonnes left
+  const legProduct=(call, berthId)=>{ if(!call) return ''; const leg=(call.legs||[]).find(l=>l.berth_element_id===berthId); return (leg&&leg.product_id)||call.product_id||''; };
+  let vn=0;
+  canvasEls.filter(e=>e.type==='berth').forEach(b=>{
+    const h=r.berthVesselHistory&&r.berthVesselHistory[b.id]; if(!h||h.length<=iEnd) return;
+    const bv=h[iEnd]; if(!bv) return;
+    const mk=(callId, name, left)=>{
+      if(!(left>0)) return; const orig=(DB.vessel_calls||[]).find(v=>v.id===callId)||null; const pid=legProduct(orig,b.id);
+      if(!pid){ w.push(`${name}: product unknown, not carried over (${Math.round(left)} t at ${b.name})`); return; }
+      DB.vessel_calls.push({id:`vc_open_${Date.now().toString(36)}_${++vn}`, name:`${name||'vessel'} (carried over)`, berth_element_id:b.id, facility_id:b.assigned_facility_id||b.facility_id,
+        arrival_date:startDate, quantity_t:Math.round(left), total_quantity_t:Math.round(left), unload_rate_tph:(orig&&orig.unload_rate_tph)||0, product_id:pid, transit_days:0, status:'Confirmed', notes:note});
+      rep.vessels++;
+    };
+    if(bv.docked) mk(bv.dockedCallId, bv.docked, bv.dockedLeft);
+    (bv.waitingList||[]).forEach(p=>mk(p.vesselCallId, p.name, p.left));
+  });
+  // 3 · rail at terminals: rail yard / local yard counts dated day 1; cargo in transit → one In-Transit movement arriving day 1
+  const up=(type, facId, pid, cars)=>{ if(!(cars>0)) return; DB.real_rail_daily=(DB.real_rail_daily||[]).filter(rr=>!(rr.type===type&&rr.date===startDate&&rr.facility_id===facId&&(rr.product_id||'')===pid));
+    DB.real_rail_daily.push({date:startDate, facility_id:facId, product_id:pid, type, cars, source:'actual', origin:'plan_open', created_at:now, updated_at:now}); rep.railRows++; };
+  canvasEls.filter(e=>e.type==='berth'&&(e.props?.berth_type||'')==='Rail Receiving').forEach(b=>{
+    const facId=b.assigned_facility_id||b.facility_id, cap=parseFloat(b.props.car_capacity_t)||RAIL_CAR_T_DEFAULT;
+    const ry=(r.railAtRailyardHistory||{})[b.id]?.[iMorn]||{}, ly=(r.railYardHistory||{})[b.id]?.[iMorn]||{}, tr=(r.railTransitHistory||{})[b.id]?.[iMorn]||{};
+    Object.keys(ry).forEach(pid=>up('railyard_count',facId,pid,Math.round((+ry[pid]||0)/cap)));
+    Object.keys(ly).forEach(pid=>up('localyard_count',facId,pid,Math.round((+ly[pid]||0)/cap)));
+    Object.keys(tr).forEach(pid=>{
+      let t=+tr[pid]||0; if(!(t>0)) return;
+      // already represented by a copied movement that departed before 1 Jan and arrives on or after it
+      (DB.rail_movements||[]).forEach(m=>{ if(m.to_berth_id!==b.id&&m.to_facility_id!==facId) return; if((m.product_id||'')!==pid) return; if(!['Planned','Confirmed','In Transit'].includes(m.status||'')) return;
+        if(!m.departure_date||m.departure_date>=startDate) return; const arr=dateToDayOffset(m.departure_date, src.simCfg.start_date)+1+(parseInt(m.transit_days)||0); if(arr>=d) t-=(+m.total_capacity_t||0); });
+      if(t>0.5){ DB.rail_movements.push({id:`rm_open_${Date.now().toString(36)}_${b.id}_${pid}`, from_facility_id:mainCanvasFacilityId(), to_facility_id:facId, to_berth_id:b.id, product_id:pid,
+        departure_date:_plDayBefore(startDate), transit_days:1, total_capacity_t:Math.round(t), wagon_count:Math.max(1,Math.round(t/cap)), wagon_capacity_t:cap, status:'In Transit', reference:'Opening state', notes:note}); rep.railMoves++; }
+    });
+  });
+  if(rep.railMoves) w.push(`${rep.railMoves} in-transit rail lot(s) were given a 1-day remaining transit (the results do not keep the days left).`);
+  // 4 · origin yards: cars available per product at the dispatch point
+  canvasEls.filter(e=>e.type==='dispatch_point').forEach(dp=>{
+    const h=(r.railHistory||{})[dp.id]; const rec=h&&h[iMorn]; const cars=rec&&rec.carsAvailByProduct; if(!cars) return;
+    const facId=(typeof _railDpFacId==='function'?_railDpFacId(dp):null)||dp.assigned_facility_id||dp.facility_id;
+    Object.keys(cars).forEach(pid=>{ const c=Math.round(+cars[pid]||0); if(!(c>0)) return;
+      DB.real_rail_daily=(DB.real_rail_daily||[]).filter(rr=>!(rr.type==='yard_count'&&rr.date===startDate&&rr.facility_id===facId&&(rr.product_id||'')===pid));
+      DB.real_rail_daily.push({date:startDate, facility_id:facId, dispatch_id:dp.id, product_id:pid, type:'yard_count', cars:c, source:'actual', origin:'plan_open', created_at:now, updated_at:now}); rep.yards++; });
+  });
+  // 5 · one-off maintenance that straddles 1 Jan: clip to day 1 (the engine drops events that began earlier)
+  (DB.element_maintenance_events||[]).forEach(ev=>{
+    if(ev.type==='recurring'||!ev.start_date||ev.start_date>=startDate) return;
+    const dur=Math.max(1,Math.ceil(parseFloat(ev.duration_days)||1)); const s0=new Date(ev.start_date+'T12:00:00'), s1=new Date(startDate+'T12:00:00');
+    const elapsed=Math.round((s1-s0)/864e5); if(elapsed>=dur) return;
+    ev.start_date=startDate; ev.duration_days=dur-elapsed; if(ev.end_date&&ev.end_date<startDate) delete ev.end_date; ev.notes=((ev.notes||'')+' · clipped to the Planning start').trim(); rep.maint++;
+  });
+  rep.summary=`${rep.silos} silos, ${rep.vessels} vessels, ${rep.railRows} rail yard rows, ${rep.railMoves} rail lots in transit, ${rep.yards} origin-yard rows, ${rep.maint} maintenance events clipped`;
+  rep.at=now; return rep;
+}
+// Remove what a previous copy wrote, so a refresh never doubles up.
+function _plUndoOpeningState(){
+  const isOpen=o=>String(o&&(o.notes||o.reference||'')).startsWith('Opening state');
+  DB.vessel_calls=(DB.vessel_calls||[]).filter(v=>!isOpen(v));
+  DB.rail_movements=(DB.rail_movements||[]).filter(m=>!(String(m.notes||'').startsWith('Opening state')||m.reference==='Opening state'));
+  DB.real_rail_daily=(DB.real_rail_daily||[]).filter(rr=>rr.origin!=='plan_open');
+}
+// Create FLORIDA ROLL - BGT <year>: duplicate this scenario, flag it, point its simulation at the budget year, copy the opening state.
+async function planCreateScenario(){
+  if(scIsPlanning()){ statMsg('This already is a Planning scenario'); return; }
+  if(!window.showSaveFilePicker){ statMsg('This browser cannot create scenario files (Chrome/Edge required)'); return; }
+  const s=plSettings(); const year=parseInt(document.getElementById('pl-year')?.value)||s.budget_year; const startDate=`${year}-01-01`;
+  const srcId=SC.activeId, srcName=(scActive()&&scActive().name)||'Execution';
+  const chk=_plOpenCheck(S.simResults, startDate);
+  if(!chk.ok && !confirm(chk.msg+'\n\nCreate the Planning scenario anyway? The opening state will be incomplete until you refresh it from a longer source run.')) return;
+  const src={DB, simCfg:{...S.simCfg}, simResults:S.simResults};   // references: nothing is mutated before the file exists
+  const before=SC.activeId;
+  await scCreateFromCurrent(`FLORIDA ROLL - BGT ${year}`);          // the save picker runs inside this click
+  if(SC.activeId===before||!SC.activeId){ statMsg('Planning scenario not created'); return; }
+  // The new file holds a copy of the current state; now turn it into the Planning scenario.
+  S.simCfg.role='planning'; S.simCfg.plan_source_scenario_id=srcId; S.simCfg.plan_source_name=srcName;
+  S.simCfg.start_date=startDate; S.simCfg.horizonPreset='year'; S.simCfg.horizon=(_simHorizonPresets(startDate).find(p=>p.id==='year')||{days:365}).days;
+  window._scTopoSeal=null; window._scLog=_clEmpty();
+  s.budget_year=year;
+  // Shed real data that predates the budget year by more than 90 days (the Planning run never reads it).
+  const cut=new Date(startDate+'T12:00:00'); cut.setDate(cut.getDate()-90); const cutS=cut._ymd(); let shed=0;
+  LS_TRIM_90D.forEach(t=>{ const a=DB[t]; if(!Array.isArray(a)) return; const keep=a.filter(x=>!x.date||x.date>=cutS); shed+=a.length-keep.length; DB[t]=keep; });
+  const rep=planCopyOpeningState(src, startDate, srcName); s.open_report=rep;
+  S.simResults=null;
+  autoSave(); await scManualSave(); scUpdatePill(); if(typeof updateStatusBar==='function') updateStatusBar();
+  renderCfgPanel('plan'); _demandChanged();
+  statMsg(`Planning scenario created — ${rep.summary}${shed?'; '+shed+' old real-data rows left behind':''}`);
+  if(rep.warnings.length) setTimeout(()=>alert('Planning scenario created.\n\nOpening state: '+rep.summary+'\n\n⚠ '+rep.warnings.join('\n⚠ ')), 50);
+}
+async function planRefreshOpeningState(){
+  if(!scIsPlanning()){ statMsg('Only in a Planning scenario'); return; }
+  const srcId=S.simCfg.plan_source_scenario_id; const pk=await scPeekScenario(srcId,{prompt:true});
+  if(!pk){ statMsg('Could not read the source scenario file'); return; }
+  const r=pk.payload.simResults, startDate=S.simCfg.start_date, srcCfg=pk.payload.simCfg||{};
+  if(!r){ statMsg(pk.name+' has no saved simulation results — run and save it first'); return; }
+  const save=S.simCfg.start_date; S.simCfg.start_date=srcCfg.start_date||save;   // _plOpenCheck reads S.simCfg.start_date as the SOURCE start
+  const chk=_plOpenCheck(r, startDate); S.simCfg.start_date=save;
+  if(!chk.ok && !confirm(chk.msg+'\n\nRefresh anyway?')) return;
+  if(!confirm(`Replace the opening state (silo start levels, carried-over vessels, rail yard rows) with ${pk.name}'s latest simulation?`)) return;
+  _plUndoOpeningState();
+  const src={DB:pk.payload.DB, simCfg:srcCfg, simResults:r};
+  const keep=S.simCfg.start_date; S.simCfg.start_date=srcCfg.start_date||keep; let rep; try{ rep=planCopyOpeningState(src, startDate, pk.name); } finally { S.simCfg.start_date=keep; }
+  plSettings().open_report=rep; S.simResults=null; autoSave(); await scManualSave(); planRender(); _demandChanged();
+  statMsg('Opening state refreshed — '+rep.summary);
+}
+
+// ═══ P2 · Import + versions ═══════════════════════════════════════════════════
+const PL_MONTHS=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function _plNum(v){ if(v==null||v==='') return 0; if(typeof v==='number') return isFinite(v)?v:0; const n=Number(String(v).replace(/[,\s]/g,'')); return isFinite(n)?n:0; }
+function _plStr(v){ return String(v??'').trim(); }
+function _plCode(v){ const s=_plStr(v); return /^\d+(\.0+)?$/.test(s)?String(parseInt(s,10)):s; }   // 4802.0 → "4802", keeps "Adj"
+function _plAoa(buf, sheetName){
+  const wb=XLSX.read(buf,{type:'array',dense:true});
+  const names=wb.SheetNames; let sh=null;
+  if(typeof sheetName==='function') sh=names.find(sheetName); else if(sheetName) sh=names.find(x=>x.trim().toLowerCase()===String(sheetName).toLowerCase());
+  if(sheetName&&!sh) return {wb, names, sheet:null, aoa:null};
+  const ws=wb.Sheets[sh||names[0]];
+  return {wb, names, sheet:sh||names[0], aoa:XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:''})};
+}
+function _plHdrIndex(row){ return row.map(c=>_plStr(c).toLowerCase()); }
+function _plPick(hdr, ...names){ for(const nm of names){ if(nm instanceof RegExp){ const i=hdr.findIndex(h=>nm.test(h)); if(i>=0) return i; } else { const i=hdr.indexOf(nm.toLowerCase()); if(i>=0) return i; } } return -1; }
+function _plMonthCols(hdrRow, year){
+  const cols=[]; hdrRow.forEach((c,i)=>{ const s=_plStr(c); if(!s||/^fy$|^total$|^check$|^\d{4}$/i.test(s)) return; const pm=_fbParseMonthHeader(s, year); if(pm&&pm.m>=1&&pm.m<=12&&(pm.y===year||!/\d/.test(s))) cols.push({i, m:pm.m}); });
+  // one column per month, first occurrence wins
+  const seen=new Set(); return cols.filter(c=>{ if(seen.has(c.m)) return false; seen.add(c.m); return true; });
+}
+// ── External (FL): one line per draft row ────────────────────────────────────
+async function plIngestExternal(buf, name){
+  await loadLib('xlsx');
+  const s=plSettings(), year=s.budget_year;
+  const {names, sheet, aoa}=_plAoa(buf, n=>/^external\s*\(\s*fl\s*\)\s*$/i.test(n.trim()));
+  if(!aoa) throw new Error('No "External (FL)" sheet in '+name+' (sheets: '+names.join(', ')+')');
+  const h0=aoa.findIndex((r,i)=>i<15&&r.some(c=>/^sold-?\s*to\s*party$/i.test(_plStr(c)))&&r.some(c=>/^plant$/i.test(_plStr(c))));
+  if(h0<0) throw new Error('"External (FL)": header row with "Sold-to party" and "Plant" not found');
+  const hdr=_plHdrIndex(aoa[h0]);
+  const C={area:_plPick(hdr,'plant area'), ctype:_plPick(hdr,'st customer type'), csub:_plPick(hdr,'st customer subtype'), plant:_plPick(hdr,'plant'), pname:_plPick(hdr,'plant name'),
+    inco:_plPick(hdr,'incoterms','incoterm'), owner:_plPick(hdr,'st owner'), sold:_plPick(hdr,'sold-to party','sold to party','sold-to'), soldn:_plPick(hdr,'sold-to party name','sold to party name'),
+    ship:_plPick(hdr,'ship-to party','ship to party','ship-to'), shipn:_plPick(hdr,'ship-to party name','ship to party name'), pline:_plPick(hdr,'product line'), mat:_plPick(hdr,'material'), matd:_plPick(hdr,'material description'),
+    region:_plPick(hdr,'region'), district:_plPick(hdr,/^d40/,'district'), fy:_plPick(hdr,'fy')};
+  const miss=['plant','sold','ship','mat'].filter(k=>C[k]<0); if(miss.length) throw new Error('"External (FL)": missing columns '+miss.join(', '));
+  const mc=_plMonthCols(aoa[h0], year); if(mc.length!==12) throw new Error(`"External (FL)": found ${mc.length} month columns, expected 12 (Jan…Dec)`);
+  const lines=[]; let fy=0; const byPlant={}; let skipped=0;
+  aoa.slice(h0+1).forEach((r,k)=>{
+    const plant=_plCode(r[C.plant]); const sold=_plCode(r[C.sold]); const ship=_plCode(r[C.ship]); const mat=_plCode(r[C.mat]);
+    const months=PL_MONTHS.map((_,i)=>{ const c=mc.find(x=>x.m===i+1); return c?_plNum(r[c.i]):0; });
+    const tot=months.reduce((a,b)=>a+b,0);
+    if(!plant&&!sold&&!mat){ skipped++; return; }
+    if(tot===0&&!months.some(x=>x!==0)){ skipped++; return; }
+    const adj=/^adj/i.test(plant)||/^adj/i.test(mat);
+    const prospective=!sold||/^n\/?a$/i.test(sold)||/prospect/i.test(_plStr(r[C.soldn]));
+    const line={kind:'EXT', family:'cement', line_key:['EXT',sold||('~'+_plStr(r[C.shipn])),ship,plant,mat].join('|'), src_row:h0+2+k,
+      sold_to:sold, sold_to_name:_plStr(r[C.soldn]), ship_to:ship, ship_to_name:_plStr(r[C.shipn]), plant, plant_name:_plStr(r[C.pname]), material:mat, material_desc:_plStr(r[C.matd]),
+      incoterm:_plStr(r[C.inco]), cust_type:_plStr(r[C.ctype]), cust_subtype:_plStr(r[C.csub]), region:_plStr(r[C.region]), district:_plStr(r[C.district]), product_line:_plStr(r[C.pline]),
+      months, fy:Math.round(tot*1000)/1000};
+    if(adj) line.adjustment=true; if(prospective) line.prospective=true;
+    lines.push(line); fy+=tot; byPlant[plant]=(byPlant[plant]||0)+tot;
+  });
+  PL.stage.ext={file:name, sheet, year, lines, fy:Math.round(fy), byPlant, rows:aoa.length-h0-1, skipped, at:new Date().toISOString()};
+  planRender();
+  return {rowCount:lines.length, warnings:lines.some(l=>l.prospective)?[lines.filter(l=>l.prospective).length+' prospective-customer rows (no sold-to) will be classed EXT']:[]};
+}
+// ── RMX workbook: Cem_Use / Slag_Use / FA_Use, Florida rows, K ST → ST ────────
+async function plIngestRmx(buf, name){
+  await loadLib('xlsx');
+  const s=plSettings(), year=s.budget_year, regions=(s.rmx_regions||[]).map(x=>x.toLowerCase());
+  const want={cem_use:'cement', slag_use:'slag', fa_use:'ash'}; const wb=XLSX.read(buf,{type:'array',dense:true});
+  const lines=[], perFam={}, warnings=[]; let unitWarn=[];
+  Object.keys(want).forEach(key=>{
+    const fam=want[key]; const sh=wb.SheetNames.find(x=>x.trim().toLowerCase()===key); if(!sh){ warnings.push('sheet '+key+' not found'); return; }
+    const aoa=XLSX.utils.sheet_to_json(wb.Sheets[sh],{header:1,raw:true,defval:''});
+    const h0=aoa.findIndex((r,i)=>i<30&&r.some(c=>/^plant\s*#?$/i.test(_plStr(c)))&&r.some(c=>/^region$/i.test(_plStr(c))));
+    if(h0<0){ warnings.push(sh+': header row with "Plant #" and "Region" not found'); return; }
+    const hdr=_plHdrIndex(aoa[h0]);
+    const cRegion=_plPick(hdr,'region'), cDistrict=_plPick(hdr,'district'), cMarket=_plPick(hdr,'market'), cPlant=_plPick(hdr,/^plant\s*#?$/), cName=_plPick(hdr,'plant name');
+    // months are on the row above the "Bdgt" row in this layout: search the header row and the two above it
+    let mc=[]; for(let i=h0;i>=Math.max(0,h0-2)&&mc.length<12;i--) mc=_plMonthCols(aoa[i], year);
+    if(mc.length!==12){ warnings.push(sh+': '+mc.length+' month columns found'); return; }
+    // unit header: the sheet says "(K ST)" above the month row — refuse anything else
+    const unitCell=aoa.slice(Math.max(0,h0-4),h0+1).flat().map(_plStr).find(c=>/volume\s*\(/i.test(c));
+    if(unitCell&&!/\(\s*k\s*st\s*\)/i.test(unitCell)) unitWarn.push(sh+' header says "'+unitCell+'" — expected "(K ST)"; values were still multiplied by 1,000');
+    let region='', district=''; let nPl=0, fam_t=0;
+    aoa.slice(h0+1).forEach(r=>{
+      if(_plStr(r[cRegion])) region=_plStr(r[cRegion]); if(_plStr(r[cDistrict])) district=_plStr(r[cDistrict]);
+      const code=_plCode(r[cPlant]); if(!code||!/^\d{3,5}$/.test(code)) return;
+      if(regions.length&&!regions.includes(region.toLowerCase())) return;
+      const months=PL_MONTHS.map((_,i)=>{ const c=mc.find(x=>x.m===i+1); return c?_plNum(r[c.i])*1000:0; });   // THOUSANDS of short tons → short tons
+      const tot=months.reduce((a,b)=>a+b,0); if(!(tot>0)&&!months.some(x=>x>0)) return;
+      lines.push({kind:'INT', family:fam, line_key:['INT',fam,code].join('|'), rmx_plant:code, rmx_name:_plStr(r[cName]), region, district, market:_plStr(r[cMarket]), months, fy:tot});
+      nPl++; fam_t+=tot;
+    });
+    perFam[fam]={plants:nPl, fy:Math.round(fam_t), sheet:sh};
+  });
+  if(!lines.length) throw new Error('RMX workbook: no Florida plant rows found ('+(warnings.join('; ')||'check the sheet names')+')');
+  PL.stage.rmx={file:name, year, lines, perFam, at:new Date().toISOString(), warnings:warnings.concat(unitWarn)};
+  planRender();
+  return {rowCount:lines.length, warnings:warnings.concat(unitWarn)};
+}
+// ── Sales history (Detail) → compact month × sold-to × ship-to × demand point index ──
+async function plIngestDetail(buf, name){
+  await loadLib('xlsx');
+  const {names, sheet, aoa}=_plAoa(buf, n=>/salesdetailed/i.test(n));
+  const A=aoa||_plAoa(buf).aoa;
+  const h0=A.findIndex((r,i)=>i<10&&r.some(c=>/^inv_roll_name$/i.test(_plStr(c)))); if(h0<0) throw new Error('Detail: INV_ROLL_NAME column not found');
+  const hdr=_plHdrIndex(A[h0]);
+  const cS=_plPick(hdr,'sold-to','sold to'), cSn=_plPick(hdr,'sold-to name','sold to name'), cH=_plPick(hdr,'ship-to','ship to'), cHn=_plPick(hdr,'ship-to name','ship to name'),
+        cP=_plPick(hdr,'ship pt','ship point'), cD=_plPick(hdr,'delivery date'), cQ=_plPick(hdr,'report qty'), cN=_plPick(hdr,'inv_roll_name'), cL=_plPick(hdr,'loads');
+  if(cS<0||cH<0||cD<0||cQ<0) throw new Error('Detail: missing one of Sold-To / Ship-To / Delivery Date / Report Qty');
+  const agg=new Map(); let dmin=null, dmax=null, nrows=0; const names_={};
+  for(let i=h0+1;i<A.length;i++){ const r=A[i]; const ds=_dsSalesYmd(r[cD]); if(!ds) continue; const q=_plNum(r[cQ]); if(!q) continue;
+    const ym=ds.slice(0,7); const sold=_plCode(r[cS]), ship=_plCode(r[cH]), dp=_plStr(r[cN]); if(!dp) continue;
+    const k=ym+'\u001f'+sold+'\u001f'+ship+'\u001f'+dp; let a=agg.get(k); if(!a){ a={ym, sold_to:sold, ship_to:ship, dp_name:dp, q:0, loads:0, sp:_plCode(r[cP])}; agg.set(k,a); }
+    a.q+=q; a.loads+=cL>=0?_plNum(r[cL]):(q>0?1:0); nrows++;
+    if(cSn>=0&&r[cSn]) names_['s'+sold]=_plStr(r[cSn]); if(cHn>=0&&r[cHn]) names_['h'+ship]=_plStr(r[cHn]);
+    if(!dmin||ds<dmin) dmin=ds; if(!dmax||ds>dmax) dmax=ds; }
+  const rows=[...agg.values()].filter(a=>a.q>0).map(a=>({...a, q:Math.round(a.q*10)/10}));
+  PL.hist={file:{name, sheet:sheet||names[0]}, rows, names:names_, dateMin:dmin, dateMax:dmax, srcRows:nrows, at:new Date().toISOString()};
+  try{ await dsSaveHandle('planDetail:index', PL.hist); }catch(e){ console.warn('plan hist save', e); }
+  planRender();
+  return {rowCount:rows.length, dateMin:dmin, dateMax:dmax, warnings:[]};
+}
+async function plHistLoad(){ if(PL.hist) return PL.hist; try{ const h=await dsLoadHandle('planDetail:index'); if(h&&h.rows){ PL.hist=h; return h; } }catch(e){} return null; }
+// ── versions ──────────────────────────────────────────────────────────────────
+function plVersions(){ return (DB.plan_versions=DB.plan_versions||[]); }
+function plActiveVersion(){ return plVersions().find(v=>v.status==='active')||null; }
+function plVersionLines(vid){ return (DB.plan_lines||[]).filter(l=>l.version_id===vid); }
+function plCreateVersion(){
+  const ext=PL.stage.ext, rmx=PL.stage.rmx;
+  if(!ext||!rmx){ statMsg('Load both budget workbooks first (External and RMX)'); return; }
+  const label=(document.getElementById('plv-label')?.value||'').trim()||('Upload '+new Date().toISOString().slice(0,10));
+  const note=(document.getElementById('plv-note')?.value||'').trim();
+  const s=plSettings(); const id='pv_'+Date.now().toString(36); const now=new Date().toISOString();
+  const v={id, kind:'budget', year:s.budget_year, label, status:plActiveVersion()?'draft':'active', uploaded_at:now, uploaded_by:_plWho(),
+    source_files:[{slot:'planExternal', name:ext.file, sheet:ext.sheet, rows:ext.lines.length, fy_t:ext.fy},{slot:'planRmx', name:rmx.file, sheet:Object.values(rmx.perFam).map(f=>f.sheet).join(', '), rows:rmx.lines.length, fy_t:Math.round(rmx.lines.reduce((a,l)=>a+l.fy,0))}],
+    note, generated_at:null, generated_hash:null, stale:false};
+  plVersions().push(v);
+  if(!Array.isArray(DB.plan_lines)) DB.plan_lines=[];
+  let k=0; ext.lines.concat(rmx.lines).forEach(l=>{ DB.plan_lines.push({id:`pl_${id}_${++k}`, version_id:id, ...l}); });
+  PL.tr={}; autoSave(); planRender(); statMsg(`Version "${label}" created — ${ext.lines.length} external + ${rmx.lines.length} internal lines`);
+}
+function plSetActiveVersion(id){ plVersions().forEach(v=>{ if(v.status==='active') v.status='draft'; }); const v=plVersions().find(x=>x.id===id); if(v) v.status='active'; autoSave(); planRender(); }
+function plArchiveVersion(id){ const v=plVersions().find(x=>x.id===id); if(!v) return; v.status=v.status==='archived'?'draft':'archived'; autoSave(); planRender(); }
+function plDeleteVersion(id){ const v=plVersions().find(x=>x.id===id); if(!v||v.status==='active'){ statMsg('Make another version active first'); return; }
+  if(!confirm(`Delete version "${v.label}" and its ${plVersionLines(id).length} lines? Keys and persistent rules stay.`)) return;
+  DB.plan_versions=plVersions().filter(x=>x.id!==id); DB.plan_lines=(DB.plan_lines||[]).filter(l=>l.version_id!==id); DB.plan_demand=(DB.plan_demand||[]).filter(p=>p.version_id!==id);
+  DB.norm_rules=(DB.norm_rules||[]).filter(r=>r.version_id!==id); DB.alloc_keys=(DB.alloc_keys||[]).filter(r=>r.version_id!==id); autoSave(); planRender(); }
+// ── translation of a line to a demand point (Demand Mapping's engine) ─────────
+function PL_DEM_SHIP_TYPE(){ if(!XLMAP) xlmapLoad(); const m=(XLMAP.movements||[]).find(r=>String(r.movement||'').toUpperCase()==='DEM'&&r.action!=='park'&&r.action!=='ignore'); return m?m.ship_type:'SALES'; }
+function plTranslateLine(line){
+  if(!XLMAP) xlmapLoad();
+  const t=xlmapTranslate({ship_pt:line.plant, material:line.material, sold_to:line.sold_to, ship_type:PL_DEM_SHIP_TYPE()});
+  let name=t.finalName, cls=t.parts&&t.parts.class;
+  if(line.prospective&&t.parts&&t.parts.source&&t.parts.product){ t.parts.class='EXT'; cls='EXT'; name=xlmapName(t.parts); }
+  const el=name?xlmapFindDp(name):null;
+  const missing=(t.missing||[]).slice(); if(!el&&name&&t.mapped) missing.push('demand point '+name+' is not in the topology');
+  return {dp_name:name||'', element_id:el?el.id:null, mapped:!!(t.mapped&&el), missing, inactive:!!(el&&el.is_active===false), purchased:!!(el&&plIsPurchasedDp(el)), cls, action:t.action, source:t.parts&&t.parts.source, product:t.parts&&t.parts.product, pres:t.parts&&t.parts.presentation};
+}
+function plLineTarget(line){ const k=line.line_key; if(PL.tr[k]) return PL.tr[k]; return (PL.tr[k]=plTranslateLine(line)); }
+function plVersionStats(v){
+  const L=plVersionLines(v.id); const st={ext:{n:0,fy:0,mapped:0,fyMapped:0,inactive:0,purchased:0,missing:{}}, int:{}};
+  L.forEach(l=>{ if(l.kind==='EXT'){ const t=plLineTarget(l); st.ext.n++; st.ext.fy+=l.fy; if(t.mapped){ st.ext.mapped++; st.ext.fyMapped+=l.fy; } else { (t.missing.length?t.missing:['unmapped']).forEach(m=>{ const key=m.replace(/\d{5,}/g,'#').slice(0,80); st.ext.missing[key]=(st.ext.missing[key]||0)+l.fy; }); }
+      if(t.inactive) st.ext.inactive++; if(t.purchased) st.ext.purchased++; }
+    else { const f=st.int[l.family]=st.int[l.family]||{n:0,fy:0}; f.n++; f.fy+=l.fy; } });
+  return st;
+}
+// File-level difference between two versions, per line_key (keys/rules effect is added in P4).
+function plVersionDiff(aId, bId){
+  const A=new Map(plVersionLines(aId).map(l=>[l.line_key,l])), B=new Map(plVersionLines(bId).map(l=>[l.line_key,l])); const rows=[];
+  new Set([...A.keys(),...B.keys()]).forEach(k=>{ const a=A.get(k), b=B.get(k); const fa=a?a.fy:0, fb=b?b.fy:0; if(Math.abs(fa-fb)<0.5&&a&&b&&a.months.every((x,i)=>Math.abs(x-b.months[i])<0.5)) return;
+    const l=b||a; rows.push({key:k, kind:l.kind, label:l.kind==='EXT'?`${l.sold_to_name||l.sold_to} → ${l.ship_to_name||l.ship_to} · ${l.plant_name||l.plant} · ${l.material_desc||l.material}`:`${l.family} · ${l.rmx_plant} ${l.rmx_name}`, fa, fb, d:fb-fa, status:!a?'new':!b?'gone':'changed'}); });
+  rows.sort((x,y)=>Math.abs(y.d)-Math.abs(x.d)); return rows;
+}
+function plShowDiff(){ const a=document.getElementById('plv-a')?.value, b=document.getElementById('plv-b')?.value; if(!a||!b||a===b){ statMsg('Pick two different versions'); return; } PL.ui.diff={a,b}; planRender(); }
+// ═══ P3 · Allocation keys, normalisation rules, flags ═══════════════════════════
+function _plYmAdd(ym, k){ const [y,m]=ym.split('-').map(Number); const d=new Date(y, m-1+k, 1); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }
+function _plYmRange(fromYm, toYm){ const out=[]; let ym=fromYm; let g=0; while(ym<=toYm&&g++<600){ out.push(ym); ym=_plYmAdd(ym,1); } return out; }
+// Anchor = the last COMPLETE month of the history; window = n months back, most recent first.
+function plHistAnchor(){ const h=PL.hist; if(!h||!h.dateMax) return null; const d=h.dateMax; const last=new Date(+d.slice(0,4), +d.slice(5,7), 0).getDate(); return +d.slice(8,10)>=last?d.slice(0,7):_plYmAdd(d.slice(0,7),-1); }
+function plHistWindow(nMonths){ const a=plHistAnchor(); if(!a) return []; const out=[]; for(let i=0;i<nMonths;i++) out.push(_plYmAdd(a,-i)); return out; }
+function _plHistIndex(){
+  const h=PL.hist; if(!h) return null; if(h._idx&&h._idx.n===h.rows.length) return h._idx;
+  const bySold=new Map(), byShip=new Map(), byDp=new Map();
+  h.rows.forEach(r=>{ (bySold.get(r.sold_to)||bySold.set(r.sold_to,[]).get(r.sold_to)).push(r); (byShip.get(r.ship_to)||byShip.set(r.ship_to,[]).get(r.ship_to)).push(r); (byDp.get(r.dp_name)||byDp.set(r.dp_name,[]).get(r.dp_name)).push(r); });
+  return (h._idx={n:h.rows.length, bySold, byShip, byDp});
+}
+// Family of a demand point name: topology product first, name tokens as the fallback (history names may predate the topology).
+function plFamilyOfName(name){
+  const c=PL._famCache=PL._famCache||{}; if(c[name]) return c[name];
+  let fam=null; const el=xlmapFindDp(name);
+  if(el){ const dp=(DB.demand_points||[]).find(d=>d.element_id===el.id); const pid=dp&&dp.products&&dp.products[0]&&dp.products[0].product_id; const p=pid&&(DB.products||[]).find(x=>x.id===pid);
+    if(p){ if(p.category==='additive') fam=/slag|slg/i.test(p.scm_type||p.name)?'slag':/ash/i.test(p.scm_type||p.name)?'ash':'other'; else if(/^cement/.test(p.category||'')) fam='cement'; } }
+  if(!fam){ const prod=(name.split('/')[2]||name).toUpperCase(); fam=/SLG|SLAG|GGBS/.test(prod)?'slag':/ASH|FLY/.test(prod)?'ash':/WHT|OFFSPEC|CLK|CLINKER/.test(prod)?'other':'cement'; }
+  return (c[name]=fam);
+}
+// Purchased supply: the point's facility is purchased, or its product is third-party cement sold from our terminal (P0 marker), or — for
+// history names with no topology point — the source facility is purchased / the product is a known third-party brand.
+function plIsPurchasedName(name){
+  const el=xlmapFindDp(name); if(el) return plIsPurchasedDp(el);
+  const srcName=name.split('/')[0]; const fac=_plFacByName(srcName); if(fac) return isPurchasedFac(fac);
+  return /^(EXT|HEI)/i.test(srcName)||PL_PURCHASED_HINT.test(name.split('/')[2]||'');
+}
+function _plDpShort(name){ const p=String(name||'').split('/'); if(p.length<5) return name; return p[0]+'/'+p[2]+(p[3]&&p[3]!=='BLK'?'/'+p[3]:'')+'/'+p[4]; }
+function plRules(){ return (DB.norm_rules=DB.norm_rules||[]); }
+function plKeys(){ return (DB.alloc_keys=DB.alloc_keys||[]); }
+function _plWeights(months, weights){ return months.map((ym,i)=>weights[Math.min(i, weights.length-1)]??1); }
+// Weighted shares of v[dp][ym] over the window (months recent-first, weights aligned).
+function plShares(v, months, weights){
+  const w=_plWeights(months, weights); const s={}; let tot=0;
+  Object.keys(v).forEach(dp=>{ let x=0; months.forEach((ym,i)=>{ x+=(v[dp][ym]||0)*w[i]; }); if(x>0){ s[dp]=x; tot+=x; } });
+  Object.keys(s).forEach(dp=>{ s[dp]=s[dp]/tot; }); return {shares:s, weighted_t:tot};
+}
+function _plMixOver(rows, fam, excludeDp, months){
+  // a customer's own mix over the other points of the family in the given months (rows = that customer's history)
+  const v={}; let t=0; rows.forEach(r=>{ if(!months.includes(r.ym)) return; if(r.dp_name===excludeDp) return; if(plFamilyOfName(r.dp_name)!==fam) return; if(fam==='cement'&&plIsPurchasedName(r.dp_name)) return; v[r.dp_name]=(v[r.dp_name]||0)+r.q; t+=r.q; });
+  if(!(t>0)) return null; Object.keys(v).forEach(k=>{ v[k]=v[k]/t; }); return v;
+}
+// Pre-window mix: the months before `fromYm` (pre_purchase_months, widened to 6, then everything before).
+function plPreWindowMix(rows, fam, excludeDp, fromYm, s){
+  s=s||plSettings(); const n=s.pre_purchase_months||3;
+  const tries=[_plYmRange(_plYmAdd(fromYm,-n), _plYmAdd(fromYm,-1)), _plYmRange(_plYmAdd(fromYm,-6), _plYmAdd(fromYm,-1)), _plYmRange('2000-01', _plYmAdd(fromYm,-1))];
+  for(const months of tries){ const mix=_plMixOver(rows, fam, excludeDp, months); if(mix) return {mix, months:[months[0], months[months.length-1]]}; }
+  return null;
+}
+// Apply purchase + substitution rules to one customer's v[dp][ym]. Shipments are never edited — this works on a copy.
+function plApplyRules(v, custRows, customer, fam, months, s){
+  s=s||plSettings(); const out={}; Object.keys(v).forEach(dp=>{ out[dp]={...v[dp]}; });
+  const applied=[], notes=[]; let removed=0, unallocated=0;
+  const moveTo=(mix, fromDp, ym, t)=>{ if(!mix){ unallocated+=t; return; } Object.keys(mix).forEach(dp=>{ out[dp]=out[dp]||{}; out[dp][ym]=(out[dp][ym]||0)+t*mix[dp]; }); };
+  // 1 · cement purchase rule (D20): purchased points → the plant's own mix before the purchases began
+  if(fam==='cement'){
+    const purchased=Object.keys(out).filter(dp=>plIsPurchasedName(dp));
+    const ruleOff=plRules().some(r=>r.type==='purchase'&&r.customer===customer&&r.enabled===false);
+    if(purchased.length&&!ruleOff){
+      let f=null; months.slice().reverse().forEach(ym=>{ if(f) return; if(purchased.some(dp=>(out[dp][ym]||0)>0)) f=ym; });
+      if(f){ const pre=plPreWindowMix(custRows, fam, null, f, s);
+        purchased.forEach(dp=>{ months.forEach(ym=>{ const t=out[dp][ym]||0; if(!(t>0)) return; removed+=t; out[dp][ym]=0; moveTo(pre&&pre.mix, dp, ym, t); }); delete out[dp]; });
+        applied.push('purchase:'+customer); notes.push(`purchases from ${f} re-split by the ${pre?pre.months[0]+'…'+pre.months[1]:'(no own history — unallocated)'} mix`);
+        const id='nr_purchase_'+customer; let r=plRules().find(x=>x.id===id); if(!r){ r={id, kind:'budget', type:'purchase', auto:true, customer, dp_name:'*purchased cement*', from:f, to:months[0], target:'pre_window_mix', decided:'exception', apply_to:['history'], enabled:true, created_by:'auto', created_at:new Date().toISOString(), note:''}; plRules().push(r); } else { r.from=f; r.to=months[0]; }
+      } }
+  }
+  // 2 · declared substitution windows (D22), oldest first
+  plRules().filter(r=>r.type==='substitution'&&r.enabled!==false&&(r.apply_to||[]).includes('history')&&(!r.customer||String(r.customer)===String(customer))&&out[r.dp_name])
+    .sort((a,b)=>String(a.created_at).localeCompare(String(b.created_at))).forEach(r=>{
+      let moved=0; const mixNamed=r.target&&typeof r.target==='object'&&r.target.dp_name?{[r.target.dp_name]:1}:null;
+      const pre=mixNamed?null:plPreWindowMix(custRows, fam, r.dp_name, r.from, s);
+      months.forEach(ym=>{ if(ym<r.from||ym>r.to) return; const t=out[r.dp_name][ym]||0; if(!(t>0)) return; out[r.dp_name][ym]=0; moved+=t; moveTo(mixNamed||(pre&&pre.mix), r.dp_name, ym, t); });
+      if(moved>0){ removed+=moved; applied.push(r.id); notes.push(`${_plDpShort(r.dp_name)} ${r.from}…${r.to} → ${mixNamed?_plDpShort(r.target.dp_name):'pre-window mix'} (${Math.round(moved)} t)`); }
+    });
+  Object.keys(out).forEach(dp=>{ if(!months.some(ym=>(out[dp][ym]||0)>0)) delete out[dp]; });
+  return {v:out, applied, notes, removed_t:removed, unallocated_t:unallocated};
+}
+// ── internal key for one RMX plant × family ───────────────────────────────────
+function plComputeIntKey(rmxPlant, fam, opts){
+  opts=opts||{}; const s=plSettings(); const idx=_plHistIndex(); if(!idx) return null;
+  const months=plHistWindow(opts.months||s.window_months); const weights=opts.weights||s.weights||[1]; const floor=opts.floor!=null?opts.floor:s.floor;
+  const custRows=idx.byShip.get(String(rmxPlant))||[];
+  const v={}; custRows.forEach(r=>{ if(!months.includes(r.ym)) return; if(plFamilyOfName(r.dp_name)!==fam) return; v[r.dp_name]=v[r.dp_name]||{}; v[r.dp_name][r.ym]=(v[r.dp_name][r.ym]||0)+r.q; });
+  if(!Object.keys(v).length) return null;
+  const raw=plShares(v, months, weights);
+  const norm=plApplyRules(v, custRows, String(rmxPlant), fam, months, s);
+  const ns=plShares(norm.v, months, weights);
+  let kept=Object.entries(ns.shares).filter(([,x])=>x>=floor); if(!kept.length) kept=Object.entries(ns.shares).sort((a,b)=>b[1]-a[1]).slice(0,1);
+  const kt=kept.reduce((a,[,x])=>a+x,0);
+  const targets=kept.sort((a,b)=>b[1]-a[1]).map(([dp,x])=>({dp_name:dp, element_id:(xlmapFindDp(dp)||{}).id||null, share:Math.round(x/kt*10000)/10000}));
+  return {id:'ak_INT|'+fam+'|'+rmxPlant, kind:'budget', scope:{kind:'INT', rmx_plant:String(rmxPlant), family:fam}, targets, floor,
+    window:{anchor:months[0], months:months.length, weights:weights.slice(0,months.length)},
+    provenance:{raw_targets:Object.entries(raw.shares).sort((a,b)=>b[1]-a[1]).map(([dp,x])=>({dp_name:dp, share:Math.round(x*10000)/10000})), norm_targets:Object.entries(ns.shares).sort((a,b)=>b[1]-a[1]).map(([dp,x])=>({dp_name:dp, share:Math.round(x*10000)/10000})),
+      rules_applied:norm.applied, notes:norm.notes, purchased_removed_t:Math.round(norm.removed_t), unallocated_t:Math.round(norm.unallocated_t), window_t:Math.round(raw.weighted_t),
+      history:{file:PL.hist.file.name, dateMin:PL.hist.dateMin, dateMax:PL.hist.dateMax}, computed_at:new Date().toISOString()},
+    status:'computed', version_id:null};
+}
+function plKeyFor(rmxPlant, fam){ return plKeys().find(k=>k.scope&&k.scope.kind==='INT'&&k.scope.rmx_plant===String(rmxPlant)&&k.scope.family===fam)||null; }
+// Compute (or refresh) every internal key the active version needs; edited / copied keys are kept unless force.
+function plComputeAllIntKeys(force){
+  const v=plActiveVersion(); if(!v){ statMsg('No active version'); return; } if(!PL.hist){ statMsg('Load the sales history (Detail) first'); return; }
+  let n=0, kept=0, none=0;
+  plVersionLines(v.id).filter(l=>l.kind==='INT').forEach(l=>{
+    const cur=plKeyFor(l.rmx_plant, l.family);
+    if(cur&&!force&&(cur.status==='edited'||cur.status==='copied')){ kept++; return; }
+    const k=plComputeIntKey(l.rmx_plant, l.family);
+    if(!k){ none++; if(cur&&cur.status==='computed'){ DB.alloc_keys=plKeys().filter(x=>x.id!==cur.id); } return; }
+    if(cur){ Object.assign(cur, k, {status:'computed', edited_by:null, edited_at:null, copied_from:null}); } else plKeys().push(k); n++;
+  });
+  autoSave(); planRender(); statMsg(`Keys: ${n} computed, ${kept} kept as edited/copied, ${none} plants without history`);
+}
+function plSisterCandidates(line){
+  const v=plActiveVersion(); const L=plVersionLines(v.id).filter(l=>l.kind==='INT'&&l.family===line.family&&l.rmx_plant!==line.rmx_plant&&plKeyFor(l.rmx_plant,l.family));
+  const score=l=>(l.market===line.market?0:l.district===line.district?1:2)*1e9+Math.abs(l.fy-line.fy);
+  return L.sort((a,b)=>score(a)-score(b)).slice(0,6);
+}
+function plCopyKey(rmxPlant, fam, fromPlant){
+  const srcK=plKeyFor(fromPlant, fam); if(!srcK){ statMsg('Source plant has no key'); return; }
+  const k=JSON.parse(JSON.stringify(srcK)); k.id='ak_INT|'+fam+'|'+rmxPlant; k.scope={kind:'INT', rmx_plant:String(rmxPlant), family:fam}; k.status='copied'; k.copied_from=String(fromPlant); k.edited_by=_plWho(); k.edited_at=new Date().toISOString();
+  const cur=plKeyFor(rmxPlant, fam); if(cur) Object.assign(cur, k); else plKeys().push(k); autoSave(); planRender();
+}
+function plEditKey(id){ PL.ui.editKey=PL.ui.editKey===id?null:id; planRender(); }
+function plSaveKeyEdit(id){
+  const k=plKeys().find(x=>x.id===id); if(!k) return; const inputs=[...document.querySelectorAll(`[data-key='${id}'][data-dp]`)];
+  const t=inputs.map(i=>({dp_name:i.dataset.dp, element_id:(xlmapFindDp(i.dataset.dp)||{}).id||null, share:Math.max(0,parseFloat(i.value)||0)/100})).filter(x=>x.share>0);
+  const sum=t.reduce((a,x)=>a+x.share,0); if(!t.length||Math.abs(sum-1)>0.005){ statMsg(`Shares must add up to 100% (now ${Math.round(sum*100)}%)`); return; }
+  const add=document.getElementById('plk-add-'+id.replace(/[^a-z0-9]/gi,'_'))?.value; if(add&&!t.some(x=>x.dp_name===add)) { statMsg('Set a share for the added point, then save'); }
+  k.targets=t.sort((a,b)=>b.share-a.share); k.status='edited'; k.edited_by=_plWho(); k.edited_at=new Date().toISOString(); PL.ui.editKey=null; autoSave(); planRender();
+}
+function plKeyAddTarget(id){ const k=plKeys().find(x=>x.id===id); const sel=document.getElementById('plk-add-'+id.replace(/[^a-z0-9]/gi,'_')); const dp=sel&&sel.value; if(!k||!dp) return; if(!k.targets.some(t=>t.dp_name===dp)) k.targets.push({dp_name:dp, element_id:(xlmapFindDp(dp)||{}).id||null, share:0}); planRender(); }
+function plRecomputeKey(id){ const k=plKeys().find(x=>x.id===id); if(!k) return; const nk=plComputeIntKey(k.scope.rmx_plant, k.scope.family); if(!nk){ statMsg('No history for this plant'); return; } Object.assign(k, nk, {status:'computed', edited_by:null, edited_at:null, copied_from:null}); autoSave(); planRender(); }
+// ── external evidence, flags, effective target ───────────────────────────────
+function plExtEvidence(soldTo, dpName){
+  const idx=_plHistIndex(); if(!idx) return null; const months=plHistWindow(12); const rows=(idx.bySold.get(String(soldTo))||[]).filter(r=>months.includes(r.ym));
+  const tot=rows.reduce((a,r)=>a+r.q,0); const on=rows.filter(r=>r.dp_name===dpName); const t=on.reduce((a,r)=>a+r.q,0);
+  const ms=[...new Set(on.map(r=>r.ym))].sort(); const custMs=[...new Set(rows.map(r=>r.ym))].sort();
+  return {t:Math.round(t), tot:Math.round(tot), share:tot?t/tot:0, months_active:ms.length, first_ym:ms[0]||null, last_ym:ms[ms.length-1]||null, cust_months:custMs.length, cust_first:custMs[0]||null, anchor:months[0]};
+}
+function plFlagExtLine(line, t, ev, splitPairs){
+  const s=plSettings(); const f=[];
+  if(line.adjustment) f.push('adjustment'); if(line.prospective) f.push('prospective');
+  if(!t.mapped){ (t.missing||[]).forEach(m=>{ f.push(/demand point/.test(m)?'dp_missing':/material/.test(m)?'material_unmapped':/ship point/.test(m)?'ship_point_unmapped':'unmapped'); }); if(!t.missing||!t.missing.length) f.push('unmapped'); }
+  if(t.inactive) f.push('dp_inactive'); if(t.purchased) f.push('purchased_dp');
+  if(splitPairs&&splitPairs.has(line.ship_to+'|'+line.material)) f.push('split_pair');
+  if(ev&&!line.prospective){
+    if(ev.tot===0) f.push('new_customer'); else if(ev.t===0) f.push('no_history');
+    else { if(ev.share*100<s.low_share_pct) f.push('low_share'); if(ev.months_active<=s.short_window_months&&ev.cust_months>=6) f.push('short_window');
+      if(ev.first_ym&&ev.cust_first&&ev.first_ym>ev.cust_first&&ev.first_ym>=_plYmAdd(ev.anchor,-5)) f.push('recent_first'); }
+  }
+  return [...new Set(f)];
+}
+function _plSplitPairs(vid){ const m=new Map(); plVersionLines(vid).filter(l=>l.kind==='EXT').forEach(l=>{ const k=l.ship_to+'|'+l.material; (m.get(k)||m.set(k,new Set()).get(k)).add(l.plant); }); return new Set([...m.entries()].filter(([,v])=>v.size>1).map(([k])=>k)); }
+// Effective targets of an external line: translation → row reassignment (D21/D24) → substitution rules on the draft (D22). Returns [{dp_name, element_id, share}] or [] when excluded.
+function plEffectiveExtTarget(line){
+  const t=plLineTarget(line); const v=plActiveVersion(); const vid=v&&v.id;
+  let targets=t.dp_name?[{dp_name:t.dp_name, element_id:t.element_id, share:1}]:[]; let via=null;
+  const rr=plRules().filter(r=>(r.type==='reassign'||r.type==='exclude')&&r.line_key===line.line_key&&r.enabled!==false&&(!r.version_id||r.version_id===vid)).sort((a,b)=>(b.version_id?1:0)-(a.version_id?1:0));
+  if(rr.length){ const r=rr[0]; if(r.type==='exclude') return {targets:[], via:'excluded', rule:r}; if(r.target&&r.target.dp_name) targets=[{dp_name:r.target.dp_name, element_id:(xlmapFindDp(r.target.dp_name)||{}).id||null, share:1}]; via='reassigned'; }
+  if(!via&&targets.length){
+    const idx=_plHistIndex(); const dp=targets[0].dp_name;
+    const sub=plRules().filter(r=>r.type==='substitution'&&r.enabled!==false&&(r.apply_to||[]).includes('draft')&&r.dp_name===dp&&(!r.customer||String(r.customer)===String(line.sold_to))&&(!r.version_id||r.version_id===vid));
+    if(sub.length){ const r=sub[sub.length-1]; let mix=null;
+      if(r.target&&typeof r.target==='object'&&r.target.dp_name) mix={[r.target.dp_name]:1};
+      else if(idx){ const rows=idx.bySold.get(String(line.sold_to))||[]; const pre=plPreWindowMix(rows, plFamilyOfName(dp), dp, r.from); mix=pre&&pre.mix; }
+      if(mix){ targets=Object.entries(mix).map(([d,x])=>({dp_name:d, element_id:(xlmapFindDp(d)||{}).id||null, share:x})); via='rule:'+r.id; } else via='rule-no-mix'; }
+  }
+  return {targets, via};
+}
+function plConfirmLine(key, on){ const s=plSettings(); s.reviewed=s.reviewed||{}; if(on) s.reviewed[key]={at:new Date().toISOString(), by:_plWho()}; else delete s.reviewed[key]; autoSave(); planRender(); }
+function plReassignLine(key){
+  const sel=document.getElementById('plr-dp-'+_plSafe(key)); const dp=sel&&sel.value; const scope=document.getElementById('plr-scope-'+_plSafe(key))?.value||'persistent'; if(!dp){ statMsg('Pick a demand point'); return; }
+  const v=plActiveVersion(); DB.norm_rules=plRules().filter(r=>!((r.type==='reassign'||r.type==='exclude')&&r.line_key===key));
+  plRules().push({id:'nr_'+Date.now().toString(36), kind:'budget', type:dp==='__exclude__'?'exclude':'reassign', line_key:key, target:dp==='__exclude__'?null:{dp_name:dp, element_id:(xlmapFindDp(dp)||{}).id||null}, version_id:scope==='this'?v.id:null, enabled:true, created_by:_plWho(), created_at:new Date().toISOString(), note:''});
+  plConfirmLine(key, true);
+}
+function _plSafe(k){ return String(k).replace(/[^a-z0-9]/gi,'_'); }
+// ── candidates (D23): points that appear after silent months in the last 12 months ──
+function plProposeCandidates(){
+  const idx=_plHistIndex(); if(!idx) return []; const s=plSettings(); const months=plHistWindow(12).slice().reverse(); const out=[]; const dec=(s.decisions||{});
+  idx.byDp.forEach((rows, dp)=>{
+    const byM={}; rows.forEach(r=>{ if(months.includes(r.ym)) byM[r.ym]=(byM[r.ym]||0)+r.q; });
+    const act=months.map(ym=>byM[ym]||0); const first=act.findIndex(x=>x>0); if(first<s.silent_months) return;
+    const t=act.reduce((a,b)=>a+b,0); if(!(t>0)) return;
+    const cust={}; rows.forEach(r=>{ if(months.includes(r.ym)){ const k=r.sold_to; cust[k]=cust[k]||{t:0, ms:new Set()}; cust[k].t+=r.q; cust[k].ms.add(r.ym); } });
+    const custs=Object.entries(cust).map(([k,c])=>({sold_to:k, name:(PL.hist.names||{})['s'+k]||k, t:Math.round(c.t), months:c.ms.size})).sort((a,b)=>b.t-a.t);
+    out.push({dp, from:months[first], to:months[months.length-1], t:Math.round(t), active:act.filter(x=>x>0).length, customers:custs, decided:dec[dp]||null, purchased:plIsPurchasedName(dp)});
+  });
+  return out.sort((a,b)=>b.t-a.t);
+}
+function plDecideCandidate(dp, what){
+  const s=plSettings(); s.decisions=s.decisions||{}; const c=plProposeCandidates().find(x=>x.dp===dp);
+  if(what==='exception'&&c){ plRules().push({id:'nr_'+Date.now().toString(36), kind:'budget', type:'substitution', dp_name:dp, element_id:(xlmapFindDp(dp)||{}).id||null, customer:null, from:c.from, to:c.to, target:'pre_window_mix', decided:'exception', apply_to:['history','draft'], version_id:null, enabled:true, created_by:_plWho(), created_at:new Date().toISOString(), note:'from the candidates list'}); s.decisions[dp]={what:'exception', at:new Date().toISOString()}; }
+  else if(what==='new_normal'){ s.decisions[dp]={what:'new_normal', at:new Date().toISOString()}; }
+  else delete s.decisions[dp];
+  PL.tr={}; autoSave(); planRender();
+}
+function plAddRule(){
+  const g=id=>document.getElementById(id)?.value||''; const dp=g('plr-new-dp'), from=g('plr-new-from'), to=g('plr-new-to'), cust=g('plr-new-cust').trim(), tgt=g('plr-new-target'), apply=[...document.querySelectorAll('.plr-new-apply:checked')].map(x=>x.value);
+  if(!dp||!from||!to||from>to){ statMsg('Demand point, from and to months are required'); return; }
+  plRules().push({id:'nr_'+Date.now().toString(36), kind:'budget', type:'substitution', dp_name:dp, element_id:(xlmapFindDp(dp)||{}).id||null, customer:cust||null, from, to, target:tgt&&tgt!=='pre_window_mix'?{dp_name:tgt, element_id:(xlmapFindDp(tgt)||{}).id||null}:'pre_window_mix', decided:'exception', apply_to:apply.length?apply:['history','draft'], version_id:null, enabled:true, created_by:_plWho(), created_at:new Date().toISOString(), note:g('plr-new-note')});
+  PL.tr={}; autoSave(); planRender(); statMsg('Rule added — recompute the keys to apply it to history');
+}
+function plToggleRule(id){ const r=plRules().find(x=>x.id===id); if(!r) return; r.enabled=r.enabled===false; autoSave(); planRender(); }
+function plDeleteRule(id){ DB.norm_rules=plRules().filter(x=>x.id!==id); autoSave(); planRender(); }
+// ── cards ───────────────────────────────────────────────────────────────────────
+function _plDpOptions(sel, fam){ const dps=(DB.elements||[]).filter(e=>e.type==='demand_point').map(e=>e.name).filter(n=>!fam||plFamilyOfName(n)===fam).sort(); return dps.map(n=>`<option value="${_plEsc(n)}" ${n===sel?'selected':''}>${_plEsc(n)}</option>`).join(''); }
+function _plTargetsHTML(targets, raw){ return (targets||[]).map(t=>`<span style="white-space:nowrap">${_plEsc(_plDpShort(t.dp_name))} <b>${Math.round(t.share*100)}%</b>${raw?` <span class="pl-muted">(${Math.round(((raw.find(r=>r.dp_name===t.dp_name)||{}).share||0)*100)})</span>`:''}${t.element_id?'':' <span class="pl-flag bad" title="not in the topology">?</span>'}</span>`).join(' · '); }
+function _plIntKeysCardHTML(s){
+  const v=plActiveVersion(); if(!v||!PL.hist) return _plCard('pl-keys','Internal keys','needs an active version and the sales history', null, '<div class="pl-muted">Load the Detail history and create a version first.</div>');
+  const fam=PL.ui.keyFam||'cement', onlyFlag=!!PL.ui.keyFlag; const L=plVersionLines(v.id).filter(l=>l.kind==='INT'&&l.family===fam).sort((a,b)=>b.fy-a.fy);
+  const anchor=plHistAnchor(); const win=plHistWindow(s.window_months);
+  const rows=L.map(l=>{ const k=plKeyFor(l.rmx_plant, fam); const flags=[]; if(!k) flags.push('no_history'); else { if(k.targets.some(t=>!t.element_id)) flags.push('point_missing'); if(k.provenance&&k.provenance.unallocated_t>0) flags.push('unallocated'); if(k.status==='copied') flags.push('copied'); if(k.status==='edited') flags.push('edited'); if(k.targets.length>1) flags.push('split'); }
+    return {l,k,flags}; }).filter(x=>!onlyFlag||x.flags.some(f=>f!=='split'&&f!=='edited'));
+  const sid=k=>_plSafe(k.id);
+  const html=rows.map(({l,k,flags})=>{
+    const editing=k&&PL.ui.editKey===k.id;
+    let tgt;
+    if(!k){ const sis=plSisterCandidates(l); tgt=`<span class="pl-flag bad">no history</span> ${sis.length?`copy from <select class="fi" style="width:170px;padding:2px 4px;font-size:10px" id="pls-${_plSafe(l.line_key)}">${sis.map(x=>`<option value="${x.rmx_plant}">${_plEsc(x.rmx_name)} (${x.market||x.district})</option>`).join('')}</select> <button class="pl-btn" onclick="plCopyKey('${l.rmx_plant}','${fam}',document.getElementById('pls-${_plSafe(l.line_key)}').value)">Copy key</button>`:'<span class="pl-muted">no sister plant with a key yet</span>'}`; }
+    else if(editing){ tgt=`${k.targets.map(t=>`<div style="display:flex;gap:6px;align-items:center;margin:2px 0"><span style="min-width:200px">${_plEsc(_plDpShort(t.dp_name))}</span><input class="fi" type="number" style="width:70px" data-key="${k.id}" data-dp="${_plEsc(t.dp_name)}" value="${Math.round(t.share*1000)/10}" min="0" max="100" step="0.1">%</div>`).join('')}
+        <div style="display:flex;gap:6px;align-items:center;margin-top:4px"><select class="fi" id="plk-add-${sid(k)}" style="width:220px;padding:2px 4px;font-size:10px"><option value="">+ add a point…</option>${_plDpOptions('',fam)}</select><button class="pl-btn" onclick="plKeyAddTarget('${k.id}')">Add</button>
+        <button class="pl-btn pri" onclick="plSaveKeyEdit('${k.id}')">Save</button><button class="pl-btn" onclick="plEditKey('${k.id}')">Cancel</button><button class="pl-btn" onclick="plRecomputeKey('${k.id}')">Recompute</button></div>`; }
+    else tgt=_plTargetsHTML(k.targets, k.provenance&&k.provenance.raw_targets);
+    const prov=k&&k.provenance?`${k.provenance.purchased_removed_t?`<span class="pl-flag" title="purchased / substituted tonnes re-split">${_plFmt(k.provenance.purchased_removed_t)} t re-split</span>`:''}${k.provenance.unallocated_t?`<span class="pl-flag bad">${_plFmt(k.provenance.unallocated_t)} t unallocated</span>`:''}${(k.provenance.notes||[]).length?`<span class="pl-muted" title="${_plEsc(k.provenance.notes.join(' · '))}">ⓘ</span>`:''}`:'';
+    return `<tr><td><b>${_plEsc(l.rmx_name)}</b> <span class="pl-muted">${l.rmx_plant} · ${_plEsc(l.district||'')}</span></td><td class="n">${_plFmt(l.fy)}</td><td>${tgt}<div>${prov}</div></td>
+      <td>${k?`<span class="pl-flag ${k.status==='computed'?'dim':''}">${k.status}${k.copied_from?' ← '+k.copied_from:''}</span>`:''}${flags.filter(f=>f!=='edited'&&f!=='copied').map(f=>`<span class="pl-flag ${f==='split'?'dim':'bad'}">${f}</span>`).join('')}</td>
+      <td style="white-space:nowrap">${k&&!editing?`<button class="pl-btn" onclick="plEditKey('${k.id}')">Edit</button>`:''}</td></tr>`; }).join('');
+  const fams=['cement','slag','ash'].map(f=>`<button class="pl-btn ${fam===f?'pri':''}" onclick="PL.ui.keyFam='${f}';planRender()">${f}</button>`).join(' ');
+  return _plCard('pl-keys','Internal keys',`${fam} · window ${win[win.length-1]} → ${win[0]} (weights ${(s.weights||[]).slice(0,s.window_months).join(',')}) · floor ${Math.round(s.floor*100)}%`, L.length,
+    `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">${fams}<label class="pl-muted"><input type="checkbox" ${onlyFlag?'checked':''} onchange="PL.ui.keyFlag=this.checked;planRender()"> flagged only</label>
+       <span style="flex:1"></span><button class="pl-btn" onclick="plComputeAllIntKeys(false)">Compute missing keys</button><button class="pl-btn warn" onclick="if(confirm('Recompute every key from history? Edited and copied keys are replaced.')) plComputeAllIntKeys(true)">Recompute all</button></div>
+     <div class="pl-muted" style="margin-bottom:4px">final % — (raw % in brackets, before purchases and substitution windows were re-split). Anchor month ${anchor||'—'}.</div>
+     <div style="max-height:420px;overflow:auto;border:1px solid var(--border)"><table class="pl-tbl"><tr><th>RMX plant</th><th>Budget FY</th><th>Supply (demand points)</th><th>Status</th><th></th></tr>${html||'<tr><td colspan=5 class="pl-muted">nothing to show</td></tr>'}</table></div>`);
+}
+function _plExtReviewCardHTML(s){
+  const v=plActiveVersion(); if(!v) return '';
+  const idx=_plHistIndex(); const onlyFlag=PL.ui.extFlag!==false; const q=(PL.ui.extQ||'').toLowerCase(); const reviewed=s.reviewed||{}; const split=_plSplitPairs(v.id);
+  const L=plVersionLines(v.id).filter(l=>l.kind==='EXT');
+  const INFO=new Set(['split_pair','adjustment']);
+  const rows=L.map(l=>{ const t=plLineTarget(l); const ev=idx?plExtEvidence(l.sold_to, t.dp_name):null; const flags=plFlagExtLine(l,t,ev,split); const eff=plEffectiveExtTarget(l); return {l,t,ev,flags,real:flags.filter(f=>!INFO.has(f)),eff,ok:!!reviewed[l.line_key]}; });
+  const nFlag=rows.filter(r=>r.real.length).length, nOk=rows.filter(r=>r.ok).length, nOpen=rows.filter(r=>r.real.length&&!r.ok).length;
+  const shown=rows.filter(r=>(!onlyFlag||r.real.length||r.eff.via)&&(!q||(r.l.sold_to_name+' '+r.l.ship_to_name+' '+r.t.dp_name+' '+r.flags.join(' ')).toLowerCase().includes(q))).sort((a,b)=>(a.ok-b.ok)||(b.real.length-a.real.length)||(b.l.fy-a.l.fy)).slice(0,400);
+  const html=shown.map(({l,t,ev,flags,eff,ok})=>{ const k=_plSafe(l.line_key);
+    const evTxt=ev?(ev.tot?`${_plFmt(ev.t)} of ${_plFmt(ev.tot)} t (${Math.round(ev.share*100)}%) · ${ev.months_active} mo${ev.first_ym?' · since '+ev.first_ym:''}`:'no history'):'';
+    const effTxt=eff.via==='excluded'?'<span class="pl-flag bad">excluded</span>':eff.via?`<span class="pl-flag ok">${eff.via.startsWith('rule')?'rule':'reassigned'}</span> ${_plTargetsHTML(eff.targets)}`:'';
+    return `<tr style="${ok?'opacity:.6':''}"><td><b>${_plEsc(l.sold_to_name||l.sold_to)}</b><br><span class="pl-muted">${_plEsc(l.ship_to_name||l.ship_to)} · ${l.incoterm}</span></td><td class="pl-muted">${_plEsc(l.plant_name||l.plant)}<br>${_plEsc(l.material_desc||l.material)}</td>
+      <td>${_plEsc(_plDpShort(t.dp_name)||'—')}<br>${effTxt}</td><td class="n">${_plFmt(l.fy)}</td><td class="pl-muted">${evTxt}</td><td>${flags.map(f=>`<span class="pl-flag ${['adjustment','split_pair'].includes(f)?'dim':''}">${f}</span>`).join('')}</td>
+      <td style="white-space:nowrap"><label><input type="checkbox" ${ok?'checked':''} onchange="plConfirmLine('${_plEsc(l.line_key)}',this.checked)"> ok</label>
+        <select class="fi" id="plr-dp-${k}" style="width:150px;padding:2px 4px;font-size:9px"><option value="">reassign to…</option>${_plDpOptions(t.dp_name,'cement')}<option value="__exclude__">— exclude this row —</option></select>
+        <select class="fi" id="plr-scope-${k}" style="width:88px;padding:2px 4px;font-size:9px"><option value="persistent">persistent</option><option value="this">this version</option></select>
+        <button class="pl-btn" onclick="plReassignLine('${_plEsc(l.line_key)}')">Go</button></td></tr>`; }).join('');
+  return _plCard('pl-ext','External draft review',`${nFlag} flagged · ${nOk} confirmed · ${nOpen} open`, L.length,
+    `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px"><label class="pl-muted"><input type="checkbox" ${onlyFlag?'checked':''} onchange="PL.ui.extFlag=this.checked;planRender()"> flagged / reassigned only</label>
+       <input class="fi" placeholder="filter customer, ship-to, point, flag…" value="${_plEsc(PL.ui.extQ||'')}" style="width:260px" onchange="PL.ui.extQ=this.value;planRender()">
+       <span class="pl-muted">Flags: low_share &lt; ${s.low_share_pct}% of the customer's 12-month volume · short_window ≤ ${s.short_window_months} months · recent_first = first seen in the last 6 months · purchased_dp = cement on a purchased point (never budgeted there)</span></div>
+     <div style="max-height:460px;overflow:auto;border:1px solid var(--border)"><table class="pl-tbl"><tr><th>Customer · ship-to</th><th>Draft plant · material</th><th>Demand point → effective</th><th>FY</th><th>Evidence (12 mo)</th><th>Flags</th><th></th></tr>${html||'<tr><td colspan=7 class="pl-muted">nothing flagged</td></tr>'}</table></div>`);
+}
+function _plCandidatesCardHTML(s){
+  if(!PL.hist) return ''; const c=plProposeCandidates(); const open=c.filter(x=>!x.decided);
+  const rows=c.slice(0,40).map(x=>`<tr style="${x.decided?'opacity:.6':''}"><td><b>${_plEsc(_plDpShort(x.dp))}</b>${x.purchased?' <span class="pl-flag dim">purchased</span>':''}<br><span class="pl-muted">${x.from} → ${x.to} · ${x.active} active months · ${_plFmt(x.t)} t</span></td>
+      <td class="pl-muted">${x.customers.slice(0,5).map(cu=>`${_plEsc(cu.name).slice(0,22)} ${_plFmt(cu.t)} t / ${cu.months} mo`).join('<br>')}${x.customers.length>5?'<br>+'+(x.customers.length-5)+' more':''}</td>
+      <td style="white-space:nowrap">${x.decided?`<span class="pl-flag ${x.decided.what==='exception'?'':'ok'}">${x.decided.what==='exception'?'exception (rule)':'new normal'}</span> <button class="pl-btn" onclick="plDecideCandidate('${_plEsc(x.dp)}','undo')">undo</button>`:`<button class="pl-btn warn" onclick="plDecideCandidate('${_plEsc(x.dp)}','exception')">Exception → rule</button> <button class="pl-btn" onclick="plDecideCandidate('${_plEsc(x.dp)}','new_normal')">New normal</button>`}</td></tr>`).join('');
+  return _plCard('pl-cand','Candidates: points that appeared recently',`${open.length} to decide`, c.length,
+    `<div class="pl-muted" style="margin-bottom:4px">A demand point with no volume for the first ${s.silent_months}+ months of the last 12 and volume after that. “Exception” creates a substitution window (customers go back to their own pre-window mix, in history and in the draft); “New normal” keeps it.</div>
+     <table class="pl-tbl"><tr><th>Demand point · window</th><th>Who bought it</th><th>Decision</th></tr>${rows||'<tr><td colspan=3 class="pl-muted">none</td></tr>'}</table>`);
+}
+function _plRulesCardHTML(s){
+  const R=plRules().slice().sort((a,b)=>String(a.created_at).localeCompare(String(b.created_at)));
+  const rows=R.map(r=>`<tr style="${r.enabled===false?'opacity:.5':''}"><td><span class="pl-flag ${r.type==='purchase'?'dim':''}">${r.type}${r.auto?' · auto':''}</span></td>
+      <td>${r.line_key?`<span class="pl-muted">row</span> ${_plEsc(r.line_key)}`:`<b>${_plEsc(_plDpShort(r.dp_name||''))}</b>${r.customer?' · customer '+_plEsc(r.customer):''}${r.from?' · '+r.from+' → '+r.to:''}`}</td>
+      <td>${r.type==='exclude'?'excluded':r.target==='pre_window_mix'?'each customer\'s pre-window mix':r.target&&r.target.dp_name?_plEsc(_plDpShort(r.target.dp_name)):''} <span class="pl-muted">${(r.apply_to||[]).join('+')}${r.version_id?' · this version':''}</span></td>
+      <td class="pl-muted">${String(r.created_at||'').slice(0,10)} ${_plEsc(r.created_by||'')}${r.note?' · '+_plEsc(r.note):''}</td>
+      <td style="white-space:nowrap"><button class="pl-btn" onclick="plToggleRule('${r.id}')">${r.enabled===false?'Enable':'Disable'}</button> ${r.auto?'':`<button class="pl-btn" onclick="plDeleteRule('${r.id}')">Delete</button>`}</td></tr>`).join('');
+  return _plCard('pl-rules','Normalisation rules','history is never edited — these re-attribute volume when keys are computed and when the draft is translated', R.length,
+    `<table class="pl-tbl"><tr><th>Type</th><th>What</th><th>Target</th><th></th><th></th></tr>${rows||'<tr><td colspan=5 class="pl-muted">no rules yet — purchase rules appear automatically when keys are computed</td></tr>'}</table>
+     <div style="margin-top:8px;display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:6px;align-items:end">
+       <label class="pl-muted">Demand point X<br><select class="fi" id="plr-new-dp" style="width:100%"><option value="">—</option>${_plDpOptions('')}</select></label>
+       <label class="pl-muted">From (YYYY-MM)<br><input class="fi" id="plr-new-from" placeholder="2026-08" style="width:100%"></label>
+       <label class="pl-muted">To<br><input class="fi" id="plr-new-to" placeholder="2026-10" style="width:100%"></label>
+       <label class="pl-muted">Customer (blank = all)<br><input class="fi" id="plr-new-cust" placeholder="sold-to / plant" style="width:100%"></label>
+       <label class="pl-muted">Counts as<br><select class="fi" id="plr-new-target" style="width:100%"><option value="pre_window_mix">each customer's pre-window mix</option>${_plDpOptions('')}</select></label>
+       <label class="pl-muted">Apply to<br><label><input type="checkbox" class="plr-new-apply" value="history" checked> history</label> <label><input type="checkbox" class="plr-new-apply" value="draft" checked> draft</label></label>
+       <label class="pl-muted">Note<br><input class="fi" id="plr-new-note" style="width:100%"></label>
+       <button class="pl-btn pri" onclick="plAddRule()">Add substitution window</button></div>`);
+}
+// ═══ P4 · Generate → plan_demand → materialise · comparison in Execution ═══════
+function _plHash(str){ let h=0; for(let i=0;i<str.length;i++) h=(h*31+str.charCodeAt(i))|0; return (h>>>0).toString(16); }
+function plGenHash(vid){
+  const s=plSettings(); const y=s.budget_year;
+  const parts=[plVersionLines(vid).map(l=>l.id+':'+l.fy).join(','), plKeys().map(k=>k.id+':'+k.status+':'+k.targets.map(t=>t.dp_name+'='+t.share).join('+')).join(','),
+    plRules().map(r=>r.id+':'+(r.enabled!==false)+':'+(r.from||'')+(r.to||'')+':'+JSON.stringify(r.target)+':'+(r.version_id||'')).join(','),
+    [s.sat_pct,s.ships_sat,s.window_months,(s.weights||[]).join('/'),s.floor,s.pre_purchase_months].join('|'), (DB.non_working_days||[]).filter(d=>String(d.date).startsWith(String(y))).map(d=>d.date).sort().join(',')];
+  return _plHash(parts.join('\u0001'));
+}
+// Monthly tonnes per demand point for a version: INT lines × key shares, EXT lines → effective targets. Pure.
+function plGenerateMonthly(vid){
+  const tot={}, lines={}, names={}, unalloc=[], warnings=[]; let excluded=0, excludedT=0;
+  const add=(el, name, m, t, lineId)=>{ if(!t||!(m>=0)) return; /* negatives (returns, adjustments) net here and are clamped per point-month */ names[el]=names[el]||name; tot[el]=tot[el]||{}; lines[el]=lines[el]||{}; tot[el][m]=(tot[el][m]||0)+t; lines[el][m]=lines[el][m]||{}; lines[el][m][lineId]=(lines[el][m][lineId]||0)+t; };
+  plVersionLines(vid).forEach(l=>{
+    if(l.kind==='INT'){
+      const k=plKeyFor(l.rmx_plant, l.family); if(!k){ unalloc.push({line:l, t:l.fy, why:'no key (no history, no sister copy)'}); return; }
+      k.targets.forEach(t=>{ if(!t.element_id){ unalloc.push({line:l, t:l.fy*t.share, why:'point not in topology: '+t.dp_name}); return; } l.months.forEach((x,m)=>add(t.element_id, t.dp_name, m, x*t.share, l.id)); });
+    } else {
+      if(l.adjustment){ unalloc.push({line:l, t:l.fy, why:'adjustment row (no demand point)'}); return; }
+      const eff=plEffectiveExtTarget(l); if(!eff.targets.length){ excluded++; excludedT+=l.fy; return; }
+      eff.targets.forEach(t=>{ if(!t.element_id){ unalloc.push({line:l, t:l.fy*t.share, why:'point not in topology: '+t.dp_name}); return; }
+        const el=(DB.elements||[]).find(e=>e.id===t.element_id);
+        if(el&&plIsPurchasedDp(el)&&plFamilyOfName(t.dp_name)==='cement'){ unalloc.push({line:l, t:l.fy*t.share, why:'cement on a purchased point: '+t.dp_name+' — reassign it'}); return; }
+        l.months.forEach((x,m)=>add(t.element_id, t.dp_name, m, x*t.share, l.id)); });
+    }
+  });
+  let clamped=0; Object.keys(tot).forEach(el=>{ Object.keys(tot[el]).forEach(m=>{ if(tot[el][m]<0){ clamped+=-tot[el][m]; tot[el][m]=0; } }); });
+  if(clamped) warnings.push(`${Math.round(clamped)} t of negative point-months clamped to 0`);
+  return {tot, lines, names, unalloc, excluded, excludedT, clamped, warnings};
+}
+function plSpreadMonth(y, m, total, carry, s){
+  const t=total+(carry||0); const rows=t>0?_fbDistributeMonthRows(y, m, t, {shipsSat:s.ships_sat!==false, satPct:s.sat_pct}):[];
+  const days=new Array(31).fill(0); let spread=0; rows.forEach(r=>{ const d=+r.date.slice(8,10); days[d-1]=r.value; spread+=r.value; });
+  return {days, spread_t:spread, carry:t-spread};
+}
+function plGenerate(vid){
+  vid=vid||(plActiveVersion()||{}).id; const v=plVersions().find(x=>x.id===vid); if(!v){ statMsg('No version'); return null; }
+  const s=plSettings(); const y=s.budget_year; const g=plGenerateMonthly(vid);
+  DB.plan_demand=(DB.plan_demand||[]).filter(p=>p.version_id!==vid);
+  let sumTot=0, sumSpread=0, nRows=0;
+  Object.keys(g.tot).forEach(el=>{ let carry=0;
+    for(let m=0;m<12;m++){ const t=g.tot[el][m]||0; const sp=plSpreadMonth(y, m+1, t, carry, s); carry=sp.carry; sumTot+=t; sumSpread+=sp.spread_t;
+      const L=Object.entries(g.lines[el][m]||{}).sort((a,b)=>b[1]-a[1]); const top=L.slice(0,10).map(([id,t2])=>({line_id:id, t:Math.round(t2)})); const rest=L.slice(10).reduce((a,[,t2])=>a+t2,0); if(rest>0) top.push({line_id:'other', t:Math.round(rest)});
+      if(t>0||sp.spread_t>0){ DB.plan_demand.push({version_id:vid, element_id:el, dp_name:g.names[el], ym:`${y}-${String(m+1).padStart(2,'0')}`, kind:'budget', days:sp.days, total_t:Math.round(t*10)/10, spread_t:sp.spread_t, lines:top, generated_at:new Date().toISOString()}); nRows++; } }
+    if(Math.abs(carry)>25) g.warnings.push(`${g.names[el]}: ${Math.round(carry)} t could not be placed in the year`); });
+  v.generated_at=new Date().toISOString(); v.generated_hash=plGenHash(vid); v.stale=false;
+  v.gen_report={rows:nRows, points:Object.keys(g.tot).length, total_t:Math.round(sumTot), spread_t:Math.round(sumSpread), unallocated_t:Math.round(g.unalloc.reduce((a,u)=>a+u.t,0)), unallocated:g.unalloc.slice(0,60).map(u=>({why:u.why, t:Math.round(u.t), label:u.line.kind==='EXT'?(u.line.sold_to_name||u.line.sold_to)+' · '+(u.line.material_desc||u.line.material):(u.line.family+' · '+u.line.rmx_name)})), excluded:g.excluded, excluded_t:Math.round(g.excludedT), clamped:Math.round(g.clamped), warnings:g.warnings};
+  let mat=null; if(v.status==='active'&&scIsPlanning()) mat=plMaterialise(vid);
+  autoSave(); planRender();
+  statMsg(`Generated ${v.label}: ${_plFmt(sumSpread)} ST on ${Object.keys(g.tot).length} demand points${v.gen_report.unallocated_t?' · '+_plFmt(v.gen_report.unallocated_t)+' ST unallocated':''}${mat?' · simulation re-running':''}`);
+  return v.gen_report;
+}
+// plan_demand of the active version → demand_values (point-level, tagged). Only inside a Planning scenario.
+function plMaterialise(vid){
+  if(!scIsPlanning()){ statMsg('Budget demand is materialised only inside a Planning scenario'); return null; }
+  const s=plSettings(); const y=String(s.budget_year); const rows=(DB.plan_demand||[]).filter(p=>p.version_id===vid); const covered=new Set(rows.map(p=>p.element_id));
+  const before=DB.demand_values.length; let replaced=0;
+  DB.demand_values=DB.demand_values.filter(r=>{
+    if(r.source==='budget'){ return !!(r.manual&&r.version_id===vid); }      // generated rows of any version go; manual overrides of THIS version stay
+    if(r.source==='actual') return true;
+    if(covered.has(r.element_id)&&String(r.date).startsWith(y)){ replaced++; return false; }   // old forecast rows in the budget year for covered points
+    return true; });
+  const manual=new Set(DB.demand_values.filter(r=>r.source==='budget'&&r.manual&&r.version_id===vid).map(r=>r.element_id+'|'+r.date));
+  const actual=new Set(DB.demand_values.filter(r=>r.source==='actual').map(r=>r.element_id+'|'+r.date));
+  let n=0, skippedActual=0, keptManual=0;
+  rows.forEach(p=>{ p.days.forEach((t,i)=>{ if(!(t>0)) return; const ds=p.ym+'-'+String(i+1).padStart(2,'0'); const k=p.element_id+'|'+ds; if(actual.has(k)){ skippedActual++; return; } if(manual.has(k)){ keptManual++; return; }
+    DB.demand_values.push({element_id:p.element_id, date:ds, value_t:t, source:'budget', version_id:vid}); n++; }); });
+  const rep={written:n, replaced, skippedActual, keptManual, before, after:DB.demand_values.length}; s.materialised={version_id:vid, at:new Date().toISOString(), ...rep};
+  if(typeof _demandChanged==='function') _demandChanged(); return rep;
+}
+function plManualRows(vid){ return (DB.demand_values||[]).filter(r=>r.source==='budget'&&r.manual&&r.version_id===vid); }
+function plRevertManual(vid, elId, ds){ DB.demand_values=DB.demand_values.filter(r=>!(r.source==='budget'&&r.manual&&r.version_id===vid&&(!elId||(r.element_id===elId&&r.date===ds)))); plMaterialise(vid); autoSave(); planRender(); }
+function plStaleCheck(){ const v=plActiveVersion(); if(!v||!v.generated_at) return false; const st=v.generated_hash!==plGenHash(v.id); if(st!==!!v.stale){ v.stale=st; } return st; }
+function _plGenerateCardHTML(s){
+  const v=plActiveVersion(); if(!v) return '';
+  const stale=plStaleCheck(); const r=v.gen_report; const mat=s.materialised&&s.materialised.version_id===v.id?s.materialised:null; const manual=plManualRows(v.id);
+  const pdRows=(DB.plan_demand||[]).filter(p=>p.version_id===v.id);
+  const byFam={}; pdRows.forEach(p=>{ const f=plFamilyOfName(p.dp_name||''); byFam[f]=(byFam[f]||0)+p.spread_t; });
+  const byFac={}; pdRows.forEach(p=>{ const f=(p.dp_name||'').split('/')[0]; byFac[f]=(byFac[f]||0)+p.spread_t; });
+  return _plCard('pl-gen','Generate & simulate', v.generated_at?`generated ${String(v.generated_at).slice(0,16).replace('T',' ')}${stale?' · keys, rules or settings changed since':''}`:'not generated yet', null,
+    `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+       <button class="pl-btn ${stale||!v.generated_at?'pri':''}" onclick="plGenerate('${v.id}')">${v.generated_at?'Regenerate':'Generate'} budget demand for ${_plEsc(v.label)}</button>
+       ${stale?'<span class="pl-flag">regenerate — inputs changed</span>':''}
+       ${scIsPlanning()?'':'<span class="pl-muted">(materialised into the simulation only inside the Planning scenario)</span>'}
+     </div>
+     ${r?`<div class="pl-kv" style="margin-top:8px"><b>Budget demand</b><span><b>${_plFmt(r.spread_t)}</b> ST spread on ${r.points} demand points (${_plFmt(r.total_t)} ST allocated; the 25 t steps carry month to month)</span>
+       <b>By family</b><span>${Object.keys(byFam).map(f=>f+' '+_plFmt(byFam[f])).join(' · ')}</span>
+       <b>By facility</b><span>${Object.keys(byFac).sort().map(f=>f+' '+_plFmt(byFac[f]/1000,1)+'k').join(' · ')}</span>
+       <b>Not allocated</b><span>${r.unallocated_t?`<span class="pl-flag bad">${_plFmt(r.unallocated_t)} ST</span>`:'<span class="pl-flag ok">0</span>'} ${r.excluded?' · '+r.excluded+' rows excluded ('+_plFmt(r.excluded_t)+' ST)':''}${r.clamped?' · '+_plFmt(r.clamped)+' ST clamped':''}</span>
+       ${mat?`<b>Simulation</b><span>${_plFmt(mat.written)} daily rows written · ${mat.replaced} old forecast rows replaced · ${mat.skippedActual} actual days kept · ${mat.keptManual} manual overrides kept</span>`:''}
+       </div>
+       ${r.unallocated&&r.unallocated.length?`<details style="margin-top:6px"><summary class="pl-muted" style="cursor:pointer">Unallocated detail (${r.unallocated.length})</summary><table class="pl-tbl">${r.unallocated.map(u=>`<tr><td>${_plEsc(u.label)}</td><td class="pl-muted">${_plEsc(u.why)}</td><td class="n">${_plFmt(u.t)}</td></tr>`).join('')}</table></details>`:''}
+       ${r.warnings.length?`<div class="pl-muted" style="margin-top:4px">⚠ ${r.warnings.map(_plEsc).join('<br>⚠ ')}</div>`:''}`:''}
+     ${manual.length?`<details style="margin-top:6px"><summary class="pl-muted" style="cursor:pointer">${manual.length} manual day overrides in this version</summary><table class="pl-tbl">${manual.slice(0,100).map(m=>`<tr><td>${_plEsc(((DB.elements||[]).find(e=>e.id===m.element_id)||{}).name||m.element_id)}</td><td>${m.date}</td><td class="n">${_plFmt(m.value_t)}</td><td><button class="pl-btn" onclick="plRevertManual('${v.id}','${m.element_id}','${m.date}')">revert</button></td></tr>`).join('')}</table><button class="pl-btn" style="margin-top:4px" onclick="plRevertManual('${v.id}')">Revert all</button></details>`:''}`);
+}
+// ── Execution side: read the Planning file's active budget, read-only ─────────
+const PL_LINK_KEY='avila_plan_link';
+function plLink(){ try{ return JSON.parse(localStorage.getItem(PL_LINK_KEY)||'null')||{}; }catch(e){ return {}; } }
+function plSetLink(id){ try{ localStorage.setItem(PL_LINK_KEY, JSON.stringify({id:id||null})); }catch(e){} PL.bgt=null; PL._bgtAt=0; planRender(); if(id) plBgtEnsure({prompt:true}); }
+async function plPeekBudget(opts){
+  const link=plLink(); if(!link.id||scIsPlanning()) return null;
+  const pk=await scPeekScenario(link.id, opts||{}); if(!pk){ PL._bgtErr='file not readable (not in this browser, or no permission yet — click Connect)'; return null; }
+  if(PL.bgt&&PL.bgt.fileMod===pk.fileMod) return PL.bgt;
+  const D=pk.payload.DB||{}; const v=(D.plan_versions||[]).find(x=>x.status==='active'); const byEl={}, byName={}; let tot=0; const byVersion={};
+  (D.plan_demand||[]).forEach(p=>{ const bv=byVersion[p.version_id]=byVersion[p.version_id]||{byEl:{}, names:{}}; (bv.byEl[p.element_id]=bv.byEl[p.element_id]||{})[p.ym]=p.days; bv.names[p.element_id]=p.dp_name||'';
+    if(v&&p.version_id===v.id){ (byEl[p.element_id]=byEl[p.element_id]||{})[p.ym]=p.days; if(p.dp_name) (byName[p.dp_name]=byName[p.dp_name]||{})[p.ym]=p.days; tot+=p.spread_t||0; } });
+  const set=(D.plan_settings||[]).find(x=>x.id==='default')||{};
+  PL.bgt={scenarioId:link.id, scenarioName:pk.name, versionId:v&&v.id, versionLabel:v&&v.label, generated_at:v&&v.generated_at, year:(v&&v.year)||set.budget_year||(new Date().getFullYear()+1), byEl, byName, total_t:Math.round(tot), fileMod:pk.fileMod, at:Date.now(),
+    versions:(D.plan_versions||[]).filter(x=>x.generated_at).map(x=>({id:x.id, label:x.label, status:x.status, year:x.year, generated_at:x.generated_at})), byVersion};
+  PL._bgtErr=v?null:'the Planning scenario has no active, generated version';
+  return PL.bgt;
+}
+// Synchronous accessor for renders: returns what is loaded and kicks a silent refresh at most once a minute.
+function plBgtEnsure(opts){
+  if(scIsPlanning()||!plLink().id) return null;
+  const now=Date.now(); if(!PL._bgtBusy&&(now-(PL._bgtAt||0)>60000||(opts&&opts.prompt))){ PL._bgtBusy=true; PL._bgtAt=now;
+    plPeekBudget(opts).then(b=>{ PL._bgtBusy=false; if(b&&b.at>now-5000){ if(S.view==='demand'&&typeof renderDemandChart==='function') renderDemandChart(); else if(S.view==='supply'&&typeof renderSupplyView==='function') renderSupplyView(); if(document.getElementById('cfg-panel-plan')) planRender(); } }).catch(e=>{ PL._bgtBusy=false; console.warn('plan budget peek', e); }); }
+  return PL.bgt&&PL.bgt.versionId?PL.bgt:null;
+}
+function plBgtVal(elIds, ds){ const b=PL.bgt; if(!b) return 0; const ym=ds.slice(0,7), d=+ds.slice(8,10)-1; let t=0; elIds.forEach(id=>{ const el=(DB.elements||[]).find(e=>e.id===id); const by=b.byEl[id]||(el&&b.byName[el.name]); if(by&&by[ym]) t+=by[ym][d]||0; }); return t; }
+function plBgtExtra(dpts){ const b=plBgtEnsure(); if(!b||!dpts||!dpts.length) return []; const ids=dpts.map(d=>d.element_id); if(!ids.some(id=>b.byEl[id]||b.byName[((DB.elements||[]).find(e=>e.id===id)||{}).name])) return [];
+  return [{label:`📊 budget ${b.year}`, color:'var(--amber)', title:`Budget ${b.year} — ${b.scenarioName}, version ${b.versionLabel}`, valFn:ds=>plBgtVal(ids, ds)}]; }
+function _plCompareCardHTML(s){
+  const link=plLink(); const opts=Object.values(SC.meta||{}).sort((a,b)=>String(a.name).localeCompare(String(b.name)));
+  const b=PL.bgt; if(link.id&&!b) plBgtEnsure();
+  return _plCard('pl-compare','Budget comparison in this scenario','Demand chart BGT panels and Supply budget rows read the Planning file', null,
+    `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="pl-muted">Planning scenario</span>
+       <select class="fi" id="pl-link" style="width:260px" onchange="plSetLink(this.value)"><option value="">— none —</option>${opts.map(m=>`<option value="${m.id}" ${link.id===m.id?'selected':''}>${_plEsc(m.name)}</option>`).join('')}</select>
+       <button class="pl-btn" onclick="plBgtEnsure({prompt:true})" ${link.id?'':'disabled'}>Connect / refresh</button></div>
+     <div class="pl-muted" style="margin-top:6px">${b&&b.versionId?`<span class="pl-flag ok">connected</span> ${_plEsc(b.scenarioName)} · version <b>${_plEsc(b.versionLabel)}</b> · budget ${b.year} · ${_plFmt(b.total_t)} ST on ${Object.keys(b.byEl).length} points · generated ${String(b.generated_at||'').slice(0,10)}`:link.id?`<span class="pl-flag">${_plEsc(PL._bgtErr||'reading…')}</span>`:'Pick the Planning scenario created from this one. Budget rows appear on the Supply page once its window reaches January '+(s.budget_year)+'.'}</div>`);
+}
+// ═══ P6 · Budget → Execution: copy a slice of a Planning version into this scenario as tagged forecast rows (reversible) ═══
+function plImports(){ return (DB.plan_imports=DB.plan_imports||[]); }
+function _plImportInputs(){
+  const g=id=>document.getElementById(id); const b=PL.bgt||{}; const vid=g('pli-version')?.value||b.versionId; const from=g('pli-from')?.value, to=g('pli-to')?.value;
+  const sel=g('pli-dps'); const picked=sel?[...sel.selectedOptions].map(o=>o.value).filter(Boolean):[];
+  const bv=b.byVersion&&b.byVersion[vid]; const all=bv?Object.keys(bv.byEl):[];
+  return {vid, from, to, elIds:picked.length?picked:all, bv};
+}
+function plImportPreview(apply){
+  const b=PL.bgt; if(!b||!b.byVersion){ statMsg('Connect the Planning scenario first'); return null; }
+  const {vid, from, to, elIds, bv}=_plImportInputs(); if(!bv){ statMsg('That version has no generated demand'); return null; } if(!from||!to||from>to){ statMsg('Pick a date range'); return null; }
+  const known=new Set((DB.elements||[]).filter(e=>e.type==='demand_point').map(e=>e.id));
+  const vals=[]; elIds.forEach(el=>{ if(!known.has(el)) return; const byYm=bv.byEl[el]||{}; Object.keys(byYm).forEach(ym=>{ byYm[ym].forEach((t,i)=>{ if(!(t>0)) return; const ds=ym+'-'+String(i+1).padStart(2,'0'); if(ds<from||ds>to) return; vals.push({element_id:el, date:ds, value_t:t}); }); }); });
+  const touched=new Set(vals.map(x=>x.element_id+'|'+x.date)); const actual=new Set((DB.demand_values||[]).filter(r=>r.source==='actual').map(r=>r.element_id+'|'+r.date));
+  const replaced=(DB.demand_values||[]).filter(r=>touched.has(r.element_id+'|'+r.date)&&r.source!=='actual');
+  const skip=vals.filter(x=>actual.has(x.element_id+'|'+x.date)).length; const t=vals.reduce((a,x)=>a+x.value_t,0);
+  const prev={vid, label:(b.versions.find(v=>v.id===vid)||{}).label||vid, from, to, points:new Set(vals.map(x=>x.element_id)).size, rows:vals.length, t:Math.round(t), replaced:replaced.length, skip};
+  if(!apply){ PL.ui.importPreview=prev; planRender(); return prev; }
+  if(vals.length>5000&&!confirm(`${vals.length} daily rows will be written — the Execution change log records each one (budget 15,000 ops). Continue? (Splitting by quarter keeps the log small.)`)) return null;
+  const imp={id:'pi_'+Date.now().toString(36), planning_scenario_id:b.scenarioId, planning_name:b.scenarioName, version_id:vid, version_label:prev.label, element_ids:[...new Set(vals.map(x=>x.element_id))], from, to, n_rows:0, t:0,
+    replaced:replaced.map(r=>({...r})), at:new Date().toISOString(), by:_plWho(), undone_at:null};
+  DB.demand_values=(DB.demand_values||[]).filter(r=>!(touched.has(r.element_id+'|'+r.date)&&r.source!=='actual'));
+  vals.forEach(x=>{ if(actual.has(x.element_id+'|'+x.date)) return; DB.demand_values.push({element_id:x.element_id, date:x.date, value_t:Math.round(x.value_t*10)/10, source:'forecast', version_id:vid, plan_tag:'budget'}); imp.n_rows++; imp.t+=x.value_t; });
+  imp.t=Math.round(imp.t); plImports().push(imp); PL.ui.importPreview=null;
+  if(typeof _demandChanged==='function') _demandChanged(); autoSave(); planRender();
+  statMsg(`Budget ${prev.label} copied into this scenario: ${_plFmt(imp.n_rows)} days, ${_plFmt(imp.t)} ST (${prev.replaced} forecast rows replaced, ${prev.skip} actual days kept)`);
+  return imp;
+}
+function plUndoImport(id){
+  const imp=plImports().find(x=>x.id===id); if(!imp||imp.undone_at) return;
+  const els=new Set(imp.element_ids); const before=DB.demand_values.length;
+  DB.demand_values=DB.demand_values.filter(r=>!(r.plan_tag==='budget'&&r.version_id===imp.version_id&&els.has(r.element_id)&&r.date>=imp.from&&r.date<=imp.to));
+  const removed=before-DB.demand_values.length; const actual=new Set(DB.demand_values.filter(r=>r.source==='actual').map(r=>r.element_id+'|'+r.date));
+  (imp.replaced||[]).forEach(r=>{ if(!actual.has(r.element_id+'|'+r.date)) DB.demand_values.push({...r}); });
+  imp.undone_at=new Date().toISOString(); if(typeof _demandChanged==='function') _demandChanged(); autoSave(); planRender();
+  statMsg(`Import undone: ${removed} budget days removed, ${(imp.replaced||[]).length} previous rows restored`);
+}
+function _plImportCardHTML(s){
+  const b=PL.bgt; const y=s.budget_year; const imps=plImports().slice().reverse(); const pv=PL.ui.importPreview;
+  const vopts=b&&b.versions?b.versions.map(v=>`<option value="${v.id}" ${v.id===b.versionId?'selected':''}>${_plEsc(v.label)}${v.status==='active'?' (active)':''}</option>`).join(''):'';
+  const curV=(b&&b.versions&&(document.getElementById('pli-version')?.value||b.versionId))||null; const bv=b&&b.byVersion&&b.byVersion[curV];
+  const dpopts=bv?Object.keys(bv.byEl).map(el=>({el, name:(bv.names[el])||(((DB.elements||[]).find(e=>e.id===el)||{}).name)||el})).sort((a,b2)=>a.name.localeCompare(b2.name)).map(o=>`<option value="${o.el}">${_plEsc(o.name)}</option>`).join(''):'';
+  const hist=imps.length?`<table class="pl-tbl" style="margin-top:8px"><tr><th>When</th><th>Version</th><th>Range</th><th>Points</th><th>Days</th><th>ST</th><th></th></tr>${imps.slice(0,12).map(i=>`<tr style="${i.undone_at?'opacity:.5':''}"><td>${String(i.at).slice(0,16).replace('T',' ')}<br><span class="pl-muted">${_plEsc(i.by||'')}</span></td><td>${_plEsc(i.version_label)}</td><td>${i.from} → ${i.to}</td><td class="n">${i.element_ids.length}</td><td class="n">${_plFmt(i.n_rows)}</td><td class="n">${_plFmt(i.t)}</td><td>${i.undone_at?'<span class="pl-flag dim">undone</span>':`<button class="pl-btn" onclick="plUndoImport('${i.id}')">Undo</button>`}</td></tr>`).join('')}</table>`:'';
+  return _plCard('pl-import','Budget → this scenario','copy a slice of the budget in as forecast (tagged, reversible)', imps.length||null,
+    b&&b.versions&&b.versions.length?`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px;align-items:end">
+       <label class="pl-muted">Version<br><select class="fi" id="pli-version" style="width:100%" onchange="planRender()">${vopts}</select></label>
+       <label class="pl-muted">From<br><input class="fi" type="date" id="pli-from" value="${pv?pv.from:y+'-01-01'}" style="width:100%"></label>
+       <label class="pl-muted">To<br><input class="fi" type="date" id="pli-to" value="${pv?pv.to:y+'-03-31'}" style="width:100%"></label>
+       <label class="pl-muted">Demand points (none selected = all)<br><select class="fi" id="pli-dps" multiple size="5" style="width:100%">${dpopts}</select></label>
+       <div style="display:flex;gap:6px"><button class="pl-btn" onclick="plImportPreview(false)">Preview</button><button class="pl-btn pri" onclick="plImportPreview(true)" ${pv?'':'disabled'}>Apply</button></div></div>
+     ${pv?`<div class="pl-muted" style="margin-top:6px">Preview: <b>${_plEsc(pv.label)}</b> ${pv.from} → ${pv.to} · ${pv.points} points · ${_plFmt(pv.rows)} days · <b>${_plFmt(pv.t)}</b> ST · ${pv.replaced} existing forecast rows would be replaced · ${pv.skip} actual days kept as they are</div>`:''}
+     <div class="pl-muted" style="margin-top:4px">Copied rows are ordinary forecast rows tagged with the budget version; actual days are never touched; Undo restores exactly what was replaced.</div>${hist}`
+    :`<div class="pl-muted">Connect a Planning scenario with a generated version above.</div>${hist}`);
+}
+// ── cards ─────────────────────────────────────────────────────────────────────
+function _plSlotRow(id){ const slot=DS_SLOTS.find(x=>x.id===id); return slot?dsBuildSlotHTML(slot).replace(/dsRefreshConfigUI\(\)/g,'planRender()'):''; }
+function _plSourcesCardHTML(s){
+  const ext=PL.stage.ext, rmx=PL.stage.rmx, h=PL.hist; if(!h) plHistLoad().then(x=>{ if(x) planRender(); });
+  const extTxt=ext?`<span class="pl-flag ok">staged</span> ${ext.lines.length} lines · FY <b>${_plFmt(ext.fy)}</b> ST · ${Object.keys(ext.byPlant).map(p=>p+' '+_plFmt(ext.byPlant[p]/1000,1)+'k').join(' · ')}${ext.skipped?' · '+ext.skipped+' empty rows skipped':''}`:'<span class="pl-muted">not loaded — click Refresh / Set File</span>';
+  const rmxTxt=rmx?`<span class="pl-flag ok">staged</span> ${Object.keys(rmx.perFam).map(f=>`${f} ${rmx.perFam[f].plants} plants / <b>${_plFmt(rmx.perFam[f].fy)}</b> ST`).join(' · ')}${rmx.warnings.length?' <span class="pl-flag">'+rmx.warnings.length+' warning(s)</span>':''}`:'<span class="pl-muted">not loaded</span>';
+  const hTxt=h?`<span class="pl-flag ok">indexed</span> ${_plFmt(h.rows.length)} month × customer × point rows · ${h.dateMin} → ${h.dateMax} · ${_plEsc(h.file.name)}`:'<span class="pl-muted">not loaded — needed for the allocation keys</span>';
+  return _plCard('pl-sources','Sources','the two budget workbooks and the sales history', null,
+    `${_plSlotRow('planExternal')}<div class="pl-muted" style="padding:4px 0 8px">${extTxt}</div>
+     ${_plSlotRow('planRmx')}<div class="pl-muted" style="padding:4px 0 8px">${rmxTxt}${rmx&&rmx.warnings.length?'<br>⚠ '+rmx.warnings.map(_plEsc).join('<br>⚠ '):''}</div>
+     ${_plSlotRow('planDetail')}<div class="pl-muted" style="padding:4px 0 8px">${hTxt}</div>
+     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">
+       <input class="fi" id="plv-label" placeholder="version label, e.g. V4 · Oct 1" style="width:200px"><input class="fi" id="plv-note" placeholder="note (optional)" style="width:260px">
+       <button class="pl-btn pri" onclick="plCreateVersion()" ${ext&&rmx?'':'disabled'}>Create version from the staged files</button>
+     </div>`);
+}
+function _plVersionsCardHTML(s){
+  const vs=plVersions().slice().sort((a,b)=>String(b.uploaded_at).localeCompare(String(a.uploaded_at)));
+  if(!vs.length) return _plCard('pl-versions','Versions','none yet', 0, '<div class="pl-muted">Create a version from the staged files above. Every upload becomes an immutable version; keys, rules and reassignments carry across versions.</div>');
+  const rows=vs.map(v=>{ const st=plVersionStats(v); const intTxt=Object.keys(st.int).map(f=>f+' '+_plFmt(st.int[f].fy/1000,1)+'k').join(' · ');
+    return `<tr><td><label><input type="radio" name="plv-active" ${v.status==='active'?'checked':''} onchange="plSetActiveVersion('${v.id}')"> <b>${_plEsc(v.label)}</b></label> <span class="pl-flag ${v.status==='active'?'ok':'dim'}">${v.status}</span>${v.stale?' <span class="pl-flag">regenerate</span>':''}<br><span class="pl-muted">${String(v.uploaded_at).slice(0,16).replace('T',' ')} · ${_plEsc(v.uploaded_by||'')}${v.note?' · '+_plEsc(v.note):''}</span></td>
+      <td class="pl-muted">${v.source_files.map(f=>_plEsc(f.name)).join('<br>')}</td>
+      <td class="n">EXT ${_plFmt(st.ext.fy/1000,1)}k<br><span class="pl-muted">${intTxt}</span></td>
+      <td class="n">${st.ext.mapped}/${st.ext.n} <span class="pl-muted">(${st.ext.fy?Math.round(st.ext.fyMapped/st.ext.fy*100):0}% of t)</span></td>
+      <td>${v.generated_at?'<span class="pl-flag ok">generated '+String(v.generated_at).slice(0,10)+'</span>':'<span class="pl-flag dim">not generated</span>'}</td>
+      <td style="white-space:nowrap"><button class="pl-btn" onclick="plArchiveVersion('${v.id}')">${v.status==='archived'?'Unarchive':'Archive'}</button> <button class="pl-btn" onclick="plDeleteVersion('${v.id}')" ${v.status==='active'?'disabled':''}>Delete</button></td></tr>`; }).join('');
+  const opts=vs.map(v=>`<option value="${v.id}">${_plEsc(v.label)}</option>`).join('');
+  let diff=''; if(PL.ui.diff&&vs.some(v=>v.id===PL.ui.diff.a)&&vs.some(v=>v.id===PL.ui.diff.b)){
+    const d=plVersionDiff(PL.ui.diff.a, PL.ui.diff.b); const la=vs.find(v=>v.id===PL.ui.diff.a).label, lb=vs.find(v=>v.id===PL.ui.diff.b).label;
+    const tot=d.reduce((a,r)=>a+r.d,0);
+    diff=`<div style="margin-top:8px"><b>${_plEsc(la)} → ${_plEsc(lb)}</b>: ${d.length} lines differ, net ${tot>=0?'+':''}${_plFmt(tot)} ST (file changes; the keys/rules split appears once both versions are generated)</div>
+      <div style="max-height:240px;overflow:auto;border:1px solid var(--border);margin-top:4px"><table class="pl-tbl"><tr><th>Line</th><th>Status</th><th>FY A</th><th>FY B</th><th>Δ</th></tr>
+      ${d.slice(0,300).map(r=>`<tr><td>${_plEsc(r.label)}</td><td><span class="pl-flag ${r.status==='new'?'ok':r.status==='gone'?'bad':'dim'}">${r.status}</span></td><td class="n">${_plFmt(r.fa)}</td><td class="n">${_plFmt(r.fb)}</td><td class="n" style="color:${r.d<0?'var(--red)':'var(--green)'}">${r.d>=0?'+':''}${_plFmt(r.d)}</td></tr>`).join('')}</table></div>`;
+  }
+  return _plCard('pl-versions','Versions','active = the one that is generated and simulated', vs.length,
+    `<table class="pl-tbl"><tr><th>Version</th><th>Files</th><th>Volume</th><th>EXT mapped</th><th>Demand</th><th></th></tr>${rows}</table>
+     <div style="display:flex;gap:6px;align-items:center;margin-top:8px"><span class="pl-muted">Compare</span><select class="fi" id="plv-a" style="width:160px">${opts}</select><span class="pl-muted">→</span><select class="fi" id="plv-b" style="width:160px">${opts}</select><button class="pl-btn" onclick="plShowDiff()">Show differences</button></div>${diff}`);
+}
+function _plTranslationCardHTML(s){
+  const v=plActiveVersion(); if(!v) return '';
+  const st=plVersionStats(v); const miss=Object.entries(st.ext.missing).sort((a,b)=>b[1]-a[1]);
+  const bad=plVersionLines(v.id).filter(l=>l.kind==='EXT').map(l=>({l,t:plLineTarget(l)})).filter(x=>!x.t.mapped||x.t.inactive).sort((a,b)=>b.l.fy-a.l.fy).slice(0,40);
+  return _plCard('pl-translate','Translation check','external rows → demand points through Demand Mapping', `${st.ext.mapped}/${st.ext.n} rows`,
+    `<div class="pl-kv"><b>Mapped</b><span>${st.ext.mapped} rows · ${_plFmt(st.ext.fyMapped)} of ${_plFmt(st.ext.fy)} ST (${st.ext.fy?Math.round(st.ext.fyMapped/st.ext.fy*100):0}%)</span>
+       <b>Inactive point</b><span>${st.ext.inactive}</span><b>Purchased point</b><span>${st.ext.purchased} <span class="pl-muted">(cement budget never lands on a purchased point — flagged in the review)</span></span></div>
+     ${miss.length?`<div style="margin-top:6px"><b>Not placeable</b> (fix in Configuration → Demand Mapping):<ul style="margin:4px 0 0 16px;padding:0">${miss.map(([m,t])=>`<li>${_plEsc(m)} — ${_plFmt(t)} ST</li>`).join('')}</ul></div>`:'<div class="pl-muted" style="margin-top:6px">Every external row has a demand point.</div>'}
+     ${bad.length?`<div style="max-height:200px;overflow:auto;border:1px solid var(--border);margin-top:6px"><table class="pl-tbl"><tr><th>Sold-to</th><th>Ship-to</th><th>Plant</th><th>Material</th><th>FY</th><th>Composed name</th><th>Why</th></tr>
+       ${bad.map(({l,t})=>`<tr><td>${_plEsc(l.sold_to_name||l.sold_to)}</td><td>${_plEsc(l.ship_to_name||l.ship_to)}</td><td>${_plEsc(l.plant)}</td><td>${_plEsc(l.material_desc||l.material)}</td><td class="n">${_plFmt(l.fy)}</td><td class="pl-muted">${_plEsc(t.dp_name)}</td><td class="pl-muted">${_plEsc((t.missing[0]||(t.inactive?'point inactive':'')).slice(0,90))}</td></tr>`).join('')}</table></div>`:''}`);
 }
 
 // ═══ Users & access panel (admin) ═══
@@ -34508,7 +35705,8 @@ function scOpenHistoryPanel(){
 const _CL_TABLE_LABEL={elements:'topology items', connections:'connections', facilities:'facilities', products:'products',
   demand_values:'demand values', production_campaigns:'production campaigns', vessel_calls:'vessel calls', vessel_campaigns:'vessel campaigns', vessel_sof:'SOF statements',
   rail_movements:'rail movements', rail_loading_plan:'rail loading plan', silo_links:'silo links', silo_transfer_plans:'silo transfers',
-  mill_policies:'mill policies', element_maintenance_events:'maintenance events', demand_substitutions:'demand swaps', [CL_CFG]:'settings'};
+  mill_policies:'mill policies', element_maintenance_events:'maintenance events', demand_substitutions:'demand swaps',
+  plan_versions:'budget versions', plan_lines:'budget lines', alloc_keys:'allocation keys', norm_rules:'normalisation rules', plan_demand:'budget demand', plan_imports:'budget imports', plan_settings:'budget settings', [CL_CFG]:'settings'};
 function _clSummary(n){
   return Object.entries(n||{}).map(([t,[a,m,d]])=>{
     const parts=[]; if(a) parts.push('+'+a); if(m) parts.push('~'+m); if(d) parts.push('−'+d);
