@@ -22431,7 +22431,8 @@ function _pushBIBuildTables(){
     const _y=(DB.plan_settings||[]).find(x=>x.id==='default')?.budget_year||new Date().getFullYear()+1;
     (DB.plan_lines||[]).forEach(l=>{
       let targets=[];
-      if(l.kind==='INT'){ const k=plKeyFor(l.rmx_plant, l.family); targets=k?k.targets:[]; }
+      if(l.kind==='LOAD'){ const e=xlmapFindDp(l.dp_name); targets=[{dp_name:l.dp_name, element_id:e?e.id:'', share:1}]; }
+      else if(l.kind==='INT'){ const k=plKeyFor(l.rmx_plant, l.family); targets=k?k.targets:[]; }
       else { try{ targets=plEffectiveExtTarget(l).targets; }catch(e){ targets=[]; } }
       if(!targets.length) targets=[{dp_name:'', element_id:'', share:1}];
       targets.forEach(t=>{ (l.months||[]).forEach((x,m)=>{ const bt=(+x||0)*(t.share||0); if(!bt) return;
@@ -34473,13 +34474,16 @@ function planPanelHTML(){
 }
 // ── Execution scenario view: prerequisites, create / link the Planning scenario, budget → Execution.
 function _plExecPanelHTML(s){
-  return _plPrereqCardHTML(s)+_plCompareCardHTML(s)+_plImportCardHTML(s)+_plCard('pl-create','Planning scenario','duplicate of this scenario, budget year '+s.budget_year, null,
+  if(PL.ui.open['pl-adv-x']===undefined) PL.ui.open['pl-adv-x']=false;
+  const advX=PL.ui.open['pl-adv-x']!==false;
+  return _plCard('pl-create','Planning scenario','duplicate of this scenario, budget year '+s.budget_year, null,
     `<div class="pl-muted" style="margin-bottom:8px">A Planning scenario is a separate file duplicated from this one. It simulates the budget year from this scenario's projected 31 December state (silos, vessels at berth or waiting, rail in the yards and in transit), with the file watcher, merge, Sales catalog and Real Sales imports switched off. One editor at a time; every computer must run this app version or the budget tables are dropped on save.</div>
      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
        <label class="pl-muted">Budget year <input class="fi" type="number" id="pl-year" value="${s.budget_year}" min="2026" max="2035" style="width:80px;display:inline-block;margin-left:4px" onchange="plSettings().budget_year=parseInt(this.value)||${s.budget_year};autoSave();planRender()"></label>
        <button class="pl-btn pri" onclick="planCreateScenario()">Create Planning scenario…</button>
        <span class="pl-muted">${_plOpenCheck(S.simResults, s.budget_year+'-01-01').msg}</span>
-     </div>`);
+     </div>`)+_plCompareCardHTML(s)+_plImportCardHTML(s)+_plCard('pl-adv-x','Advanced: prerequisites for building from customers (legacy)','history points, ash sources, product supply — not needed when you load a ready demand table', null,
+    advX?_plPrereqCardHTML(s):'<div class="pl-muted">Open this only if you build the budget from the customer workbooks. The simulation check above is the only one a ready demand table needs.</div>');
 }
 // ── P0 prerequisites in Execution ───────────────────────────────────────────
 // Power-plant ash sources: shipped straight from the plant, so purchased-type facilities (D15).
@@ -34588,7 +34592,11 @@ function plIsPurchasedDp(el){
 // Planning scenario view: settings only in this step; sources, versions, keys, rules, generation follow.
 function _plPlanningPanelHTML(s){
   const w=(s.weights||[]).join(',');
-  return _plSourceCardHTML(s)+_plSourcesCardHTML(s)+_plVersionsCardHTML(s)+_plTranslationCardHTML(s)+_plCandidatesCardHTML(s)+_plIntKeysCardHTML(s)+_plExtReviewCardHTML(s)+_plRulesCardHTML(s)+_plGenerateCardHTML(s)+_plCard('pl-settings','Settings','how keys are computed and months are spread', null,
+  if(PL.ui.open['pl-adv']===undefined) PL.ui.open['pl-adv']=false;
+  if(PL.ui.open['pl-settings']===undefined) PL.ui.open['pl-settings']=false;
+  const advOpen=PL.ui.open['pl-adv']!==false;
+  return _plSourceCardHTML(s)+_plLoadCardHTML(s)+_plVersionsCardHTML(s)+_plGenerateCardHTML(s)+_plCard('pl-adv','Advanced: build the budget from customers (legacy)','customer workbooks, allocation keys, rules — not needed with a ready demand table', null,
+    advOpen?(_plSourcesCardHTML(s)+_plTranslationCardHTML(s)+_plCandidatesCardHTML(s)+_plIntKeysCardHTML(s)+_plExtReviewCardHTML(s)+_plRulesCardHTML(s)):'<div class="pl-muted">Open this only to build a budget from the customer workbooks and the sales history.</div>')+_plCard('pl-settings','Settings','how keys are computed and months are spread', null,
     `<div class="pl-kv">
       <b>Budget year</b><input class="fi" type="number" id="pls-year" value="${s.budget_year}" style="width:90px">
       <b>Saturday %</b><span><input class="fi" type="number" id="pls-sat" value="${s.sat_pct}" min="0" max="100" style="width:70px;display:inline-block"> <label><input type="checkbox" id="pls-ships-sat" ${s.ships_sat?'checked':''}> ships on Saturdays</label></span>
@@ -34651,18 +34659,23 @@ function _scApplyTopologyTables(payload){
   return t;
 }
 function _plSourceCardHTML(s){
+  plSrcEnsure();
   const srcId=S.simCfg.plan_source_scenario_id, srcName=S.simCfg.plan_source_name||(srcId&&SC.meta[srcId]&&SC.meta[srcId].name)||'(not linked)';
   const rep=s.open_report||null;
-  return _plCard('pl-source','Source scenario','topology and opening state come from '+_plEsc(srcName), null,
+  const stale=PL._srcStale===true?'<span class="pl-flag bad">the trend scenario changed since this update</span>':PL._srcStale===false?'<span class="pl-flag ok">up to date with the trend</span>':'';
+  return _plCard('pl-source','From the trend scenario','topology, settings and the 31 Dec closing state come from '+_plEsc(srcName), null,
     `<div class="pl-kv">
       <b>Linked to</b><span>${_plEsc(srcName)} ${srcId&&!SC.meta[srcId]?'<span class="pl-flag bad">not in this browser\'s scenario list</span>':''}</span>
       <b>Simulation</b><span>${S.simCfg.start_date} · ${S.simCfg.horizon} days (${S.simCfg.horizonPreset||'custom'})</span>
-      <b>Opening state</b><span>${rep?_plEsc(rep.summary)+' <span class="pl-muted">('+String(rep.at||'').slice(0,16).replace('T',' ')+')</span>':'<span class="pl-muted">not copied yet</span>'}</span>
+      <b>Closing state</b><span>${rep?_plEsc(rep.summary)+' <span class="pl-muted">('+String(rep.at||'').slice(0,16).replace('T',' ')+')</span>':'<span class="pl-muted">not copied yet</span>'}</span>
+      ${rep&&rep.topology?`<b>Topology</b><span>${_plEsc(rep.topology)}</span>`:''}
      </div>
      ${rep&&rep.warnings&&rep.warnings.length?`<div class="pl-muted" style="margin-top:6px">⚠ ${rep.warnings.map(_plEsc).join('<br>⚠ ')}</div>`:''}
-     <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
-       <button class="pl-btn" onclick="planRefreshTopology()" ${srcId?'':'disabled'}>Refresh topology from ${_plEsc(srcName)}…</button>
-       <button class="pl-btn" onclick="planRefreshOpeningState()" ${srcId?'':'disabled'}>Refresh opening state from its latest simulation…</button>
+     <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+       <button class="pl-btn pri" onclick="planUpdateFromTrend()" ${srcId?'':'disabled'}>Update from ${_plEsc(srcName)}…</button>${stale}
+       <details style="display:inline-block"><summary class="pl-muted" style="cursor:pointer">only one of the two…</summary>
+         <button class="pl-btn" onclick="planRefreshTopology()" ${srcId?'':'disabled'}>Topology only…</button>
+         <button class="pl-btn" onclick="planRefreshOpeningState()" ${srcId?'':'disabled'}>Closing state only…</button></details>
      </div>`);
 }
 async function planRefreshTopology(){
@@ -34806,7 +34819,7 @@ async function planRefreshOpeningState(){
   _plUndoOpeningState();
   const src={DB:pk.payload.DB, simCfg:srcCfg, simResults:r};
   const keep=S.simCfg.start_date; S.simCfg.start_date=srcCfg.start_date||keep; let rep; try{ rep=planCopyOpeningState(src, startDate, pk.name); } finally { S.simCfg.start_date=keep; }
-  plSettings().open_report=rep; S.simResults=null; autoSave(); await scManualSave(); planRender(); _demandChanged();
+  rep.src_mod=pk.fileMod; plSettings().open_report=rep; S.simResults=null; PL._srcStale=false; PL._srcAt=0; autoSave(); await scManualSave(); planRender(); _demandChanged();
   statMsg('Opening state refreshed — '+rep.summary);
 }
 
@@ -34962,9 +34975,10 @@ function plTranslateLine(line){
 }
 function plLineTarget(line){ const k=line.line_key; if(PL.tr[k]) return PL.tr[k]; return (PL.tr[k]=plTranslateLine(line)); }
 function plVersionStats(v){
-  const L=plVersionLines(v.id); const st={ext:{n:0,fy:0,mapped:0,fyMapped:0,inactive:0,purchased:0,missing:{}}, int:{}};
+  const L=plVersionLines(v.id); const st={ext:{n:0,fy:0,mapped:0,fyMapped:0,inactive:0,purchased:0,missing:{}}, int:{}, load:{n:0,fy:0}};
   L.forEach(l=>{ if(l.kind==='EXT'){ const t=plLineTarget(l); st.ext.n++; st.ext.fy+=l.fy; if(t.mapped){ st.ext.mapped++; st.ext.fyMapped+=l.fy; } else { (t.missing.length?t.missing:['unmapped']).forEach(m=>{ const key=m.replace(/\d{5,}/g,'#').slice(0,80); st.ext.missing[key]=(st.ext.missing[key]||0)+l.fy; }); }
       if(t.inactive) st.ext.inactive++; if(t.purchased) st.ext.purchased++; }
+    else if(l.kind==='LOAD'){ st.load.n++; st.load.fy+=l.fy; }
     else { const f=st.int[l.family]=st.int[l.family]||{n:0,fy:0}; f.n++; f.fy+=l.fy; } });
   return st;
 }
@@ -34972,12 +34986,12 @@ function plVersionStats(v){
 function plVersionDiff(aId, bId){
   const A=new Map(plVersionLines(aId).map(l=>[l.line_key,l])), B=new Map(plVersionLines(bId).map(l=>[l.line_key,l])); const rows=[];
   new Set([...A.keys(),...B.keys()]).forEach(k=>{ const a=A.get(k), b=B.get(k); const fa=a?a.fy:0, fb=b?b.fy:0; if(Math.abs(fa-fb)<0.5&&a&&b&&a.months.every((x,i)=>Math.abs(x-b.months[i])<0.5)) return;
-    const l=b||a; rows.push({key:k, kind:l.kind, label:l.kind==='EXT'?`${l.sold_to_name||l.sold_to} → ${l.ship_to_name||l.ship_to} · ${l.plant_name||l.plant} · ${l.material_desc||l.material}`:`${l.family} · ${l.rmx_plant} ${l.rmx_name}`, fa, fb, d:fb-fa, status:!a?'new':!b?'gone':'changed'}); });
+    const l=b||a; rows.push({key:k, kind:l.kind, label:l.kind==='LOAD'?`${l.family} · ${l.dp_name}`:l.kind==='EXT'?`${l.sold_to_name||l.sold_to} → ${l.ship_to_name||l.ship_to} · ${l.plant_name||l.plant} · ${l.material_desc||l.material}`:`${l.family} · ${l.rmx_plant} ${l.rmx_name}`, fa, fb, d:fb-fa, status:!a?'new':!b?'gone':'changed'}); });
   rows.sort((x,y)=>Math.abs(y.d)-Math.abs(x.d)); return rows;
 }
 function plShowDiff(){ const a=document.getElementById('plv-a')?.value, b=document.getElementById('plv-b')?.value; if(!a||!b||a===b){ statMsg('Pick two different versions'); return; } PL.ui.diff={a,b}; planRender(); }
 // ── Version comparison report (D26): what the FILE changed vs what KEYS / RULES changed, from buckets down to lines ──
-function _plBucket(l){ return l.kind==='EXT'?'External cement':'Internal '+(l.family||'cement'); }
+function _plBucket(l){ return l.kind==='LOAD'?'Loaded '+(l.family||'cement'):l.kind==='EXT'?'External cement':'Internal '+(l.family||'cement'); }
 function _plSumBy(L, f){ const o={}; L.forEach(l=>{ const k=f(l); o[k]=(o[k]||0)+(l.fy||0); }); return o; }
 function plVersionReport(aId, bId){
   const A=plVersions().find(v=>v.id===aId), B=plVersions().find(v=>v.id===bId); if(!A||!B) throw new Error('version not found');
@@ -35338,6 +35352,10 @@ function plGenerateMonthly(vid){
   const tot={}, lines={}, names={}, unalloc=[], warnings=[]; let excluded=0, excludedT=0;
   const add=(el, name, m, t, lineId)=>{ if(!t||!(m>=0)) return; /* negatives (returns, adjustments) net here and are clamped per point-month */ names[el]=names[el]||name; tot[el]=tot[el]||{}; lines[el]=lines[el]||{}; tot[el][m]=(tot[el][m]||0)+t; lines[el][m]=lines[el][m]||{}; lines[el][m][lineId]=(lines[el][m][lineId]||0)+t; };
   plVersionLines(vid).forEach(l=>{
+    if(l.kind==='LOAD'){   // a ready demand point x month row: resolved by NAME every time, so a topology refresh cannot orphan it
+      const el=xlmapFindDp(l.dp_name); if(!el){ unalloc.push({line:l, t:l.fy, why:'point not in topology: '+l.dp_name}); return; }
+      l.months.forEach((x,m)=>add(el.id, el.name, m, x, l.id)); return;
+    }
     if(l.kind==='INT'){
       const k=plKeyFor(l.rmx_plant, l.family); if(!k){ unalloc.push({line:l, t:l.fy, why:'no key (no history, no sister copy)'}); return; }
       k.targets.forEach(t=>{ if(!t.element_id){ unalloc.push({line:l, t:l.fy*t.share, why:'point not in topology: '+t.dp_name}); return; } l.months.forEach((x,m)=>add(t.element_id, t.dp_name, m, x*t.share, l.id)); });
@@ -35370,7 +35388,7 @@ function plGenerate(vid){
       if(t>0||sp.spread_t>0){ DB.plan_demand.push({version_id:vid, element_id:el, dp_name:g.names[el], ym:`${y}-${String(m+1).padStart(2,'0')}`, kind:'budget', days:sp.days, total_t:Math.round(t*10)/10, spread_t:sp.spread_t, lines:top, generated_at:new Date().toISOString()}); nRows++; } }
     if(Math.abs(carry)>25) g.warnings.push(`${g.names[el]}: ${Math.round(carry)} t could not be placed in the year`); });
   v.generated_at=new Date().toISOString(); v.generated_hash=plGenHash(vid); v.stale=false;
-  v.gen_report={rows:nRows, points:Object.keys(g.tot).length, total_t:Math.round(sumTot), spread_t:Math.round(sumSpread), unallocated_t:Math.round(g.unalloc.reduce((a,u)=>a+u.t,0)), unallocated:g.unalloc.slice(0,60).map(u=>({why:u.why, t:Math.round(u.t), label:u.line.kind==='EXT'?(u.line.sold_to_name||u.line.sold_to)+' · '+(u.line.material_desc||u.line.material):(u.line.family+' · '+u.line.rmx_name)})), excluded:g.excluded, excluded_t:Math.round(g.excludedT), clamped:Math.round(g.clamped), warnings:g.warnings};
+  v.gen_report={rows:nRows, points:Object.keys(g.tot).length, total_t:Math.round(sumTot), spread_t:Math.round(sumSpread), unallocated_t:Math.round(g.unalloc.reduce((a,u)=>a+u.t,0)), unallocated:g.unalloc.slice(0,60).map(u=>({why:u.why, t:Math.round(u.t), label:u.line.kind==='LOAD'?u.line.dp_name:u.line.kind==='EXT'?(u.line.sold_to_name||u.line.sold_to)+' · '+(u.line.material_desc||u.line.material):(u.line.family+' · '+u.line.rmx_name)})), excluded:g.excluded, excluded_t:Math.round(g.excludedT), clamped:Math.round(g.clamped), warnings:g.warnings};
   let mat=null; if(v.status==='active'&&scIsPlanning()) mat=plMaterialise(vid);
   autoSave(); planRender();
   statMsg(`Generated ${v.label}: ${_plFmt(sumSpread)} ST on ${Object.keys(g.tot).length} demand points${v.gen_report.unallocated_t?' · '+_plFmt(v.gen_report.unallocated_t)+' ST unallocated':''}${mat?' · simulation re-running':''}`);
@@ -35455,59 +35473,242 @@ function _plCompareCardHTML(s){
        <button class="pl-btn" onclick="plBgtEnsure({prompt:true})" ${link.id?'':'disabled'}>Connect / refresh</button></div>
      <div class="pl-muted" style="margin-top:6px">${b&&b.versionId?`<span class="pl-flag ok">connected</span> ${_plEsc(b.scenarioName)} · version <b>${_plEsc(b.versionLabel)}</b> · budget ${b.year} · ${_plFmt(b.total_t)} ST on ${Object.keys(b.byEl).length} points · generated ${String(b.generated_at||'').slice(0,10)}`:link.id?`<span class="pl-flag">${_plEsc(PL._bgtErr||'reading…')}</span>`:'Pick the Planning scenario created from this one. Budget rows appear on the Supply page once its window reaches January '+(s.budget_year)+'.'}</div>`);
 }
-// ═══ P6 · Budget → Execution: copy a slice of a Planning version into this scenario as tagged forecast rows (reversible) ═══
+// ═══ P6 · Budget → Execution (push): copy a slice of a Planning version into this scenario as tagged forecast rows (reversible) ═══
+// Choices: dates, demand points (facility / family / pick), Replace or Fill gaps only, month-by-month preview, Undo (by import id).
 function plImports(){ return (DB.plan_imports=DB.plan_imports||[]); }
 function _plImportInputs(){
-  const g=id=>document.getElementById(id); const b=PL.bgt||{}; const vid=g('pli-version')?.value||b.versionId; const from=g('pli-from')?.value, to=g('pli-to')?.value;
+  const g=id=>document.getElementById(id); const b=PL.bgt||{};
   const sel=g('pli-dps'); const picked=sel?[...sel.selectedOptions].map(o=>o.value).filter(Boolean):[];
-  const bv=b.byVersion&&b.byVersion[vid]; const all=bv?Object.keys(bv.byEl):[];
-  return {vid, from, to, elIds:picked.length?picked:all, bv};
+  return {vid:g('pli-version')?.value||b.versionId, from:g('pli-from')?.value, to:g('pli-to')?.value, picked, fac:g('pli-fac')?.value||'', fam:g('pli-fam')?.value||'', mode:g('pli-mode')?.value||'replace'};
+}
+function _plImportEls(inp, bv){
+  if(!bv) return [];
+  const nameOf=el=>(bv.names&&bv.names[el])||((DB.elements||[]).find(e=>e.id===el)||{}).name||'';
+  if(inp.picked&&inp.picked.length) return inp.picked.slice();                 // an explicit pick wins over the facility / family filters
+  let els=Object.keys(bv.byEl);
+  if(inp.fac) els=els.filter(el=>nameOf(el).split('/')[0]===inp.fac);
+  if(inp.fam) els=els.filter(el=>plFamilyOfName(nameOf(el))===inp.fam);
+  return els;
 }
 function plImportPreview(apply){
   const b=PL.bgt; if(!b||!b.byVersion){ statMsg('Connect the Planning scenario first'); return null; }
-  const {vid, from, to, elIds, bv}=_plImportInputs(); if(!bv){ statMsg('That version has no generated demand'); return null; } if(!from||!to||from>to){ statMsg('Pick a date range'); return null; }
-  const known=new Set((DB.elements||[]).filter(e=>e.type==='demand_point').map(e=>e.id));
-  const vals=[]; elIds.forEach(el=>{ if(!known.has(el)) return; const byYm=bv.byEl[el]||{}; Object.keys(byYm).forEach(ym=>{ byYm[ym].forEach((t,i)=>{ if(!(t>0)) return; const ds=ym+'-'+String(i+1).padStart(2,'0'); if(ds<from||ds>to) return; vals.push({element_id:el, date:ds, value_t:t}); }); }); });
+  const inp=(apply&&PL.ui.impIn)?PL.ui.impIn:_plImportInputs(); if(!apply) PL.ui.impIn=inp;     // Apply uses exactly what was previewed
+  const {vid, from, to, mode}=inp; const bv=b.byVersion[vid];
+  if(!bv){ statMsg('That version has no generated demand'); return null; } if(!from||!to||from>to){ statMsg('Pick a date range'); return null; }
+  const elIds=_plImportEls(inp, bv); const known=new Set((DB.elements||[]).filter(e=>e.type==='demand_point').map(e=>e.id));
+  let vals=[]; elIds.forEach(el=>{ if(!known.has(el)) return; const byYm=bv.byEl[el]||{}; Object.keys(byYm).forEach(ym=>{ byYm[ym].forEach((t,i)=>{ if(!(t>0)) return; const ds=ym+'-'+String(i+1).padStart(2,'0'); if(ds<from||ds>to) return; vals.push({element_id:el, date:ds, value_t:t}); }); }); });
+  const existing=(DB.demand_values||[]).filter(r=>r.source!=='actual');
+  if(mode==='fill'){ const have=new Set(existing.filter(r=>r.value_t>0).map(r=>r.element_id+'|'+r.date)); vals=vals.filter(x=>!have.has(x.element_id+'|'+x.date)); }   // only days that have no forecast
   const touched=new Set(vals.map(x=>x.element_id+'|'+x.date)); const actual=new Set((DB.demand_values||[]).filter(r=>r.source==='actual').map(r=>r.element_id+'|'+r.date));
-  const replaced=(DB.demand_values||[]).filter(r=>touched.has(r.element_id+'|'+r.date)&&r.source!=='actual');
-  const skip=vals.filter(x=>actual.has(x.element_id+'|'+x.date)).length; const t=vals.reduce((a,x)=>a+x.value_t,0);
-  const prev={vid, label:(b.versions.find(v=>v.id===vid)||{}).label||vid, from, to, points:new Set(vals.map(x=>x.element_id)).size, rows:vals.length, t:Math.round(t), replaced:replaced.length, skip};
+  const replaced=existing.filter(r=>touched.has(r.element_id+'|'+r.date));
+  const writable=vals.filter(x=>!actual.has(x.element_id+'|'+x.date));
+  const skip=vals.length-writable.length; const t=writable.reduce((a,x)=>a+x.value_t,0);
+  const byM={}; writable.forEach(x=>{ const ym=x.date.slice(0,7); (byM[ym]=byM[ym]||{cur:0,bud:0}).bud+=x.value_t; });
+  replaced.forEach(r=>{ if(actual.has(r.element_id+'|'+r.date)) return; const ym=r.date.slice(0,7); if(byM[ym]) byM[ym].cur+=r.value_t; });
+  const prev={vid, label:(b.versions.find(v=>v.id===vid)||{}).label||vid, from, to, mode, points:new Set(writable.map(x=>x.element_id)).size, rows:writable.length, t:Math.round(t), replaced:replaced.length, skip,
+    months:Object.keys(byM).sort().map(ym=>({ym, cur:Math.round(byM[ym].cur), bud:Math.round(byM[ym].bud)}))};
   if(!apply){ PL.ui.importPreview=prev; planRender(); return prev; }
-  if(vals.length>5000&&!confirm(`${vals.length} daily rows will be written — the Execution change log records each one (budget 15,000 ops). Continue? (Splitting by quarter keeps the log small.)`)) return null;
-  const imp={id:'pi_'+Date.now().toString(36), planning_scenario_id:b.scenarioId, planning_name:b.scenarioName, version_id:vid, version_label:prev.label, element_ids:[...new Set(vals.map(x=>x.element_id))], from, to, n_rows:0, t:0,
+  if(writable.length>5000&&!confirm(`${writable.length} daily rows will be written — the Execution change log records each one (budget 15,000 ops). Continue? (Splitting by quarter keeps the log small.)`)) return null;
+  const imp={id:'pi_'+Date.now().toString(36), planning_scenario_id:b.scenarioId, planning_name:b.scenarioName, version_id:vid, version_label:prev.label, element_ids:[...new Set(writable.map(x=>x.element_id))], from, to, mode, marked:true, n_rows:0, t:0,
     replaced:replaced.map(r=>({...r})), at:new Date().toISOString(), by:_plWho(), undone_at:null};
   DB.demand_values=(DB.demand_values||[]).filter(r=>!(touched.has(r.element_id+'|'+r.date)&&r.source!=='actual'));
-  vals.forEach(x=>{ if(actual.has(x.element_id+'|'+x.date)) return; DB.demand_values.push({element_id:x.element_id, date:x.date, value_t:Math.round(x.value_t*10)/10, source:'forecast', version_id:vid, plan_tag:'budget'}); imp.n_rows++; imp.t+=x.value_t; });
+  writable.forEach(x=>{ DB.demand_values.push({element_id:x.element_id, date:x.date, value_t:Math.round(x.value_t*10)/10, source:'forecast', version_id:vid, plan_tag:'budget', import_id:imp.id}); imp.n_rows++; imp.t+=x.value_t; });
   imp.t=Math.round(imp.t); plImports().push(imp); PL.ui.importPreview=null;
   if(typeof _demandChanged==='function') _demandChanged(); autoSave(); planRender();
-  statMsg(`Budget ${prev.label} copied into this scenario: ${_plFmt(imp.n_rows)} days, ${_plFmt(imp.t)} ST (${prev.replaced} forecast rows replaced, ${prev.skip} actual days kept)`);
+  statMsg(`Budget ${prev.label} copied into this scenario: ${_plFmt(imp.n_rows)} days, ${_plFmt(imp.t)} ST (${mode==='fill'?'gaps only':prev.replaced+' forecast rows replaced'}, ${prev.skip} actual days kept)`);
   return imp;
+}
+// An import can be undone only when no later, still-active import touches the same points and days (undo the later one first).
+function plImportBlockedBy(imp){
+  const els=new Set(imp.element_ids||[]);
+  return plImports().find(x=>x.id!==imp.id&&!x.undone_at&&String(x.at)>String(imp.at)&&x.from<=imp.to&&x.to>=imp.from&&(x.element_ids||[]).some(e=>els.has(e)))||null;
 }
 function plUndoImport(id){
   const imp=plImports().find(x=>x.id===id); if(!imp||imp.undone_at) return;
+  const blk=plImportBlockedBy(imp); if(blk){ statMsg(`Undo the later import (${blk.version_label} ${blk.from} → ${blk.to}) first — it overlaps this one`); return; }
   const els=new Set(imp.element_ids); const before=DB.demand_values.length;
-  DB.demand_values=DB.demand_values.filter(r=>!(r.plan_tag==='budget'&&r.version_id===imp.version_id&&els.has(r.element_id)&&r.date>=imp.from&&r.date<=imp.to));
+  DB.demand_values=DB.demand_values.filter(r=>imp.marked?(r.import_id!==imp.id):!(r.plan_tag==='budget'&&r.version_id===imp.version_id&&els.has(r.element_id)&&r.date>=imp.from&&r.date<=imp.to));
   const removed=before-DB.demand_values.length; const actual=new Set(DB.demand_values.filter(r=>r.source==='actual').map(r=>r.element_id+'|'+r.date));
   (imp.replaced||[]).forEach(r=>{ if(!actual.has(r.element_id+'|'+r.date)) DB.demand_values.push({...r}); });
   imp.undone_at=new Date().toISOString(); if(typeof _demandChanged==='function') _demandChanged(); autoSave(); planRender();
   statMsg(`Import undone: ${removed} budget days removed, ${(imp.replaced||[]).length} previous rows restored`);
 }
 function _plImportCardHTML(s){
-  const b=PL.bgt; const y=s.budget_year; const imps=plImports().slice().reverse(); const pv=PL.ui.importPreview;
-  const vopts=b&&b.versions?b.versions.map(v=>`<option value="${v.id}" ${v.id===b.versionId?'selected':''}>${_plEsc(v.label)}${v.status==='active'?' (active)':''}</option>`).join(''):'';
-  const curV=(b&&b.versions&&(document.getElementById('pli-version')?.value||b.versionId))||null; const bv=b&&b.byVersion&&b.byVersion[curV];
-  const dpopts=bv?Object.keys(bv.byEl).map(el=>({el, name:(bv.names[el])||(((DB.elements||[]).find(e=>e.id===el)||{}).name)||el})).sort((a,b2)=>a.name.localeCompare(b2.name)).map(o=>`<option value="${o.el}">${_plEsc(o.name)}</option>`).join(''):'';
-  const hist=imps.length?`<table class="pl-tbl" style="margin-top:8px"><tr><th>When</th><th>Version</th><th>Range</th><th>Points</th><th>Days</th><th>ST</th><th></th></tr>${imps.slice(0,12).map(i=>`<tr style="${i.undone_at?'opacity:.5':''}"><td>${String(i.at).slice(0,16).replace('T',' ')}<br><span class="pl-muted">${_plEsc(i.by||'')}</span></td><td>${_plEsc(i.version_label)}</td><td>${i.from} → ${i.to}</td><td class="n">${i.element_ids.length}</td><td class="n">${_plFmt(i.n_rows)}</td><td class="n">${_plFmt(i.t)}</td><td>${i.undone_at?'<span class="pl-flag dim">undone</span>':`<button class="pl-btn" onclick="plUndoImport('${i.id}')">Undo</button>`}</td></tr>`).join('')}</table>`:'';
-  return _plCard('pl-import','Budget → this scenario','copy a slice of the budget in as forecast (tagged, reversible)', imps.length||null,
+  const b=PL.bgt; const y=s.budget_year; const imps=plImports().slice().reverse(); const pv=PL.ui.importPreview; const inp=PL.ui.impIn||{};
+  const vopts=b&&b.versions?b.versions.map(v=>`<option value="${v.id}" ${v.id===(inp.vid||b.versionId)?'selected':''}>${_plEsc(v.label)}${v.status==='active'?' (active)':''}</option>`).join(''):'';
+  const curV=(b&&b.versions&&(document.getElementById('pli-version')?.value||inp.vid||b.versionId))||null; const bv=b&&b.byVersion&&b.byVersion[curV];
+  const nameOf=el=>(bv&&bv.names[el])||(((DB.elements||[]).find(e=>e.id===el)||{}).name)||el;
+  const picked=new Set(inp.picked||[]);
+  const dpopts=bv?Object.keys(bv.byEl).map(el=>({el, name:nameOf(el)})).sort((a,b2)=>a.name.localeCompare(b2.name)).map(o=>`<option value="${o.el}" ${picked.has(o.el)?'selected':''}>${_plEsc(o.name)}</option>`).join(''):'';
+  const facs=bv?[...new Set(Object.keys(bv.byEl).map(el=>nameOf(el).split('/')[0]))].sort():[];
+  const hist=imps.length?`<table class="pl-tbl" style="margin-top:8px"><tr><th>When</th><th>Version</th><th>Range</th><th>Points</th><th>Days</th><th>ST</th><th></th></tr>${imps.slice(0,12).map(i=>{ const blk=!i.undone_at&&plImportBlockedBy(i);
+    return `<tr style="${i.undone_at?'opacity:.5':''}"><td>${String(i.at).slice(0,16).replace('T',' ')}<br><span class="pl-muted">${_plEsc(i.by||'')}</span></td><td>${_plEsc(i.version_label)}${i.mode==='fill'?' <span class="pl-flag dim">gaps only</span>':''}</td><td>${i.from} → ${i.to}</td><td class="n">${i.element_ids.length}</td><td class="n">${_plFmt(i.n_rows)}</td><td class="n">${_plFmt(i.t)}</td><td>${i.undone_at?'<span class="pl-flag dim">undone</span>':blk?`<span class="pl-muted" title="undo the later overlapping import first">after ${_plEsc(blk.version_label)} ${blk.from}</span>`:`<button class="pl-btn" onclick="plUndoImport('${i.id}')">Undo</button>`}</td></tr>`; }).join('')}</table>`:'';
+  const mTbl=pv&&pv.months&&pv.months.length?`<table class="pl-tbl" style="margin-top:6px;max-width:520px"><tr><th>Month</th><th>Forecast now (ST)</th><th>Budget (ST)</th><th>Change</th></tr>${pv.months.map(m=>`<tr><td>${m.ym}</td><td class="n">${_plFmt(m.cur)}</td><td class="n">${_plFmt(m.bud)}</td>${_plDc(m.bud-m.cur)}</tr>`).join('')}<tr><td><b>Total</b></td><td class="n"><b>${_plFmt(pv.months.reduce((a,m)=>a+m.cur,0))}</b></td><td class="n"><b>${_plFmt(pv.months.reduce((a,m)=>a+m.bud,0))}</b></td>${_plDc(pv.months.reduce((a,m)=>a+m.bud-m.cur,0))}</tr></table>`:'';
+  return _plCard('pl-import','Push the budget into this scenario','copy any slice of the budget in as forecast (tagged, reversible)', imps.length||null,
     b&&b.versions&&b.versions.length?`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px;align-items:end">
        <label class="pl-muted">Version<br><select class="fi" id="pli-version" style="width:100%" onchange="planRender()">${vopts}</select></label>
-       <label class="pl-muted">From<br><input class="fi" type="date" id="pli-from" value="${pv?pv.from:y+'-01-01'}" style="width:100%"></label>
-       <label class="pl-muted">To<br><input class="fi" type="date" id="pli-to" value="${pv?pv.to:y+'-03-31'}" style="width:100%"></label>
-       <label class="pl-muted">Demand points (none selected = all)<br><select class="fi" id="pli-dps" multiple size="5" style="width:100%">${dpopts}</select></label>
+       <label class="pl-muted">From<br><input class="fi" type="date" id="pli-from" value="${inp.from||y+'-01-01'}" style="width:100%"></label>
+       <label class="pl-muted">To<br><input class="fi" type="date" id="pli-to" value="${inp.to||y+'-03-31'}" style="width:100%"></label>
+       <label class="pl-muted">Facility<br><select class="fi" id="pli-fac" style="width:100%"><option value="">all</option>${facs.map(f=>`<option ${inp.fac===f?'selected':''}>${_plEsc(f)}</option>`).join('')}</select></label>
+       <label class="pl-muted">Family<br><select class="fi" id="pli-fam" style="width:100%"><option value="">all</option>${['cement','slag','ash'].map(f=>`<option value="${f}" ${inp.fam===f?'selected':''}>${f}</option>`).join('')}</select></label>
+       <label class="pl-muted">Days<br><select class="fi" id="pli-mode" style="width:100%"><option value="replace" ${inp.mode!=='fill'?'selected':''}>Replace the forecast</option><option value="fill" ${inp.mode==='fill'?'selected':''}>Only fill days with no forecast</option></select></label>
+       <label class="pl-muted">Or pick demand points (none = the filters above)<br><select class="fi" id="pli-dps" multiple size="4" style="width:100%">${dpopts}</select></label>
        <div style="display:flex;gap:6px"><button class="pl-btn" onclick="plImportPreview(false)">Preview</button><button class="pl-btn pri" onclick="plImportPreview(true)" ${pv?'':'disabled'}>Apply</button></div></div>
-     ${pv?`<div class="pl-muted" style="margin-top:6px">Preview: <b>${_plEsc(pv.label)}</b> ${pv.from} → ${pv.to} · ${pv.points} points · ${_plFmt(pv.rows)} days · <b>${_plFmt(pv.t)}</b> ST · ${pv.replaced} existing forecast rows would be replaced · ${pv.skip} actual days kept as they are</div>`:''}
-     <div class="pl-muted" style="margin-top:4px">Copied rows are ordinary forecast rows tagged with the budget version; actual days are never touched; Undo restores exactly what was replaced.</div>${hist}`
+     ${pv?`<div class="pl-muted" style="margin-top:6px">Preview: <b>${_plEsc(pv.label)}</b> ${pv.from} → ${pv.to} · ${pv.points} points · ${_plFmt(pv.rows)} days · <b>${_plFmt(pv.t)}</b> ST · ${pv.mode==='fill'?'only days with no forecast':pv.replaced+' existing forecast rows would be replaced'} · ${pv.skip} actual days kept as they are</div>${mTbl}`:''}
+     <div class="pl-muted" style="margin-top:4px">Copied rows are ordinary forecast rows tagged with the budget version; actual days are never touched; Undo restores exactly what was replaced (the latest overlapping push first).</div>${hist}`
     :`<div class="pl-muted">Connect a Planning scenario with a generated version above.</div>${hist}`);
+}
+
+// ═══ P7 · Quick load: a ready-made demand point × month table becomes a budget version ═══
+// File: any sheet with a "Demand point" column and month columns (Jan…Dec, or 2027-01…) in short tons, optional "Family" (CEM / SLG / ASH).
+// Both the internal file (merged from the mix guidance) and the external one can be staged; they land in ONE version.
+PL.load={files:[], unit:1, alias:{}, view:null};
+const PL_FAM_OF_CODE={CEM:'cement', CEMENT:'cement', SLG:'slag', SLAG:'slag', ASH:'ash', FA:'ash', FLYASH:'ash', 'FLY ASH':'ash'};
+const PL_CODE_OF_FAM={cement:'CEM', slag:'SLG', ash:'ASH', other:'OTH'};
+function _plLoadParse(buf, name){
+  const year=plSettings().budget_year;
+  const wb=XLSX.read(buf,{type:'array',dense:true});
+  const rank=n=>/dp monthly/i.test(n)?0:/demand point|budget|demand/i.test(n)?1:2;
+  const order=[...wb.SheetNames].sort((a,b)=>rank(a)-rank(b));
+  for(const sn of order){
+    const aoa=XLSX.utils.sheet_to_json(wb.Sheets[sn],{header:1,raw:true,defval:''});
+    const h0=aoa.findIndex((r,i)=>i<30&&r.some(c=>/^(demand\s*point|demand point name|dp|point)$/i.test(_plStr(c))));
+    if(h0<0) continue;
+    const hdr=aoa[h0], hl=_plHdrIndex(hdr);
+    const iDp=_plPick(hl,'demand point','demand point name','dp','point'); const iFam=_plPick(hl,'family','product family','fam');
+    const mcols=_plMonthCols(hdr, year); const rows=[]; let skipped=0;
+    if(mcols.length){
+      aoa.slice(h0+1).forEach(r=>{ const dp=_plStr(r[iDp]); if(!dp||/^total\b/i.test(dp)) return;
+        const months=new Array(12).fill(0); let any=false; mcols.forEach(c=>{ const v=_plNum(r[c.i]); if(v){ months[c.m-1]+=v; any=true; } });
+        if(!any){ skipped++; return; } rows.push({dp, fam:_plStr(iFam>=0?r[iFam]:''), months}); });
+    } else {
+      const iM=_plPick(hl,'month','period','ym','date'); const iV=_plPick(hl,'tons','tonnes','st','short tons','value','budget','budget_t','volume');
+      if(iM<0||iV<0) continue;
+      const map=new Map();
+      aoa.slice(h0+1).forEach(r=>{ const dp=_plStr(r[iDp]); if(!dp||/^total\b/i.test(dp)) return; const pm=_fbParseMonthHeader(r[iM], year); const v=_plNum(r[iV]); if(!pm||!v){ skipped++; return; }
+        const fam=iFam>=0?_plStr(r[iFam]):''; const k=dp+'|'+fam; let o=map.get(k); if(!o){ o={dp, fam, months:new Array(12).fill(0)}; map.set(k,o); } o.months[pm.m-1]+=v; });
+      map.forEach(o=>rows.push(o));
+    }
+    if(rows.length) return {name, sheet:sn, rows, skipped};
+  }
+  throw new Error('no sheet with a "Demand point" column and month columns in '+name);
+}
+function plLoadFiles(inp){
+  const files=[...(inp.files||[])]; inp.value=''; if(!files.length) return;
+  (async()=>{ try{ await loadLib('xlsx');
+      for(const f of files){ const st=_plLoadParse(await f.arrayBuffer(), f.name); PL.load.files=PL.load.files.filter(x=>x.name!==st.name); PL.load.files.push(st); }
+      planRender(); statMsg(`${files.length} file(s) staged — check the preview, then load`);
+    }catch(e){ statMsg('Could not read the file — '+e.message); console.warn(e); } })();
+}
+function plLoadRemove(i){ PL.load.files.splice(i,1); planRender(); }
+function plLoadUnit(v){ PL.load.unit=+v||1; planRender(); }
+function _plSuggestDp(name){
+  const tok=s=>new Set(String(s).toUpperCase().split(/[\/_\s()\-]+/).filter(Boolean)); const t=tok(name); const out=[];
+  (DB.elements||[]).forEach(e=>{ if(e.type!=='demand_point') return; const u=tok(e.name); let i=0; t.forEach(x=>{ if(u.has(x)) i++; }); const sc=i/Math.max(t.size,u.size,1); if(sc>=.5) out.push({name:e.name, sc}); });
+  return out.sort((a,b)=>b.sc-a.sc).slice(0,3);
+}
+// Staged rows → one line per demand point and family (the same point in two files adds up).
+function _plLoadResolve(){
+  const L=PL.load, unit=+L.unit||1, map=new Map(), unm=new Map();
+  L.files.forEach(f=>f.rows.forEach(r=>{
+    const dpName=L.alias[r.dp]||r.dp; const el=xlmapFindDp(dpName);
+    const fam=PL_FAM_OF_CODE[String(r.fam||'').toUpperCase()]||plFamilyOfName(dpName);
+    const key=(el?el.id:_xlNorm(dpName))+'|'+fam; let o=map.get(key); if(!o){ o={dp_name:el?el.name:dpName, element_id:el?el.id:null, family:fam, months:new Array(12).fill(0)}; map.set(key,o); }
+    r.months.forEach((v,m)=>{ o.months[m]+=v*unit; });
+    if(!el){ const u=unm.get(r.dp)||{dp:r.dp, fy:0, fam}; u.fy+=r.months.reduce((a,b)=>a+b,0)*unit; unm.set(r.dp,u); } }));
+  const lines=[...map.values()].map(o=>{ const months=o.months.map(x=>Math.round(x*100)/100); return {...o, months, fy:Math.round(months.reduce((a,b)=>a+b,0)*100)/100}; }).filter(o=>o.fy!==0);
+  const unmatched=[...unm.values()].sort((a,b)=>b.fy-a.fy).map(u=>{ const src=u.dp.split('/')[0]; const fac=_plFacByName(src); const pid=_plProductByToken(u.dp.split('/')[2]||'')?.id||null; return {...u, sugg:_plSuggestDp(u.dp), fac, pid}; });
+  return {lines, unmatched};
+}
+function plLoadAlias(i,j){ const u=PL.load.view&&PL.load.view.unmatched[i]; if(!u||!u.sugg[j]) return; PL.load.alias[u.dp]=u.sugg[j].name; planRender(); }
+function plLoadCreate(i){
+  const u=PL.load.view&&PL.load.view.unmatched[i]; if(!u) return; let fac=u.fac;
+  if(!fac){ const src=u.dp.split('/')[0]; plCreateAshFacility(src.toUpperCase()); fac=_plFacByName(src); if(fac&&u.fam==='slag') fac.name=src+'/SLG'; else if(fac&&u.fam==='cement') fac.name=src+'/CEM'; }   // a source we do not have yet = purchased supply (power-plant ash, bought slag)
+  if(!fac){ statMsg('Could not create the facility '+u.dp.split('/')[0]); return; }
+  plCreateDp(fac.id, u.dp, u.pid);
+}
+function plLoadExclude(i){ const u=PL.load.view&&PL.load.view.unmatched[i]; if(!u) return; PL.load.files.forEach(f=>{ f.rows=f.rows.filter(r=>r.dp!==u.dp); }); planRender(); }
+function plLoadApply(){
+  const res=_plLoadResolve(); if(!res.lines.length){ statMsg('Nothing to load'); return; }
+  const s=plSettings(), g=id=>document.getElementById(id);
+  const label=(g('plq-label')?.value||'').trim()||('Budget '+s.budget_year+' · '+new Date().toISOString().slice(0,10));
+  s.sat_pct=Math.max(0,Math.min(100,parseFloat(g('plq-sat')?.value)||0)); s.ships_sat=!!g('plq-ships-sat')?.checked;
+  const makeActive=g('plq-active')?!!g('plq-active').checked:true;
+  const unT=res.unmatched.reduce((a,u)=>a+u.fy,0);
+  if(res.unmatched.length&&!confirm(`${res.unmatched.length} demand point(s) (${_plFmt(unT)} ST) are not in this scenario and will stay unallocated until they exist (they are kept in the version and picked up by Regenerate).\n\nLoad anyway?`)) return;
+  const id='pv_'+Date.now().toString(36), now=new Date().toISOString();
+  if(makeActive) plVersions().forEach(v=>{ if(v.status==='active') v.status='draft'; });
+  const v={id, kind:'budget', source:'load', year:s.budget_year, label, status:(makeActive||!plActiveVersion())?'active':'draft', uploaded_at:now, uploaded_by:_plWho(),
+    source_files:PL.load.files.map(f=>({slot:'load', name:f.name, sheet:f.sheet, rows:f.rows.length, fy_t:Math.round(f.rows.reduce((a,r)=>a+r.months.reduce((x,y)=>x+y,0),0)*(+PL.load.unit||1))})),
+    note:'Loaded as a demand point × month table', generated_at:null, generated_hash:null, stale:false};
+  plVersions().push(v); if(!Array.isArray(DB.plan_lines)) DB.plan_lines=[];
+  res.lines.forEach((l,k)=>DB.plan_lines.push({id:`pl_${id}_${k+1}`, version_id:id, kind:'LOAD', line_key:'LOAD|'+l.family+'|'+_xlNorm(l.dp_name), family:l.family, dp_name:l.dp_name, element_id:l.element_id, months:l.months, fy:l.fy}));
+  PL.tr={}; PL.load.files=[]; PL.load.alias={}; PL.load.view=null;
+  const rep=plGenerate(id);
+  autoSave(); planRender();
+  statMsg(`Budget "${label}" loaded: ${res.lines.length} demand points, ${_plFmt(rep?rep.spread_t:0)} ST${rep&&rep.unallocated_t?' · '+_plFmt(rep.unallocated_t)+' ST unallocated':''}`);
+}
+async function plLoadTemplate(){
+  await loadLib('xlsx'); const y=plSettings().budget_year;
+  const dps=(DB.elements||[]).filter(e=>e.type==='demand_point'&&e.is_active!==false).sort((a,b)=>a.name.localeCompare(b.name));
+  const aoa=[['Family','Demand point',...PL_MONTHS]]; dps.forEach(e=>aoa.push([PL_CODE_OF_FAM[plFamilyOfName(e.name)]||'',e.name,...new Array(12).fill(0)]));
+  const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), 'DP monthly');
+  XLSX.writeFile(wb, `Budget_${y}_demand_template.xlsx`, {compression:true}); statMsg(`Template saved — ${dps.length} demand points × 12 months (short tons)`);
+}
+function _plLoadCardHTML(s){
+  const L=PL.load, res=_plLoadResolve(); L.view=res; const y=s.budget_year;
+  const files=L.files.map((f,i)=>`<tr><td><b>${_plEsc(f.name)}</b> <span class="pl-muted">sheet ${_plEsc(f.sheet)}</span></td><td class="n">${f.rows.length} rows</td><td class="n">${_plFmt(f.rows.reduce((a,r)=>a+r.months.reduce((x,z)=>x+z,0),0)*(+L.unit||1))} ST</td><td><button class="pl-btn" onclick="plLoadRemove(${i})">Remove</button></td></tr>`).join('');
+  const fam={}, mon=new Array(12).fill(0); res.lines.forEach(l=>{ fam[l.family]=(fam[l.family]||0)+l.fy; l.months.forEach((x,m)=>{ mon[m]+=x; }); });
+  const matched=res.lines.filter(l=>l.element_id); const curF=(()=>{ const ids=new Set(matched.map(l=>l.element_id)); let t=0; (DB.demand_values||[]).forEach(r=>{ if(r.source!=='actual'&&r.source!=='budget'&&ids.has(r.element_id)&&String(r.date).startsWith(String(y))) t+=r.value_t||0; }); return t; })();
+  const unm=res.unmatched.slice(0,60).map((u,i)=>`<tr><td><b>${_plEsc(u.dp)}</b></td><td class="n">${_plFmt(u.fy)}</td><td>${u.sugg.map((x,j)=>`<button class="pl-btn" onclick="plLoadAlias(${i},${j})" title="use this point">${_plEsc(_plDpShort(x.name))}</button>`).join(' ')}<button class="pl-btn" onclick="plLoadCreate(${i})">${u.fac?'Create point at '+_plEsc(u.fac.name):'Create '+_plEsc(u.dp.split('/')[0])+' (purchased) + point'}</button> <button class="pl-btn" onclick="plLoadExclude(${i})">Skip</button></td></tr>`).join('');
+  const act=plActiveVersion();
+  return _plCard('pl-load','Load budget demand','a demand point × month table in short tons (the merged internal file, the external one)', L.files.length||null,
+    `<div class="pl-muted" style="margin-bottom:8px">Sheet with a <b>Demand point</b> column and month columns Jan…Dec (optional <b>Family</b>: CEM / SLG / ASH). Names must match the demand points of this scenario; anything that does not is listed below. Stage the internal and the external file, then load them together as one version. The demand is spread over the working days (Saturday weight below) and simulated.</div>
+     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+       <label class="pl-btn pri" style="cursor:pointer">Choose file(s)…<input type="file" accept=".xlsx,.xls,.csv" multiple style="display:none" onchange="plLoadFiles(this)"></label>
+       <button class="pl-btn" onclick="plLoadTemplate()">Download template</button>
+       <label class="pl-muted">Units <select class="fi" style="width:130px;display:inline-block" onchange="plLoadUnit(this.value)"><option value="1" ${(+L.unit||1)===1?'selected':''}>short tons</option><option value="1000" ${+L.unit===1000?'selected':''}>thousand short tons</option></select></label>
+       ${act?`<span class="pl-muted">active version: <b>${_plEsc(act.label)}</b>${act.generated_at?'':' (not generated)'}</span>`:'<span class="pl-muted">no budget version yet</span>'}
+     </div>
+     ${L.files.length?`<table class="pl-tbl" style="margin-top:8px"><tr><th>File</th><th>Rows</th><th>Total</th><th></th></tr>${files}</table>
+     <div class="pl-kv" style="margin-top:8px"><b>Budget ${y}</b><span><b>${_plFmt(res.lines.reduce((a,l)=>a+l.fy,0))}</b> ST on ${res.lines.length} demand points · ${Object.keys(fam).map(f=>f+' '+_plFmt(fam[f])).join(' · ')}</span>
+       <b>By month</b><span>${mon.map((x,m)=>PL_MONTHS[m]+' '+_plFmt(x/1000,1)+'k').join(' · ')}</span>
+       <b>Forecast now</b><span>${curF?_plFmt(curF)+' ST in '+y+' for the matched points (replaced by the budget)':'<span class="pl-muted">no forecast for these points in '+y+'</span>'}</span></div>
+     ${res.unmatched.length?`<div style="margin-top:8px"><span class="pl-flag bad">${res.unmatched.length} not in this scenario · ${_plFmt(res.unmatched.reduce((a,u)=>a+u.fy,0))} ST</span><div style="max-height:200px;overflow:auto;border:1px solid var(--border);margin-top:4px"><table class="pl-tbl"><tr><th>Name in the file</th><th>ST</th><th>Use…</th></tr>${unm}</table></div></div>`:'<div style="margin-top:8px"><span class="pl-flag ok">every demand point found</span></div>'}
+     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px">
+       <input class="fi" id="plq-label" placeholder="version label" value="Budget ${y} · ${new Date().toISOString().slice(0,10)}" style="width:230px">
+       <label class="pl-muted">Saturday % <input class="fi" type="number" id="plq-sat" value="${s.sat_pct}" min="0" max="100" style="width:64px;display:inline-block"></label>
+       <label class="pl-muted"><input type="checkbox" id="plq-ships-sat" ${s.ships_sat?'checked':''}> ships on Saturdays</label>
+       <label class="pl-muted"><input type="checkbox" id="plq-active" checked> make it the active version</label>
+       <button class="pl-btn pri" onclick="plLoadApply()">Load as budget version & simulate</button></div>`:''}`);
+}
+// ── From the trend scenario: topology + 31 Dec closing state in one step, with a stale badge ──
+async function planUpdateFromTrend(){
+  if(!scIsPlanning()){ statMsg('Only in a Planning scenario'); return; }
+  const srcId=S.simCfg.plan_source_scenario_id; const pk=await scPeekScenario(srcId,{prompt:true});
+  if(!pk){ statMsg('Could not read the trend scenario file (is it in this browser\'s scenario list?)'); return; }
+  const r=pk.payload.simResults, startDate=S.simCfg.start_date, srcCfg=pk.payload.simCfg||{};
+  if(!r){ statMsg(pk.name+' has no saved simulation results — run and save it first'); return; }
+  const save=S.simCfg.start_date; S.simCfg.start_date=srcCfg.start_date||save; const chk=_plOpenCheck(r, startDate); S.simCfg.start_date=save;
+  const diff=_tsTopoDiff({DB}, pk.payload); const byT={}; diff.forEach(c=>{ byT[c.t]=(byT[c.t]||0)+1; });
+  const lines=Object.keys(byT).map(t=>`${byT[t]} ${t}`).join(', ')||'no differences';
+  if(!chk.ok&&!confirm(chk.msg+'\n\nUpdate anyway?')) return;
+  if(!confirm(`Update this budget scenario from ${pk.name}?\n\n• Topology: ${lines}\n• Closing state: silo levels, carried-over vessels and rail yards from its latest simulation\n\nDemand, budget versions and settings stay.`)) return;
+  try{ if(SC.activeId) await scWriteSnapshot(SC.activeId, JSON.stringify(scBuildPayload()), 'pre-update-from-trend'); }catch(e){ console.warn('snapshot', e); }
+  try{
+    let orphans=[]; if(diff.length){ _scApplyTopologyTables(pk.payload); orphans=planRevalidateRefs(); }
+    _plUndoOpeningState();
+    const src={DB:pk.payload.DB, simCfg:srcCfg, simResults:r}; const keep=S.simCfg.start_date; S.simCfg.start_date=srcCfg.start_date||keep; let rep; try{ rep=planCopyOpeningState(src, startDate, pk.name); } finally { S.simCfg.start_date=keep; }
+    rep.src_mod=pk.fileMod; rep.topology=lines; plSettings().open_report=rep; S.simResults=null; PL._srcStale=false; PL._srcAt=0;
+    autoSave(); await scManualSave(); if(typeof renderLocationTree==='function') renderLocationTree(); if(typeof updateNavFacilities==='function') updateNavFacilities();
+    planRender(); _demandChanged();
+    statMsg(`Updated from ${pk.name} ✓ — topology: ${lines}; ${rep.summary}${orphans.length?'; '+orphans.length+' stored references could not be re-resolved':''}`);
+  }catch(e){ statMsg('Update from trend failed — '+e.message); console.warn(e); }
+}
+function plSrcEnsure(){
+  const srcId=S.simCfg.plan_source_scenario_id; if(!srcId||PL._srcBusy||Date.now()-(PL._srcAt||0)<60000) return;
+  PL._srcBusy=true; PL._srcAt=Date.now();
+  scPeekScenario(srcId).then(pk=>{ PL._srcBusy=false; if(!pk) return; const m=(plSettings().open_report||{}).src_mod; const st=m?pk.fileMod>m:null; if(st!==PL._srcStale){ PL._srcStale=st; planRender(); } }).catch(()=>{ PL._srcBusy=false; });
 }
 // ── cards ─────────────────────────────────────────────────────────────────────
 function _plSlotRow(id){ const slot=DS_SLOTS.find(x=>x.id===id); return slot?dsBuildSlotHTML(slot).replace(/dsRefreshConfigUI\(\)/g,'planRender()'):''; }
@@ -35531,8 +35732,8 @@ function _plVersionsCardHTML(s){
   const rows=vs.map(v=>{ const st=plVersionStats(v); const intTxt=Object.keys(st.int).map(f=>f+' '+_plFmt(st.int[f].fy/1000,1)+'k').join(' · ');
     return `<tr><td><label><input type="radio" name="plv-active" ${v.status==='active'?'checked':''} onchange="plSetActiveVersion('${v.id}')"> <b>${_plEsc(v.label)}</b></label> <span class="pl-flag ${v.status==='active'?'ok':'dim'}">${v.status}</span>${v.stale?' <span class="pl-flag">regenerate</span>':''}<br><span class="pl-muted">${String(v.uploaded_at).slice(0,16).replace('T',' ')} · ${_plEsc(v.uploaded_by||'')}${v.note?' · '+_plEsc(v.note):''}</span></td>
       <td class="pl-muted">${v.source_files.map(f=>_plEsc(f.name)).join('<br>')}</td>
-      <td class="n">EXT ${_plFmt(st.ext.fy/1000,1)}k<br><span class="pl-muted">${intTxt}</span></td>
-      <td class="n">${st.ext.mapped}/${st.ext.n} <span class="pl-muted">(${st.ext.fy?Math.round(st.ext.fyMapped/st.ext.fy*100):0}% of t)</span></td>
+      <td class="n">${st.load.n?`Loaded ${_plFmt(st.load.fy/1000,1)}k`:`EXT ${_plFmt(st.ext.fy/1000,1)}k<br><span class="pl-muted">${intTxt}</span>`}</td>
+      <td class="n">${st.load.n?`${st.load.n} points`:`${st.ext.mapped}/${st.ext.n} <span class="pl-muted">(${st.ext.fy?Math.round(st.ext.fyMapped/st.ext.fy*100):0}% of t)</span>`}</td>
       <td>${v.generated_at?'<span class="pl-flag ok">generated '+String(v.generated_at).slice(0,10)+'</span>':'<span class="pl-flag dim">not generated</span>'}</td>
       <td style="white-space:nowrap"><button class="pl-btn" onclick="plArchiveVersion('${v.id}')">${v.status==='archived'?'Unarchive':'Archive'}</button> <button class="pl-btn" onclick="plDeleteVersion('${v.id}')" ${v.status==='active'?'disabled':''}>Delete</button></td></tr>`; }).join('');
   const opts=vs.map(v=>`<option value="${v.id}">${_plEsc(v.label)}</option>`).join('');
