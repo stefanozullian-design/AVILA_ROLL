@@ -3270,7 +3270,7 @@ const ET = {
     {k:'supply_mode',l:'Supply Mode',t:'select',opts:['Ship','Truck','Rail']},
     {k:'typical_volume_t',l:'Typical Vessel Volume — Total Cargo (t)',t:'number'},
     {k:'lead_time_days',l:'Lead Time (days order → first arrival)',t:'number'},
-    {k:'min_cover_days',l:'Min Cover Trigger (days of inventory)',t:'number'}
+    {k:'min_cover_days',l:'Vessel trigger — days of cover (propose a vessel to arrive when projected silo stock falls to this many days of average demand)',t:'number'}
   ]}
 };
 
@@ -8152,7 +8152,9 @@ function fltPageBounds(p){
 
 // The window a preset asks for, before a page cuts it to the days it has (b).
 function fltTfWanted(k,b){
-  const t=new Date(), y=t.getFullYear(), m=t.getMonth();
+  // A Planning scenario runs a future year (starts 1 Jan next year): "today" for the presets is its first day, so
+  // Current month / Year to date / Rest of year open on the budget year instead of an empty window.
+  const t=(typeof scIsPlanning==='function'&&scIsPlanning()&&S.simCfg&&S.simCfg.start_date&&S.simCfg.start_date>new Date()._ymd())?new Date(S.simCfg.start_date+'T12:00:00'):new Date(), y=t.getFullYear(), m=t.getMonth();
   const today=new Date(y,m,t.getDate())._ymd();
   const som=new Date(y,m,1)._ymd(), eom=new Date(y,m+1,0)._ymd();
   switch(k){
@@ -17424,6 +17426,33 @@ function _planRailShipments(rBase){
   autoSave();
 }
 
+// Day-by-day silo projection for the vessel auto-proposer, mirroring simDayBerths: ONE vessel docked
+// at a time (a vessel arriving meanwhile queues at anchorage, FIFO), and ship berths discharge
+// ALL-OR-NOTHING each day — a full day at the berth rate if the silo has room (today's drain counts),
+// otherwise nothing; anti-deadlock: a day's rate bigger than the whole silo takes whatever room exists.
+// A vessel's cargo is never clipped: it stays aboard until it fits. (Clipping it made the proposer
+// think the silo drained sooner than it really does, so every later vessel was proposed earlier
+// and earlier.) The simulator's berth-yield swap is not modelled (one product per berth).
+function _projectShipSilo(vessels, startInv, siloMax, outflow, horizon, projInv, intake){
+  const vs=vessels.slice().sort((a,b)=>a.arr-b.arr);
+  let vi=0, cur=null, rem=0, inv=startInv;
+  for(let d=1;d<=horizon;d++){
+    projInv[d]=inv;
+    if(!cur||rem<=0){
+      if(vi<vs.length&&vs[vi].arr<=d){cur=vs[vi++];rem=cur.qty;} else cur=null;
+    }
+    let take=0;
+    if(cur&&rem>0){
+      const fullDaily=Math.min(cur.perDay, rem), space=Math.max(0,siloMax-inv+outflow[d]);
+      take=space>=fullDaily?fullDaily:(fullDaily>siloMax?space:0);
+      rem-=take;
+    }
+    intake[d]=take;
+    inv=Math.max(0,Math.min(siloMax,inv+take-outflow[d]));
+  }
+  projInv[horizon+1]=inv;
+}
+
 function _writeProposedVesselCalls(r){
   // Remove only AUTO-GENERATED Proposed vessel calls (notes starts with 'Auto-proposed').
   // User-created Proposed vessels (e.g. placeholders/estimates) are preserved so the
@@ -17511,31 +17540,26 @@ function _writeProposedVesselCalls(r){
         &&v.product_id===productId
         &&(v.status!=='Proposed'||!(v.notes?.startsWith('Auto-proposed')))
       );
-      const lockedInflow=new Array(horizon+2).fill(0);
+      const lockedVsSp=[];
       lockedCalls.forEach(v=>{
         const arrDay=dateToDayOffset(v.arrival_date,S.simCfg.start_date)+1;
-        const ud=berthRate>0?Math.ceil(primaryQty/(berthRate*24)):unloadDays;
-        for(let d=arrDay;d<arrDay+ud&&d<=horizon;d++) lockedInflow[d]+=primaryQty/ud;
+        if(arrDay<1) return;
+        lockedVsSp.push({arr:arrDay, qty:primaryQty, perDay:berthRate>0?berthRate*24:primaryQty/unloadDays});
       });
 
-      const propInflow=new Array(horizon+2).fill(0);
+      const propVsSp=[];
       const proposedCalls=[];
       const projInvSp=new Array(horizon+2).fill(0);
-      projInvSp[1]=Math.max(0,Math.min(siloMax,siloStart));
-      const rebuildFromSp=from=>{
-        for(let d=from;d<=horizon;d++){
-          projInvSp[d+1]=Math.max(0,Math.min(siloMax,
-            projInvSp[d]+lockedInflow[d]+propInflow[d]-dailyOutflow[d]
-          ));
-        }
-      };
-      rebuildFromSp(1);
+      const intakeSp=new Array(horizon+2).fill(0);
+      const startInvSp=Math.max(0,Math.min(siloMax,siloStart));
+      const rebuildFromSp=()=>_projectShipSilo([...lockedVsSp,...propVsSp],startInvSp,siloMax,dailyOutflow,horizon,projInvSp,intakeSp);
+      rebuildFromSp();
 
       let scanFromSp=1, guardSp=horizon+10;
       while(guardSp-->0){
         let critDay=null;
         for(let d=scanFromSp;d<=horizon;d++){
-          const eod=projInvSp[d]+lockedInflow[d]+propInflow[d]-dailyOutflow[d];
+          const eod=projInvSp[d+1];
           if(eod<=critFloorSp){critDay=d;break;}
         }
         if(!critDay) break;
@@ -17549,15 +17573,15 @@ function _writeProposedVesselCalls(r){
 
         const alreadyCovered=[...lockedCalls,...proposedCalls].some(v=>{
           const ad=v.arrivalDay??dateToDayOffset(v.arrival_date,S.simCfg.start_date)+1;
-          return ad>=idealArrival-unloadDays&&ad<=idealArrival+unloadDays+1;
+          return ad>=idealArrival-unloadDays&&ad<=idealArrival+2;
         });
         if(alreadyCovered){scanFromSp=critDay+1;continue;}
 
         const arrivalStr=new Date(simStart.getTime()+(idealArrival-1)*864e5)._ymd();
         const orderStr=new Date(simStart.getTime()+(orderDay-1)*864e5)._ymd();
         proposedCalls.push({arrivalDay:idealArrival});
-        for(let d=idealArrival;d<idealArrival+unloadDays&&d<=horizon;d++) propInflow[d]+=primaryQty/Math.max(1,unloadDays);
-        rebuildFromSp(idealArrival);
+        propVsSp.push({arr:idealArrival, qty:primaryQty, perDay:berthRate>0?berthRate*24:primaryQty/Math.max(1,unloadDays)});
+        rebuildFromSp();
 
         let legOffset=0;
         const legs=allocBerths.map((ab,li)=>{
@@ -17640,29 +17664,24 @@ function _writeProposedVesselCalls(r){
         v.berth_element_id===berth.id&&v.product_id===productId&&
         (v.status!=='Proposed'||!(v.notes?.startsWith('Auto-proposed')))
       );
-      const lockedInflow=new Array(horizon+2).fill(0);
+      const lockedVs=[];
       lockedCalls.forEach(v=>{
         const arrDay=dateToDayOffset(v.arrival_date,S.simCfg.start_date)+1;
+        if(arrDay<1) return;
         const rate=parseFloat(v.unload_rate_tph)||berthRate;
         const ud=rate>0?Math.ceil((v.quantity_t||0)/(rate*24)):unloadDays;
-        const dailyQty=(v.quantity_t||0)/ud;
-        for(let d=arrDay;d<arrDay+ud&&d<=horizon;d++) lockedInflow[d]+=dailyQty;
+        lockedVs.push({arr:arrDay, qty:v.quantity_t||0, perDay:rate>0?rate*24:(v.quantity_t||0)/ud});
       });
 
-      const propInflow=new Array(horizon+2).fill(0);
+      const propVs=[];
       const proposedCalls=[];
 
-      // Forward projection: projInv[d] = BOD inventory on day d
+      // Forward projection: projInv[d] = BOD inventory on day d; intake[d] = tonnes unloaded on day d
       const projInv=new Array(horizon+2).fill(0);
-      projInv[1]=Math.max(0,Math.min(siloMax,siloStart));
-      const rebuildFrom=from=>{
-        for(let d=from;d<=horizon;d++){
-          projInv[d+1]=Math.max(0,Math.min(siloMax,
-            projInv[d]+lockedInflow[d]+propInflow[d]-dailyOutflow[d]
-          ));
-        }
-      };
-      rebuildFrom(1);
+      const intake=new Array(horizon+2).fill(0);
+      const startInvB=Math.max(0,Math.min(siloMax,siloStart));
+      const rebuildFrom=()=>_projectShipSilo([...lockedVs,...propVs],startInvB,siloMax,dailyOutflow,horizon,projInv,intake);
+      rebuildFrom();
 
       const facName=DB.facilities.find(f=>f.id===(berth.assigned_facility_id||berth.facility_id||S.facility_id))?.name||'';
       const vesselFacId=berth.assigned_facility_id||berth.facility_id||S.facility_id;
@@ -17672,7 +17691,7 @@ function _writeProposedVesselCalls(r){
         // Find first day where EOD inventory hits the critical floor
         let critDay=null;
         for(let d=scanFrom;d<=horizon;d++){
-          const eod=projInv[d]+lockedInflow[d]+propInflow[d]-dailyOutflow[d];
+          const eod=projInv[d+1];
           if(eod<=critFloor){critDay=d;break;}
         }
         if(!critDay) break;
@@ -17688,7 +17707,7 @@ function _writeProposedVesselCalls(r){
         // Skip if a vessel is already arriving close enough to cover this period
         const alreadyCovered=[...lockedCalls,...proposedCalls].some(v=>{
           const ad=v.arrivalDay??dateToDayOffset(v.arrival_date,S.simCfg.start_date)+1;
-          return ad>=idealArrival-unloadDays&&ad<=idealArrival+unloadDays+1;
+          return ad>=idealArrival-unloadDays&&ad<=idealArrival+2;
         });
         if(alreadyCovered){scanFrom=critDay+1;continue;}
 
@@ -17696,9 +17715,8 @@ function _writeProposedVesselCalls(r){
         const orderStr=new Date(simStart.getTime()+(orderDay-1)*864e5)._ymd();
 
         proposedCalls.push({arrivalDay:idealArrival});
-        const dailyUnload=typicalVol/Math.max(1,unloadDays);
-        for(let d=idealArrival;d<idealArrival+unloadDays&&d<=horizon;d++) propInflow[d]+=dailyUnload;
-        rebuildFrom(idealArrival);
+        propVs.push({arr:idealArrival, qty:typicalVol, perDay:berthRate>0?berthRate*24:typicalVol/Math.max(1,unloadDays)});
+        rebuildFrom();
 
         DB.vessel_calls.push({
           id:`vc_prop_${ss.id}_${berth.id}_${idealArrival}`,
