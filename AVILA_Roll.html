@@ -3059,6 +3059,8 @@ const DB = {
   // Real Data Input — user-entered actual values
   real_production_daily: [], // { date:'YYYY-MM-DD', facility_id, element_id, product_id, volume_t, source:'actual', created_at, updated_at }
   real_inventory_daily:  [], // { date:'YYYY-MM-DD', facility_id, silo_id, product_id, eod_volume_t, source:'actual', created_at, updated_at }
+  real_transfers_file_daily: [], // { date, origin, origin_facility_id, product_name, product_id, volume_t } — from Avila_Transfers_Summary.xlsx (Data Sources › Real Transfers); read-only history, per origin × product × day
+  real_transfers_file_meta: {},  // { loaded_at, file, row_count, agg_count, date_min, date_max, lanes[] }
   real_transfers_daily:  [], // { date:'YYYY-MM-DD', origin_facility_id, dest_facility_id, mode:'rail', product_id, volume_t, created_at, updated_at }
   real_silo_transfers_daily: [], // { date:'YYYY-MM-DD', link_id, from_silo_id, to_silo_id, product_id, volume_t, source:'actual', created_at, updated_at } — tonnes actually moved along a silo link that day (wins over the plan)
   real_rail_daily:       [], // { date:'YYYY-MM-DD', facility_id, product_id, type:'loading'|'delivered', cars:N, source:'actual', created_at, updated_at }
@@ -27201,6 +27203,7 @@ const DS_SLOTS = [
   // NOTE: the former 'topology' slot is retired — topology persistence is now
   // owned by the Scenario system (each scenario is its own JSON file). See scInit().
   { id:'realSales',      label:'Real Sales',       description:'Avila_Shipments_Summary.xlsx — tonnes per demand point per day; this is where actual demand comes from. Written by Publish in Configuration → Demand Mapping (formerly by the Excel pivot).', handler:'spIngestFile',  dbKey:'real_shipments_daily' },
+  { id:'realTransfers',  label:'Real Transfers',   description:'Avila_Transfers_Summary.xlsx — rail/plant transfer tonnes per day (Delivery Date, INV_ROLL_NAME like BRS/TRF/BRS_IL(12)/BLK/INT, Report Qty). Written by Publish in Configuration → Demand Mapping from the movements the rules park as transfers. Bind it to read the history into the app.', handler:'dsIngestTransfers', dbKey:'real_transfers_file_daily' },
   { id:'demandSales',    label:'Demand — SAP Sales', description:'The raw SAP sales export (Ship Pt, Material, Sold-To, Ship Type, Delivery Date, Report Qty …; .xlsx or .csv). Bind it once — a SharePoint folder synced to this machine is re-read on every refresh. Rows are translated by Configuration → Demand Mapping; Publish there writes the Summary, Detail and Transfers files that Real Sales, the Sales page and Power BI read.', handler:'dsIngestDemandSales', dbKey:'' },
   { id:'realProduction', label:'Real Production',  description:'ProductionReal.xlsx — SAP export with DATE, EQUIPMENT, MATERIAL CODE, PRODUCTION columns. EQUIPMENT must match element names (e.g. BROSFM01, BROSKL02). MATERIAL CODE matched via product material_code field.', handler:'dsIngestProduction', dbKey:'real_production_daily' },
   { id:'transportCost',  label:'Transport Cost',   description:'Freight and logistics cost matrix',            handler:'dsIngestTransport',  dbKey:'transport_costs' },
@@ -27784,6 +27787,80 @@ async function spIngestFile(buf, fileName){
   autoSave();
 
   return { rowCount: raw.length };
+}
+
+// ── Transfers file (Avila_Transfers_Summary.xlsx) ─────────────────────────────
+// One row per day per transfer lane: INV_ROLL_NAME = "<origin>/TRF/<material…>/<INT>",
+// e.g. BRS/TRF/BRS_IL(12)/BLK/INT. The name carries the ORIGIN and the material but not the
+// destination, so rows are stored per origin × material × day; origin and product are resolved
+// against the topology when they exist. Read-only history — it does not change the simulation.
+async function dsIngestTransfers(buf, fileName){
+  await loadLib('xlsx');
+  const wb = XLSX.read(buf, {type:'array', cellDates:false, raw:true});
+  const sheetName = wb.SheetNames.find(n=>n==='SalesConsolidated') || wb.SheetNames[0];
+  const raw = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {raw:true, defval:''});
+  if(!raw.length) throw new Error('Sheet is empty');
+  const cols = Object.keys(raw[0]);
+  if(!(cols.includes('INV_ROLL_NAME') && cols.includes('Report Qty') && cols.includes('Delivery Date')))
+    throw new Error('Unrecognised column format — expected Delivery Date / INV_ROLL_NAME / Report Qty');
+  const ymd=v=>{
+    if(typeof v==='number' && v>40000 && v<60000) return new Date(Math.round((v-25569)*86400000))
+      .toISOString().slice(0,10);
+    const t=String(v||'').trim();
+    if(/^\d{4}-\d{2}-\d{2}/.test(t)) return t.slice(0,10);
+    const m=t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    return m?`${m[3]}-${m[1].padStart(2,'0')}-${m[2].padStart(2,'0')}`:null;
+  };
+  const facByName={}; (DB.facilities||[]).forEach(f=>{ facByName[String(f.name||'').toUpperCase()]=f.id; });
+  const prodByName={}; (DB.products||[]).forEach(p=>{ prodByName[String(p.name||'').toUpperCase()]=p.id; });
+  const prodFor=nm=>{
+    const k=nm.toUpperCase();
+    return prodByName[k] || prodByName[k.replace(/\/(BLK|PAK)$/,'')] || null;
+  };
+  const agg={}, lanes=new Set(); let skipped=0, dateMin='9999', dateMax='0000';
+  raw.forEach(r=>{
+    const qty=parseFloat(r['Report Qty'])||0, ds=ymd(r['Delivery Date']);
+    const parts=String(r['INV_ROLL_NAME']||'').trim().split('/');
+    if(!qty||!ds||parts.length<4||parts[1]!=='TRF'){ skipped++; return; }
+    const origin=parts[0], prodName=parts.slice(2,-1).join('/');     // drop <origin>/TRF and the trailing INT
+    const rollName=parts.join('/');
+    const key=ds+'|'+rollName;
+    if(!agg[key]) agg[key]={date:ds,roll_name:rollName,origin,origin_facility_id:facByName[origin.toUpperCase()]||null,
+      product_name:prodName,product_id:prodFor(prodName),volume_t:0};
+    agg[key].volume_t+=qty;
+    lanes.add(rollName);
+    if(ds<dateMin) dateMin=ds; if(ds>dateMax) dateMax=ds;
+  });
+  const rows=Object.values(agg).map(x=>({...x,volume_t:Math.round(x.volume_t*100)/100}));
+  if(!rows.length) throw new Error('No transfer rows (INV_ROLL_NAME with "/TRF/") found');
+  DB.real_transfers_file_daily=rows;
+  DB.real_transfers_file_meta={loaded_at:new Date().toISOString().slice(0,16).replace('T',' '),file:fileName,
+    row_count:raw.length, agg_count:rows.length, date_min:dateMin, date_max:dateMax, lanes:[...lanes].sort()};
+  const warnings=[];
+  if(skipped) warnings.push(`${skipped} row(s) skipped (no date, zero qty or not a TRF name)`);
+  const unk=[...new Set(rows.filter(x=>!x.product_id).map(x=>x.product_name))];
+  if(unk.length) warnings.push('Material not in the topology: '+unk.join(', '));
+  const dm=dsTransfersDispatchMatch();
+  if(dm.unmatched.length) warnings.push('No dispatch point is named exactly like: '+dm.unmatched.join(', ')+' — rename the dispatch point in the topology to match');
+  autoSave();
+  return { rowCount: raw.length, dateMin, dateMax, warnings: warnings.length?warnings:null };
+}
+
+// A transfer lane (INV_ROLL_NAME) belongs to the dispatch point whose NAME is exactly that
+// string (compared like demand-point names: case/space-insensitive). Resolved on demand,
+// so renaming a dispatch point in the topology takes effect without re-reading the file.
+function dsTransfersDispatchMatch(){
+  const byName=new Map((DB.elements||[]).filter(e=>e.type==='dispatch_point').map(e=>[_xlNorm(e.name),e]));
+  const lanes=new Map();   // roll_name → tonnes
+  (DB.real_transfers_file_daily||[]).forEach(r=>{ if(r.roll_name) lanes.set(r.roll_name,(lanes.get(r.roll_name)||0)+r.volume_t); });
+  const all=[...lanes].map(([name,t])=>{ const d=byName.get(_xlNorm(name)); return {name,t,dispatch_id:d?.id||null,facility_id:d?.facility_id||null}; });
+  return {lanes:all, matched:all.filter(x=>x.dispatch_id), unmatched:all.filter(x=>!x.dispatch_id).map(x=>x.name)};
+}
+// Tonnes the file says left a dispatch point on a day (all lanes whose name matches it).
+function realTransferOutT(dispatchId,ds){
+  const el=(DB.elements||[]).find(e=>e.id===dispatchId); if(!el) return 0;
+  const n=_xlNorm(el.name);
+  return (DB.real_transfers_file_daily||[]).reduce((s,r)=>s+(r.date===ds&&_xlNorm(r.roll_name)===n?r.volume_t:0),0);
 }
 
 // ── Topology JSON handler ─────────────────────────────
@@ -32104,7 +32181,7 @@ const LS_SKIP_ALWAYS = new Set(['real_shipments_daily']);
 // mill_policies and demand_substitutions — and every table added later inherited the
 // bug. Structural/config tables are now kept by default; only volume data is shed.
 const LS_SKIP_COMPACT = new Set([...LS_SKIP_ALWAYS,
-  'real_shipments_meta','forecast_commitments','plan_demand',
+  'real_shipments_meta','real_transfers_file_daily','forecast_commitments','plan_demand',
   'real_production_daily','real_inventory_daily','real_transfers_daily','real_silo_transfers_daily',
   'real_rail_daily','real_shipping_daily','real_unloading_daily']);
 // Rolling window for the high-volume daily tables, applied to the SAVED COPY only.
@@ -32216,6 +32293,8 @@ function loadSaved(){
   // behaviour change, not a cleanup.)
   if(!DB.real_shipments_daily) DB.real_shipments_daily=[];
   if(!DB.real_shipments_meta)  DB.real_shipments_meta={};
+  if(!DB.real_transfers_file_daily) DB.real_transfers_file_daily=[];
+  if(!DB.real_transfers_file_meta)  DB.real_transfers_file_meta={};
   if(!DB.forecast_commitments) DB.forecast_commitments=[];
   if(!DB.demand_values)        DB.demand_values=[];
 
@@ -32402,6 +32481,7 @@ const _MG_KEYS = {
   real_shipments_daily:  r=>['rs', r.date, r.origin, r.product, r.customer_type, r.ship_to??''].join('|'),
   real_production_daily: r=>['rp', r.date, r.facility_id, r.element_id, r.product_id].join('|'),
   real_inventory_daily:  r=>['ri', r.date, r.facility_id, r.silo_id, r.product_id].join('|'),
+  real_transfers_file_daily: r=>['rtf', r.date, r.roll_name||(r.origin+'/'+r.product_name)].join('|'),
   real_transfers_daily:  r=>['rt', r.date, r.origin_facility_id, r.dest_facility_id, r.mode, r.product_id].join('|'),
   real_silo_transfers_daily: r=>['rst', r.date, r.link_id, r.from_silo_id, r.to_silo_id].join('|'),
   real_rail_daily:       r=>['rr', r.date, r.facility_id, r.product_id, r.type, r.dispatch_id??'', r.dest_facility_id??''].join('|'),
@@ -33614,7 +33694,7 @@ const AC_TABLE_FUNC={
   real_inventory_daily:'inventory', actual_inventory:'inventory',
   production_campaigns:'production', production_schedule:'production', mill_policies:'production', mill_product_focus:'production',
   element_maintenance_events:'production', non_working_days:'production',
-  real_production_daily:'real', real_shipments_daily:'real', real_shipments_meta:'real', real_transfers_daily:'real',
+  real_production_daily:'real', real_shipments_daily:'real', real_shipments_meta:'real', real_transfers_daily:'real', real_transfers_file_daily:'real', real_transfers_file_meta:'real',
   real_silo_transfers_daily:'real', real_rail_daily:'real', real_shipping_daily:'real', real_unloading_daily:'real',
   actual_production:'real', actual_dispatch:'real', actual_vessel_calls:'real', actual_rail_movements:'real',
   vessel_calls:'logistics', vessel_campaigns:'logistics', vessel_sof:'logistics', rail_movements:'logistics', rail_loading_plan:'logistics',
