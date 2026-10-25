@@ -745,6 +745,26 @@ body.c0-drag,body.c0-drag *{cursor:col-resize!important;user-select:none!importa
 #supply-table-wrap td.cell-real{background-color:var(--real-faint)!important;}
 #supply-table-wrap td.cell-gap{color:var(--simulated)!important;font-style:italic;font-weight:400!important;}
 #supply-table-wrap td.cell-plan{box-shadow:inset 0 2px 0 var(--plan);}
+/* Day-cell declarations shared by every cell of the Supply grid live here instead of in each cell's
+   inline style. A year view is ~100k cells: with everything inline the page built and parsed ~45 MB of
+   HTML per render. Only what varies per cell (colour, weight, today/weekend edges) stays inline. */
+td.sx-n{font-size:9px;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);}
+td.sx-nb{font-size:9px;font-weight:700;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);}
+td.sx-np{cursor:pointer;font-size:9px;text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);}
+td.sx-gt{cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;}
+.sx-bar{position:relative;height:10px;}
+td.sx-ct{vertical-align:bottom;padding:2px 1px 0;border-bottom:2px solid var(--border2);}
+td.sx-ct>div.sx-ctd{display:flex;align-items:flex-end;justify-content:center;}
+.sx-cb{flex:1;min-width:1px;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;margin:0 .5px;}
+.sx-cbl{font-size:6px;line-height:1;white-space:nowrap;margin-bottom:1px;font-family:var(--mono);}
+.sx-cbe{width:100%;opacity:.35;border-radius:1px 1px 0 0;}
+.sx-cbi{width:100%;}
+td.sx-dm{cursor:cell;padding:1px 2px;border-bottom:1px solid var(--border);border-right:1px solid rgba(var(--hi-rgb),.03);}
+td.sx-dm>input.dem-cell{width:50px;background:transparent;border:none;color:var(--simulated);font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;outline:none;}
+td.sx-dm>div{width:50px;font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;color:var(--simulated);background:transparent;}
+td.sx-dm.sx-act>input.dem-cell,td.sx-dm.sx-act>div{background:rgba(var(--green-rgb),.06);color:var(--real);}
+td.sx-dm.sx-nwd>input.dem-cell,td.sx-dm.sx-nwd>div{background:rgba(var(--red-rgb),.08);color:rgba(var(--red-rgb),.4);}
+td.sx-dm.sx-nwd>input.dem-cell{border:1px dashed rgba(var(--red-rgb),.5);}
 .tp-table th{padding:5px 8px;border-bottom:1px solid var(--border2);color:var(--text-dim);font-weight:400;text-align:right;position:sticky;top:0;background:var(--surface);}
 .tp-table th:first-child{text-align:left;min-width:200px;position:sticky;left:0;z-index:2;background:var(--surface);}
 .tp-table td{padding:3px 8px;border-bottom:0.5px solid var(--border2);text-align:right;color:var(--text-dim);}
@@ -9875,19 +9895,16 @@ function _demCellHtml(el, ds, monYm, tdStyStr, dayCls){
   const isNwd=_isNWD(ds);
   // Supply page: imported actual sales read as actual too (the Demand grid keeps its own look).
   const act=isActual||(dayCls==='sup-day-'&&_dmdIsActual(el.id,ds));
-  const cellBg=isNwd?'rgba(var(--red-rgb),.08)':act?'rgba(var(--green-rgb),.06)':'transparent';
-  const cellColor=isNwd?'rgba(var(--red-rgb),.4)':act?'var(--real)':'var(--simulated)';
+  // Look = classes (td.sx-dm rules in the stylesheet): red for a non-working day, green for an actual
+  // day, plain otherwise — a non-working day wins over actual, as the inline colours always did.
+  const look=isNwd?' sx-nwd':act?' sx-act':'';
   const nm=(el.name||'').replace(/"/g,'&quot;');
   // On the Supply page the cell carries its source like every other Supply number.
   const src=dayCls==='sup-day-'&&v>0?(act?' cell-real':(ds<new Date()._ymd()?' cell-gap':'')):'';
-  return `<td class="${dayCls||'dem-day-'}${monYm}${src}" ondblclick="openDemandBuilder('${el.id}','${ds}')" title="Double-click to open the Forecast Builder for ${nm} starting ${ds}" style="cursor:cell;padding:1px 2px;border-bottom:1px solid var(--border);border-right:1px solid rgba(var(--hi-rgb),.03);${tdStyStr}">
-    ${isActual
-      ? `<div style="width:50px;font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;color:${cellColor};background:${cellBg}" title="Actual shipment data — double-click for Forecast Builder">${v?Math.round(v*10)/10:''}</div>`
-      : `<input class="dem-cell" data-el="${el.id}" data-date="${ds}"${isNwd?' data-nwd="1"':''} value="${v||''}" onchange="saveDemandCell(this)"
-          ${isNwd?'title="Non-working day — 0 by default; type a value to force a manual override"':''}
-          style="width:50px;background:${cellBg};border:${isNwd?'1px dashed rgba(var(--red-rgb),.5)':'none'};color:${cellColor};font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;outline:none">`
-    }
-  </td>`;
+  return `<td class="${dayCls||'dem-day-'}${monYm}${src} sx-dm${look}" ondblclick="openDemandBuilder('${el.id}','${ds}')" title="Double-click to open the Forecast Builder for ${nm} starting ${ds}"${tdStyStr?` style="${tdStyStr}"`:''}>${isActual
+      ? `<div title="Actual shipment data — double-click for Forecast Builder">${v?Math.round(v*10)/10:''}</div>`
+      : `<input class="dem-cell" data-el="${el.id}" data-date="${ds}"${isNwd?' data-nwd="1"':''} value="${v||''}" onchange="saveDemandCell(this)"${isNwd?' title="Non-working day — 0 by default; type a value to force a manual override"':''}>`
+    }</td>`;
 }
 
 // "↓ Save Forecast". Every cell already saves itself the moment it changes (saveDemandCell),
@@ -10049,7 +10066,7 @@ const _DOWN_TIP = {
 const DOWNTIME_PRODUCTS = {'__down_repair__':'repair','__down_pm__':'pm','__down_inv__':'inv'};
 // The downtime campaign covering an element's day (its reason for being down), or null.
 function _downCampaignAt(elId, ds){
-  return (DB.production_campaigns||[]).find(c=>c.element_id===elId&&DOWNTIME_PRODUCTS[c.product_id]&&ds>=c.start_date&&ds<=c.end_date)||null;
+  return _idxRows('production_campaigns','element_id',elId).find(c=>DOWNTIME_PRODUCTS[c.product_id]&&ds>=c.start_date&&ds<=c.end_date)||null;
 }
 // Days an element sits in a Maintenance Calendar event → Map(date → event id), over the
 // simulation horizon (recurring events expanded). Steps by CALENDAR day (setDate): adding
@@ -10148,6 +10165,15 @@ function _supSyncInvModeBtn(){
 }
 // Compact tonnes for the 6px number on a bar: 38k · 5.0k · 655
 function _tAbbrev(v){ v=Math.round(v); return v>=10000?Math.round(v/1000)+'k':v>=1000?(v/1000).toFixed(1)+'k':String(v); }
+// Number.prototype.toLocaleString builds an Intl formatter on every call (~30 µs); a year view of the
+// Supply page formats ~50k numbers per render. Same output, one Intl call per distinct value.
+const _fmtIntCache=new Map();
+function _fmtInt(n){
+  if(Object.is(n,-0)) return n.toLocaleString();   // Map would fold -0 into 0
+  let s=_fmtIntCache.get(n);
+  if(s===undefined){ if(_fmtIntCache.size>60000) _fmtIntCache.clear(); s=n.toLocaleString(); _fmtIntCache.set(n,s); }
+  return s;
+}
 
 // ── Nested demand-point rows under a Supply-page product-requirement row ──────────
 // The same demand points (e.g. .../INT, /EXT, /IND) that feed a product row's
@@ -10188,7 +10214,7 @@ function _supDpnRows(dpts, months, collapsedMonths, tdSty, depth, base, stickyLe
     months.forEach(mon=>{
       const isCol=collapsedMonths.has(mon.ym);
       const mt=mon.dates.reduce((s,ds)=>s+(_demandRate(el.id,ds)||0),0);
-      hh+=`<td style="border-left:2px solid rgba(var(--hi-rgb),.05);font-size:8px;color:var(--text-dim);text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+      hh+=`<td style="border-left:2px solid rgba(var(--hi-rgb),.05);font-size:8px;color:var(--text-dim);text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
       // 'sup-day-' — these rows live in the Supply table, so their day cells must carry the
       // prefix _monthTotalsToEnd(wrap,'sup-day-',false) looks for, or the month-total cell is
       // left at the front of the row and every value shifts one column right (off-by-one date).
@@ -10202,9 +10228,9 @@ function _supDpnRows(dpts, months, collapsedMonths, tdSty, depth, base, stickyLe
     months.forEach(mon=>{
       const isCol=collapsedMonths.has(mon.ym);
       const mt=mon.dates.reduce((s,ds)=>s+(ex.valFn(ds)||0),0);
-      hh+=`<td style="border-left:2px solid rgba(var(--hi-rgb),.05);font-size:8px;color:${ex.color};text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+      hh+=`<td style="border-left:2px solid rgba(var(--hi-rgb),.05);font-size:8px;color:${ex.color};text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
       if(!isCol) mon.dates.forEach(ds=>{ const v=ex.valFn(ds)||0;
-        hh+=`<td class="sup-day-${mon.ym} ${ex.srcFn?ex.srcFn(ds,v):''}" style="font-size:8px;color:${ex.color};text-align:right;padding:3px 4px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
+        hh+=`<td class="sup-day-${mon.ym} ${ex.srcFn?ex.srcFn(ds,v):''}" style="font-size:8px;color:${ex.color};text-align:right;padding:3px 4px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):''}</td>`; });
     });
     hh+=`</tr>`;
   });
@@ -10243,14 +10269,26 @@ function _realPackT(rec){
   return tpp>0?(parseFloat(rec.pallets)||0)*tpp:null;
 }
 function _dedupRealProd(elId, ds){
+  // Inside an _idxRun block (a Supply render asks ~400k times) the answer is kept per element+day;
+  // the memo lives in _IDX.maps, so it is dropped with the indexes when the block ends. Read-only result.
+  let memo=null, key;
+  if(_IDX.depth){
+    memo=_IDX.maps.get('\0dedup'); if(!memo){ memo=new Map(); _IDX.maps.set('\0dedup',memo); }
+    key=elId+'|'+ds; const hit=memo.get(key); if(hit!==undefined) return hit;
+  }
   const rows=_idxRows('real_production_daily','element_id',elId,'date',ds); // read-only
-  if(!rows.length) return [];
-  const byProd={};
-  rows.forEach(r=>{
-    const pid=r.product_id; const pt=r.pallets!=null?_realPackT(r):null; const v=pt!=null?pt:(parseFloat(r.volume_t)||0);
-    if(!(pid in byProd) || (r.source==='actual'&&byProd[pid].source!=='actual')) byProd[pid]={product_id:pid, volume_t:v, source:r.source};
-  });
-  return Object.values(byProd);
+  let res;
+  if(!rows.length) res=[];
+  else{
+    const byProd={};
+    rows.forEach(r=>{
+      const pid=r.product_id; const pt=r.pallets!=null?_realPackT(r):null; const v=pt!=null?pt:(parseFloat(r.volume_t)||0);
+      if(!(pid in byProd) || (r.source==='actual'&&byProd[pid].source!=='actual')) byProd[pid]={product_id:pid, volume_t:v, source:r.source};
+    });
+    res=Object.values(byProd);
+  }
+  if(memo) memo.set(key,res);
+  return res;
 }
 
 // Per-VESSEL status timelines from a berth's berthVesselHistory. One entry per vessel (in
@@ -10342,7 +10380,7 @@ function _vesselCargoAt(vesselCallId, berthId){
 function _vesselLeftTip(c, berthId){
   if(!c||c.left==null) return '';
   const cargo=_vesselCargoAt(c.vesselCallId, berthId);
-  const left=Math.max(0,c.left), fmt=n=>Math.round(n).toLocaleString();
+  const left=Math.max(0,c.left), fmt=n=>_fmtInt(Math.round(n));
   return cargo>0
     ? ` · cargo ${fmt(cargo)} t · unloaded ${fmt(Math.max(0,cargo-left))} t · ${fmt(left)} t left (end of day)`
     : ` · ${fmt(left)} t left (end of day)`;
@@ -10461,9 +10499,15 @@ function _renderSupplyViewInner(wrap){
   const _pastSty=ds=>ds<todayStr?';background-image:linear-gradient(var(--past-shade),var(--past-shade));':'';
   const thSty=ds=>(isSat(ds)?'border-left:2px solid rgba(var(--red-rgb),.4);background:var(--wkend-th)':
                   new Date(ds+'T00:00:00').getDay()===0?'border-right:2px solid rgba(var(--red-rgb),.4);background:var(--wkend-th)':'')+(ds<todayStr?_pastSty(ds)+'color:var(--past-th-text);':'');
-  const tdSty=ds=>(ds===todayStr?'border-left:2px solid var(--green);border-right:2px solid var(--green);':
+  const _tdStyRaw=ds=>(ds===todayStr?'border-left:2px solid var(--green);border-right:2px solid var(--green);':
                   isSat(ds)?'border-left:2px solid rgba(var(--red-rgb),.3);background:var(--wkend-td,rgba(var(--red-rgb),.04))':
                   new Date(ds+'T00:00:00').getDay()===0?'border-right:2px solid rgba(var(--red-rgb),.3);background:var(--wkend-td,rgba(var(--red-rgb),.04))':'')+(ds<todayStr?';background-image:linear-gradient(var(--past-shade-td,var(--past-shade)),var(--past-shade-td,var(--past-shade)));':'');
+  // Every row asks the same ~365 questions: one answer per date per render (two Date objects each otherwise).
+  const _tdStyMemo=new Map();
+  const tdSty=ds=>{ let s=_tdStyMemo.get(ds); if(s===undefined){ s=_tdStyRaw(ds); _tdStyMemo.set(ds,s); } return s; };
+  // Previous calendar day of a date (the "beginning inventory = yesterday's EOD" lookups), once per date.
+  const _prevDayMemo=new Map();
+  const _prevDs=ds=>{ let p=_prevDayMemo.get(ds); if(p===undefined){ const d=new Date(ds+'T00:00:00'); d.setDate(d.getDate()-1); p=d._ymd(); _prevDayMemo.set(ds,p); } return p; };
 
   // ── Three-tier production data resolution ────────────────
   // Tier 1: sim results (millProductHistory + element_product_capacities)
@@ -10474,11 +10518,16 @@ function _renderSupplyViewInner(wrap){
   const dataSource=hasSim?'Simulated output':'Planned schedule / rated capacity (default)';
 
   // Map dateString → event_id (for the clickable MAINT badge) — shared with Push to BI.
-  const maintSetFor=(elId)=>_maintDayMap(elId);
+  const _maintMemo=new Map();   // one Maintenance Calendar expansion per element per render
+  const maintSetFor=(elId)=>{ let m=_maintMemo.get(elId); if(!m){ m=_maintDayMap(elId); _maintMemo.set(elId,m); } return m; };
 
   // Returns {product_id, capacity_tpd} for element on a given date
   // Uses four-tier resolution: ACTUAL > SIM > SCHEDULE > DEFAULT
-  const resolveProduction=(el, ds, dayIdx, maintDays)=>{
+  // Memoised per (element, date, sim day) for this render: the same cell is resolved several
+  // times (whole-horizon runs, the month total, the day cell, group totals). Results are read-only.
+  const _rpMemo=new Map();
+  const resolveProduction=(el, ds, dayIdx, maintDays)=>{ const _k=el.id+'|'+ds+'|'+dayIdx; let _v=_rpMemo.get(_k); if(_v===undefined){ _v=_resolveProductionRaw(el, ds, dayIdx, maintDays); _rpMemo.set(_k,_v); } return _v; };
+  const _resolveProductionRaw=(el, ds, dayIdx, maintDays)=>{
     if(maintDays.has(ds)) return {product_id:null, capacity_tpd:0};
 
     // Tier 0: ACTUAL data from real_production_daily (highest priority). Deduped per product.
@@ -10497,9 +10546,7 @@ function _renderSupplyViewInner(wrap){
     }
 
     // Tier 0.5: Manager campaign — locked, overrides simulation
-    const managerCampaign=(DB.production_campaigns||[]).find(c=>
-      c.element_id===el.id && ds>=c.start_date && ds<=c.end_date
-    );
+    const managerCampaign=_idxRows('production_campaigns','element_id',el.id).find(c=>ds>=c.start_date && ds<=c.end_date);
     if(managerCampaign){
       // "Down For Repairs" is a full stop (0 production). "Down PM Day" is a HALF-day: the
       // element actually ran at ~50%, so fall through to the sim tiers below instead of
@@ -10509,7 +10556,7 @@ function _renderSupplyViewInner(wrap){
         return {product_id:null, capacity_tpd:0, isCampaign:true, downtime:dt};
       if(!dt){
         const campRate=parseFloat(managerCampaign.rate_tpd)||0;
-        const fallbackCap=DB.element_product_capacities.find(c=>c.element_id===el.id&&c.product_id===managerCampaign.product_id);
+        const fallbackCap=(_capsByEl.get(el.id)||[]).find(c=>c.product_id===managerCampaign.product_id);
         const fbRate=_isPackingRow(fallbackCap)?_packLineCapT(fallbackCap):(parseFloat(fallbackCap?.capacity_tpd)||0);
         const rate=campRate||fbRate;
         return {product_id:managerCampaign.product_id, capacity_tpd:rate, isCampaign:true};
@@ -10532,7 +10579,7 @@ function _renderSupplyViewInner(wrap){
     if(hasSim&&el.type==='kiln'&&r.kilnProdHistory?.[el.id]){
       const v=r.kilnProdHistory[el.id][dayIdx];
       if(v!==undefined){
-        const first=DB.element_product_capacities.find(c=>c.element_id===el.id);
+        const first=(_capsByEl.get(el.id)||[])[0];
         return {product_id:first?.product_id||null, capacity_tpd:v||0};
       }
     }
@@ -10540,7 +10587,7 @@ function _renderSupplyViewInner(wrap){
     if(hasSim&&r.millProductHistory[el.id]){
       const pid=r.millProductHistory[el.id][dayIdx]||null;
       if(pid!==undefined){
-        const cap=DB.element_product_capacities.find(c=>c.element_id===el.id&&c.product_id===pid);
+        const cap=(_capsByEl.get(el.id)||[]).find(c=>c.product_id===pid);
         return {product_id:pid, capacity_tpd:pid?parseFloat(cap?.capacity_tpd)||0:0};
       }
     }
@@ -10549,7 +10596,7 @@ function _renderSupplyViewInner(wrap){
     if(hasSim&&el.type==='packing_plant'&&r.packProductHistory?.[el.id]){
       const pid=r.packProductHistory[el.id][dayIdx]||null;
       if(pid!==undefined){
-        const line=DB.element_product_capacities.find(c=>c.element_id===el.id&&c.product_id===pid);
+        const line=(_capsByEl.get(el.id)||[]).find(c=>c.product_id===pid);
         return {product_id:pid, capacity_tpd:pid?_packLineCapT(line):0};
       }
     }
@@ -10641,7 +10688,7 @@ function _renderSupplyViewInner(wrap){
     months.forEach(mon=>{
       const isCol=collapsed.has(mon.ym);
       const mt=mon.dates.reduce((s,ds)=>s+resolveProduction(el,ds,_dIdx(ds),maintDays).capacity_tpd,0);
-      h+=`<td style="border-left:2px solid rgba(var(--${o.rgb}-rgb),.15);font-size:9px;color:${o.color};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+      h+=`<td style="border-left:2px solid rgba(var(--${o.rgb}-rgb),.15);font-size:9px;color:${o.color};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
       if(!isCol) mon.dates.forEach(ds=>{
         const dayIdx=_dIdx(ds);
         const res=resolveProduction(el,ds,dayIdx,maintDays);
@@ -10665,12 +10712,12 @@ function _renderSupplyViewInner(wrap){
           const lockBadge=isCamp?'<span style="font-size:7px;color:var(--lime);margin-left:2px" title="Manager campaign">🔒</span>':'';
           const isBlocked=(!isMaint&&!dt&&v<=0&&blockedDays.has(ds));
           const downKind=isMaint?'maint':dt?dt:isBlocked?'blocked':null;
-          const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?(res.isActual?_DOWN_TIP[dt].replace(/ \(manual\) — .*$/,'')+' — actual: no production that day':_DOWN_TIP[dt]+(v>0?` · ${prod?.name?esc(prod.name)+' ':''}${Math.round(v).toLocaleString()} t`:'')):isBlocked?_DOWN_TIP.blocked:isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name||''));
+          const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?(res.isActual?_DOWN_TIP[dt].replace(/ \(manual\) — .*$/,'')+' — actual: no production that day':_DOWN_TIP[dt]+(v>0?` · ${prod?.name?esc(prod.name)+' ':''}${_fmtInt(Math.round(v))} t`:'')):isBlocked?_DOWN_TIP.blocked:isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name||''));
           let inner, cAlign='text-align:right;', cPad='padding:4px 6px;';
           if(downKind){ cAlign=''; cPad='padding:3px 0;';
             // a reason on a day with actuals keeps the real-data bottom edge
-            inner=`<div style="position:relative;height:10px;background:${_DOWN_HATCH[downKind]}${res.isActual?';box-shadow:inset 0 -2px 0 var(--real)':''}"></div>`; }
-          else { inner = v>0?prodIcon(prod)+Math.round(v).toLocaleString()+lockBadge:'0'; }
+            inner=`<div class="sx-bar" style="background:${_DOWN_HATCH[downKind]}${res.isActual?';box-shadow:inset 0 -2px 0 var(--real)':''}"></div>`; }
+          else { inner = v>0?prodIcon(prod)+_fmtInt(Math.round(v))+lockBadge:'0'; }
           h+=`<td ${dAttr} class="sup-day-${mon.ym} ${(res.isActual&&v>0)?'cell-real':((!downKind&&v>0&&ds<todayStr)?'cell-gap':'')}" title="${cellTitle}${(res.isActual&&v>0)?' · actual':''}" onclick="event.stopPropagation();${clickFn}" style="${gPos}cursor:pointer;font-size:9px;color:${v>0?o.color:'rgba(var(--red-rgb),calc(var(--zero-k)*.4))'};${cAlign}${cPad}border-bottom:1px solid var(--border);overflow:visible;${campBorder}${tdSty(ds)}">${inner}${grips}</td>`;
           return;
         }
@@ -10683,9 +10730,9 @@ function _renderSupplyViewInner(wrap){
           _gPrev='__real';
           const _allP=resolveProductionAll(el,ds,dayIdx,maintDays);
           const _multi=_allP.length>1;
-          const _tip=(_allP.length?_allP.map(p=>(_prodById.get(p.product_id)?.name||p.product_id)+' '+Math.round(p.capacity_tpd).toLocaleString()+'t').join(' + '):(prod?.name||''))+' · actual';
+          const _tip=(_allP.length?_allP.map(p=>(_prodById.get(p.product_id)?.name||p.product_id)+' '+_fmtInt(Math.round(p.capacity_tpd))+'t').join(' + '):(prod?.name||''))+' · actual';
           const _mk=_multi?`<span style="font-size:7px;color:var(--amber);vertical-align:super;margin-left:1px">▾${_allP.length}</span>`:'';
-          h+=`<td ${dAttr} class="sup-day-${mon.ym} cell-real" title="${_tip}" onclick="event.stopPropagation();${clickFn}" style="${gPos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barColor};box-shadow:inset 0 -2px 0 var(--real)"><span style="position:absolute;left:4px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:8px;font-weight:700;color:${_barTextColor(barColor)};pointer-events:none">${Math.round(v).toLocaleString()}${_mk}</span></div>${grips}</td>`;
+          h+=`<td ${dAttr} class="sup-day-${mon.ym} cell-real sx-gt" title="${_tip}" onclick="event.stopPropagation();${clickFn}" style="${gPos}${tdSty(ds)}"><div class="sx-bar" style="background:${barColor};box-shadow:inset 0 -2px 0 var(--real)"><span style="position:absolute;left:4px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:8px;font-weight:700;color:${_barTextColor(barColor)};pointer-events:none">${_fmtInt(Math.round(v))}${_mk}</span></div>${grips}</td>`;
           return;
         }
         // FORECAST / maintenance / downtime: Gantt bar — colour = product, or a distinct hatch
@@ -10702,14 +10749,14 @@ function _renderSupplyViewInner(wrap){
         const _edges=[]; if(isCamp&&!isMaint) _edges.push('inset 0 2px 0 var(--plan)'); if(isGap) _edges.push('inset 0 -2px 0 var(--simulated)');
         if(res.isActual&&downKind) _edges.push('inset 0 -2px 0 var(--real)');   // the reason for a real 0 t day
         const campMark=_edges.length?`box-shadow:${_edges.join(',')};`:'';
-        const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?(res.isActual?_DOWN_TIP[dt].replace(/ \(manual\) — .*$/,'')+' — actual: no production that day':_DOWN_TIP[dt]+(v>0?` · ${prod?.name?esc(prod.name)+' ':''}${Math.round(v).toLocaleString()} t`:'')):isBlocked?_DOWN_TIP.blocked:isStarved?starvedTip:(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name?`${esc(prod.name)} · ${Math.round(v)} t/d`:'Idle')));
+        const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?(res.isActual?_DOWN_TIP[dt].replace(/ \(manual\) — .*$/,'')+' — actual: no production that day':_DOWN_TIP[dt]+(v>0?` · ${prod?.name?esc(prod.name)+' ':''}${_fmtInt(Math.round(v))} t`:'')):isBlocked?_DOWN_TIP.blocked:isStarved?starvedTip:(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name?`${esc(prod.name)} · ${Math.round(v)} t/d`:'Idle')));
         const zpos=isRunStart?'position:relative;z-index:2;':gPos;
         // Product name only (no rate) in the middle of each production run — small, without the
         // plant prefix ("BRS_IL(12)/BLK" → "IL(12)/BLK") and clipped to its own day cell; the
         // tooltip has the full name.
         const lblName=((typeof spShortProd==='function')?spShortProd(prod?.name||''):(prod?.name||'')).replace(/^[A-Z0-9]{2,5}_(?=.)/,'');
         const label=(lblIdx.has(dayIdx)&&!downKind&&v>0&&lblName)?`<span style="${_BAR_LBL_FIT}line-height:10px;font-family:var(--mono);color:${isGap?'var(--simulated)':'var(--bar-lbl)'};text-shadow:0 0 2px var(--bar-lbl-halo),0 0 2px var(--bar-lbl-halo);pointer-events:none">${esc(lblName)}</span>`:'';
-        h+=`<td ${dAttr} class="sup-day-${mon.ym}${isGap?' src-gap':''}" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="${zpos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barBg};${campMark}">${label}</div>${grips}</td>`;
+        h+=`<td ${dAttr} class="sup-day-${mon.ym}${isGap?' src-gap':''} sx-gt" title="${cellTitle}" onclick="event.stopPropagation();${clickFn}" style="${zpos}${tdSty(ds)}"><div class="sx-bar" style="background:${barBg};${campMark}">${label}</div>${grips}</td>`;
       });
     });
     return h+`</tr>`;
@@ -10915,9 +10962,9 @@ function _renderSupplyViewInner(wrap){
       <td title="Tonnes moved between two silos that hold the same material — one line per direction. Click a day to plan a campaign or record an actual; drag a campaign's ends to change its duration. Links are drawn on the topology (Movement › Silo Transfer)." style="${stickyLeft('var(--surface)',depth,'border-bottom:1px solid var(--border),')}color:${color};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow(key)}</span> ${label}</td>`;
     months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
       const mt=mon.dates.reduce((a,ds)=>a+dayTot(ds),0);
-      out+=`<td style="border-left:2px solid rgba(var(--${rgb}-rgb),.2);font-size:9px;font-weight:700;color:${color};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+      out+=`<td style="border-left:2px solid rgba(var(--${rgb}-rgb),.2);font-size:9px;font-weight:700;color:${color};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
       if(!isCol) mon.dates.forEach(ds=>{ const v=dayTot(ds);
-        out+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${color};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
+        out+=`<td class="sup-day-${mon.ym} sx-nb" style="color:${color};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):''}</td>`; });
     });
     out+=`</tr>`;
     rows.forEach(row=>{
@@ -10931,10 +10978,10 @@ function _renderSupplyViewInner(wrap){
       out+=`<tr class="supsec-${key}" data-sl="${lk.id}"><td title="${esc(fe?.name||'')} → ${esc(te?.name||'')} · ${esc(pname)}" style="${stickyLeft('var(--surface)',depth+1,'border-bottom:1px solid var(--border),')}color:${color};font-size:9px">`
         +`<span style="color:var(--orange);margin-right:4px">┄</span>${esc(_slShort(d.from))} → ${esc(_slShort(d.to))}`
         +(ff!==tf?`<span style="color:var(--text-dim);font-size:8px;margin-left:5px">${esc(ff)} → ${esc(tf)}</span>`:'')
-        +(maxT>0?`<span style="color:var(--text-dim);font-size:8px;margin-left:5px">max ${Math.round(maxT).toLocaleString()} t/d</span>`:'')+`</td>`;
+        +(maxT>0?`<span style="color:var(--text-dim);font-size:8px;margin-left:5px">max ${_fmtInt(Math.round(maxT))} t/d</span>`:'')+`</td>`;
       months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
         const mt=mon.dates.reduce((a,ds)=>a+cell(row,ds).v,0);
-        out+=`<td style="border-left:2px solid rgba(var(--${rgb}-rgb),.1);font-size:9px;color:${color};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+        out+=`<td style="border-left:2px solid rgba(var(--${rgb}-rgb),.1);font-size:9px;color:${color};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
         if(!isCol) mon.dates.forEach(ds=>{
           const c=cell(row,ds), di=_dIdx(ds);
           const grips=_campGrips('xfer',c.plan,ds);
@@ -10944,8 +10991,8 @@ function _renderSupplyViewInner(wrap){
             // An actual the simulation could not apply in full (its origin/destination levels
             // disagree with the recorded move) gets an amber top edge; the tooltip says why.
             const rShort=c.moved!=null&&c.moved<c.v-0.5;
-            const tip=`${Math.round(c.v).toLocaleString()} t moved · actual${rShort?` — the simulation could apply only ${Math.round(c.moved).toLocaleString()} t (its origin is empty or its destination full that day; entering real inventories fixes that)`:''}`;
-            out+=`<td data-ds="${ds}" class="sup-day-${mon.ym} cell-real" title="${tip}" onclick="event.stopPropagation();${clickFn}" style="${gPos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barColor};box-shadow:inset 0 -2px 0 var(--real)${rShort?',inset 0 2px 0 var(--amber)':''}"><span style="position:absolute;left:4px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:8px;font-weight:700;color:${_barTextColor(barColor)};pointer-events:none">${Math.round(c.v).toLocaleString()}</span></div>${grips}</td>`;
+            const tip=`${_fmtInt(Math.round(c.v))} t moved · actual${rShort?` — the simulation could apply only ${_fmtInt(Math.round(c.moved))} t (its origin is empty or its destination full that day; entering real inventories fixes that)`:''}`;
+            out+=`<td data-ds="${ds}" class="sup-day-${mon.ym} cell-real sx-gt" title="${tip}" onclick="event.stopPropagation();${clickFn}" style="${gPos}${tdSty(ds)}"><div class="sx-bar" style="background:${barColor};box-shadow:inset 0 -2px 0 var(--real)${rShort?',inset 0 2px 0 var(--amber)':''}"><span style="position:absolute;left:4px;top:0;line-height:10px;white-space:nowrap;font-family:var(--mono);font-size:8px;font-weight:700;color:${_barTextColor(barColor)};pointer-events:none">${_fmtInt(Math.round(c.v))}</span></div>${grips}</td>`;
             return;
           }
           const on=!!c.plan&&c.v>0;
@@ -10956,11 +11003,11 @@ function _renderSupplyViewInner(wrap){
           const edges=[]; if(c.plan) edges.push('inset 0 2px 0 var(--plan)');
           if(short) edges.push('inset 0 -2px 0 var(--amber)'); else if(isGap&&!full) edges.push('inset 0 -2px 0 var(--simulated)');
           const tip=!c.plan?'Nothing planned — click to plan a campaign or record an actual'
-            :`🔒 Campaign: ${Math.round(c.v).toLocaleString()} t/d${c.plan.start_date!==c.plan.end_date?` (${c.plan.start_date} → ${c.plan.end_date})`:''}`
-              +(full?' — nothing could move (origin empty or destination full)':short?` — only ${Math.round(c.moved).toLocaleString()} t could move (origin ran short or destination nearly full)`:'')
+            :`🔒 Campaign: ${_fmtInt(Math.round(c.v))} t/d${c.plan.start_date!==c.plan.end_date?` (${c.plan.start_date} → ${c.plan.end_date})`:''}`
+              +(full?' — nothing could move (origin empty or destination full)':short?` — only ${_fmtInt(Math.round(c.moved))} t could move (origin ran short or destination nearly full)`:'')
               +(ds<todayStr?' · no actual recorded':'');
-          const lbl=(lblIdx.has(di)&&on&&!full)?`<span style="${_BAR_LBL_FIT}line-height:10px;font-family:var(--mono);color:${isGap?'var(--simulated)':'var(--bar-lbl)'};text-shadow:0 0 2px var(--bar-lbl-halo),0 0 2px var(--bar-lbl-halo);pointer-events:none">${Math.round(c.v).toLocaleString()} t/d</span>`:'';
-          out+=`<td data-ds="${ds}" class="sup-day-${mon.ym}${isGap?' src-gap':''}" title="${tip}" onclick="event.stopPropagation();${clickFn}" style="${gPos}cursor:pointer;padding:3px 0;border-bottom:1px solid var(--border);overflow:visible;${tdSty(ds)}"><div style="position:relative;height:10px;background:${barBg};${edges.length?`box-shadow:${edges.join(',')};`:''}">${lbl}</div>${grips}</td>`;
+          const lbl=(lblIdx.has(di)&&on&&!full)?`<span style="${_BAR_LBL_FIT}line-height:10px;font-family:var(--mono);color:${isGap?'var(--simulated)':'var(--bar-lbl)'};text-shadow:0 0 2px var(--bar-lbl-halo),0 0 2px var(--bar-lbl-halo);pointer-events:none">${_fmtInt(Math.round(c.v))} t/d</span>`:'';
+          out+=`<td data-ds="${ds}" class="sup-day-${mon.ym}${isGap?' src-gap':''} sx-gt" title="${tip}" onclick="event.stopPropagation();${clickFn}" style="${gPos}${tdSty(ds)}"><div class="sx-bar" style="background:${barBg};${edges.length?`box-shadow:${edges.join(',')};`:''}">${lbl}</div>${grips}</td>`;
         });
       });
       out+=`</tr>`;
@@ -11018,11 +11065,11 @@ function _renderSupplyViewInner(wrap){
   months.forEach(mon=>{
     const isCol=collapsed.has(mon.ym);
     const mt=grpMonTotal(prodEls,mon);
-    h+=`<td style="background:rgba(var(--blue-rgb),.1);border-left:2px solid rgba(var(--blue-rgb),.25);font-size:9px;font-weight:700;color:var(--blue);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border2)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+    h+=`<td style="background:rgba(var(--blue-rgb),.1);border-left:2px solid rgba(var(--blue-rgb),.25);font-size:9px;font-weight:700;color:var(--blue);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border2)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
     if(!isCol) mon.dates.forEach(ds=>{
       const dayIdx=_dIdx(ds);
       const v=grpDailyTotal(prodEls,ds,dayIdx);
-      h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_prodActs(prodEls,ds))}" style="background:rgba(var(--blue-rgb),.07);font-size:9px;font-weight:700;color:var(--blue);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border2);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
+      h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_prodActs(prodEls,ds))}" style="background:rgba(var(--blue-rgb),.07);font-size:9px;font-weight:700;color:var(--blue);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border2);${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):0}</td>`;
     });
   });
   h+=`</tr>`;
@@ -11031,8 +11078,7 @@ function _renderSupplyViewInner(wrap){
   // Rendered as table rows so the columns line up exactly with the date grid
   // below and scroll together. One grouped bar per day, one bar per product.
   const _chartInvVal=(siloId, ds, startInv)=>{
-    const prev=new Date(ds+'T00:00:00'); prev.setDate(prev.getDate()-1);
-    const realInv=_idxFirst('real_inventory_daily','silo_id',siloId,'date',prev._ymd());
+    const realInv=_idxFirst('real_inventory_daily','silo_id',siloId,'date',_prevDs(ds));
     if(realInv) return parseFloat(realInv.eod_volume_t)||0;
     const dayIdx=_dIdx(ds);
     const hist=r?.inventoryHistory?.[siloId]||[];
@@ -11117,21 +11163,21 @@ function _renderSupplyViewInner(wrap){
     const _useIdx={}; allDates.forEach((d,i)=>_useIdx[d]=i);
     const _dailyUse={};
     prodIds.forEach(pid=>{
-      _dailyUse[pid]=_useDates.map(ds=>{
-        if(cat!=='clinker'){ // cement + SCM = direct product demand
-          return _scopeDps.filter(dp=>dp.products?.some(p=>p.product_id===pid))
-            .reduce((s,dp)=>s+(_demandRate(dp.element_id,ds)||0),0);
+      if(cat!=='clinker'){ // cement + SCM = direct product demand
+        const _dps=_scopeDps.filter(dp=>dp.products?.some(p=>p.product_id===pid));
+        _dailyUse[pid]=_useDates.map(ds=>_dps.reduce((s,dp)=>s+(_demandRate(dp.element_id,ds)||0),0));
+        return;
+      }
+      // clinker: the (demand point, recipe %) terms are fixed per product — collected once, in the
+      // same order as before, then summed per date.
+      const _terms=[];
+      _scopeDps.forEach(dp=>{ (dp.products||[]).forEach(p=>{
+        const prod=_prodById.get(p.product_id);
+        if(prod&&(prod.category==='cement_bulk'||prod.category==='cement_packed')){
+          DB.recipes.filter(rc=>rc.product_id===p.product_id&&rc.material_id===pid).forEach(rc=>{ _terms.push([dp.element_id,(parseFloat(rc.pct)||0)]); });
         }
-        let t=0; // clinker
-        _scopeDps.forEach(dp=>{ (dp.products||[]).forEach(p=>{
-          const prod=_prodById.get(p.product_id);
-          if(prod&&(prod.category==='cement_bulk'||prod.category==='cement_packed')){
-            const cd=_demandRate(dp.element_id,ds)||0;
-            DB.recipes.filter(rc=>rc.product_id===p.product_id&&rc.material_id===pid).forEach(rc=>{ t+=cd*(parseFloat(rc.pct)||0)/100; });
-          }
-        }); });
-        return t;
-      });
+      }); });
+      _dailyUse[pid]=_useDates.map(ds=>{ let t=0; for(let i=0;i<_terms.length;i++){ const cd=_demandRate(_terms[i][0],ds)||0; t+=cd*_terms[i][1]/100; } return t; });
     });
     // Average of the next 14 days starting at date-index di.
     const _fwdRate=(pid,di)=>{ const arr=_dailyUse[pid]||[]; let sum=0,n=0; for(let k=di;k<Math.min(arr.length,di+14);k++){ sum+=arr[k]; n++; } return n?sum/n:0; };
@@ -11146,7 +11192,7 @@ function _renderSupplyViewInner(wrap){
     const _hintTail=`${_anySplit?' · one bar per silo where a product is stored in several (not shareable)':''}${extraFn?' · lighter top = on rail (transit + rail yard + local yard)':''}`;
     const chartHint=_invMode==='days'
       ?`scale 0–${INV_DAYS_CAP} days of cover (next-14-day demand) · # on bar = tonnes · light cap = beyond ${INV_DAYS_CAP} days · faded dashed = stock with no demand in the window${_hintTail}`
-      :`scale max ${Math.round(gmax).toLocaleString()} t · # on bar = days of cover (next-14-day demand)${_hintTail}`;
+      :`scale max ${_fmtInt(Math.round(gmax))} t · # on bar = days of cover (next-14-day demand)${_hintTail}`;
     let row=`<tr class="sup-chart-row${secKey?' supsec-'+secKey:''}" data-chart="${cat}"><td title="${chartHint}" style="${stickyLeft('var(--surface)',depth!=null?depth:1,'border-bottom:2px solid var(--border2),')}vertical-align:bottom;padding-top:5px;padding-bottom:5px">
       <div style="color:${accent};font-size:8px;font-weight:700;letter-spacing:1px;text-transform:uppercase">${label} <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></div>
       <div style="display:flex;flex-wrap:wrap;font-size:7px;color:var(--text-dim);line-height:1.5;margin-top:3px;max-width:${leftW-24}px">${legend}</div>
@@ -11176,21 +11222,21 @@ function _renderSupplyViewInner(wrap){
             // Cargo still on rail stacks on top, converted to days the same way.
             const cdT=(ex>0&&!noDem&&!capped)?_coverSe(se,_useIdx[ds],v+ex):'';
             const expx=(cdT!==''&&cdT>(cd===''?0:cd))?Math.max(1,px(cdT)-hpx):0;
-            const lbl=v>0?`<div style="font-size:6px;line-height:1;color:${se.color};white-space:nowrap;margin-bottom:1px;font-family:var(--mono)">${_tAbbrev(v)}</div>`:'';
-            const extBar=expx>0?`<div style="width:100%;height:${expx}px;background:${se.color};opacity:.35;border-top:1px dashed ${se.color};border-radius:1px 1px 0 0"></div>`:'';
+            const lbl=v>0?`<div class="sx-cbl" style="color:${se.color}">${_tAbbrev(v)}</div>`:'';
+            const extBar=expx>0?`<div class="sx-cbe" style="height:${expx}px;background:${se.color};border-top:1px dashed ${se.color}"></div>`:'';
             const barSty=noDem?`opacity:.25;border-top:1px dashed ${se.color};`:(capped?'border-top:2px solid var(--text);':'');
-            const ttl=`${se.name}: ${Math.round(v).toLocaleString()} t${ex>0?` + ${Math.round(ex).toLocaleString()} t on rail (transit+yard)`:''} · ${ds} · ${noDem?'no demand in the next 14 days':(cd===''?'no stock':'~'+cd+'d cover'+(capped?` — beyond the ${INV_DAYS_CAP}d scale`:''))}${se.split?' · this silo only':''}`;
-            return `<div title="${ttl}" style="flex:1;min-width:1px;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;margin:0 .5px">${lbl}${extBar}<div style="width:100%;height:${hpx}px;background:${bcol};${barSty}border-radius:${expx>0?'0':'1px 1px 0 0'}"></div></div>`;
+            const ttl=`${se.name}: ${_fmtInt(Math.round(v))} t${ex>0?` + ${_fmtInt(Math.round(ex))} t on rail (transit+yard)`:''} · ${ds} · ${noDem?'no demand in the next 14 days':(cd===''?'no stock':'~'+cd+'d cover'+(capped?` — beyond the ${INV_DAYS_CAP}d scale`:''))}${se.split?' · this silo only':''}`;
+            return `<div class="sx-cb" title="${ttl}">${lbl}${extBar}<div class="sx-cbi" style="height:${hpx}px;background:${bcol};${barSty}border-radius:${expx>0?'0':'1px 1px 0 0'}"></div></div>`;
           }
           const hpx=v>0?Math.max(1,Math.round(v/gmax*H)):0;
           const expx=ex>0?Math.max(1,Math.round(ex/gmax*H)):0;
-          const lbl=cd!==''?`<div style="font-size:6px;line-height:1;color:${se.color};white-space:nowrap;margin-bottom:1px;font-family:var(--mono)">${cd}</div>`:'';
-          const extBar=expx>0?`<div style="width:100%;height:${expx}px;background:${se.color};opacity:.35;border-top:1px dashed ${se.color};border-radius:1px 1px 0 0"></div>`:'';
-          const ttl=ex>0?`${se.name}: ${Math.round(v).toLocaleString()} t available + ${Math.round(ex).toLocaleString()} t on rail (transit+yard) = ${Math.round(v+ex).toLocaleString()} t total · ${ds}${cd!==''?' · ~'+cd+'d cover (available)':''}`
-            :`${se.name}: ${Math.round(v).toLocaleString()} t · ${ds}${cd!==''?' · ~'+cd+'d cover':''}${se.split?' · this silo only':''}`;
-          return `<div title="${ttl}" style="flex:1;min-width:1px;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;margin:0 .5px">${lbl}${extBar}<div style="width:100%;height:${hpx}px;background:${bcol};border-radius:${expx>0?'0':'1px 1px 0 0'}"></div></div>`;
+          const lbl=cd!==''?`<div class="sx-cbl" style="color:${se.color}">${cd}</div>`:'';
+          const extBar=expx>0?`<div class="sx-cbe" style="height:${expx}px;background:${se.color};border-top:1px dashed ${se.color}"></div>`:'';
+          const ttl=ex>0?`${se.name}: ${_fmtInt(Math.round(v))} t available + ${_fmtInt(Math.round(ex))} t on rail (transit+yard) = ${_fmtInt(Math.round(v+ex))} t total · ${ds}${cd!==''?' · ~'+cd+'d cover (available)':''}`
+            :`${se.name}: ${_fmtInt(Math.round(v))} t · ${ds}${cd!==''?' · ~'+cd+'d cover':''}${se.split?' · this silo only':''}`;
+          return `<div class="sx-cb" title="${ttl}">${lbl}${extBar}<div class="sx-cbi" style="height:${hpx}px;background:${bcol};border-radius:${expx>0?'0':'1px 1px 0 0'}"></div></div>`;
         }).join('');
-        row+=`<td class="sup-day-${mon.ym}" style="vertical-align:bottom;padding:2px 1px 0;border-bottom:2px solid var(--border2);${tdSty(ds)}"><div style="display:flex;align-items:flex-end;justify-content:center;height:${H}px;${ds===todayStr?'background:rgba(var(--green-rgb),.06)':''}">${bars}</div></td>`;
+        row+=`<td class="sup-day-${mon.ym} sx-ct"${(s=>s?` style="${s}"`:'')(tdSty(ds))}><div class="sx-ctd" style="height:${H}px;${ds===todayStr?'background:rgba(var(--green-rgb),.06)':''}">${bars}</div></td>`;
       });
     });
     return row+`</tr>`;
@@ -11299,12 +11345,12 @@ function _renderSupplyViewInner(wrap){
           };
           // Helper: total need for a product on a given date
           // = local direct demand + (rail cars loaded × car_capacity_t)
+          const _dpsMemo=new Map();   // demand points of a product, once per product (not per cell)
+          const _dpsOf=prodId=>{ let a=_dpsMemo.get(prodId); if(!a){ a=demandPoints.filter(dp=>(dp.products||[]).some(p=>p.product_id===prodId)); _dpsMemo.set(prodId,a); } return a; };
+          const _demElIds=new Set(demandEls.map(e=>e.id));
           const totalNeed=(prodId, ds)=>{
-            const dpts=demandPoints.filter(dp=>dp.products?.some(p=>p.product_id===prodId));
-            const directDemand=dpts.reduce((sum,dp)=>{
-              const el=demandEls.find(e=>e.id===dp.element_id);
-              return sum+(_demandRate(el.id,ds)||0);
-            },0);
+            const dpts=_dpsOf(prodId);
+            const directDemand=dpts.reduce((sum,dp)=>sum+(_demandRate(dp.element_id,ds)||0),0);
             return directDemand+_railLoadT(prodId,ds);
           };
 
@@ -11313,10 +11359,10 @@ function _renderSupplyViewInner(wrap){
           //   re-sourced to a substitute material (drops this product's need).
           const swappedOut=(prodId, ds)=>{
             let q=0;
-            demandPoints.filter(dp=>dp.products?.some(p=>p.product_id===prodId)).forEach(dp=>{
-              const el=demandEls.find(e=>e.id===dp.element_id); if(!el) return;
-              const t=_demandRate(el.id,ds)||0;
-              const sw=(typeof _resolveDemandSwap==='function')?_resolveDemandSwap(el.id,t,ds):null;
+            _dpsOf(prodId).forEach(dp=>{
+              if(!_demElIds.has(dp.element_id)) return;
+              const t=_demandRate(dp.element_id,ds)||0;
+              const sw=(typeof _resolveDemandSwap==='function')?_resolveDemandSwap(dp.element_id,t,ds):null;
               if(sw) q+=Math.min(sw.qty,t);
             });
             return q;
@@ -11329,17 +11375,17 @@ function _renderSupplyViewInner(wrap){
           const _dpDisp=id=>DB.elements.find(e=>e.id===id)?.name||DB.demand_points.find(d=>d.element_id===id)?.element_name||id;
           const swappedIn=(prodId, ds)=>{
             let q=0;
-            demandPoints.filter(dp=>dp.products?.some(p=>p.product_id===prodId)).forEach(dp=>{
+            _dpsOf(prodId).forEach(dp=>{
               q+=(typeof _resolveDemandSwapIn==='function')?_resolveDemandSwapIn(dp.element_id,ds,(id)=>_demandRate(id,ds)):0;
             });
             return q;
           };
           const _outTargets=(prodId)=>{ const n=new Set();
-            demandPoints.filter(dp=>dp.products?.some(p=>p.product_id===prodId)).forEach(dp=>{
+            _dpsOf(prodId).forEach(dp=>{
               (DB.demand_substitutions||[]).filter(s=>s.from_element_id===dp.element_id).forEach(s=>n.add(s.to_element_id?_dpDisp(s.to_element_id):(_prodById.get(s.to_product_id)?.name||s.to_product_id))); });
             return [...n].join(', '); };
           const _inSources=(prodId)=>{ const n=new Set();
-            demandPoints.filter(dp=>dp.products?.some(p=>p.product_id===prodId)).forEach(dp=>{
+            _dpsOf(prodId).forEach(dp=>{
               (DB.demand_substitutions||[]).filter(s=>s.to_element_id===dp.element_id).forEach(s=>n.add(_dpDisp(s.from_element_id))); });
             return [...n].join(', '); };
           // Surface a substitute product here even if it has no direct demand at
@@ -11363,10 +11409,10 @@ function _renderSupplyViewInner(wrap){
             months.forEach(mon=>{
               const isCol=collapsed.has(mon.ym);
               const mt=[...productsSet].reduce((s,pid)=>s+mon.dates.reduce((a,ds)=>a+needHere(pid,ds),0),0);
-              h+=`<td style="border-left:2px solid rgba(var(--blue-rgb),.2);font-size:9px;font-weight:700;color:${prodReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+              h+=`<td style="border-left:2px solid rgba(var(--blue-rgb),.2);font-size:9px;font-weight:700;color:${prodReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
               if(!isCol) mon.dates.forEach(ds=>{
                 const v=[...productsSet].reduce((s,pid)=>s+needHere(pid,ds),0);
-                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${prodReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`;
+                h+=`<td class="sup-day-${mon.ym} sx-nb" style="color:${prodReqColor};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):''}</td>`;
               });
             });
             h+=`</tr>`;
@@ -11375,7 +11421,7 @@ function _renderSupplyViewInner(wrap){
             Array.from(productsSet).sort().forEach(prodId=>{
               const prod=_prodById.get(prodId);
               const prodName=prod?.name||prodId;
-              const _dpnDpts=demandPoints.filter(dp=>dp.products?.some(p=>p.product_id===prodId));
+              const _dpnDpts=_dpsOf(prodId);
               const _dpnBase=node.id+'_cementNeed_'+prodId;
               // Rail loading is part of this product's requirement but isn't demand-point
               // demand — show it as its own breakdown line so the children reconcile to the
@@ -11390,12 +11436,12 @@ function _renderSupplyViewInner(wrap){
               months.forEach(mon=>{
                 const isCol=collapsed.has(mon.ym);
                 const mt=mon.dates.reduce((s,ds)=>s+needHere(prodId,ds),0);
-                h+=`<td ondblclick="_openSwapForProduct('${prodId}','${mon.dates[0]||''}')" title="Double-click to swap part of this demand to another material" style="cursor:pointer;border-left:2px solid rgba(var(--blue-rgb),.1);font-size:9px;color:${prodReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                h+=`<td ondblclick="_openSwapForProduct('${prodId}','${mon.dates[0]||''}')" title="Double-click to swap part of this demand to another material" style="cursor:pointer;border-left:2px solid rgba(var(--blue-rgb),.1);font-size:9px;color:${prodReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
                 if(!isCol) mon.dates.forEach(ds=>{
                   const v=needHere(prodId,ds);
                   const _acts=_dmdActs(_dpnDpts,ds); if(_railLoadT(prodId,ds)>0) _acts.push(_railReal(node.id,ds));
                   if(swappedIn(prodId,ds)>0) _acts.push(..._swapInActs(_dpnDpts,ds));
-                  h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_acts)}" ondblclick="_openSwapForProduct('${prodId}','${ds}')" title="Double-click to swap part of this demand to another material" style="cursor:pointer;font-size:9px;color:${v>0?prodReqColor:'rgba(var(--blue-rgb),calc(var(--zero-k)*.3))'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
+                  h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_acts)} sx-np" ondblclick="_openSwapForProduct('${prodId}','${ds}')" title="Double-click to swap part of this demand to another material" style="color:${v>0?prodReqColor:'rgba(var(--blue-rgb),calc(var(--zero-k)*.3))'};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):0}</td>`;
                 });
               });
               h+=`</tr>`;
@@ -11412,8 +11458,8 @@ function _renderSupplyViewInner(wrap){
                   months.forEach(mon=>{
                     const isCol=collapsed.has(mon.ym);
                     const mt=mon.dates.reduce((s,ds)=>s+valFn(ds),0);
-                    rr+=`<td style="border-left:2px solid rgba(var(--hi-rgb),.05);font-size:8px;color:${color};text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
-                    if(!isCol) mon.dates.forEach(ds=>{ const v=valFn(ds); rr+=`<td class="sup-day-${mon.ym} ${actsFn?_srcCls(ds,v,actsFn(ds)):''}" style="font-size:8px;color:${color};text-align:right;padding:3px 4px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
+                    rr+=`<td style="border-left:2px solid rgba(var(--hi-rgb),.05);font-size:8px;color:${color};text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
+                    if(!isCol) mon.dates.forEach(ds=>{ const v=valFn(ds); rr+=`<td class="sup-day-${mon.ym} ${actsFn?_srcCls(ds,v,actsFn(ds)):''}" style="font-size:8px;color:${color};text-align:right;padding:3px 4px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):''}</td>`; });
                   });
                   return rr+`</tr>`;
                 };
@@ -11454,9 +11500,7 @@ function _renderSupplyViewInner(wrap){
           const getInventoryValue=(siloId, dateStr, startInv)=>{
             // For date X: display BEGINNING inventory = ENDING of day X-1
             // So ONLY check previous day's real inventory data
-            const prevDate=new Date(dateStr+'T00:00:00');
-            prevDate.setDate(prevDate.getDate()-1);
-            const prevDateStr=prevDate._ymd();
+            const prevDateStr=_prevDs(dateStr);
 
             // Check ONLY previous day's ending inventory (becomes today's beginning)
             const realInv=_idxFirst('real_inventory_daily','silo_id',siloId,'date',prevDateStr);
@@ -11476,11 +11520,11 @@ function _renderSupplyViewInner(wrap){
           months.forEach(mon=>{
             const isCol=collapsed.has(mon.ym);
             const mt=mon.dates.reduce((a,ds)=>a+_cemInvDay(ds),0)/(mon.dates.length||1);
-            h+=`<td style="border-left:2px solid rgba(var(--teal-rgb),.2);font-size:9px;font-weight:700;color:${invColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+            h+=`<td style="border-left:2px solid rgba(var(--teal-rgb),.2);font-size:9px;font-weight:700;color:${invColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
             if(!isCol){
               mon.dates.forEach(ds=>{
                 const v=_cemInvDay(ds);
-                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${invColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`;
+                h+=`<td class="sup-day-${mon.ym} sx-nb" style="color:${invColor};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):''}</td>`;
               });
             }
           });
@@ -11501,7 +11545,7 @@ function _renderSupplyViewInner(wrap){
                 return s+inv.value;
               },0);
               const avgMonthly=mt/mon.dates.length;
-              h+=`<td style="border-left:2px solid rgba(var(--teal-rgb),.1);font-size:9px;color:${invColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${avgMonthly>0?Math.round(avgMonthly).toLocaleString():''}</td>`;
+              h+=`<td style="border-left:2px solid rgba(var(--teal-rgb),.1);font-size:9px;color:${invColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${avgMonthly>0?_fmtInt(Math.round(avgMonthly)):''}</td>`;
               if(!isCol){
                 mon.dates.forEach((ds)=>{
                   const inv=getInventoryValue(silo.id, ds, siloStart);
@@ -11510,7 +11554,7 @@ function _renderSupplyViewInner(wrap){
                   const cellWeight=inv.isActual?'700':'400';
                   const cellClass=inv.isActual?'cell-real':(ds<todayStr&&v>0?'cell-gap':'');
                   const lvlTitle=(siloMax>0?`${Math.round(v/siloMax*100)}% of ${siloMax.toLocaleString()}t capacity${inv.isActual?' · actual':''}`:'')+' · click to set real inventory';
-                  h+=`<td class="sup-day-${mon.ym} ${cellClass}" title="${lvlTitle}" onclick="showInventoryPopup('${silo.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?lvlColor:'rgba(var(--teal-rgb),calc(var(--zero-k)*.3))'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${cellWeight};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
+                  h+=`<td class="sup-day-${mon.ym} ${cellClass} sx-np" title="${lvlTitle}" onclick="showInventoryPopup('${silo.id}','${ds}')" style="color:${v>0?lvlColor:'rgba(var(--teal-rgb),calc(var(--zero-k)*.3))'};font-weight:${cellWeight};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):0}</td>`;
                 });
               }
             });
@@ -11535,11 +11579,11 @@ function _renderSupplyViewInner(wrap){
           months.forEach(mon=>{
             const isCol=collapsed.has(mon.ym);
             const mt=grpMonTotal(cemEls,mon);
-            h+=`<td style="border-left:2px solid rgba(var(--green-rgb),.2);font-size:9px;color:${cemColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+            h+=`<td style="border-left:2px solid rgba(var(--green-rgb),.2);font-size:9px;color:${cemColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
             if(!isCol) mon.dates.forEach(ds=>{
               const dayIdx=_dIdx(ds);
               const v=grpDailyTotal(cemEls,ds,dayIdx);
-              h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${cemColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
+              h+=`<td class="sup-day-${mon.ym} sx-n" style="color:${cemColor};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):0}</td>`;
             });
           });
           h+=`</tr>`;
@@ -11570,9 +11614,9 @@ function _renderSupplyViewInner(wrap){
               months.forEach(mon=>{
                 const isCol=collapsed.has(mon.ym);
                 const mt=_cbpPids.reduce((s,pid)=>s+mon.dates.reduce((a,ds)=>a+(_cbp[pid][ds]||0),0),0);
-                h+=`<td style="border-left:2px solid rgba(var(--green-rgb),.2);font-size:9px;color:${cemColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                h+=`<td style="border-left:2px solid rgba(var(--green-rgb),.2);font-size:9px;color:${cemColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
                 if(!isCol) mon.dates.forEach(ds=>{ const v=_cbpPids.reduce((s,pid)=>s+(_cbp[pid][ds]||0),0);
-                  h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${cemColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+                  h+=`<td class="sup-day-${mon.ym} sx-n" style="color:${cemColor};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):0}</td>`; });
               });
               h+=`</tr>`;
               _cbpPids.forEach(pid=>{
@@ -11584,9 +11628,9 @@ function _renderSupplyViewInner(wrap){
                 months.forEach(mon=>{
                   const isCol=collapsed.has(mon.ym);
                   const mt=mon.dates.reduce((s,ds)=>s+(_cbp[pid][ds]||0),0);
-                  h+=`<td style="border-left:2px solid rgba(var(--green-rgb),.15);font-size:9px;color:${pColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                  h+=`<td style="border-left:2px solid rgba(var(--green-rgb),.15);font-size:9px;color:${pColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
                   if(!isCol) mon.dates.forEach(ds=>{ const v=_cbp[pid][ds]||0;
-                    h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_prodActs(cemEls,ds,pid))}" style="font-size:9px;color:${v>0?pColor:'rgba(var(--green-rgb),calc(var(--zero-k)*.3))'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+                    h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_prodActs(cemEls,ds,pid))} sx-n" style="color:${v>0?pColor:'rgba(var(--green-rgb),calc(var(--zero-k)*.3))'};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):0}</td>`; });
                 });
                 h+=`</tr>`;
               });
@@ -11619,8 +11663,7 @@ function _renderSupplyViewInner(wrap){
           // ── STARTING INVENTORY (packed silos, per silo · tonnes) ──
           if(_packedSilosShown.length){
             const _packInvVal=(siloId,ds,startT)=>{
-              const prev=new Date(ds+'T00:00:00'); prev.setDate(prev.getDate()-1);
-              const realInv=_idxFirst('real_inventory_daily','silo_id',siloId,'date',prev._ymd());
+              const realInv=_idxFirst('real_inventory_daily','silo_id',siloId,'date',_prevDs(ds));
               if(realInv) return {value:parseFloat(realInv.eod_volume_t)||0,isActual:true};
               const dayIdx=_dIdx(ds);
               const hist=r?.inventoryHistory?.[siloId]||[];
@@ -11633,9 +11676,9 @@ function _renderSupplyViewInner(wrap){
             months.forEach(mon=>{
               const isCol=collapsed.has(mon.ym);
               const mt=mon.dates.reduce((a,ds)=>a+_pkInvDay(ds),0)/(mon.dates.length||1);
-              h+=`<td style="border-left:2px solid rgba(var(--blue-rgb),.2);font-size:9px;font-weight:700;color:${pkColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+              h+=`<td style="border-left:2px solid rgba(var(--blue-rgb),.2);font-size:9px;font-weight:700;color:${pkColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
               if(!isCol) mon.dates.forEach(ds=>{ const v=_pkInvDay(ds);
-                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${pkColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
+                h+=`<td class="sup-day-${mon.ym} sx-nb" style="color:${pkColor};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):''}</td>`; });
             });
             h+=`</tr>`;
             _packedSilosShown.forEach(silo=>{
@@ -11643,19 +11686,19 @@ function _renderSupplyViewInner(wrap){
               const siloStart=_siloStartT(silo);
               h+=`<tr class="supsec-packedInv">
                 <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${pkColor};font-size:9px" title="${esc(silo.name)}">${_supLeafLabel(silo.name)}
-                  <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${siloMax>0?'cap: '+Math.round(siloMax).toLocaleString()+'t':''}</span>
+                  <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${siloMax>0?'cap: '+_fmtInt(Math.round(siloMax))+'t':''}</span>
                 </td>`;
               months.forEach(mon=>{
                 const isCol=collapsed.has(mon.ym);
                 const mt=mon.dates.reduce((s,ds)=>s+_packInvVal(silo.id,ds,siloStart).value,0)/(mon.dates.length||1);
-                h+=`<td style="border-left:2px solid rgba(var(--blue-rgb),.1);font-size:9px;color:${pkColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                h+=`<td style="border-left:2px solid rgba(var(--blue-rgb),.1);font-size:9px;color:${pkColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
                 if(!isCol) mon.dates.forEach(ds=>{
                   const inv=_packInvVal(silo.id,ds,siloStart); const v=inv.value;
                   const lvlColor=invLevelColor(v,siloMax);
                   const cellWeight=inv.isActual?'700':'400';
                   const cellClass=inv.isActual?'cell-real':(ds<todayStr&&v>0?'cell-gap':'');
-                  const lvlTitle=(siloMax>0?`${Math.round(v/siloMax*100)}% of ${Math.round(siloMax).toLocaleString()}t capacity${inv.isActual?' · actual':''}`:'')+' · click to set real inventory';
-                  h+=`<td class="sup-day-${mon.ym} ${cellClass}" title="${lvlTitle}" onclick="showInventoryPopup('${silo.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?lvlColor:'rgba(var(--blue-rgb),calc(var(--zero-k)*.3))'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${cellWeight};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
+                  const lvlTitle=(siloMax>0?`${Math.round(v/siloMax*100)}% of ${_fmtInt(Math.round(siloMax))}t capacity${inv.isActual?' · actual':''}`:'')+' · click to set real inventory';
+                  h+=`<td class="sup-day-${mon.ym} ${cellClass} sx-np" title="${lvlTitle}" onclick="showInventoryPopup('${silo.id}','${ds}')" style="color:${v>0?lvlColor:'rgba(var(--blue-rgb),calc(var(--zero-k)*.3))'};font-weight:${cellWeight};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):0}</td>`;
                 });
               });
               h+=`</tr>`;
@@ -11666,17 +11709,18 @@ function _renderSupplyViewInner(wrap){
           {
             const pkProds=[...packedProductIds].filter(pid=>_prodById.get(pid)).filter(_supProdAllows)
               .sort((a,b)=>(_prodById.get(a)?.name||a).localeCompare(_prodById.get(b)?.name||b));
-            const pkDemand=(pid,ds)=>demandPoints.filter(dp=>dp.products?.some(p=>p.product_id===pid))
-              .reduce((s,dp)=>s+(_demandRate(dp.element_id,ds)||0),0);
+            const _pkDpsMemo=new Map();
+            const _pkDpsOf=pid=>{ let a=_pkDpsMemo.get(pid); if(!a){ a=demandPoints.filter(dp=>dp.products?.some(p=>p.product_id===pid)); _pkDpsMemo.set(pid,a); } return a; };
+            const pkDemand=(pid,ds)=>_pkDpsOf(pid).reduce((s,dp)=>s+(_demandRate(dp.element_id,ds)||0),0);
             if(pkProds.length){
               h+=`<tr class="sup-sec-hdr" data-seckey="packedNeed" onclick="_supToggleSec('packedNeed')" style="cursor:pointer;background:rgba(var(--blue-rgb),.05);border-top:2px solid rgba(var(--blue-rgb),.3)">
                 <td title="Packed-product demand" style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${pkColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('packedNeed')}</span> PACKED REQUIREMENTS <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>`;
               months.forEach(mon=>{
                 const isCol=collapsed.has(mon.ym);
                 const mt=pkProds.reduce((s,pid)=>s+mon.dates.reduce((a,ds)=>a+pkDemand(pid,ds),0),0);
-                h+=`<td style="border-left:2px solid rgba(var(--blue-rgb),.2);font-size:9px;font-weight:700;color:${pkColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                h+=`<td style="border-left:2px solid rgba(var(--blue-rgb),.2);font-size:9px;font-weight:700;color:${pkColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
                 if(!isCol) mon.dates.forEach(ds=>{ const v=pkProds.reduce((s,pid)=>s+pkDemand(pid,ds),0);
-                  h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${pkColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
+                  h+=`<td class="sup-day-${mon.ym} sx-nb" style="color:${pkColor};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):''}</td>`; });
               });
               h+=`</tr>`;
               pkProds.forEach(pid=>{
@@ -11688,9 +11732,9 @@ function _renderSupplyViewInner(wrap){
                 months.forEach(mon=>{
                   const isCol=collapsed.has(mon.ym);
                   const mt=mon.dates.reduce((s,ds)=>s+pkDemand(pid,ds),0);
-                  h+=`<td style="border-left:2px solid rgba(var(--blue-rgb),.1);font-size:9px;color:${pkColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                  h+=`<td style="border-left:2px solid rgba(var(--blue-rgb),.1);font-size:9px;color:${pkColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
                   if(!isCol) mon.dates.forEach(ds=>{ const v=pkDemand(pid,ds);
-                    h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_dmdActs(_dpnDpts,ds))}" style="font-size:9px;color:${v>0?pkColor:'rgba(var(--blue-rgb),calc(var(--zero-k)*.3))'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+                    h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_dmdActs(_dpnDpts,ds))} sx-n" style="color:${v>0?pkColor:'rgba(var(--blue-rgb),calc(var(--zero-k)*.3))'};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):0}</td>`; });
                 });
                 h+=`</tr>`;
                 h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, node.depth+3, _dpnBase, stickyLeft);
@@ -11711,11 +11755,11 @@ function _renderSupplyViewInner(wrap){
           months.forEach(mon=>{
             const isCol=collapsed.has(mon.ym);
             const mt=grpMonTotal(packEls,mon);
-            h+=`<td style="border-left:2px solid rgba(var(--blue-rgb),.2);font-size:9px;color:${packColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+            h+=`<td style="border-left:2px solid rgba(var(--blue-rgb),.2);font-size:9px;color:${packColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
             if(!isCol) mon.dates.forEach(ds=>{
               const dayIdx=_dIdx(ds);
               const v=grpDailyTotal(packEls,ds,dayIdx);
-              h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${packColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
+              h+=`<td class="sup-day-${mon.ym} sx-n" style="color:${packColor};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):0}</td>`;
             });
           });
           h+=`</tr>`;
@@ -11778,9 +11822,9 @@ function _renderSupplyViewInner(wrap){
               <td title="Tonnes · click a bar to plan" style="${stickyLeft('var(--surface)',node.depth+1,'border-bottom:1px solid var(--border),')}color:${railColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow('railLoad')}</span> RAIL LOADING <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>`;
             months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
               const mt=mon.dates.reduce((a,ds)=>a+railTonsDay(ds),0);
-              _railHTML+=`<td style="border-left:2px solid rgba(var(--purple-rgb),.2);font-size:9px;font-weight:700;color:${railColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+              _railHTML+=`<td style="border-left:2px solid rgba(var(--purple-rgb),.2);font-size:9px;font-weight:700;color:${railColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
               if(!isCol) mon.dates.forEach(ds=>{ const v=railTonsDay(ds);
-                _railHTML+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${railColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
+                _railHTML+=`<td class="sup-day-${mon.ym} sx-nb" style="color:${railColor};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):''}</td>`; });
             });
             _railHTML+=`</tr>`;
 
@@ -11808,7 +11852,7 @@ function _renderSupplyViewInner(wrap){
               }
               months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
                 const mt=mon.dates.reduce((s,ds)=>s+(byDate[ds]?.cars||0),0);
-                rr+=`<td title="cars loaded" style="border-left:2px solid rgba(var(--purple-rgb),.1);font-size:9px;color:${railColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                rr+=`<td title="cars loaded" style="border-left:2px solid rgba(var(--purple-rgb),.1);font-size:9px;color:${railColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
                 if(!isCol) mon.dates.forEach(ds=>{
                   const e=byDate[ds]||{cars:0,pid:null,byProduct:{},isReal:false,plan:0,isCamp:false};
                   const prod=e.pid?_prodById.get(e.pid):null;
@@ -11903,11 +11947,11 @@ function _renderSupplyViewInner(wrap){
             months.forEach(mon=>{
               const isCol=collapsed.has(mon.ym);
               const mt=mon.dates.reduce((a,ds)=>a+_clkReqDay(ds),0);
-              h+=`<td style="border-left:2px solid rgba(var(--peach-rgb),.2);font-size:9px;font-weight:700;color:${clinkerReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+              h+=`<td style="border-left:2px solid rgba(var(--peach-rgb),.2);font-size:9px;font-weight:700;color:${clinkerReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
               if(!isCol){
                 mon.dates.forEach(ds=>{
                   const v=_clkReqDay(ds);
-                  h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${clinkerReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`;
+                  h+=`<td class="sup-day-${mon.ym} sx-nb" style="color:${clinkerReqColor};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):''}</td>`;
                 });
               }
             });
@@ -11922,13 +11966,13 @@ function _renderSupplyViewInner(wrap){
               months.forEach(mon=>{
                 const isCol=collapsed.has(mon.ym);
                 const mt=mon.dates.reduce((s,ds)=>s+_clkReqDay(ds,clinkerProdId),0);
-                h+=`<td style="border-left:2px solid rgba(var(--peach-rgb),.1);font-size:9px;color:${clinkerReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                h+=`<td style="border-left:2px solid rgba(var(--peach-rgb),.1);font-size:9px;color:${clinkerReqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
                 if(!isCol){
                   mon.dates.forEach(ds=>{
                     const totalReq=_clkReqDay(ds,clinkerProdId);
                     const _acts=_clkFinishMills.flatMap(m=>resolveProductionAll(m,ds,_dIdx(ds),maintSetFor(m.id))
                       .filter(res=>DB.recipes.some(rc=>rc.product_id===res.product_id&&rc.material_id===clinkerProdId)).map(res=>!!res.isActual));
-                    h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,totalReq,_acts)}" style="font-size:9px;color:${totalReq>0?clinkerReqColor:'rgba(var(--peach-rgb),calc(var(--zero-k)*.3))'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${totalReq>0?Math.round(totalReq).toLocaleString():''}</td>`;
+                    h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,totalReq,_acts)} sx-n" style="color:${totalReq>0?clinkerReqColor:'rgba(var(--peach-rgb),calc(var(--zero-k)*.3))'};${tdSty(ds)}">${totalReq>0?_fmtInt(Math.round(totalReq)):''}</td>`;
                   });
                 }
               });
@@ -11959,9 +12003,7 @@ function _renderSupplyViewInner(wrap){
           const clinkerInvColor='var(--orange)';
           // Helper for clinker inventory (same as cement above)
           const getClkInvValue=(siloId, dateStr, startInv)=>{
-            const prevDate=new Date(dateStr+'T00:00:00');
-            prevDate.setDate(prevDate.getDate()-1);
-            const prevDateStr=prevDate._ymd();
+            const prevDateStr=_prevDs(dateStr);
             const realInv=_idxFirst('real_inventory_daily','silo_id',siloId,'date',prevDateStr);
             if(realInv) return {value:parseFloat(realInv.eod_volume_t)||0, isActual:true};
             const dayIdx=_dIdx(dateStr);
@@ -11976,11 +12018,11 @@ function _renderSupplyViewInner(wrap){
           months.forEach(mon=>{
             const isCol=collapsed.has(mon.ym);
             const mt=mon.dates.reduce((a,ds)=>a+_clkInvDay(ds),0)/(mon.dates.length||1);
-            h+=`<td style="border-left:2px solid rgba(var(--orange-rgb),.2);font-size:9px;font-weight:700;color:${clinkerInvColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+            h+=`<td style="border-left:2px solid rgba(var(--orange-rgb),.2);font-size:9px;font-weight:700;color:${clinkerInvColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
             if(!isCol){
               mon.dates.forEach(ds=>{
                 const v=_clkInvDay(ds);
-                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${clinkerInvColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`;
+                h+=`<td class="sup-day-${mon.ym} sx-nb" style="color:${clinkerInvColor};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):''}</td>`;
               });
             }
           });
@@ -12001,7 +12043,7 @@ function _renderSupplyViewInner(wrap){
                 return s+inv.value;
               },0);
               const avgMonthly=mt/mon.dates.length;
-              h+=`<td style="border-left:2px solid rgba(var(--orange-rgb),.1);font-size:9px;color:${clinkerInvColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${avgMonthly>0?Math.round(avgMonthly).toLocaleString():''}</td>`;
+              h+=`<td style="border-left:2px solid rgba(var(--orange-rgb),.1);font-size:9px;color:${clinkerInvColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${avgMonthly>0?_fmtInt(Math.round(avgMonthly)):''}</td>`;
               if(!isCol){
                 mon.dates.forEach((ds)=>{
                   const inv=getClkInvValue(silo.id, ds, siloStart);
@@ -12009,7 +12051,7 @@ function _renderSupplyViewInner(wrap){
                   const cellColor=inv.isActual?'var(--real)':clinkerInvColor;
                   const cellClass=inv.isActual?'cell-real':(ds<todayStr&&v>0?'cell-gap':'');
                   const cellWeight=inv.isActual?'700':'400';
-                  h+=`<td class="sup-day-${mon.ym} ${cellClass}" title="click to set real inventory${inv.isActual?' · actual':''}" onclick="showInventoryPopup('${silo.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?cellColor:'rgba(var(--orange-rgb),calc(var(--zero-k)*.3))'};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${cellWeight};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
+                  h+=`<td class="sup-day-${mon.ym} ${cellClass} sx-np" title="click to set real inventory${inv.isActual?' · actual':''}" onclick="showInventoryPopup('${silo.id}','${ds}')" style="color:${v>0?cellColor:'rgba(var(--orange-rgb),calc(var(--zero-k)*.3))'};font-weight:${cellWeight};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):0}</td>`;
                 });
               }
             });
@@ -12033,11 +12075,11 @@ function _renderSupplyViewInner(wrap){
           months.forEach(mon=>{
             const isCol=collapsed.has(mon.ym);
             const mt=grpMonTotal(clkEls,mon);
-            h+=`<td style="border-left:2px solid rgba(var(--orange-rgb),.2);font-size:9px;color:${clkColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+            h+=`<td style="border-left:2px solid rgba(var(--orange-rgb),.2);font-size:9px;color:${clkColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
             if(!isCol) mon.dates.forEach(ds=>{
               const dayIdx=_dIdx(ds);
               const v=grpDailyTotal(clkEls,ds,dayIdx);
-              h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${clkColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
+              h+=`<td class="sup-day-${mon.ym} sx-n" style="color:${clkColor};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):0}</td>`;
             });
           });
           h+=`</tr>`;
@@ -12071,11 +12113,11 @@ function _renderSupplyViewInner(wrap){
       months.forEach(mon=>{
         const isCol=collapsed.has(mon.ym);
         const mt=grpMonTotal(node.els,mon);
-        h+=`<td style="border-left:2px solid rgba(var(--blue-rgb),.15);background:rgba(var(--hi-rgb),.03);font-size:9px;font-weight:700;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border2)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+        h+=`<td style="border-left:2px solid rgba(var(--blue-rgb),.15);background:rgba(var(--hi-rgb),.03);font-size:9px;font-weight:700;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border2)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
         if(!isCol) mon.dates.forEach(ds=>{
           const dayIdx=_dIdx(ds);
           const v=grpDailyTotal(node.els,ds,dayIdx);
-          h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_prodActs(node.els,ds))}" style="background:rgba(var(--hi-rgb),.03);font-size:9px;font-weight:700;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border2);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
+          h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_prodActs(node.els,ds))}" style="background:rgba(var(--hi-rgb),.03);font-size:9px;font-weight:700;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border2);${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):0}</td>`;
         });
       });
       h+=`</tr>`;
@@ -12102,8 +12144,9 @@ function _renderSupplyViewInner(wrap){
       // on the right row. Unresolvable ids pass through unchanged.
       const _pnorm=s=>String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
       const _canonCache={};
+      const _prodIdSet=new Set(DB.products.map(p=>p.id));
       const _canon=pid=>{
-        if(!pid||DB.products.some(p=>p.id===pid)) return pid;
+        if(!pid||_prodIdSet.has(pid)) return pid;
         if(Object.prototype.hasOwnProperty.call(_canonCache,pid)) return _canonCache[pid];
         const n=_pnorm(pid);
         const hit=n&&DB.products.find(p=>_pnorm(p.id).startsWith(n)||_pnorm(p.name).startsWith(n));
@@ -12137,7 +12180,7 @@ function _renderSupplyViewInner(wrap){
         h+=`<tr class="sup-grp-hdr" onclick="_supToggleGrp('${fac.id}')" style="cursor:pointer;background:rgba(var(--amber-rgb),.04);border-top:1px solid var(--border2)">
           <td style="${stickyLeft('var(--surface2)',depth,'border-bottom:1px solid var(--border),')}color:var(--amber);font-weight:700;font-size:9px">
             <span class="sup-chev">${_facCol?'▶':'▼'}</span>${esc(fac.name)}
-            ${_isPurch?`<span style="color:var(--purple);font-size:7px;letter-spacing:1px;margin-left:6px;font-weight:400">PURCHASED${_purchMaxDay>0?' · max '+Math.round(_purchMaxDay).toLocaleString()+' t/d':''}${_purchMaxMon>0?' · '+Math.round(_purchMaxMon).toLocaleString()+' t/mo':''}</span>`:''}
+            ${_isPurch?`<span style="color:var(--purple);font-size:7px;letter-spacing:1px;margin-left:6px;font-weight:400">PURCHASED${_purchMaxDay>0?' · max '+_fmtInt(Math.round(_purchMaxDay))+' t/d':''}${_purchMaxMon>0?' · '+_fmtInt(Math.round(_purchMaxMon))+' t/mo':''}</span>`:''}
           </td>`;
         months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
           h+=`<td style="background:rgba(var(--amber-rgb),.06);border-left:2px solid rgba(var(--amber-rgb),.2);font-size:9px;font-weight:700;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)"></td>`;
@@ -12181,8 +12224,7 @@ function _renderSupplyViewInner(wrap){
 
         // Beginning-of-day inventory (real prev-day EOD else simulated).
         const getInv=(siloId,ds,startInv)=>{
-          const prev=new Date(ds+'T00:00:00'); prev.setDate(prev.getDate()-1);
-          const realInv=_idxFirst('real_inventory_daily','silo_id',siloId,'date',prev._ymd());
+          const realInv=_idxFirst('real_inventory_daily','silo_id',siloId,'date',_prevDs(ds));
           if(realInv) return {value:parseFloat(realInv.eod_volume_t)||0,isActual:true};
           const di=_dIdx(ds); const hist=r?.inventoryHistory?.[siloId]||[];
           return {value:di<=0?(parseFloat(startInv)||0):(hist[di-1]??0),isActual:false};
@@ -12235,14 +12277,16 @@ function _renderSupplyViewInner(wrap){
           }
         });
         const _arrPlan=(pid,ds)=>(_termArr[pid]&&_termArr[pid][ds])||0;
-        const _arrReal=(pid,ds)=>(DB.real_transfers_daily||[]).filter(t=>t.date===ds&&t.dest_facility_id===fac.id&&_canon(t.product_id)===pid).reduce((s,t)=>s+(parseFloat(t.volume_t)||0),0)
-          +_arrRealRail(pid,ds);
+        const _arrRealIdx={};   // product|date → real transfer tonnes into this terminal (table order)
+        (DB.real_transfers_daily||[]).forEach(t=>{ if(t.dest_facility_id!==fac.id) return; const k=_canon(t.product_id)+'|'+t.date; _arrRealIdx[k]=(_arrRealIdx[k]||0)+(parseFloat(t.volume_t)||0); });
+        const _arrReal=(pid,ds)=>(_arrRealIdx[pid+'|'+ds]||0)+_arrRealRail(pid,ds);
         const _arrDay=(pid,ds)=>{ const rv=_arrReal(pid,ds); return rv>0?rv:_arrPlan(pid,ds); };
         const _prodSilos=pid=>allSilos.filter(s=>getSiloProducts(s).includes(pid));
         const _unlPlan=(pid,ds)=>{ const di=_dIdx(ds); if(di<0)return 0; return _prodSilos(pid).reduce((s,si)=>s+((r&&r.siloUnloadHistory&&r.siloUnloadHistory[si.id]||[])[di]||0),0); };
         const _unlReal=(pid,ds)=>realUnloadTonnesFacProdDay(fac.id,pid,ds);
-        const totalNeed=(pid,ds)=>demandPoints.filter(dp=>dp.products?.some(p=>_canon(p.product_id)===pid))
-          .reduce((s,dp)=>s+(_demandRate(dp.element_id,ds)||0),0);
+        const _tDpsMemo=new Map();   // demand points of a product, once per product (not per cell)
+        const _tDpsOf=pid=>{ let a=_tDpsMemo.get(pid); if(!a){ a=demandPoints.filter(dp=>dp.products?.some(p=>_canon(p.product_id)===pid)); _tDpsMemo.set(pid,a); } return a; };
+        const totalNeed=(pid,ds)=>_tDpsOf(pid).reduce((s,dp)=>s+(_demandRate(dp.element_id,ds)||0),0);
 
         // ── Demand-swap split at a TERMINAL ────────────────────────────────
         // Same treatment the plant block gives PRODUCT REQUIREMENT. Terminals used to have
@@ -12250,7 +12294,6 @@ function _renderSupplyViewInner(wrap){
         // in the engine (inventory drew down correctly) but the requirement rows here still
         // showed the point's own demand only — the tonnes appeared to vanish between the
         // source plant and the receiving terminal.
-        const _tDpsOf=pid=>demandPoints.filter(dp=>dp.products?.some(p=>_canon(p.product_id)===pid));
         const _tSwappedOut=(pid,ds)=>_tDpsOf(pid).reduce((q,dp)=>{
           const t=_demandRate(dp.element_id,ds)||0;
           const sw=(typeof _resolveDemandSwap==='function')?_resolveDemandSwap(dp.element_id,t,ds):null;
@@ -12360,9 +12403,9 @@ function _renderSupplyViewInner(wrap){
               <td style="${stickyLeft('var(--surface)',depth+1,'border-bottom:1px solid var(--border),')}color:${accent};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow(invSeckey)}</span> STARTING INVENTORY ${suffix}</td>`;
             months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
               const mt=mon.dates.reduce((a,ds)=>a+_invDay(ds),0)/(mon.dates.length||1);
-              h+=`<td style="border-left:2px solid rgba(${rgba},.2);font-size:9px;font-weight:700;color:${accent};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+              h+=`<td style="border-left:2px solid rgba(${rgba},.2);font-size:9px;font-weight:700;color:${accent};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
               if(!isCol) mon.dates.forEach(ds=>{ const v=_invDay(ds);
-                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;font-weight:700;color:${accent};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
+                h+=`<td class="sup-day-${mon.ym} sx-nb" style="color:${accent};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):''}</td>`; });
             });
             h+=`</tr>`;
             _invPids.forEach(pid=>{
@@ -12372,16 +12415,16 @@ function _renderSupplyViewInner(wrap){
                 const siloStart=_grStartOf(silo);
                 h+=`<tr class="supsec-${invSeckey}">
                   <td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${pc};font-size:9px">${_pChip(pid)}${_pNameOf(pid)}
-                    <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${esc(silo.name)}${siloMax>0?' · cap '+Math.round(siloMax).toLocaleString()+'t':''}</span></td>`;
+                    <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${esc(silo.name)}${siloMax>0?' · cap '+_fmtInt(Math.round(siloMax))+'t':''}</span></td>`;
                 months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
                   const mt=mon.dates.reduce((s,ds)=>s+getInv(silo.id,ds,siloStart).value,0)/(mon.dates.length||1);
-                  h+=`<td style="border-left:2px solid rgba(${rgba},.1);font-size:9px;color:${pc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                  h+=`<td style="border-left:2px solid rgba(${rgba},.1);font-size:9px;color:${pc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
                   if(!isCol) mon.dates.forEach(ds=>{
                     const inv=getInv(silo.id,ds,siloStart); const v=inv.value;
                     const lvlColor=invLevelColor(v,siloMax);
                     const cls=inv.isActual?'cell-real':(ds<todayStr&&v>0?'cell-gap':''); const wt=inv.isActual?'700':'400';
-                    const ttl=(siloMax>0?`${Math.round(v/siloMax*100)}% of ${Math.round(siloMax).toLocaleString()}t${inv.isActual?' · actual':''}`:'')+' · click to set real inventory';
-                    h+=`<td class="sup-day-${mon.ym} ${cls}" title="${ttl}" onclick="showInventoryPopup('${silo.id}','${ds}')" style="cursor:pointer;font-size:9px;color:${v>0?lvlColor:dimCol};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${wt};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+                    const ttl=(siloMax>0?`${Math.round(v/siloMax*100)}% of ${_fmtInt(Math.round(siloMax))}t${inv.isActual?' · actual':''}`:'')+' · click to set real inventory';
+                    h+=`<td class="sup-day-${mon.ym} ${cls} sx-np" title="${ttl}" onclick="showInventoryPopup('${silo.id}','${ds}')" style="color:${v>0?lvlColor:dimCol};font-weight:${wt};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):0}</td>`; });
                 });
                 h+=`</tr>`;
               });
@@ -12405,10 +12448,10 @@ function _renderSupplyViewInner(wrap){
               const mt=mon.dates.reduce((a,ds)=>a+_reqDay(ds),0);
               // A purchase past its contract is the one thing that can go wrong here.
               const monOver=_purchMaxMon>0&&mt>_purchMaxMon+.5;
-              h+=`<td ${monOver?`title="${Math.round(mt).toLocaleString()} t bought — past the ${Math.round(_purchMaxMon).toLocaleString()} t contracted for the month"`:''} style="border-left:2px solid rgba(${reqRgb},.2);font-size:9px;font-weight:700;color:${monOver?'var(--red)':reqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}${monOver?' ⚠':''}</td>`;
+              h+=`<td ${monOver?`title="${_fmtInt(Math.round(mt))} t bought — past the ${_fmtInt(Math.round(_purchMaxMon))} t contracted for the month"`:''} style="border-left:2px solid rgba(${reqRgb},.2);font-size:9px;font-weight:700;color:${monOver?'var(--red)':reqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}${monOver?' ⚠':''}</td>`;
               if(!isCol) mon.dates.forEach(ds=>{ const v=_reqDay(ds);
                 const dayOver=_purchMaxDay>0&&v>_purchMaxDay+.5;
-                h+=`<td class="sup-day-${mon.ym}" ${dayOver?`title="${Math.round(v).toLocaleString()} t — past the ${Math.round(_purchMaxDay).toLocaleString()} t/d we can buy here"`:''} style="font-size:9px;font-weight:700;color:${dayOver?'var(--red)':(v>0?reqColor:`rgba(${reqRgb},calc(var(--zero-k)*.3))`)};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+                h+=`<td class="sup-day-${mon.ym} sx-nb" ${dayOver?`title="${_fmtInt(Math.round(v))} t — past the ${_fmtInt(Math.round(_purchMaxDay))} t/d we can buy here"`:''} style="color:${dayOver?'var(--red)':(v>0?reqColor:`rgba(${reqRgb},calc(var(--zero-k)*.3))`)};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):0}</td>`; });
             });
             h+=`</tr>`;
             _reqPids.forEach(pid=>{
@@ -12417,10 +12460,10 @@ function _renderSupplyViewInner(wrap){
               h+=`<tr class="supsec-${reqSeckey}"><td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${reqColor};font-size:9px">${_pChip(pid)}${_pNameOf(pid)}${_dpnDpts.length?_supDpnArrow(_dpnBase,_dpnDpts.length):''}</td>`;
               months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
                 const mt=mon.dates.reduce((a,ds)=>a+_needHere(pid,ds),0);
-                h+=`<td style="border-left:2px solid rgba(${reqRgb},.1);font-size:9px;color:${reqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                h+=`<td style="border-left:2px solid rgba(${reqRgb},.1);font-size:9px;color:${reqColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
                 if(!isCol) mon.dates.forEach(ds=>{ const v=_needHere(pid,ds);
                   const _acts=_dmdActs(_dpnDpts,ds); if(_tSwappedIn(pid,ds)>0) _acts.push(..._swapInActs(_dpnDpts,ds));
-                  h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_acts)}" style="font-size:9px;color:${v>0?reqColor:`rgba(${reqRgb},calc(var(--zero-k)*.3))`};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+                  h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_acts)} sx-n" style="color:${v>0?reqColor:`rgba(${reqRgb},calc(var(--zero-k)*.3))`};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):0}</td>`; });
               });
               h+=`</tr>`;
               h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, depth+3, _dpnBase, stickyLeft, typeof plBgtExtra==='function'?plBgtExtra(_dpnDpts):[]);
@@ -12436,9 +12479,9 @@ function _renderSupplyViewInner(wrap){
                   let rr=`<tr class="supsec-${reqSeckey} sup-sub-row" style="background:${bg}"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${color};font-size:8px;font-style:italic">${label}</td>`;
                   months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
                     const mt=mon.dates.reduce((a,ds)=>a+valFn(ds),0);
-                    rr+=`<td style="border-left:2px solid rgba(var(--hi-rgb),.05);font-size:8px;color:${color};text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                    rr+=`<td style="border-left:2px solid rgba(var(--hi-rgb),.05);font-size:8px;color:${color};text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
                     if(!isCol) mon.dates.forEach(ds=>{ const v=valFn(ds);
-                      rr+=`<td class="sup-day-${mon.ym} ${actsFn?_srcCls(ds,v,actsFn(ds)):''}" style="font-size:8px;color:${color};text-align:right;padding:3px 4px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():''}</td>`; });
+                      rr+=`<td class="sup-day-${mon.ym} ${actsFn?_srcCls(ds,v,actsFn(ds)):''}" style="font-size:8px;color:${color};text-align:right;padding:3px 4px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):''}</td>`; });
                   });
                   return rr+`</tr>`;
                 };
@@ -12462,11 +12505,11 @@ function _renderSupplyViewInner(wrap){
             months.forEach(mon=>{
               const isCol=collapsed.has(mon.ym);
               const mt=grpMonTotal(_facPackers,mon);
-              h+=`<td style="border-left:2px solid rgba(var(--blue-rgb),.2);font-size:9px;color:${packColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+              h+=`<td style="border-left:2px solid rgba(var(--blue-rgb),.2);font-size:9px;color:${packColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
               if(!isCol) mon.dates.forEach(ds=>{
                 const dayIdx=_dIdx(ds);
                 const v=grpDailyTotal(_facPackers,ds,dayIdx);
-                h+=`<td class="sup-day-${mon.ym}" style="font-size:9px;color:${packColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`;
+                h+=`<td class="sup-day-${mon.ym} sx-n" style="color:${packColor};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):0}</td>`;
               });
             });
             h+=`</tr>`;
@@ -12527,7 +12570,7 @@ function _renderSupplyViewInner(wrap){
                       if(realDaySet.has(ds)){
                         _pk='__real'; // break the run so the next forecast bar re-labels its vessel
                         const rt=realUnloadTonnesBerthProdDay(berth.id,pid,ds);
-                        h+=`<td class="sup-day-${mon.ym} cell-real" title="${vessel?vessel+' — ':''}actual unloading · ${Math.round(rt).toLocaleString()} t${_vesselLeftTip(c,berth.id)} — click to edit" data-ds="${ds}" onclick="event.stopPropagation();showVesselCampaignPopup('${berth.id}','${vesselCallId}','${ds}')" style="${vg?'position:relative;':''}cursor:pointer;font-size:9px;font-weight:700;color:var(--teal);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${Math.round(rt).toLocaleString()}${vg}</td>`;
+                        h+=`<td class="sup-day-${mon.ym} cell-real" title="${vessel?vessel+' — ':''}actual unloading · ${_fmtInt(Math.round(rt))} t${_vesselLeftTip(c,berth.id)} — click to edit" data-ds="${ds}" onclick="event.stopPropagation();showVesselCampaignPopup('${berth.id}','${vesselCallId}','${ds}')" style="${vg?'position:relative;':''}cursor:pointer;font-size:9px;font-weight:700;color:var(--teal);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${_fmtInt(Math.round(rt))}${vg}</td>`;
                         return;
                       }
                       const p=_vesselCellParts(st,false);
@@ -12546,11 +12589,11 @@ function _renderSupplyViewInner(wrap){
                 h+=`<tr class="supsec-termVessel"><td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${_pColor(pid)};font-size:9px">${_pChip(pid)}${pname}<span style="font-size:7px;opacity:.55;margin-left:4px">ARRIVAL / UNLOADING</span></td>`;
                 months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
                   const mt=mon.dates.reduce((s,ds)=>s+_fDay(ds),0);
-                  h+=`<td style="border-left:2px solid rgba(var(--purple-rgb),.12);font-size:9px;font-weight:700;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                  h+=`<td style="border-left:2px solid rgba(var(--purple-rgb),.12);font-size:9px;font-weight:700;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
                   if(!isCol) mon.dates.forEach(ds=>{
                     const rv=_unlReal(pid,ds); const isReal=rv>0; const v=_fDay(ds);
                     const col=isReal?rcReal:(v>0?rc:'rgba(var(--purple-rgb),calc(var(--zero-k)*.25))');
-                    h+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''}" ondblclick="event.stopPropagation();showTermRealPopup('unload','${fac.id}','${pid}','${ds}')" title="${pname} arrival/unloading · ${Math.round(v).toLocaleString()} t${isReal?' · actual':' · planned'} — dbl-click to set actual" style="cursor:pointer;font-size:9px;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${isReal?'700':'400'};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+                    h+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''} sx-np" ondblclick="event.stopPropagation();showTermRealPopup('unload','${fac.id}','${pid}','${ds}')" title="${pname} arrival/unloading · ${_fmtInt(Math.round(v))} t${isReal?' · actual':' · planned'} — dbl-click to set actual" style="color:${col};font-weight:${isReal?'700':'400'};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):0}</td>`; });
                 });
                 h+=`</tr>`;
               }
@@ -12590,7 +12633,7 @@ function _renderSupplyViewInner(wrap){
               months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
                 const mT=mon.dates.reduce((s,ds)=>s+_pulls.pulledT(pid,_simDayOf(ds)),0);
                 const mCars=mon.dates.reduce((s,ds)=>s+_cars(_pulls.pulledT(pid,_simDayOf(ds))),0);
-                h+=`<td title="${Math.round(mT).toLocaleString()} t" style="border-left:2px solid rgba(var(--purple-rgb),.1);font-size:9px;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mCars>0?mCars.toLocaleString():''}</td>`;
+                h+=`<td title="${_fmtInt(Math.round(mT))} t" style="border-left:2px solid rgba(var(--purple-rgb),.1);font-size:9px;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mCars>0?mCars.toLocaleString():''}</td>`;
                 if(!isCol) mon.dates.forEach(ds=>{
                   const d=_simDayOf(ds), t=_pulls.pulledT(pid,d), cars=_cars(t);
                   const dbl=`ondblclick="event.stopPropagation();showRailPlacementPopup('${fac.id}','${pid}','${ds}')"`;
@@ -12606,7 +12649,7 @@ function _renderSupplyViewInner(wrap){
                   // pushes exactly as on the Rail Schedule (_rpPullTarget writes the same records).
                   // Click to type, dbl-click for the reconcile popup — like the Rail Car Loading row.
                   const editable=_pulls.isPullDay(d)&&d>=_todayD;
-                  const ttl=`${pname} · ${cars} cars (${Math.round(t).toLocaleString()} t) pulled ${ds}${isReal?' · actual':' · planned'} — at the local yard and in the silo ${nextDs}`
+                  const ttl=`${pname} · ${cars} cars (${_fmtInt(Math.round(t))} t) pulled ${ds}${isReal?' · actual':' · planned'} — at the local yard and in the silo ${nextDs}`
                     +_railPullTipLines(info,_pulls.carCap,editable)+'\nDbl-click to reconcile the physical car count';
                   if(editable){
                     h+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''}" ${dbl} title="${esc(ttl)}" style="cursor:cell;padding:1px 2px;border-bottom:1px solid var(--border);${info.short>0?'box-shadow:inset 0 -2px 0 var(--red);':''}${tdSty(ds)}"><input class="rail-pull-cell" data-dest="${fac.id}" data-pid="${pid}" data-day="${d}" data-base="${cars}" value="${cars}" onchange="_rpPullTarget(this)" style="width:34px;background:transparent;border:none;color:${col};font-family:var(--mono);font-size:9px;text-align:right;padding:3px 2px;outline:none;font-weight:${isReal?'700':'400'}"></td>`;
@@ -12632,11 +12675,11 @@ function _renderSupplyViewInner(wrap){
               h+=`<tr class="supsec-termVessel"><td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${_pColor(pid)};font-size:9px">${_pChip(pid)}${pname}<span style="font-size:7px;opacity:.55;margin-left:4px">TRANSFER / ARRIVAL</span></td>`;
               months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
                 const mt=mon.dates.reduce((s,ds)=>s+_arrDay(pid,ds),0);
-                h+=`<td style="border-left:2px solid rgba(var(--purple-rgb),.12);font-size:9px;font-weight:700;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?Math.round(mt).toLocaleString():''}</td>`;
+                h+=`<td style="border-left:2px solid rgba(var(--purple-rgb),.12);font-size:9px;font-weight:700;color:${rc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
                 if(!isCol) mon.dates.forEach(ds=>{
                   const rv=_arrReal(pid,ds); const isReal=rv>0; const v=isReal?rv:_arrPlan(pid,ds);
                   const col=isReal?rcReal:(v>0?rc:'rgba(var(--purple-rgb),calc(var(--zero-k)*.25))');
-                  h+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''}" ondblclick="event.stopPropagation();showTermRealPopup('transfer','${fac.id}','${pid}','${ds}')" title="${pname} arrival · ${Math.round(v).toLocaleString()} t${isReal?' · actual':' · planned'} — dbl-click to set actual" style="cursor:pointer;font-size:9px;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:${isReal?'700':'400'};${tdSty(ds)}">${v>0?Math.round(v).toLocaleString():0}</td>`; });
+                  h+=`<td class="sup-day-${mon.ym} ${isReal?'cell-real':''} sx-np" ondblclick="event.stopPropagation();showTermRealPopup('transfer','${fac.id}','${pid}','${ds}')" title="${pname} arrival · ${_fmtInt(Math.round(v))} t${isReal?' · actual':' · planned'} — dbl-click to set actual" style="color:${col};font-weight:${isReal?'700':'400'};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):0}</td>`; });
               });
               h+=`</tr>`;
             });
@@ -34145,7 +34188,14 @@ function _acMay(func, fac){
   if(fac!==undefined && fac!==null) return _acCan(_acUser, func, fac);
   const p=_acUser.perm||{}; return Object.keys(p).some(k=>(p[k]||{})[func]==='edit');
 }
-function _acFacOfEl(id){ if(id==null) return undefined; const e=(DB.elements||[]).find(x=>x.id===id); return e?(_acElFacility(e, _acFacByName())||undefined):undefined; }
+function _acFacOfEl(id){
+  if(id==null) return undefined;
+  const memo=_acSweep._memo;   // set for the duration of one sweep (see _acSweep)
+  if(memo && memo.has(id)) return memo.get(id);
+  const e=(DB.elements||[]).find(x=>x.id===id); const r=e?(_acElFacility(e, _acFacByName())||undefined):undefined;
+  if(memo) memo.set(id,r);
+  return r;
+}
 function _acLockTip(func, fac, ev){
   const F=AC_FUNCS.find(x=>x.id===func);
   const where=(fac!==undefined&&fac!==null)?' at '+_acFacName(fac):'';
@@ -34174,12 +34224,17 @@ function _acSweep(){
   _acSweepT=null;
   const on=_acLockActive();
   document.body.classList.toggle('ac-locked-mode', on);
-  document.querySelectorAll(AC_LOCK_INPUTS).forEach(el=>{
-    let lock=false;
-    if(on){ const sc=_acInputScope(el); lock=!!sc && !_acMay(sc.func, sc.fac); }
-    if(lock){ if(!el.readOnly){ el.readOnly=true; el.dataset.acro='1'; el.classList.add('ac-ro'); } }
-    else if(el.dataset.acro){ el.readOnly=false; delete el.dataset.acro; el.classList.remove('ac-ro'); }
-  });
+  // One sweep asks the same two questions for every cell of a row (a year view has ~30k inputs):
+  // element → facility and (function, facility) → may edit are each answered once per sweep.
+  _acSweep._memo=new Map(); const mayMemo=new Map();
+  try{
+    document.querySelectorAll(AC_LOCK_INPUTS).forEach(el=>{
+      let lock=false;
+      if(on){ const sc=_acInputScope(el); if(sc){ const k=sc.func+'|'+sc.fac; let may=mayMemo.get(k); if(may===undefined){ may=_acMay(sc.func, sc.fac); mayMemo.set(k,may); } lock=!may; } }
+      if(lock){ if(!el.readOnly){ el.readOnly=true; el.dataset.acro='1'; el.classList.add('ac-ro'); } }
+      else if(el.dataset.acro){ el.readOnly=false; delete el.dataset.acro; el.classList.remove('ac-ro'); }
+    });
+  }finally{ _acSweep._memo=null; }
   const rdBtn=document.getElementById('submitRealDataBtn');
   if(rdBtn){ const ok=!on || _acMay('real', S.realDataFacilityId) || _acMay('inventory', S.realDataFacilityId); rdBtn.disabled=!ok; rdBtn.title=ok?'':'Read-only — you cannot change real values here'; }
 }
