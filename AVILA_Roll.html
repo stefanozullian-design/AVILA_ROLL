@@ -813,6 +813,7 @@ td.sx-dm.sx-nwd>input.dem-cell{border:1px dashed rgba(var(--red-rgb),.5);}
 .rp-push-inp.rp-committed{background:rgba(var(--sky-rgb),.12);border-color:rgba(var(--sky-rgb),.6);color:var(--sky);}
 .rp-push-inp.rp-dirty{background:rgba(var(--amber-rgb),.16);border-color:rgba(var(--amber-rgb),.65);color:var(--amber);}
 .rp-push-inp.rp-real{background:rgba(var(--teal-rgb),.14);border-color:rgba(var(--teal-rgb),.6);color:var(--teal);font-weight:700;}
+.rp-push-inp.rp-file{background:rgba(var(--green-rgb),.14);border-color:rgba(var(--green-rgb),.7);border-style:dotted;color:var(--green);font-weight:700;}
 .rp-push-inp.rp-over{border-color:var(--red) !important;background:rgba(var(--red-rgb),.18) !important;color:var(--red) !important;}
 .rp-sw-icon{cursor:pointer;font-size:11px;padding:0 3px;opacity:.7;user-select:none;}
 #rp-plan-note,#sup-plan-note{font-family:var(--mono);font-size:9px;margin:6px 0;padding:6px 10px;border:1px solid rgba(var(--purple-rgb),.45);background:rgba(var(--purple-rgb),.08);color:var(--text);display:flex;gap:10px;align-items:center;}
@@ -16179,13 +16180,19 @@ function rpRender(){
         const availCells=months.map(mon=>{const isCol=window._rpColapsed.has(mon.ym);
           const mTd=`<td class="logi-mcol" style="${_mTdSty}">—</td>`;
           return mTd+(isCol?[]:mon.days).map(d=>{ const tSty=_tpTdSty(d); const sw=rpIsSwitch(d,switchDays);
-            if(!sw) return `<td${tSty?` style="${tSty}"`:''}></td>`;
             const ds=rpDayDate(d);
+            const fc=realTransferFileCars(dp,pid,ds);   // Avila_Transfers_Summary.xlsx, as cars
+            if(!sw){
+              // Not a switch day: the file may still record a departure — shown, not simulated.
+              if(fc==null) return `<td${tSty?` style="${tSty}"`:''}></td>`;
+              return `<td${tSty?` style="${tSty}"`:''}><input type="number" readonly value="${fc}" class="rp-push-inp rp-file" title="FILE: ${fc} cars (${Math.round(realTransferOutT(dp.id,ds)).toLocaleString()} t) left on ${ds} per Avila_Transfers_Summary.xlsx — not a switch day, so the simulation does not ship them"></td>`;
+            }
             const a=availAtSwitch(pid,d);
             const ry=realYard(ds);
-            const isReal=!!ry;
-            const cls=isReal?'rp-real':'rp-proposed';
+            const isReal=!!ry, isFile=!isReal&&fc!=null;
+            const cls=isReal?'rp-real':isFile?'rp-file':'rp-proposed';
             const ttl=isReal?`REAL: ${a} cars stood in the yard at this switch — clear the cell to go back to the simulated figure`
+                      :isFile?`FILE: ${fc} cars (${Math.round(realTransferOutT(dp.id,ds)).toLocaleString()} t ÷ ${parseFloat(dp.props?.car_capacity_t)||RAIL_CAR_T_DEFAULT} t/car) per Avila_Transfers_Summary.xlsx — type a number to override it`
                             :'Cars accumulated in the yard, available to push. Type the number that was really there to override the simulation.';
             return `<td class="tp-col-switch"${tSty?` style="${tSty}"`:''}><input type="number" min="0" step="1" value="${a>0?a:0}" data-dp="${dp.id}" data-fac="${_rpFacId}" data-pid="${pid}" data-ds="${ds}" data-sim="${a}" title="${ttl}" onchange="_rpAvailEdit(this)" class="rp-push-inp ${cls}"></td>`; }).join('');
         }).join('');
@@ -19621,6 +19628,17 @@ function simulate(elements, connections, horizon, includeProposed=false){
         &&(!rr.dispatch_id||rr.dispatch_id===el.id))
         .forEach(rr=>{ const pid=rr.product_id; if(!pid) return;
           s.yardByProduct[pid]=Math.max(0,Math.round(parseFloat(rr.cars)||0)); });
+      // Transfers file (Data Sources › Real Transfers): on a switch day the tonnes that really
+      // left this dispatch point, as cars, are the yard count — unless one was typed above.
+      if(isSwitch){
+        const _ycTyped=new Set((DB.real_rail_daily||[]).filter(rr=>rr.type==='yard_count'&&rr.date===_dateStr
+          &&rr.facility_id===(el.assigned_facility_id||el.facility_id)&&(!rr.dispatch_id||rr.dispatch_id===el.id)).map(rr=>rr.product_id));
+        Object.keys(railProdSilo[el.id]||{}).forEach(pid=>{
+          if(_ycTyped.has(pid)) return;
+          const fc=realTransferFileCars(el,pid,_dateStr);
+          if(fc!=null) s.yardByProduct[pid]=fc;
+        });
+      }
 
       // Cars available to push = the yard AFTER loading and any real reconciliation, but
       // BEFORE the switch ships anything. Recorded so the Rail Schedule reads it straight
@@ -27904,6 +27922,24 @@ function realTransferOutT(dispatchId,ds){
   const el=(DB.elements||[]).find(e=>e.id===dispatchId); if(!el) return 0;
   const n=_xlNorm(el.name);
   return (DB.real_transfers_file_daily||[]).reduce((s,r)=>s+(r.date===ds&&_xlNorm(r.roll_name)===n?r.volume_t:0),0);
+}
+// The file's tonnes for a dispatch point × product × day as RAIL CARS (tonnes ÷ the dispatch
+// point's car capacity, rounded), or null when the file has nothing for that day. Feeds the
+// Rail Schedule's "Available at switch" row and the simulation's yard count on switch days;
+// a typed yard_count row always wins over it (see _rpAvailEdit).
+function realTransferFileCars(dp,pid,ds){
+  if(!dp||!(DB.real_transfers_file_daily||[]).length) return null;
+  const n=_xlNorm(dp.name);
+  const prodName=_xlNorm((DB.products||[]).find(p=>p.id===pid)?.name);
+  let t=0, hit=false;
+  (DB.real_transfers_file_daily||[]).forEach(r=>{
+    if(r.date!==ds||_xlNorm(r.roll_name)!==n) return;
+    if(r.product_id?r.product_id!==pid:_xlNorm(r.product_name)!==prodName) return;
+    t+=r.volume_t; hit=true;
+  });
+  if(!hit) return null;
+  const cap=parseFloat(dp.props?.car_capacity_t)||RAIL_CAR_T_DEFAULT;
+  return Math.max(0,Math.round(t/cap));
 }
 
 // ── Topology JSON handler ─────────────────────────────
