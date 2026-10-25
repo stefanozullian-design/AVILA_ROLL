@@ -1348,6 +1348,10 @@ select.fi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
 .rules-acts{display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-top:6px;flex-wrap:wrap;}
 @media (max-width:900px){.rules-body{grid-template-columns:1fr;}.rules-col+.rules-col{border-left:0;border-top:1px solid var(--border);}}
 #second-row .sec-tab.rules-link{margin-left:auto;color:var(--blue);}
+.rules-miss{border:1px dashed rgba(var(--amber-rgb),.6);padding:6px 8px;margin:6px 0;font-size:11px;color:var(--text);}
+.rules-miss-h{font-family:var(--mono);font-size:9px;color:var(--amber);margin-bottom:4px;}
+.rules-miss-q{display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap;padding:3px 0;border-top:1px solid var(--border);}
+.rules-miss-q input{background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:10px;padding:2px 5px;width:220px;margin-right:4px;}
 .sc-role-badge{font-family:var(--mono);font-size:8px;letter-spacing:.6px;padding:1px 5px;border:1px solid var(--amber);color:var(--amber);border-radius:2px;margin-left:2px;}
 .sc-pill.planning{border-color:var(--amber);}
 .pl-tbl{width:100%;border-collapse:collapse;font-size:11px}
@@ -6370,186 +6374,11 @@ function _mpParamSummary(p){
   if(pr.lookahead_days!=null) bits.push('look '+Math.round(pr.lookahead_days)+'d');
   return bits.join(' · ');
 }
-function openMillPolicyManager(editId, focusEditId){
-  const mills=(DB.elements||[]).filter(e=>e.type==='finish_mill').sort((a,b)=>(a.name||'').localeCompare(b.name||''));
-  if(!mills.length){ statMsg('No finish mills in the topology'); return; }
-  const today=new Date()._ymd();
-  const milOpts=(sel)=>mills.map(m=>`<option value="${m.id}"${m.id===sel?' selected':''}>${(m.name||m.id).replace(/"/g,'&quot;')}</option>`).join('');
-
-  // ── Section A: per-(mill,product) objectives ──
-  const editing=editId?(DB.mill_policies||[]).find(p=>p.id===editId):null;
-  const selMill=editing?editing.element_id:mills[0].id;
-  const selProd=editing?editing.product_id:(_mpProdsOf(selMill)[0]||'');
-  const prodOpts=_mpProdsOf(selMill).map(p=>`<option value="${p}"${p===selProd?' selected':''}>${_mpPn(p)}</option>`).join('');
-  const def=_mpDefaults(selMill,selProd); const P=editing?editing.params||{}:{};
-  const g=(k,d)=>P[k]!=null?P[k]:d;
-  const vals={ target:g('target_pct',def.target), crit:g('critical_floor_pct',def.crit), stop:g('stop_pct',def.stop),
-    restart:g('restart_cover_days',def.restart), look:g('lookahead_days',def.look), minrun:g('min_run_days',def.minrun) };
-  const dFrom=editing?editing.date_from:today, dTo=editing?editing.date_to:today;
-  const policies=(DB.mill_policies||[]).slice().sort((a,b)=>(a.date_from||'').localeCompare(b.date_from||''));
-  const polRows=policies.length?policies.map(p=>`
-    <tr style="border-bottom:1px solid var(--border)${p.id===editId?';background:rgba(var(--amber-rgb),.08)':''}">
-      <td style="padding:6px 8px;color:var(--green)">${_mpMn(p.element_id)}</td>
-      <td style="padding:6px 8px;color:var(--blue)">${_mpPn(p.product_id)}</td>
-      <td style="padding:6px 8px;color:var(--text-dim);font-size:8px">${p.date_from} → ${p.date_to}</td>
-      <td style="padding:6px 8px;color:var(--text);font-size:8px">${_mpParamSummary(p)}</td>
-      <td style="padding:6px 8px;text-align:right;white-space:nowrap"><button class="tb-btn sec" style="padding:2px 7px;margin-right:4px" onclick="_editMillPolicy('${p.id}')" title="Edit">✎</button><button class="tb-btn sec" style="padding:2px 7px" onclick="_deleteMillPolicy('${p.id}')" title="Delete">✕</button></td>
-    </tr>`).join(''):`<tr><td colspan="5" style="padding:12px;text-align:center;color:var(--text-dim)">No per-product policies yet.</td></tr>`;
-  const lvlRow=(k,lab,max)=>`
-    <div style="margin-bottom:9px">
-      <div style="display:flex;justify-content:space-between;align-items:baseline"><span class="fl">${lab}</span><span id="mp-rv-${k}" style="font-size:10px;color:var(--text-dim)"></span></div>
-      <div style="display:flex;align-items:center;gap:8px">
-        <input type="range" id="mp-${k}" min="0" max="${max}" step="1" value="${vals[k]}" oninput="_mpSync('${k}','range')" style="flex:1;accent-color:var(--green)">
-        <input type="number" id="mp-${k}-d" min="0" step="0.1" oninput="_mpSync('${k}','days')" class="fi" style="width:50px;font-size:10px"><span style="font-size:9px;color:var(--text-dim)">days</span>
-      </div>
-    </div>`;
-  const plainRow=(k,lab,max,step)=>`
-    <div style="margin-bottom:9px">
-      <div style="display:flex;justify-content:space-between;align-items:baseline"><span class="fl">${lab}</span><span id="mp-rv-${k}" style="font-size:10px;color:var(--text-dim)"></span></div>
-      <input type="range" id="mp-${k}" min="0" max="${max}" step="${step}" value="${vals[k]}" oninput="_mpUpdate()" style="width:100%;accent-color:var(--green)">
-    </div>`;
-
-  // ── Section B: products considered (pause list) ──
-  const fEditing=focusEditId?(DB.mill_product_focus||[]).find(f=>f.id===focusEditId):null;
-  const fMill=fEditing?fEditing.element_id:selMill;
-  window._mpFocusSel=new Set(fEditing&&Array.isArray(fEditing.products)?fEditing.products:_mpProdsOf(fMill));
-  const fFrom=fEditing?fEditing.date_from:today, fTo=fEditing?fEditing.date_to:today;
-  const focus=(DB.mill_product_focus||[]).slice().sort((a,b)=>(a.date_from||'').localeCompare(b.date_from||''));
-  const focusRows=focus.length?focus.map(f=>`
-    <tr style="border-bottom:1px solid var(--border)${f.id===focusEditId?';background:rgba(var(--amber-rgb),.08)':''}">
-      <td style="padding:6px 8px;color:var(--green)">${_mpMn(f.element_id)}</td>
-      <td style="padding:6px 8px;color:var(--text-dim);font-size:8px">${f.date_from} → ${f.date_to}</td>
-      <td style="padding:6px 8px;color:var(--blue);font-size:8px">${(f.products||[]).map(_mpPn).join(', ')}</td>
-      <td style="padding:6px 8px;text-align:right;white-space:nowrap"><button class="tb-btn sec" style="padding:2px 7px;margin-right:4px" onclick="_editMillFocus('${f.id}')" title="Edit">✎</button><button class="tb-btn sec" style="padding:2px 7px" onclick="_deleteMillFocus('${f.id}')" title="Delete">✕</button></td>
-    </tr>`).join(''):`<tr><td colspan="4" style="padding:10px;text-align:center;color:var(--text-dim)">No focus rules — all products chased.</td></tr>`;
-
-  showModalContent(`
-    <div class="modal-hdr"><span class="modal-title">⚙ Finish-Mill Policies</span><span class="modal-close" onclick="closeModal()">✕</span></div>
-    <div class="modal-body" style="font-family:var(--mono);font-size:9px;min-width:620px;max-height:78vh;overflow:auto">
-      <div style="color:var(--text-dim);margin-bottom:10px;line-height:1.5">Per-product objectives for how a mill manages each product's silo over a date range — levels in % and days-of-cover; urgency formula stays fixed. Reverts when the window ends.</div>
-      <table style="width:100%;border-collapse:collapse;margin-bottom:10px">
-        <thead><tr style="color:var(--text-dim);font-size:8px;text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid var(--border2)">
-          <th style="text-align:left;padding:5px 8px">Mill</th><th style="text-align:left;padding:5px 8px">Product</th><th style="text-align:left;padding:5px 8px">Dates</th><th style="text-align:left;padding:5px 8px">Policy</th><th></th>
-        </tr></thead><tbody>${polRows}</tbody>
-      </table>
-      <div style="border-top:1px solid var(--border2);padding-top:11px">
-        <input type="hidden" id="mp-edit-id" value="${editId||''}">
-        <div style="font-size:8px;letter-spacing:1px;color:${editing?'var(--amber)':'var(--text-dim)'};text-transform:uppercase;margin-bottom:8px">${editing?'✎ Edit policy':'＋ New per-product policy'}</div>
-        <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px 12px;margin-bottom:10px">
-          <div><div class="fl">Finish mill</div><select class="fi" id="mp-mill" onchange="_mpMillChanged()" style="width:100%">${milOpts(selMill)}</select></div>
-          <div><div class="fl">Product</div><select class="fi" id="mp-prod" onchange="_mpProdChanged()" style="width:100%">${prodOpts}</select></div>
-          <div><div class="fl">From</div><input class="fi" id="mp-from" type="date" value="${dFrom}" style="width:100%"></div>
-          <div><div class="fl">To</div><input class="fi" id="mp-to" type="date" value="${dTo}" style="width:100%"></div>
-        </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
-          ${lvlRow('target','Target level',100)}
-          ${plainRow('restart','Restart hysteresis (days cover)',14,0.5)}
-          ${lvlRow('crit','Critical floor',50)}
-          ${plainRow('look','Look-ahead (days)',30,1)}
-          ${lvlRow('stop','Stop level',100)}
-          ${plainRow('minrun','Min run before switch (days)',14,1)}
-        </div>
-        <div id="mp-warn" style="display:none;font-size:9px;color:var(--red);margin-top:6px">⚠ Need: critical floor &lt; target ≤ stop.</div>
-        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">
-          ${editing?`<button class="tb-btn sec" onclick="openMillPolicyManager()">Cancel edit</button>`:''}
-          <button class="tb-btn" id="mp-save" style="background:var(--green);color:var(--bg)" onclick="_saveMillPolicy()">${editing?'✎ Save & run':'⚙ Add policy & run'}</button>
-        </div>
-      </div>
-
-      <div style="border-top:2px solid var(--border2);margin-top:16px;padding-top:12px">
-        <div style="font-size:9px;letter-spacing:1px;color:var(--blue);text-transform:uppercase;margin-bottom:6px">Products considered (pause)</div>
-        <div style="color:var(--text-dim);margin-bottom:8px;line-height:1.4">Separately limit which products a mill chases in a window. Listed products are the ONLY ones it makes then; others are paused (manager campaigns still override).</div>
-        <table style="width:100%;border-collapse:collapse;margin-bottom:10px">
-          <thead><tr style="color:var(--text-dim);font-size:8px;text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid var(--border2)">
-            <th style="text-align:left;padding:5px 8px">Mill</th><th style="text-align:left;padding:5px 8px">Dates</th><th style="text-align:left;padding:5px 8px">Chases only</th><th></th>
-          </tr></thead><tbody>${focusRows}</tbody>
-        </table>
-        <input type="hidden" id="mpf-edit-id" value="${focusEditId||''}">
-        <div style="font-size:8px;letter-spacing:1px;color:${fEditing?'var(--amber)':'var(--text-dim)'};text-transform:uppercase;margin-bottom:6px">${fEditing?'✎ Edit focus':'＋ New focus'}</div>
-        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px 12px;margin-bottom:8px">
-          <div><div class="fl">Finish mill</div><select class="fi" id="mpf-mill" onchange="_mpfMillChanged()" style="width:100%">${milOpts(fMill)}</select></div>
-          <div><div class="fl">From</div><input class="fi" id="mpf-from" type="date" value="${fFrom}" style="width:100%"></div>
-          <div><div class="fl">To</div><input class="fi" id="mpf-to" type="date" value="${fTo}" style="width:100%"></div>
-        </div>
-        <div class="fl">Products to chase</div>
-        <div id="mpf-chips" style="display:flex;flex-wrap:wrap;gap:5px;margin-top:3px"></div>
-        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px">
-          ${fEditing?`<button class="tb-btn sec" onclick="openMillPolicyManager()">Cancel edit</button>`:''}
-          <button class="tb-btn" style="background:var(--blue);color:var(--bg)" onclick="_saveMillFocus()">${fEditing?'✎ Save focus & run':'＋ Add focus & run'}</button>
-        </div>
-      </div>
-    </div>`);
-  _mpRefreshMeta(); ['target','crit','stop'].forEach(k=>_mpSync(k,'range')); _mpUpdate();
-  _mpfRenderChips();
-}
-function _saveMillPolicy(){
-  const editId=document.getElementById('mp-edit-id')?.value||'';
-  const mill=document.getElementById('mp-mill')?.value;
-  const prod=document.getElementById('mp-prod')?.value;
-  const from=document.getElementById('mp-from')?.value, to=document.getElementById('mp-to')?.value;
-  const v=id=>parseFloat(document.getElementById('mp-'+id)?.value)||0;
-  if(!mill||!prod||!from||!to){ statMsg('Fill mill, product and dates'); return; }
-  if(from>to){ statMsg('From date must be on or before To date'); return; }
-  const crit=v('crit'),target=v('target'),stop=v('stop');
-  if(!(crit<target&&target<=stop)){ statMsg('Need: critical floor < target ≤ stop'); return; }
-  const params={ target_pct:target, critical_floor_pct:crit, stop_pct:stop,
-    restart_cover_days:v('restart'), lookahead_days:v('look'), min_run_days:v('minrun') };
-  if(!DB.mill_policies) DB.mill_policies=[];
-  if(editId){
-    const p=DB.mill_policies.find(x=>x.id===editId);
-    if(p) Object.assign(p,{ element_id:mill, product_id:prod, date_from:from, date_to:to, params });
-  } else {
-    DB.mill_policies.push({ id:'mp_'+Date.now(), element_id:mill, product_id:prod, date_from:from, date_to:to, params, created_at:new Date().toISOString() });
-  }
-  autoSave(); closeModal();
-  statMsg((editId?'Mill policy updated':'Mill policy saved')+' — running simulation…');
-  scheduleSimulation();
-}
-function _editMillPolicy(id){ const p=(DB.mill_policies||[]).find(x=>x.id===id); if(!p){ openMillPolicyManager(); return; } openMillPolicyManager(id); }
-function _deleteMillPolicy(id){
-  if(!confirm('Delete this per-product policy?')) return;
-  DB.mill_policies=(DB.mill_policies||[]).filter(p=>p.id!==id);
-  autoSave(); openMillPolicyManager();
-  statMsg('Policy removed — re-run simulation to update projections');
-}
-
-// ── Products considered (focus) ──
-function _mpfRenderChips(){
-  const mill=document.getElementById('mpf-mill')?.value; const prods=_mpProdsOf(mill);
-  const wrap=document.getElementById('mpf-chips'); if(!wrap) return;
-  if(!window._mpFocusSel) window._mpFocusSel=new Set(prods);
-  wrap.innerHTML=prods.map(p=>{ const on=window._mpFocusSel.has(p);
-    return `<span onclick="_mpfToggle('${p}')" style="font-size:9px;padding:3px 9px;border-radius:4px;cursor:pointer;border:1px solid ${on?'var(--blue)':'var(--border2)'};background:${on?'rgba(var(--blue-rgb),.16)':'transparent'};color:${on?'var(--blue)':'var(--text-dim)'}">${_mpPn(p)}</span>`;
-  }).join('');
-}
-function _mpfToggle(pid){
-  if(!window._mpFocusSel) window._mpFocusSel=new Set();
-  if(window._mpFocusSel.has(pid)){ if(window._mpFocusSel.size>1) window._mpFocusSel.delete(pid); } else window._mpFocusSel.add(pid);
-  _mpfRenderChips();
-}
-function _mpfMillChanged(){ window._mpFocusSel=new Set(_mpProdsOf(document.getElementById('mpf-mill').value)); _mpfRenderChips(); }
-function _saveMillFocus(){
-  const editId=document.getElementById('mpf-edit-id')?.value||'';
-  const mill=document.getElementById('mpf-mill')?.value;
-  const from=document.getElementById('mpf-from')?.value, to=document.getElementById('mpf-to')?.value;
-  const products=[...(window._mpFocusSel||[])];
-  if(!mill||!from||!to){ statMsg('Fill mill and dates'); return; }
-  if(from>to){ statMsg('From date must be on or before To date'); return; }
-  if(!products.length){ statMsg('Select at least one product to chase'); return; }
-  if(products.length===_mpProdsOf(mill).length){ statMsg('All products selected = no restriction; pick a subset to pause the rest'); return; }
-  if(!DB.mill_product_focus) DB.mill_product_focus=[];
-  if(editId){ const f=DB.mill_product_focus.find(x=>x.id===editId); if(f) Object.assign(f,{element_id:mill,date_from:from,date_to:to,products}); }
-  else DB.mill_product_focus.push({ id:'mpf_'+Date.now(), element_id:mill, date_from:from, date_to:to, products });
-  autoSave(); closeModal();
-  statMsg((editId?'Focus updated':'Focus saved')+' — running simulation…');
-  scheduleSimulation();
-}
-function _editMillFocus(id){ const f=(DB.mill_product_focus||[]).find(x=>x.id===id); if(!f){ openMillPolicyManager(); return; } openMillPolicyManager(undefined,id); }
-function _deleteMillFocus(id){
-  if(!confirm('Delete this products-considered rule?')) return;
-  DB.mill_product_focus=(DB.mill_product_focus||[]).filter(f=>f.id!==id);
-  autoSave(); openMillPolicyManager();
-  statMsg('Focus removed — re-run simulation to update projections');
+// The Mill Policies screen was retired on 2026-10-25: policies are written rules now (Simulation
+// Rules › Production, type mill_operation) and saved policies were converted into them.
+function openMillPolicyManager(){
+  openRulesPage('production');
+  statMsg('Mill Policies are written rules now — your saved policies were converted and are listed under Your rules');
 }
 
 function showCampaignPopup(elId, dateStr, runStart, runEnd, runProduct){
@@ -17848,6 +17677,25 @@ function _writeProposedVesselCalls(r){
   autoSave();
 }
 
+// What a complete rule should say for the equipment picked (shown above the text box).
+function _nrGuide(){
+  const box=document.getElementById('nr-guide'); if(!box) return;
+  const ids=[...(document.getElementById('nr-elements')?.selectedOptions||[])].map(o=>o.value);
+  const types=new Set(ids.map(id=>DB.elements.find(e=>e.id===id)?.type).filter(Boolean));
+  const g='font-family:var(--mono);font-size:9px;line-height:1.55;color:var(--text);background:rgba(var(--blue-rgb),.06);border-left:3px solid var(--blue);padding:7px 10px;margin-bottom:6px';
+  if(!types.size){ box.innerHTML=''; return; }
+  if(types.has('finish_mill')){
+    const many=ids.some(id=>(typeof _mpProdsOf==='function'?_mpProdsOf(id):[]).length>1);
+    const pr=[...new Set(ids.flatMap(id=>typeof _mpProdsOf==='function'?_mpProdsOf(id):[]))].map(id=>DB.products.find(p=>p.id===id)?.name||id);
+    box.innerHTML=`<div style="${g}"><b>A complete finish-mill rule says:</b><ol style="margin:4px 0 4px 16px;padding:0">${
+      SIM_RULE_TYPES.mill_operation.checklist.filter(c=>many||c.keys[0]!=='restart_order').map(c=>`<li>${esc(c.q)} <span style="color:var(--text-dim)">e.g. ${esc(c.ex)} — if not said: ${esc(c.def)}</span></li>`).join('')
+    }</ol>Optional: the level to aim for, when a silo is critical, product-change weekdays, t/day limits.${pr.length?`<br>Products: ${esc(pr.join(', '))}.`:''}<br><span style="color:var(--text-dim)">Anything you leave out keeps the simulator's default — Interpret lists those points so you can answer them.</span></div>`;
+  } else if(types.has('kiln')){
+    box.innerHTML=`<div style="${g}"><b>For a kiln, say when it should restart after stopping on a full silo</b> — e.g. "restart when the clinker silo is below 70%" (or in days of cover, or tonnes). It stops on its own when its silos reach 98%. No overlapping maintenance between kilns can be a rule too.</div>`;
+  } else {
+    box.innerHTML=`<div style="${g}">The simulator has no custom rules for this equipment yet — you can still write one; Interpret will mark it "not supported yet" and keep it as a note.</div>`;
+  }
+}
 function _nrLoadEquipment(){
   const facId=document.getElementById('nr-facility')?.value;
   const sel=document.getElementById('nr-elements'); if(!sel) return;
@@ -18632,10 +18480,22 @@ function simulate(elements, connections, horizon, includeProposed=false){
     });
   };
 
-  // ── Mill policy overrides (per mill+PRODUCT, date-bounded) ──────────────
+  // ── Finish-mill operating rules (per mill + PRODUCT, date-bounded) ──────────
+  // Accepted 'mill_operation' rules from the Simulation Rules page — the former Mill Policies
+  // and "products considered", converted into written rules on 2026-10-25. Rows still in
+  // DB.mill_policies / mill_product_focus without a migrated_rule_id (saved by an older copy of
+  // the app, not yet converted) are read too, first, so nothing is lost in between.
   const _polByEl={}, _focusByEl={};
-  (DB.mill_policies||[]).forEach(p=>{ const eid=p.element_id||(p.element_ids||[])[0]; if(eid)(_polByEl[eid]=_polByEl[eid]||[]).push(p); });
-  (DB.mill_product_focus||[]).forEach(f=>{ const eid=f.element_id||(f.element_ids||[])[0]; if(eid)(_focusByEl[eid]=_focusByEl[eid]||[]).push(f); });
+  (DB.mill_policies||[]).filter(p=>!p.migrated_rule_id).forEach(p=>{ const eid=p.element_id||(p.element_ids||[])[0]; if(eid)(_polByEl[eid]=_polByEl[eid]||[]).push(p); });
+  (DB.mill_product_focus||[]).filter(f=>!f.migrated_rule_id).forEach(f=>{ const eid=f.element_id||(f.element_ids||[])[0]; if(eid)(_focusByEl[eid]=_focusByEl[eid]||[]).push(f); });
+  (DB.simulation_rules||[]).filter(r=>r.status==='active'&&r.structured?.type==='mill_operation').forEach(rule=>{
+    const {product, products_allowed, ...rest}=rule.structured.params||{};
+    (rule.element_ids||[]).forEach(eid=>{
+      (_polByEl[eid]=_polByEl[eid]||[]).push({product_id:product||null, date_from:rule.date_from, date_to:rule.date_to, params:rest});
+      if(Array.isArray(products_allowed)&&products_allowed.length)
+        (_focusByEl[eid]=_focusByEl[eid]||[]).push({date_from:rule.date_from, date_to:rule.date_to, products:products_allowed});
+    });
+  });
   const _polActive=(from,to,day)=>{ const d=new Date(ruleSimStart.getTime()+(day-1)*864e5);
     const f=from?new Date(from+'T00:00:00'):null, t=to?new Date(to+'T00:00:00'):null;
     if(f&&d<f) return false; if(t&&d>t) return false; return true; };
@@ -19331,10 +19191,15 @@ function simulate(elements, connections, horizon, includeProposed=false){
       // If the mill is idle/blocked, a candidate product may only restart once ITS OWN
       // silo cover (forward-looking) has dropped to that product's restart threshold
       // (mill+product policy restart_cover_days, or an AI restart_threshold rule).
+      let _restarting=false;
       if(s.status==='idle'||s.status==='blocked'){
+        _restarting=true;
         const rtRules=getRules(mill.id,'restart_threshold',day);
         const ruleTh=rtRules.length?(parseFloat(rtRules[0].structured.params?.threshold)||5):null;
         const elig=candidates.filter(c=>{
+          // An operating rule's restart level as % of the silo beats days of cover.
+          if(c.pol.restart_pct!=null){ const si=state[c.bestSilo.id];
+            return (si?.inventory||0)<=(parseFloat(c.pol.restart_pct)||0)/100*(si?.maxCap||0); }
           let th=ruleTh;
           if(c.pol.restart_cover_days!=null) th=parseFloat(c.pol.restart_cover_days)||0;
           if(th==null) return true;             // no hysteresis for this product → eligible
@@ -19364,9 +19229,10 @@ function simulate(elements, connections, horizon, includeProposed=false){
       // ── RULE: product_switch_window ───────────────────
       // Only allow product switches on specified days of week.
       // Uses the last product actually run (from history) as the lock baseline.
+      // (or the change-days of the mill's operating rule)
       const swRules=getRules(mill.id,'product_switch_window',day);
-      if(swRules.length){
-        const allowedDow=swRules[0].structured.params?.allowed_dow||[];
+      {
+        const allowedDow=swRules.length?(swRules[0].structured.params?.allowed_dow||[]):(effMillPolicy(mill.id,null,day).switch_dow||[]);
         if(allowedDow.length){
           const dayDate=new Date(ruleSimStart.getTime()+(day-1)*864e5);
           const dow=dayDate.getDay(); // 0=Sun,1=Mon,2=Tue,3=Wed,4=Thu,5=Sat,6=Sat
@@ -19389,6 +19255,13 @@ function simulate(elements, connections, horizon, includeProposed=false){
 
       // Sort by urgency desc (urgency already accounts for net depletion)
       pool.sort((a,b)=>b.urgency-a.urgency);
+      // Restart order (operating rule): on the day the mill starts again after a stop, the first
+      // product on the list that can run goes first; products not listed follow by urgency.
+      const _ord=_restarting?effMillPolicy(mill.id,null,day).restart_order:null;
+      if(Array.isArray(_ord)&&_ord.length){
+        const ix=pid=>{ const k=_ord.indexOf(pid); return k<0?1e9:k; };
+        pool.sort((a,b)=>ix(a.prodId)-ix(b.prodId)||b.urgency-a.urgency);
+      }
 
       const chosen=pool[0];
       s.status=s.status==='rampup'?'rampup':'running';
@@ -19398,9 +19271,11 @@ function simulate(elements, connections, horizon, includeProposed=false){
 
       // ── RULE: production_bounds ───────────────────────
       let actualRate=chosen.actualRate;
+      // (or the t/day limits of the mill's operating rule)
       const pbRules=getRules(mill.id,'production_bounds',day);
-      if(pbRules.length){
-        const p=pbRules[0].structured.params||{};
+      const _pb=pbRules.length?(pbRules[0].structured.params||{}):{min_tpd:chosen.pol.min_tpd, max_tpd:chosen.pol.max_tpd};
+      if(_pb.min_tpd||_pb.max_tpd){
+        const p=_pb;
         if(p.min_tpd&&actualRate>0&&actualRate<parseFloat(p.min_tpd)){
           // Below floor — either run at floor or shut down
           actualRate=parseFloat(p.min_tpd);
@@ -25794,7 +25669,7 @@ const SIM_RULEBOOK={
         {t:'Each day runs in this order: real stock is applied, silo transfers, maintenance, kilns, raw meal mills, finish mills, packing, rail, berths, demand, then end-of-day stock. A mill therefore sees clinker as it stood at the start of the day.'},
         {t:'Real data beats the plan. A real end-of-day stock entered for yesterday becomes the silo\'s stock this morning, and real production replaces what the simulator would have made that day.', set:'Daily Data form · Data Sources'},
         {t:'Maintenance takes the equipment down for the event\'s full days; a fraction gives one partial day (2.5 days = 2 days down, then a day at 50%). After it, output ramps up along the ramp-up profile.', set:'Supply › Maintenance Calendar'},
-        {t:'Every silo has a target level that decides how urgently mills fill it: 100% of capacity for "maximize", 75% for "meet demand", 50% for "minimize". A Target Level % on the silo, or a mill policy, overrides it.', set:'Element › Inventory Objective / Target Level %'},
+        {t:'Every silo has a target level that decides how urgently mills fill it: 100% of capacity for "maximize", 75% for "meet demand", 50% for "minimize". A Target Level % on the silo, or a mill operating rule, overrides it.', set:'Element › Inventory Objective / Target Level %'},
         {t:'A silo is critical when its stock is at or below its critical floor (default 10% of capacity) or it has less than one day of cover.', set:'Element › Critical Floor %'},
       ]},
       {title:'Kilns', rules:[
@@ -25815,19 +25690,20 @@ const SIM_RULEBOOK={
         {t:'Output is the mill\'s capacity for that product, limited by the clinker in stock and by the space left up to the stop level.', set:'Element › Product capacities · recipes'},
         {t:'If any silo is critical, only critical silos are considered that day.'},
         {t:'When nothing can run the mill is recorded as idle (no production needed or products paused), starved (no clinker) or blocked (silos full).'},
-        {t:'Your rules can add: a minimum run per product, a restart threshold after stopping, allowed product-change weekdays and min/max t/day.', set:'Your rules · Mill Policies'},
+        {t:'A mill operating rule (Your rules) can set when the mill stops, when it restarts, which product it restarts with, a minimum run, which products it may make, product-change days and t/day limits.', set:'Your rules'},
       ]},
       {title:'Packing plants', rules:[
         {t:'A packing line packs one product per day, at pallets/day × t per pallet, limited by bulk cement available and packed-silo space up to 98%.', set:'Element › Packing lines'},
         {t:'It picks the line whose packed silo is most urgent; a product campaign forces the product. Packing runs before customer demand, so it has first call on bulk cement.'},
       ]},
-      {title:'Mill policies', rules:[
-        {t:'A mill policy changes, for one finish mill and product and for a date range, the target %, critical floor %, stop %, restart cover days, look-ahead days and minimum run days. "Products considered" limits which products a mill may make.', set:'Supply › ⚙ Mill Policies'},
-        {t:'Policies only affect the simulator\'s own choice — not real data, campaigns or rail fill.'},
+      {title:'Mill operating rules', rules:[
+        {t:'A mill operating rule is written on this page. It applies to one or more finish mills — for one product or all of them — between its dates; whatever it does not mention keeps the simulator\'s defaults.', set:'Your rules'},
+        {t:'Operating rules only affect the simulator\'s own choice — not real data, campaigns or rail fill.'},
+        {t:'The former Mill Policies and "products considered" lists were converted into operating rules on 25 Oct 2026, with the same numbers and dates.'},
       ]},
     ],
     issues:[
-      'Mill policies: a policy saved with "restart cover days = 0" keeps the mill off after a stop until its silo is empty, even below the critical floor.',
+      'A rule that restarts a mill at "0 days of cover" keeps it off after a stop until its silo is empty, even below the critical floor (converted Mill Policies often carry this: the old screen saved 0 meaning "as soon as possible").',
       'Finish mills: a silo between its target and 98% stays eligible, so with nothing more urgent the mill keeps filling it to 98%; the target only ranks products.',
       'Finish mills: two mills sharing a clinker silo both see its morning stock, so together they can draw more clinker than is there.',
       'Kilns: real production entered on a calendar maintenance day is ignored.',
@@ -25941,6 +25817,32 @@ const SIM_RULEBOOK={
 // Rule types the simulator can enforce (the hook points in simulate() — getRules). `on` = the
 // equipment types it works on. Anything else is "not supported yet".
 const SIM_RULE_TYPES={
+  mill_operation:{area:'production', on:['finish_mill'], label:'Mill operating rule',
+    what:'How a finish mill decides when to stop, when to restart and what to make. Settings the rule does not mention keep the simulator\'s defaults.',
+    params:[
+      {k:'product', l:'For product', t:'product', def:'all its products'},
+      {k:'stop_pct', l:'Stop filling at % of silo', t:'number', def:'98%'},
+      {k:'restart_pct', l:'Restart when silo ≤ %', t:'number'},
+      {k:'restart_cover_days', l:'Restart when cover ≤ days', t:'number'},
+      {k:'restart_order', l:'Restart with', t:'order', def:'the most urgent product'},
+      {k:'min_run_days', l:'Minimum run (days)', t:'number', def:'none'},
+      {k:'products_allowed', l:'Only make', t:'products', def:'all its products'},
+      {k:'target_pct', l:'Aim for % of silo', t:'number', def:'the silo objective (100 / 75 / 50%)'},
+      {k:'critical_floor_pct', l:'Critical below %', t:'number', def:'the silo floor (10%)'},
+      {k:'switch_dow', l:'Change product only on', t:'dow', def:'any day'},
+      {k:'lookahead_days', l:'Look-ahead (days)', t:'number', def:'14'},
+      {k:'min_tpd', l:'Min t/day', t:'number'},
+      {k:'max_tpd', l:'Max t/day', t:'number'},
+    ],
+    // What a complete finish-mill rule says — shown while writing, and asked after Interpret
+    // when the words leave a point out (with the default the simulator will use instead).
+    checklist:[
+      {keys:['stop_pct'], q:'When should it stop?', ex:'"stop when the silo reaches 95%"', def:'it stops filling a silo at 98% of capacity'},
+      {keys:['restart_pct','restart_cover_days'], q:'When should it restart after a stop?', ex:'"restart when the silo is down to 3 days of cover" or "below 60%"', def:'it restarts the next day, as soon as a silo needs product'},
+      {keys:['restart_order'], q:'When it restarts, which product first?', ex:'"restart with IL(12), then SPC"', def:'the product whose silo is most urgent', multi:true},
+      {keys:['min_run_days'], q:'How many days at least on one product?', ex:'"keep a product at least 2 days"', def:'no minimum', multi:true},
+      {keys:['products_allowed'], q:'Which products may it make in this period?', ex:'"make only IL(12)"', def:'all the products it is set up for', multi:true},
+    ]},
   min_run_duration:{area:'production', on:['finish_mill'], label:'Minimum run',
     what:'Once a finish mill starts a product it keeps it for at least this many running days.',
     params:[{k:'min_days', l:'Minimum days', t:'number'}]},
@@ -25975,11 +25877,60 @@ function _ruleArea(rule){
 // reaches the simulator only once interpreted and accepted, so those go back to draft, and an
 // empty interpretation ({}) counts as none — it used to block re-interpretation for good.
 function _rulesNormalize(){
+  _millPoliciesToRules();
   (DB.simulation_rules||[]).forEach(r=>{
     if(r.structured&&!r.structured.type&&!r.structured.unsupported) r.structured=null;
     if(r.status==='active'&&!_ruleIsInterpreted(r)) r.status='draft';
     if(!r.status) r.status='draft';
   });
+}
+// Mill operating rule → one plain sentence (used for converted policies and as the summary).
+function _millOpSentence(millName, p){
+  const pn=id=>DB.products.find(x=>x.id===id)?.name||id;
+  const parts=[];
+  if(p.stop_pct!=null) parts.push(`stop filling the silo at ${p.stop_pct}% of capacity`);
+  if(p.target_pct!=null) parts.push(`aim for ${p.target_pct}% of the silo`);
+  if(p.critical_floor_pct!=null) parts.push(`treat the silo as critical below ${p.critical_floor_pct}%`);
+  if(p.restart_pct!=null) parts.push(`after a stop, restart when the silo is down to ${p.restart_pct}%`);
+  if(p.restart_cover_days!=null) parts.push(+p.restart_cover_days===0?'after a stop, restart only when the silo is empty (0 days of cover)':`after a stop, restart when the silo has ${p.restart_cover_days} days of cover or less`);
+  if(p.restart_order?.length) parts.push(`when restarting, start with ${p.restart_order.map(pn).join(', then ')}`);
+  if(p.min_run_days!=null&&+p.min_run_days>0) parts.push(`keep a product at least ${p.min_run_days} day${+p.min_run_days===1?'':'s'}`);
+  if(p.products_allowed?.length) parts.push(`make only ${p.products_allowed.map(pn).join(', ')}`);
+  if(p.switch_dow?.length) parts.push(`change product only on ${p.switch_dow.map(d=>_DOW_NM[d]).join(', ')}`);
+  if(p.lookahead_days!=null) parts.push(`look ${p.lookahead_days} days ahead`);
+  if(p.min_tpd||p.max_tpd) parts.push(`produce ${p.min_tpd||0}–${p.max_tpd||'max'} t/day`);
+  return `${millName}${p.product?` making ${pn(p.product)}`:''}: ${parts.join('; ')||'no settings'}.`;
+}
+// Mill Policies → accepted operating rules (once per row; the row is kept, marked migrated, so an
+// older copy of the app that re-saves it does not bring it back as a second source).
+function _millPoliciesToRules(){
+  if(!DB.simulation_rules) DB.simulation_rules=[];
+  let n=0;
+  const mill=id=>DB.elements.find(e=>e.id===id);
+  const facOf=el=>el?[el.assigned_facility_id||el.facility_id].filter(Boolean):[];
+  const add=(src,eid,params,label)=>{
+    const el=mill(eid), id='rule_'+src.id;
+    if(!DB.simulation_rules.some(r=>r.id===id)){
+      const text=_millOpSentence(el?.name||eid, params);
+      DB.simulation_rules.push({id, name:`${el?.name||eid} · ${label}`, area:'production', facility_ids:facOf(el), element_ids:[eid],
+        natural_text:text, structured:{type:'mill_operation', params, plain_summary:text,
+          caveat:+params.restart_cover_days===0?'Converted from Mill Policies, where 0 meant "restart as soon as possible" — the simulator reads 0 days as "only when the silo is empty". If you meant as soon as possible, remove the restart part.':undefined},
+        date_from:src.date_from||null, date_to:src.date_to||null, status:'active', conflict_ids:[], from_policy:true,
+        created_at:src.created_at||new Date().toISOString(), accepted_at:new Date().toISOString()});
+    }
+    src.migrated_rule_id=id; n++;
+  };
+  (DB.mill_policies||[]).filter(p=>!p.migrated_rule_id).forEach(p=>{
+    const eid=p.element_id||(p.element_ids||[])[0]; if(!eid) return;
+    const params={product:p.product_id||null}; Object.entries(p.params||{}).forEach(([k,v])=>{ if(v!=null&&v!=='') params[k]=v; });
+    add(p,eid,params,`${p.product_id?(DB.products.find(x=>x.id===p.product_id)?.name||p.product_id):'all products'} (from Mill Policies)`);
+  });
+  (DB.mill_product_focus||[]).filter(f=>!f.migrated_rule_id).forEach(f=>{
+    const eid=f.element_id||(f.element_ids||[])[0]; if(!eid||!(f.products||[]).length) return;
+    add(f,eid,{product:null, products_allowed:f.products.slice()},'products allowed (from Mill Policies)');
+  });
+  if(n) autoSave();
+  return n;
 }
 function _ruleStructuredSummary(s){
   if(!s) return 'Not interpreted';
@@ -25992,6 +25943,7 @@ function _ruleStructuredSummary(s){
     product_switch_window:`Product changes only on ${(p.allowed_dow||[]).map(d=>_DOW_NM[d]).join(', ')||'—'}`,
     production_bounds:`Output ${p.min_tpd||0}–${p.max_tpd||'∞'} t/day`,
     maintenance_guard:'No overlapping maintenance',
+    mill_operation:'Mill operating rule',
   };
   return map[s.type]||T.label;
 }
@@ -26009,7 +25961,7 @@ function _rulesPanelHTML(){
     sec.rules.map(r=>`<li>${esc(r.t)}${r.set?`<div class="rules-set">⚙ ${esc(r.set)}</div>`:''}</li>`).join('')}</ol></div>`).join('');
   const issues=book.issues?.length?`<details class="rules-issues"><summary>⚠ Known issues (${book.issues.length}) — the code does not yet do what you would expect</summary><ul>${
     book.issues.map(t=>`<li>${esc(t)}</li>`).join('')}</ul></details>`:'';
-  const pol=area==='production'?`<div class="rules-note">Per-mill targets, stop levels and products are set in <span class="tbl-act" onclick="openMillPolicyManager()">⚙ Mill Policies</span> (${(DB.mill_policies||[]).length} saved).</div>`:'';
+  const pol=area==='production'&&(DB.mill_policies||[]).some(p=>p.migrated_rule_id)?`<div class="rules-note">Your former Mill Policies are listed below as operating rules (marked "from Mill Policies").</div>`:'';
   const supported=Object.values(SIM_RULE_TYPES).filter(T=>T.area===area);
   return `
     <div class="rules-top">
@@ -26071,16 +26023,28 @@ function _renderRulesList(){
     // Equipment the rule type cannot act on (e.g. a minimum run on a kiln) is called out.
     const badEls=T&&T.on?(rule.element_ids||[]).map(id=>DB.elements.find(e=>e.id===id)).filter(e=>e&&!T.on.includes(e.type)):[];
     const editable=T&&st!=='active';
-    const paramsHtml=T?T.params.map(P=>{
+    const millProds=_ruleMillProducts(rule);
+    const pnm=id=>DB.products.find(x=>x.id===id)?.name||id;
+    const isSet=v=>v!=null&&v!==''&&!(Array.isArray(v)&&!v.length);
+    // An operating rule lists only the settings its words set; the rest stay at the defaults.
+    const shownParams=T?T.params.filter(P=>s.type!=='mill_operation'||isSet((s.params||{})[P.k])):[];
+    const paramsHtml=T?shownParams.map(P=>{
       const v=(s.params||{})[P.k];
-      if(!editable){
-        const shown=P.t==='dow'?(v||[]).map(d=>_DOW_NM[d]).join(', '):(v??'—');
+      if(!editable||P.t==='order'&&!millProds.length){
+        const shown=P.t==='dow'?(v||[]).map(d=>_DOW_NM[d]).join(', '):P.t==='product'?(v?pnm(v):'all'):(P.t==='products'||P.t==='order')?(v||[]).map(pnm).join(P.t==='order'?' → ':', '):(v??'—');
         return `<span class="rules-param"><span>${esc(P.l)}</span> <b>${esc(String(shown))}</b></span>`;
       }
+      if(P.t==='product') return `<label class="rules-param"><span>${esc(P.l)}</span> <select onchange="_ruleParam(${i},'${P.k}',this.value||null)"><option value="">all products</option>${millProds.map(id=>`<option value="${esc(id)}" ${id===v?'selected':''}>${esc(pnm(id))}</option>`).join('')}</select></label>`;
+      if(P.t==='products') return `<span class="rules-param"><span>${esc(P.l)}</span> ${millProds.map(id=>`<label class="rules-dow"><input type="checkbox" ${(v||[]).includes(id)?'checked':''} onchange="_ruleListToggle(${i},'${P.k}','${esc(id)}',this.checked)">${esc(pnm(id))}</label>`).join('')}</span>`;
+      if(P.t==='order') return `<span class="rules-param"><span>${esc(P.l)}</span> ${(v||[]).map((id,k)=>`<select onchange="_ruleOrderSet(${i},${k},this.value)"><option value="">—</option>${millProds.map(x=>`<option value="${esc(x)}" ${x===id?'selected':''}>${esc(pnm(x))}</option>`).join('')}</select>`).join(' → ')}</span>`;
       if(P.t==='select') return `<label class="rules-param"><span>${esc(P.l)}</span> <select onchange="_ruleParam(${i},'${P.k}',this.value)">${P.opts.map(o=>`<option ${o===(v||P.opts[0])?'selected':''}>${o}</option>`).join('')}</select></label>`;
       if(P.t==='dow') return `<span class="rules-param"><span>${esc(P.l)}</span> ${_DOW_NM.map((d,k)=>`<label class="rules-dow"><input type="checkbox" ${(v||[]).includes(k)?'checked':''} onchange="_ruleDow(${i},${k},this.checked)">${d}</label>`).join('')}</span>`;
       return `<label class="rules-param"><span>${esc(P.l)}</span> <input type="number" value="${v??''}" onchange="_ruleParam(${i},'${P.k}',this.value===''?null:parseFloat(this.value))"></label>`;
     }).join(''):'';
+    // Points a complete rule covers that these words leave out: each shows the default the
+    // simulator will use, and can be answered here (the answer is added to the rule and re-read).
+    const missing=T?.checklist?T.checklist.filter(c=>!(c.multi&&millProds.length<2&&c.keys[0]==='restart_order')&&!c.keys.some(k=>isSet((s.params||{})[k]))):[];
+    const missHtml=missing.length&&st!=='active'?`<div class="rules-miss"><div class="rules-miss-h">Not said — the simulator will use its default unless you answer:</div>${missing.map((c,k)=>`<div class="rules-miss-q"><span><b>${esc(c.q)}</b> Default: ${esc(c.def)}.</span><span><input id="rq-${i}-${k}" placeholder="${esc(c.ex.replace(/"/g,''))}"><button class="tb-btn sec" onclick="_ruleAnswer(${i},'rq-${i}-${k}')">Add</button></span></div>`).join('')}</div>`:'';
     const pv=rule._preview;
     const pvHtml=pv&&T?`<table class="rules-pv"><tr><th>Effect over the horizon (${esc(pv.at.slice(0,10))})</th><th>Without</th><th>With</th></tr>${
       pv.rows.map(r=>`<tr${r.b!==r.a?' class="chg"':''}><td>${esc(r.l)}</td><td>${esc(String(r.b))}</td><td>${esc(String(r.a))}</td></tr>`).join('')}</table>`:'';
@@ -26103,7 +26067,9 @@ function _renderRulesList(){
       ${s?.caveat?`<div class="rules-read warn">⚠ ${esc(s.caveat)}</div>`:''}
       ${badEls.length?`<div class="rules-read warn">⚠ ${esc(T.label)} only works on ${T.on.map(x=>x.replace('_',' ')).join(' / ')} — ignored for ${esc(badEls.map(e=>e.name).join(', '))}.</div>`:''}
       ${rule._interpret_error&&!s?`<div class="rules-read bad">Interpretation failed: ${esc(rule._interpret_error)}</div>`:''}
+      ${rule.from_policy?`<div class="rules-meta">from Mill Policies</div>`:''}
       ${paramsHtml?`<div class="rules-params">${paramsHtml}</div>`:''}
+      ${missHtml}
       ${pvHtml}
       <div class="rules-acts">${acts.join('')}</div>
     </div>`;
@@ -26113,6 +26079,28 @@ function _ruleParam(i,k,v){
   const rule=DB.simulation_rules[i]; if(!rule?.structured) return;
   rule.structured.params={...(rule.structured.params||{}),[k]:v};
   delete rule._preview; autoSave(); _rulesRefresh();
+}
+// Products the rule's finish mill(s) can make (for the product pickers and the checklist).
+function _ruleMillProducts(rule){
+  return [...new Set((rule.element_ids||[]).flatMap(id=>typeof _mpProdsOf==='function'?_mpProdsOf(id):[]))];
+}
+function _ruleListToggle(i,k,id,on){
+  const rule=DB.simulation_rules[i]; if(!rule?.structured) return;
+  const cur=new Set(rule.structured.params?.[k]||[]); on?cur.add(id):cur.delete(id);
+  _ruleParam(i,k,[...cur]);
+}
+function _ruleOrderSet(i,pos,id){
+  const rule=DB.simulation_rules[i]; if(!rule?.structured) return;
+  const cur=(rule.structured.params?.restart_order||[]).slice(); cur[pos]=id;
+  _ruleParam(i,'restart_order',cur.filter(Boolean));
+}
+// An answer to a "not said" question is added to the rule's words and the rule is read again.
+async function _ruleAnswer(i,inputId){
+  const rule=DB.simulation_rules[i]; const v=document.getElementById(inputId)?.value?.trim();
+  if(!rule||!v) return;
+  rule.natural_text=(rule.natural_text||'').replace(/\s*$/,'')+(/[.!?]$/.test(rule.natural_text||'')?' ':'. ')+v.replace(/^./,c=>c.toUpperCase())+(/[.!?]$/.test(v)?'':'.');
+  autoSave();
+  await _ruleInterpret(i);
 }
 function _ruleDow(i,d,on){
   const rule=DB.simulation_rules[i]; if(!rule?.structured) return;
@@ -26146,6 +26134,16 @@ const _RULE_INTERPRET_PROMPT=`You turn a planner's plain-language rule for the A
 Respond ONLY with JSON — no markdown, no explanation.
 
 Supported types and the equipment they work on:
+- mill_operation (finish mills) — USE THIS for anything about how a finish mill stops, restarts, what it makes, minimum runs, product-change days or t/day limits; one rule can carry several settings. params — include ONLY what the rule states:
+  {"product":product_id|null (the one product the rule is about; null = all the mill's products),
+   "stop_pct":number (stop filling the silo at this % of capacity),
+   "restart_pct":number (after a stop, restart when the silo is at or below this %),
+   "restart_cover_days":number (after a stop, restart when the silo has this many days of cover or less),
+   "restart_order":[product_id,...] (when it restarts, which product first, then next),
+   "min_run_days":number, "products_allowed":[product_id,...] (it may make only these),
+   "target_pct":number, "critical_floor_pct":number, "switch_dow":[0-6] (product changes only on these weekdays, 0=Sunday),
+   "lookahead_days":number, "min_tpd":number, "max_tpd":number}
+  Use the product ids given with the equipment. "plain_summary" must name the mill and every setting.
 - min_run_duration (finish mills): once a mill starts a product it keeps it at least N running days. params {"min_days":number}
 - restart_threshold (kilns, finish mills): after stopping because its silo is full, it does not restart until stock falls to the threshold. params {"metric":"inventory_days"|"inventory_pct"|"inventory_t","threshold":number}. Finish mills always read the threshold as days of cover.
 - product_switch_window (finish mills): product changes only on the listed weekdays. params {"allowed_dow":[0-6]} with 0=Sunday … 6=Saturday
@@ -26159,12 +26157,17 @@ async function _ruleInterpretOne(rule){
   const elContext=(rule.element_ids||[]).map(eid=>{
     const el=DB.elements.find(e=>e.id===eid);
     const fac=DB.facilities.find(f=>f.id===(el?.assigned_facility_id||el?.facility_id));
-    return `${el?.name||eid} (${el?.type||'?'}, at ${fac?.name||'?'})`;
+    const prods=el?.type==='finish_mill'&&typeof _mpProdsOf==='function'?_mpProdsOf(eid).map(id=>`${DB.products.find(p=>p.id===id)?.name||id} = ${id}`).join(', '):'';
+    return `${el?.name||eid} (${el?.type||'?'}, at ${fac?.name||'?'}${prods?`; products: ${prods}`:''})`;
   }).join('; ');
   const data=await callClaude({maxTokens:400, system:_RULE_INTERPRET_PROMPT,
     messages:[{role:'user',content:`Area: ${_ruleArea(rule)}\nEquipment: ${elContext||'none selected'}\nRule: "${rule.natural_text}"`}]});
   const raw=data.content?.[0]?.text||'{}';
   const parsed=JSON.parse(raw.replace(/```json|```/g,'').trim());
+  if(parsed.type==='mill_operation'&&parsed.params){   // keep only settings the words gave
+    Object.keys(parsed.params).forEach(k=>{ const v=parsed.params[k]; if(v==null||v===''||(Array.isArray(v)&&!v.length)) delete parsed.params[k]; });
+    if(!('product' in parsed.params)) parsed.params.product=null;
+  }
   if(parsed.type&&!SIM_RULE_TYPES[parsed.type]) { parsed.unsupported=true; parsed.reason=parsed.reason||`"${parsed.type}" is not a rule the simulator knows`; parsed.type=null; }
   if(!parsed.type&&!parsed.unsupported){ parsed.unsupported=true; parsed.reason=parsed.reason||'no matching rule type'; }
   rule.structured=parsed;
@@ -26267,7 +26270,7 @@ function _editRule(i){
       </div>
       <div style="display:flex;flex-direction:column;gap:3px">
         <div style="${pl}">Equipment <span style="color:var(--text-dim);font-style:italic">(hold Ctrl / ⌘ to select multiple)</span></div>
-        <select style="${pi};height:90px" id="nr-elements" multiple>
+        <select style="${pi};height:90px" id="nr-elements" multiple onchange="_nrGuide()">
           <option disabled>— Select a facility first —</option>
         </select>
       </div>
@@ -26283,6 +26286,7 @@ function _editRule(i){
       </div>
       <div style="display:flex;flex-direction:column;gap:3px">
         <div style="${pl}">Rule — write in plain language</div>
+        <div id="nr-guide"></div>
         <textarea style="${pi};height:100px;resize:vertical;line-height:1.5" id="nr-text">${rule.natural_text||''}</textarea>
       </div>
       ${rule.structured?`<div style="font-family:var(--mono);font-size:8px;padding:8px;background:var(--green-faint);border:1px solid var(--green);color:var(--green)">
@@ -26306,6 +26310,7 @@ function _editRule(i){
       if(sel) [...sel.options].forEach(o=>{
         o.selected=(rule.element_ids||[]).includes(o.value);
       });
+      _nrGuide();
     },50);
   }
 }
@@ -26396,7 +26401,7 @@ function _openNewRule(){
 
       <div style="display:flex;flex-direction:column;gap:3px">
         <div style="${pl}">Equipment <span style="color:var(--text-dim);font-style:italic">(hold Ctrl / ⌘ to select multiple)</span></div>
-        <select style="${pi};height:90px" id="nr-elements" multiple>
+        <select style="${pi};height:90px" id="nr-elements" multiple onchange="_nrGuide()">
           <option disabled>— Select a facility first —</option>
         </select>
       </div>
@@ -26414,6 +26419,7 @@ function _openNewRule(){
 
       <div style="display:flex;flex-direction:column;gap:3px">
         <div style="${pl}">Rule — write in plain language</div>
+        <div id="nr-guide"></div>
         <textarea style="${pi};height:100px;resize:vertical;line-height:1.5" id="nr-text"
           placeholder="e.g. When this equipment shuts down due to high inventory, it should not restart until the silo drops to 50% of its maximum capacity."></textarea>
       </div>
@@ -30794,8 +30800,7 @@ function switchTopSection(section){
       {label:'Production',view:'supply'},
       {label:'Products',view:'catalog'},
       {label:'Elements',view:'elements'},
-      {label:'Maintenance Calendar',view:'maintenance'},
-      {label:'⚙ Mill Policies',view:'millpolicy'}
+      {label:'Maintenance Calendar',view:'maintenance'}
     ],
     logistics:[
       {label:'Vessel Schedule',view:'schedules',tab:'vessels'},
