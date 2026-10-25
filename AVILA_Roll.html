@@ -14642,22 +14642,31 @@ function rpDemand(elId,d){
 }
 // Suggested split of one switch's cars of a product across a dispatch point's terminals:
 // ALL `avail` cars, proportional to each terminal's demand for that product over the 7 days
-// after the cars arrive (no demand anywhere → the first terminal). The Rail Schedule shows it
-// as the dashed proposal, and the simulation ships it on any switch the user hasn't confirmed,
-// so an unconfirmed switch still departs instead of piling the cars into the next one.
+// after the cars arrive. When no terminal has demand in that week (holidays, or the forecast
+// ends) the window widens — 14 days, then 30 days after arrival, then the 30 days BEFORE
+// arrival (recent demand) — and only with no demand at all do the cars go to the first
+// terminal. The Rail Schedule shows it as the dashed proposal, and the simulation ships it on
+// any switch the user hasn't confirmed, so an unconfirmed switch still departs instead of
+// piling the cars into the next one.
 // Terminals are taken in the dispatch point's destination order (the last gets the remainder).
+const RAIL_SPLIT_WINDOWS=[[0,7],[0,14],[0,30],[-30,0]];   // days from arrival: [from, to)
 function railSuggestSplit(dp, pid, d, avail, destIds){
   const out={};
   const order=(dp.props?.destinations||[]).map(x=>x.facility_id);
   const dests=destIds.filter(f=>order.includes(f)).sort((a,b)=>order.indexOf(a)-order.indexOf(b));
   if(!(avail>0)||!dests.length) return out;
-  const w={}; let tw=0;
-  dests.forEach(fid=>{
-    const tr=parseInt((dp.props?.destinations||[]).find(x=>x.facility_id===fid)?.transit_days)||1;
-    const dem=rpGetDestDemEls(fid).filter(el=>_demElMatchesProd(el,pid))
-      .reduce((s,el)=>{ let q=0; for(let k=0;k<7;k++) q+=rpDemand(el.id,d+tr+k)||0; return s+q; },0);
-    w[fid]=dem; tw+=dem;
-  });
+  const info=dests.map(fid=>({fid,
+    tr:parseInt((dp.props?.destinations||[]).find(x=>x.facility_id===fid)?.transit_days)||1,
+    els:rpGetDestDemEls(fid).filter(el=>_demElMatchesProd(el,pid))}));
+  let w={}, tw=0;
+  for(const [a,b] of RAIL_SPLIT_WINDOWS){
+    w={}; tw=0;
+    info.forEach(({fid,tr,els})=>{
+      const dem=els.reduce((s,el)=>{ let q=0; for(let k=a;k<b;k++) q+=rpDemand(el.id,d+tr+k)||0; return s+q; },0);
+      w[fid]=dem; tw+=dem;
+    });
+    if(tw>0) break;
+  }
   let assigned=0;
   dests.forEach((fid,i)=>{
     const a=Math.max(0,tw>0?(i===dests.length-1?avail-assigned:Math.floor(avail*(w[fid]||0)/tw)):(i===0?avail:0));
