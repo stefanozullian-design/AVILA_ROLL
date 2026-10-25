@@ -18976,6 +18976,11 @@ function simulate(elements, connections, horizon, includeProposed=false){
     // as a hard constraint on production rate.
     elements.filter(e=>e.type==='finish_mill').forEach(mill=>{
       const s=state[mill.id];
+      // Length of the mill's current run: consecutive days on the same product, counted before
+      // today's product is recorded. A product change, an idle or a maintenance day starts a new
+      // run. (The minimum-run rule used the lifetime runDays, so it only held in the first days.)
+      const _runStep=pid=>{ const h=r.millProductHistory[mill.id];
+        s.runLen=(h.length&&h[h.length-1]===pid)?(s.runLen||0)+1:1; };
       // Push a null so millProductHistory stays day-aligned (the display + changeover
       // logic index this array by day; skipping the push on maintenance days shifts
       // every later day, making campaign/product edits appear on the wrong day).
@@ -18991,7 +18996,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
         let _recorded=false;
         _millReal.forEach(rp=>{
           const vol=parseFloat(rp.volume_t)||0; if(!vol) return;
-          if(!_recorded){ r.millProductHistory[mill.id].push(rp.product_id); _recorded=true; }
+          if(!_recorded){ _runStep(rp.product_id); r.millProductHistory[mill.id].push(rp.product_id); _recorded=true; }
           let prodSilos=(millProductSiloMap[mill.id]||{})[rp.product_id]||[];
           // Fallback: millProductSiloMap is keyed off element_product_capacities. A real-data
           // scenario may have NO capacity rows for mills, leaving the map empty — then the mill's
@@ -19101,7 +19106,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
           else {
             s.status=s.status==='rampup'?'rampup':'running';
             s.currentProduct=prodId; s.runDays++;
-            r.millProductHistory[mill.id].push(prodId);
+            _runStep(prodId); r.millProductHistory[mill.id].push(prodId);
             // Day-split: fill RAIL first, remainder to regular silo
             const hourlyRate=ratedTPD*rampFactor/24;
             const railSpace=Math.max(0,(state[railSilo.id]?.maxCap||0)-(state[railSilo.id]?.inventory||0));
@@ -19188,7 +19193,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
             }
             s.status=s.status==='rampup'?'rampup':'running';
             s.currentProduct=campProdId; s.runDays++;
-            r.millProductHistory[mill.id].push(campProdId);
+            _runStep(campProdId); r.millProductHistory[mill.id].push(campProdId);
             const recvSilosC=(millProductSiloMap[mill.id]||{})[campProdId]||[];
             let remainC=tpd;
             recvSilosC.forEach(si=>{
@@ -19351,7 +19356,9 @@ function simulate(elements, connections, horizon, includeProposed=false){
         const minRunRules=getRules(mill.id,'min_run_duration',day);
         if(minRunRules.length) _minDays=Math.max(_minDays,parseFloat(minRunRules[0].structured.params?.min_days)||0);
         if(cur&&cur.pol.min_run_days!=null) _minDays=Math.max(_minDays,parseFloat(cur.pol.min_run_days)||0);
-        if(_minDays>0&&cur&&(s.runDays||0)<_minDays) filteredCandidates=[cur];
+        // the run must be the current product's and still running (yesterday on it)
+        const _h=r.millProductHistory[mill.id], _runLen=(_h.length&&_h[_h.length-1]===s.currentProduct)?(s.runLen||0):0;
+        if(_minDays>0&&cur&&_runLen>0&&_runLen<_minDays) filteredCandidates=[cur];
       }
 
       // ── RULE: product_switch_window ───────────────────
@@ -19387,6 +19394,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
       s.status=s.status==='rampup'?'rampup':'running';
       s.currentProduct=chosen.prodId;
       s.runDays++;
+      _runStep(chosen.prodId);
 
       // ── RULE: production_bounds ───────────────────────
       let actualRate=chosen.actualRate;
@@ -25819,7 +25827,6 @@ const SIM_RULEBOOK={
       ]},
     ],
     issues:[
-      'Finish mills: the minimum-run setting only works in a mill\'s first days of the simulation — the run counter is never reset when the product changes.',
       'Mill policies: a policy saved with "restart cover days = 0" keeps the mill off after a stop until its silo is empty, even below the critical floor.',
       'Finish mills: a silo between its target and 98% stays eligible, so with nothing more urgent the mill keeps filling it to 98%; the target only ranks products.',
       'Finish mills: two mills sharing a clinker silo both see its morning stock, so together they can draw more clinker than is there.',
