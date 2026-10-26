@@ -311,13 +311,6 @@ input.ac-ro:focus{outline:1px dashed var(--amber)!important;}
 .sof-kpis .good b{color:var(--green);}
 .sof-win{display:grid;grid-template-columns:auto auto auto auto;justify-content:start;gap:6px 12px;align-items:center;margin-top:8px;font-size:9px;}
 .sof-win label{display:flex;align-items:center;gap:6px;}
-.sof-det{margin:6px 0;border:1px solid var(--border2);padding:4px 8px;font-size:9px;}
-.sof-det summary{cursor:pointer;color:var(--text);}
-.sof-det ul{margin:6px 0 2px 16px;padding:0;line-height:1.6;}
-.sof-hdr-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px 10px;margin-top:6px;}
-.sof-hdr-grid label,.sof-rem{display:flex;flex-direction:column;gap:2px;font-size:8px;color:var(--text-dim);text-transform:uppercase;}
-.sof-rem{margin-top:6px;}
-.sof-rem textarea{text-transform:none;width:100%;box-sizing:border-box;}
 .sof-cats{display:flex;flex-wrap:wrap;gap:4px 16px;margin:8px 0;font-size:9px;}
 .sof-cats i{font-style:normal;color:var(--text-dim);}
 .sof-tbl-wrap{max-height:46vh;overflow:auto;border:1px solid var(--border2);}
@@ -24916,7 +24909,8 @@ function sofRender(){
       ${rec.read_by?`<span class="sof-dim">read by ${esc(rec.read_by)}${rec.read_at?' · '+esc(rec.read_at.slice(0,10)):''}</span>`:''}
       ${!ro?`<span class="tbl-act" onclick="document.getElementById('sof-file').click()">Replace PDF…</span>
       <input type="file" id="sof-file" accept="application/pdf,.pdf" style="display:none" onchange="sofPicked(this.files[0])">`:''}
-      ${!ro&&s.file&&getApiKey()&&!s.busy?`<span class="tbl-act" onclick="sofRead()">✦ Read again</span>`:''}
+      ${!ro&&(s.file||rec.pdf_file)&&getApiKey()&&!s.busy?`<span class="tbl-act" onclick="sofRead()">✦ ${rec.read_by==='manual'?'Read the PDF':'Read again'}</span>`:''}
+      ${!ro&&rec.read_by==='manual'&&rec.pdf_file&&!getApiKey()?`<span class="sof-warn">PDF not read — no Claude API key in this browser (Configuration → AI)</span>`:''}
       <span class="sof-status ${rec.status==='reviewed'?'ok':''}">${rec.status==='reviewed'?'✓ reviewed':'draft'}</span>
     </div>`;
   const busy=s.busy?`<div class="sof-busy"><span class="sof-spin"></span><span id="sof-busy-msg">${esc(s.msg||'Reading…')}</span> <span class="tbl-act" onclick="sofCancelRead()">Cancel</span></div>`:
@@ -24956,16 +24950,6 @@ function sofRender(){
         ${nStops>1?`<div class="sof-dim" style="margin-top:4px">Split vessel: laytime runs over the whole voyage — ${lt.nSofs} of ${nStops} ports have an SOF${lt.complete?'':'; the figure grows when the other port\'s SOF is added'}.</div>`:''}
       </div>`;
   }
-
-  // flags + remarks + particulars
-  const extra=rec?`
-    ${(rec.flags||[]).length?`<details class="sof-det" open><summary>⚑ ${rec.flags.length} point${rec.flags.length>1?'s':''} to check</summary><ul>${rec.flags.map(f=>`<li>${esc(f)}</li>`).join('')}</ul></details>`:''}
-    <details class="sof-det"><summary>Vessel particulars & Master's remarks</summary>
-      <div class="sof-hdr-grid">${[['vessel_name','Vessel'],['imo','IMO'],['voyage','Voyage'],['master','Master'],['flag','Flag'],['commodity','Commodity'],['load_port','Load port'],['discharge_port','Discharge port'],['berth','Berth'],['agency','Agency'],['agency_file','Agency file'],['cargo_t','Cargo (t)']]
-        .map(([k,l])=>`<label>${l}<input ${dis} value="${esc((rec.header||{})[k]||'')}" onchange="sofSetHdr('${k}',this.value)"></label>`).join('')}</div>
-      <label class="sof-rem">Remarks<textarea ${dis} rows="3" onchange="sofSetRec('remarks',this.value)">${esc(rec.remarks||'')}</textarea></label>
-      <div class="sof-dim" style="margin-top:6px">Milestones: ${(rec.milestones||[]).map(m=>`${esc(m.label||m.kind)} ${_sofFmt(m.at)}`).join(' · ')||'—'}</div>
-    </details>`:'';
 
   // category totals
   const totals=rec?(()=>{
@@ -25011,7 +24995,7 @@ function sofRender(){
     <div class="modal-hdr"><span class="modal-title">📄 Statement of Facts — ${title}</span><span class="modal-close" onclick="sofClose()">✕</span></div>
     <div class="sof-body">
       ${ro?`<div class="sof-warn" style="margin-bottom:8px">🔒 Read-only — you can view this SOF but not change it.</div>`:''}
-      ${src}${busy}${lay}${extra}${totals}${table}
+      ${src}${busy}${lay}${totals}${table}
     </div>
     <div class="modal-footer">
       ${rec&&!ro&&(DB.vessel_sof||[]).some(x=>x.id===rec.id)?`<button class="btn-sec" style="color:var(--red);border-color:rgba(var(--red-rgb),.5);margin-right:auto" onclick="sofDelete()">Delete SOF</button>`:''}
@@ -25034,7 +25018,6 @@ function sofSet(i, key, val){
   s.dirty=true; sofRender();
 }
 function sofSetRec(key, val){ const s=window._sof; if(!s||!s.rec||s.ro) return; s.rec[key]=val; s.dirty=true; sofRender(); }
-function sofSetHdr(key, val){ const s=window._sof; if(!s||!s.rec||s.ro) return; (s.rec.header=s.rec.header||{})[key]=val; s.dirty=true; if(key==='cargo_t') sofRender(); }
 function sofAddRow(){
   const s=window._sof; if(!s||!s.rec||s.ro) return;
   const per=s.rec.periods, last=per.slice().sort((a,b)=>_sofT(a.end)-_sofT(b.end)).pop();
@@ -25119,9 +25102,18 @@ function sofCancelRead(){ const s=window._sof; if(s&&s.abort) s.abort.abort(); }
 // reply schema-valid JSON; `fallbacks:"default"` lets the API re-run a declined request on its
 // recommended fallback model — if this browser's API access rejects that beta, retry without it.
 async function sofRead(){
-  const c=_sofCtx(); if(!c||!c.s.file||c.s.busy) return;
+  const c=_sofCtx(); if(!c||c.s.busy) return;
   const {s,v,st,berth}=c;
   if(!getApiKey()){ s.msg='No Claude API key in this browser — add one in Configuration → AI.'; sofRender(); return; }
+  if(!s.file){   // reopened later: the PDF is only in the SOF folder
+    if(!s.rec||!s.rec.pdf_file) return;
+    try{
+      const dir=await exportDir('sof', true);
+      if(!dir){ s.msg='Choose the SOF folder first (Configuration → Data Sources), or use Replace PDF….'; sofRender(); return; }
+      s.file=await (await dir.getFileHandle(s.rec.pdf_file)).getFile(); s.pdfSaved=true;
+    }catch(e){ s.msg=`<span style="color:var(--red)">${esc(s.rec.pdf_file)} is not in the SOF folder</span> — use Replace PDF… to pick it.`; sofRender(); return; }
+    if((s.rec.periods||[]).length>1&&!confirm('Read the PDF into the table? The periods typed in by hand are replaced.')){ return; }
+  }
   s.busy=true; s.msg='Sending the PDF to Claude…'; sofRender();
   const b64=await _sofB64(s.file);
   const ctx=`AVILA vessel call: ${v.name||'?'}; port / berth: ${_sofFacName(s.fac)||''} ${berth?.name||''}; planned arrival ${st.date||'?'}${st.label?' ('+st.label+' of a split vessel)':''}. Extract this Statement of Facts.`;
