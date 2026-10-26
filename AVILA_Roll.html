@@ -24910,7 +24910,7 @@ function sofRender(){
       ${!ro?`<span class="tbl-act" onclick="document.getElementById('sof-file').click()">Replace PDF…</span>
       <input type="file" id="sof-file" accept="application/pdf,.pdf" style="display:none" onchange="sofPicked(this.files[0])">`:''}
       ${!ro&&(s.file||rec.pdf_file)&&getApiKey()&&!s.busy?`<span class="tbl-act" onclick="sofRead()">✦ ${rec.read_by==='manual'?'Read the PDF':'Read again'}</span>`:''}
-      ${!ro&&rec.read_by==='manual'&&rec.pdf_file&&!getApiKey()?`<span class="sof-warn">PDF not read — no Claude API key in this browser (Configuration → AI)</span>`:''}
+      ${!ro&&rec.read_by==='manual'&&rec.pdf_file&&!getApiKey()?`<span class="sof-warn">PDF not read — no Claude API key in this browser (Configuration → AI → Use shared key file)</span>`:''}
       <span class="sof-status ${rec.status==='reviewed'?'ok':''}">${rec.status==='reviewed'?'✓ reviewed':'draft'}</span>
     </div>`;
   const busy=s.busy?`<div class="sof-busy"><span class="sof-spin"></span><span id="sof-busy-msg">${esc(s.msg||'Reading…')}</span> <span class="tbl-act" onclick="sofCancelRead()">Cancel</span></div>`:
@@ -30557,8 +30557,12 @@ function aiCfgPanelHTML(){
           <button class="btn-pri" onclick="aiSaveKey()" style="white-space:nowrap;padding:5px 12px">Set Key</button>
         </div>
         <div id="ai-key-set-row" style="display:${keySet?'flex':'none'};align-items:center;gap:10px">
-          <span style="font-family:var(--mono);font-size:9px;color:var(--green)">✓ API key configured</span>
+          <span style="font-family:var(--mono);font-size:9px;color:var(--green)">✓ API key configured${!localStorage.getItem('avila_api_key')&&localStorage.getItem('avila_api_key_shared')?` — from the shared file <b>${esc(localStorage.getItem('avila_api_key_shared_file')||'')}</b>`:''}</span>
           <button class="btn-sec" onclick="aiClearKey()" style="padding:3px 8px;font-size:8px">Clear</button>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <button class="btn-sec" onclick="aiPickSharedKey()" style="padding:3px 8px;font-size:8px">📄 Use shared key file…</button>
+          <span style="font-family:var(--mono);font-size:8px;color:var(--text-dim)">Pick the team's key .txt on SharePoint once — when the key there is changed, the app picks up the new one.</span>
         </div>
       </div>`)}
     ${row('Model',`
@@ -30608,10 +30612,40 @@ function aiSaveKey(){
 
 function aiClearKey(){
   localStorage.removeItem('avila_api_key');
+  localStorage.removeItem('avila_api_key_shared'); localStorage.removeItem('avila_api_key_shared_file');
+  scDeleteHistoryDirHandle('__ai_key_file__');
   document.getElementById('ai-key-input-row').style.display='flex';
   document.getElementById('ai-key-set-row').style.display='none';
   updateKeyUI();
 }
+
+// ── Shared key file ── the team keeps one Claude API key in a .txt on SharePoint; each browser
+// picks it once and keeps the file handle, so a rotated key is picked up without retyping.
+function _aiKeyFromText(t){ const m=String(t||'').match(/sk-ant-[A-Za-z0-9_\-]+/); return m?m[0]:''; }
+async function aiPickSharedKey(){
+  if(!window.showOpenFilePicker){ alert('This browser cannot open files directly — use Chrome or Edge.'); return; }
+  let h; try{ [h]=await window.showOpenFilePicker({id:'avila-ai-key', types:[{description:'Text file', accept:{'text/plain':['.txt']}}]}); }catch(e){ return; }
+  const key=_aiKeyFromText(await (await h.getFile()).text());
+  if(!key){ alert(`No Claude API key (sk-ant-…) found in ${h.name}.`); return; }
+  localStorage.setItem('avila_api_key_shared',key); localStorage.setItem('avila_api_key_shared_file',h.name);
+  localStorage.removeItem('avila_api_key');   // the shared file is now this browser's key
+  await scSaveHistoryDirHandle('__ai_key_file__',h);
+  renderCfgPanel('ai'); updateKeyUI();
+  const el=document.getElementById('ai-test-result'); if(el){ el.style.color='var(--green)'; el.textContent='Key read from '+h.name+'.'; }
+}
+// Silent: re-reads the file when this browser still has permission (no prompt outside a click).
+async function aiRefreshSharedKey(prompt){
+  try{
+    const h=await scLoadHistoryDirHandle('__ai_key_file__'); if(!h) return false;
+    let perm=await h.queryPermission({mode:'read'});
+    if(perm!=='granted'&&prompt) perm=await h.requestPermission({mode:'read'});
+    if(perm!=='granted') return false;
+    const key=_aiKeyFromText(await (await h.getFile()).text());
+    if(key&&key!==localStorage.getItem('avila_api_key_shared')){ localStorage.setItem('avila_api_key_shared',key); updateKeyUI(); }
+    return !!key;
+  }catch(e){ return false; }
+}
+setTimeout(()=>aiRefreshSharedKey(false), 2000);
 
 function aiSetModel(m){
   localStorage.setItem('avila_ai_model',m);
@@ -31719,7 +31753,8 @@ let chatHistory=[];
 let chatTurnStarts=[];
 const CHAT_MAX_TURNS=8;
 
-function getApiKey(){return localStorage.getItem('avila_api_key')||'';}
+// A key typed into this browser wins; otherwise the team's shared key file (aiPickSharedKey).
+function getApiKey(){return localStorage.getItem('avila_api_key')||localStorage.getItem('avila_api_key_shared')||'';}
 
 // Single entry point for every Anthropic API call (rule interpreter, settings
 // connection test, agent chat). Returns the parsed response body — callers
