@@ -35292,6 +35292,7 @@ function _scApplyTopologyTables(payload){
 function _plSourceCardHTML(s){
   plSrcEnsure();
   const srcId=S.simCfg.plan_source_scenario_id, srcName=S.simCfg.plan_source_name||(srcId&&SC.meta[srcId]&&SC.meta[srcId].name)||'(not linked)';
+  const missing=!srcId||!SC.meta[srcId];   // the link is by scenario id: nothing to read until this browser's list has it
   const rep=s.open_report||null;
   const stale=PL._srcStale===true?'<span class="pl-flag bad">the trend scenario changed since this update</span>':PL._srcStale===false?'<span class="pl-flag ok">up to date with the trend</span>':'';
   return _plCard('pl-source','From the trend scenario','topology, settings and the 31 Dec closing state come from '+_plEsc(srcName), null,
@@ -35303,16 +35304,64 @@ function _plSourceCardHTML(s){
      </div>
      ${rep&&rep.warnings&&rep.warnings.length?`<div class="pl-muted" style="margin-top:6px">⚠ ${rep.warnings.map(_plEsc).join('<br>⚠ ')}</div>`:''}
      <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-       <button class="pl-btn pri" onclick="planUpdateFromTrend()" ${srcId?'':'disabled'}>Update from ${_plEsc(srcName)}…</button>${stale}
+       <button class="pl-btn pri" onclick="planUpdateFromTrend()" ${missing?'disabled':''}>Update from ${_plEsc(srcName)}…</button>${stale}
        <details style="display:inline-block"><summary class="pl-muted" style="cursor:pointer">only one of the two…</summary>
-         <button class="pl-btn" onclick="planRefreshTopology()" ${srcId?'':'disabled'}>Topology only…</button>
-         <button class="pl-btn" onclick="planRefreshOpeningState()" ${srcId?'':'disabled'}>Closing state only…</button></details>
-     </div>`);
+         <button class="pl-btn" onclick="planRefreshTopology()" ${missing?'disabled':''}>Topology only…</button>
+         <button class="pl-btn" onclick="planRefreshOpeningState()" ${missing?'disabled':''}>Closing state only…</button></details>
+     </div>
+     ${missing?_plSourceRelinkHTML(srcId, srcName):''}`);
+}
+// The stored link is a scenario id from the browser that created the budget. In another browser,
+// or after the trend file was removed and re-added to the list (new id), nothing resolves and the
+// update buttons could do nothing. Offer to point the link at a scenario in this list, or at the file.
+function _plSourceRelinkHTML(srcId, srcName){
+  const list=Object.values(SC.meta||{}).filter(m=>m&&m.id!==SC.activeId).sort((a,b)=>String(a.name||'').localeCompare(String(b.name||'')));
+  const want=String(srcName||'').trim().toLowerCase();
+  const match=want?list.find(m=>String(m.name||'').trim().toLowerCase()===want)||null:null;
+  const opts=list.map(m=>`<option value="${_plEsc(m.id)}" ${match&&match.id===m.id?'selected':''}>${_plEsc(m.name)}${m.fileName?' · '+_plEsc(m.fileName):''}</option>`).join('');
+  return `<div class="pl-muted" style="margin-top:8px">${srcId?'The link is stored by scenario id and this browser has no scenario with that id: the trend was added here under a new id, or never added.':'No trend scenario is linked to this budget.'}${match?' A scenario named <b>'+_plEsc(match.name)+'</b> is in this browser\'s list.':''}</div>
+    <div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      ${list.length?`<select class="fi" id="pl-relink" style="width:280px;display:inline-block"><option value="">— scenario in this browser —</option>${opts}</select><button class="pl-btn pri" onclick="planRelinkSource()">Re-link</button>`:'<span class="pl-muted">no other scenario in this browser\'s list</span>'}
+      <button class="pl-btn" onclick="planRelinkPickFile()">Pick the trend file…</button>
+    </div>`;
+}
+async function planRelinkSource(id){
+  if(!scIsPlanning()){ statMsg('Only in a Planning scenario'); return; }
+  id=id||(document.getElementById('pl-relink')||{}).value||''; const m=id&&SC.meta[id]; if(!m){ statMsg('Pick a scenario first'); return; }
+  if(id===SC.activeId){ alert('A budget scenario cannot be linked to itself — pick the trend scenario.'); return; }
+  const old=S.simCfg.plan_source_scenario_id; if(old&&SC._peek) delete SC._peek[old];
+  S.simCfg.plan_source_scenario_id=id; S.simCfg.plan_source_name=m.name;
+  PL._srcStale=null; PL._srcAt=0; PL._srcBusy=false;
+  autoSave(); await scManualSave(); planRender();
+  statMsg(`Linked to ${m.name} ✓ — now press "Update from ${m.name}…"`);
+}
+// Register the trend's file in this browser's scenario list WITHOUT opening it (the budget stays active), then link.
+async function planRelinkPickFile(){
+  if(!scIsPlanning()){ statMsg('Only in a Planning scenario'); return; }
+  if(!window.showOpenFilePicker){ alert('This browser cannot open files directly — use Chrome or Edge.'); return; }
+  let handle;
+  try{ [handle]=await window.showOpenFilePicker({types:[{description:'AVILA scenario',accept:{'application/json':['.json']}}]}); }
+  catch(e){ if((e&&e.name)!=='AbortError'){ console.warn('relink picker', e); statMsg('⚠ Could not open the file dialog — '+(e&&e.message||'unknown error')); } return; }
+  if(await _scLooksLikeSalesFile(handle)){ alert(handle.name+' is an Avila Sales file, not a scenario.'); return; }
+  const owner=await scFindOwner(handle, null); let id=owner?owner.id:null;
+  if(id){ if(!SC.handles[id]){ SC.handles[id]=handle; await scSaveHandle(id,handle); } SC.meta[id].fileName=handle.name; }
+  else { id='sc_'+Date.now().toString(36); SC.meta[id]={ id, name:scNameFromHandle(handle), color:scPickColor(), fileName:handle.name, lastSaved:null, lastOpened:null }; SC.handles[id]=handle; await scSaveHandle(id,handle); }
+  if(id===SC.activeId){ alert('That is this budget scenario\'s own file — pick the trend scenario\'s file.'); return; }
+  scSaveMeta(); if(typeof scRenderDropdown==='function') scRenderDropdown();
+  await planRelinkSource(id);
+}
+// Every read of the trend used to fail with a 2.5-second status-bar line that was easy to miss.
+function _plSrcFail(srcId){
+  const name=S.simCfg.plan_source_name||'the trend scenario';
+  const msg=srcId&&SC.meta[srcId]
+    ?`Could not read the trend scenario file for ${name}.\n\nChrome has lost, or has not yet granted, access to that file. Open ${name} once from the scenario menu (📂), come back to this budget scenario and try again — or use "Pick the trend file…" on the "From the trend scenario" card.`
+    :`${name} is not in this browser's scenario list (the link is stored by scenario id).\n\nUse "Re-link" or "Pick the trend file…" on the "From the trend scenario" card to point this budget at the trend scenario, then update.`;
+  statMsg('Could not read the trend scenario file'); alert(msg);
 }
 async function planRefreshTopology(){
   if(!scIsPlanning()){ statMsg('Only in a Planning scenario'); return; }
   const srcId=S.simCfg.plan_source_scenario_id; const pk=await scPeekScenario(srcId,{prompt:true});
-  if(!pk){ statMsg('Could not read the source scenario file (is it in this browser\'s scenario list?)'); return; }
+  if(!pk){ _plSrcFail(srcId); return; }
   const diff=_tsTopoDiff({DB}, pk.payload); const byT={}; diff.forEach(c=>{ byT[c.t]=(byT[c.t]||0)+1; });
   const lines=Object.keys(byT).map(t=>`${byT[t]} ${t}`).join(', ')||'no differences';
   if(!diff.length){ statMsg('Topology already matches '+pk.name); return; }
@@ -35440,7 +35489,7 @@ async function planCreateScenario(){
 async function planRefreshOpeningState(){
   if(!scIsPlanning()){ statMsg('Only in a Planning scenario'); return; }
   const srcId=S.simCfg.plan_source_scenario_id; const pk=await scPeekScenario(srcId,{prompt:true});
-  if(!pk){ statMsg('Could not read the source scenario file'); return; }
+  if(!pk){ _plSrcFail(srcId); return; }
   const r=pk.payload.simResults, startDate=S.simCfg.start_date, srcCfg=pk.payload.simCfg||{};
   if(!r){ statMsg(pk.name+' has no saved simulation results — run and save it first'); return; }
   const save=S.simCfg.start_date; S.simCfg.start_date=srcCfg.start_date||save;   // _plOpenCheck reads S.simCfg.start_date as the SOURCE start
@@ -36317,7 +36366,7 @@ function _plLoadCardHTML(s){
 async function planUpdateFromTrend(){
   if(!scIsPlanning()){ statMsg('Only in a Planning scenario'); return; }
   const srcId=S.simCfg.plan_source_scenario_id; const pk=await scPeekScenario(srcId,{prompt:true});
-  if(!pk){ statMsg('Could not read the trend scenario file (is it in this browser\'s scenario list?)'); return; }
+  if(!pk){ _plSrcFail(srcId); return; }
   const r=pk.payload.simResults, startDate=S.simCfg.start_date, srcCfg=pk.payload.simCfg||{};
   if(!r){ statMsg(pk.name+' has no saved simulation results — run and save it first'); return; }
   const save=S.simCfg.start_date; S.simCfg.start_date=srcCfg.start_date||save; const chk=_plOpenCheck(r, startDate); S.simCfg.start_date=save;
