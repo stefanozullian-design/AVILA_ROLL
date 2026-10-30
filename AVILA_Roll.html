@@ -22449,7 +22449,7 @@ function _pushBIBuildTables(){
     (DB.plan_lines||[]).forEach(l=>{
       const e=l.kind==='LOAD'?xlmapFindDp(l.dp_name):null; const t={dp_name:e?e.name:(l.dp_name||''), element_id:e?e.id:''};
       (l.months||[]).forEach((x,m)=>{ const bt=+x||0; if(!bt) return;
-        fact_plan_line.push(stamp({version_id:l.version_id, version_label:_vLabel[l.version_id]||'', kind:l.src==='EXT'?'EXT':l.kind, family:l.family||'', month:`${_y}-${String(m+1).padStart(2,'0')}-01`,
+        fact_plan_line.push(stamp({version_id:l.version_id, version_label:_vLabel[l.version_id]||'', kind:l.src==='EXT'||l.src==='INT'?l.src:l.kind, family:l.family||'', month:`${_y}-${String(m+1).padStart(2,'0')}-01`,
           sold_to:l.sold_to||'', sold_to_name:l.sold_to_name||'', ship_to:l.ship_to||'', ship_to_name:l.ship_to_name||'', rmx_plant:l.rmx_plant||'', rmx_name:l.rmx_name||'', district:l.district||'',
           plant:l.plant||'', material:l.material||'', material_desc:l.material_desc||'', incoterm:l.incoterm||'',
           demand_point_id:t.element_id||'', dp_name:t.dp_name||'', facility_id:t.element_id?(elFac[t.element_id]||''):'', product_id:t.element_id?(elPrimary[t.element_id]||''):'', channel:t.element_id?(elChan[t.element_id]||''):'',
@@ -35068,7 +35068,8 @@ async function scRestoreTopologySnapshot(id, name){
 // ═══════════════════════════════════════════════════════════════════════════
 function SIMCFG_DEFAULTS(){ return {start_date:new Date()._ymd(), horizon:90, mode:'planning', conflict_resolution:'rolling_avg', autoPropose:true}; }
 const PL={ ui:{open:{}, tab:null}, hist:null, bgt:null, stage:{}, tr:{}, busy:false };
-const PL_DEFAULT_SETTINGS=()=>({ id:'default', kind:'budget', budget_year:new Date().getFullYear()+1, sat_pct:25, ships_sat:true, updated_at:null, updated_by:null });
+const PL_DEFAULT_SETTINGS=()=>({ id:'default', kind:'budget', budget_year:new Date().getFullYear()+1, sat_pct:25, ships_sat:true,
+  mix_months:12, mix_min_share_pct:5, mix_min_month_t:50, mix_recent_months:3, mix_recent_weight:2, plant_map:'4009=1136, 4089=4090', updated_at:null, updated_by:null });
 function plSettings(){
   if(!Array.isArray(DB.plan_settings)) DB.plan_settings=[];
   let s=DB.plan_settings.find(r=>r.id==='default');
@@ -35158,10 +35159,15 @@ function plIsPurchasedDp(el){
 // Planning scenario view: the trend link, load, versions (master files), generation, settings.
 function _plPlanningPanelHTML(s){
   if(PL.ui.open['pl-settings']===undefined) PL.ui.open['pl-settings']=false;
-  return _plSourceCardHTML(s)+_plLoadCardHTML(s)+_plVersionsCardHTML(s)+_plGenerateCardHTML(s)+_plCard('pl-settings','Settings','budget year and how each month is spread over its days', null,
+  return _plSourceCardHTML(s)+_plLoadCardHTML(s)+_plVersionsCardHTML(s)+_plGenerateCardHTML(s)+_plCard('pl-settings','Settings','budget year, how each month is spread over its days, how the internal budget is split', null,
     `<div class="pl-kv">
       <b>Budget year</b><input class="fi" type="number" id="pls-year" value="${s.budget_year}" style="width:90px">
       <b>Saturday %</b><span><input class="fi" type="number" id="pls-sat" value="${s.sat_pct}" min="0" max="100" style="width:70px;display:inline-block"> <label><input type="checkbox" id="pls-ships-sat" ${s.ships_sat?'checked':''}> ships on Saturdays</label></span>
+      <b>Internal split: months of history</b><input class="fi" type="number" id="pls-mixm" value="${s.mix_months}" min="3" max="24" style="width:70px">
+      <b>A point counts in a month from (%)</b><input class="fi" type="number" id="pls-mixs" value="${s.mix_min_share_pct}" min="0" max="50" style="width:70px">
+      <b>Months under (ST) are ignored</b><input class="fi" type="number" id="pls-mixt" value="${s.mix_min_month_t}" min="0" style="width:70px">
+      <b>Recent months · their weight</b><span><input class="fi" type="number" id="pls-mixr" value="${s.mix_recent_months}" min="0" max="12" style="width:60px;display:inline-block"> × <input class="fi" type="number" id="pls-mixw" value="${s.mix_recent_weight}" min="1" max="5" style="width:60px;display:inline-block"></span>
+      <b>Budget plant # → sold-to #</b><span><input class="fi" type="text" id="pls-pmap" value="${_plEsc(s.plant_map||'')}" style="width:260px"> <span class="pl-muted">only where they differ (Leesburg 4009 ships as 1136, Naples North Block 1 4089 as 4090)</span></span>
      </div>
      <div style="margin-top:8px;display:flex;gap:8px;align-items:center"><button class="pl-btn pri" onclick="plSaveSettings()">Save settings</button>
        <span class="pl-muted">${s.updated_at?('saved '+s.updated_at.slice(0,16).replace('T',' ')+' by '+_plEsc(s.updated_by)):'defaults'}</span></div>`);
@@ -35171,6 +35177,9 @@ function plSaveSettings(){
   s.budget_year=parseInt(g('pls-year')?.value)||s.budget_year;
   s.sat_pct=Math.max(0,Math.min(100,parseFloat(g('pls-sat')?.value)||0));
   s.ships_sat=!!g('pls-ships-sat')?.checked;
+  const n=(id,d,lo,hi)=>{ const v=parseFloat(g(id)?.value); return isFinite(v)?Math.max(lo,Math.min(hi,v)):d; };
+  s.mix_months=Math.round(n('pls-mixm',12,3,24)); s.mix_min_share_pct=n('pls-mixs',5,0,50); s.mix_min_month_t=n('pls-mixt',50,0,1e6); s.mix_recent_months=Math.round(n('pls-mixr',3,0,12)); s.mix_recent_weight=n('pls-mixw',2,1,5);
+  s.plant_map=g('pls-pmap')?.value??s.plant_map;
   s.updated_at=new Date().toISOString(); s.updated_by=_plWho();
   autoSave(); planRender(); statMsg('Budget settings saved');
 }
@@ -35488,14 +35497,15 @@ function plTranslateLine(line){
   return {dp_name:name||'', element_id:el?el.id:null, mapped:!!(t.mapped&&el), missing, inactive:!!(el&&el.is_active===false), purchased:!!(el&&plIsPurchasedDp(el)), cls, action:t.action, source:t.parts&&t.parts.source, product:t.parts&&t.parts.product, pres:t.parts&&t.parts.presentation};
 }
 function plVersionStats(v){
-  const st={n:0, fy:0, fam:{}, ext:0, file:0, legacy:0};
+  const st={n:0, fy:0, fam:{}, ext:0, int:0, file:0, legacy:0};
   plVersionLines(v.id).forEach(l=>{ st.n++; st.fy+=l.fy||0; st.fam[l.family||'cement']=(st.fam[l.family||'cement']||0)+(l.fy||0);
-    if(l.kind!=='LOAD') st.legacy++; else if(l.src==='EXT') st.ext+=l.fy||0; else st.file+=l.fy||0; });
+    if(l.kind!=='LOAD') st.legacy++; else if(l.src==='EXT') st.ext+=l.fy||0; else if(l.src==='INT') st.int+=l.fy||0; else st.file+=l.fy||0; });
   return st;
 }
 // One readable label for a version line (an External (FL) customer row, or a demand point of a table).
 function _plLineLabel(l){
   if(l.src==='EXT'||l.kind==='EXT') return `${l.sold_to_name||l.sold_to||'(prospect)'} → ${l.ship_to_name||l.ship_to||''} · ${l.plant_name||l.plant||''} · ${l.material_desc||l.material||''}`;
+  if(l.src==='INT') return `${l.family} · ${l.rmx_name||l.rmx_plant} (plant ${l.rmx_plant}) → ${l.dp_name}`;
   if(l.kind==='INT') return `${l.family} · ${l.rmx_name||l.rmx_plant}`;
   return `${l.family||''} · ${l.dp_name||''}`;
 }
@@ -35508,7 +35518,7 @@ function plVersionDiff(aId, bId){
 }
 function plShowDiff(){ const a=document.getElementById('plv-a')?.value, b=document.getElementById('plv-b')?.value; if(!a||!b||a===b){ statMsg('Pick two different versions'); return; } PL.ui.diff={a,b}; planRender(); }
 // ── Version comparison report: files, months, facilities, demand points, lines ──
-function _plBucket(l){ return l.kind!=='LOAD'?'Retired process':(l.src==='EXT'?'External (FL)':'Demand-point table')+' · '+(l.family||'cement'); }
+function _plBucket(l){ return l.kind!=='LOAD'?'Retired process':(({EXT:'External (FL)', INT:'Internal (RMX)'})[l.src]||'Demand-point table')+' · '+(l.family||'cement'); }
 function _plSumBy(L, f){ const o={}; L.forEach(l=>{ const k=f(l); o[k]=(o[k]||0)+(l.fy||0); }); return o; }
 function plVersionReport(aId, bId){
   const A=plVersions().find(v=>v.id===aId), B=plVersions().find(v=>v.id===bId); if(!A||!B) throw new Error('version not found');
@@ -35786,11 +35796,147 @@ function _plImportCardHTML(s){
     :`<div class="pl-muted">Connect a Planning scenario with a generated version above.</div>${hist}`);
 }
 
+// ═══ Internal budget split: the RMX workbook (each internal plant's monthly cement / slag / fly-ash need, in K ST) × that plant's
+// demand-point mix. The mix is the BGT page's (and pbi/budget/mix_budget_merge.py's): per sold-to × family, the last N complete months of
+// internal shipments (/INT, and Lockhart's own /LKHT) from Avila_Shipments_Detail.xlsx; a month's combination = the points with at least
+// the minimum share of its tonnes (months under the minimum tonnes ignored); the most frequent combination wins (the recent months count
+// more; ties → tonnes); the split = tonnes pooled over the months that used it. Budget plant # = sold-to #, except Settings' plant map.
+function _plRmxParse(buf, name){
+  const year=plSettings().budget_year; const want={cem_use:'CEM', slag_use:'SLG', fa_use:'ASH'}; const wb=XLSX.read(buf,{type:'array',dense:true});
+  const rows=[], perFam={}, warnings=[];
+  Object.keys(want).forEach(key=>{
+    const fam=want[key]; const sh=wb.SheetNames.find(x=>x.trim().toLowerCase()===key); if(!sh){ warnings.push('sheet '+key+' not found'); return; }
+    const aoa=XLSX.utils.sheet_to_json(wb.Sheets[sh],{header:1,raw:true,defval:''});
+    const h0=aoa.findIndex((r,i)=>i<30&&r.some(c=>/^plant\s*#?$/i.test(_plStr(c)))&&r.some(c=>/^region$/i.test(_plStr(c))));
+    if(h0<0){ warnings.push(sh+': header row with "Plant #" and "Region" not found'); return; }
+    const hdr=_plHdrIndex(aoa[h0]); const cRegion=_plPick(hdr,'region'), cDistrict=_plPick(hdr,'district'), cPlant=_plPick(hdr,/^plant\s*#?$/), cName=_plPick(hdr,'plant name');
+    let mc=[]; for(let i=h0;i>=Math.max(0,h0-2)&&mc.length<12;i--) mc=_plMonthCols(aoa[i], year);   // the months sit on the row above the "Bdgt" row
+    if(mc.length!==12){ warnings.push(sh+': '+mc.length+' month columns found'); return; }
+    const unitCell=aoa.slice(Math.max(0,h0-4),h0+1).flat().map(_plStr).find(c=>/volume\s*\(/i.test(c));
+    if(unitCell&&!/\(\s*k\s*st\s*\)/i.test(unitCell)) warnings.push(sh+' says "'+unitCell+'": expected "(K ST)"; values were still multiplied by 1,000');
+    let region='', district='', n=0, t=0;
+    aoa.slice(h0+1).forEach(r=>{
+      if(_plStr(r[cRegion])) region=_plStr(r[cRegion]); if(_plStr(r[cDistrict])) district=_plStr(r[cDistrict]);
+      const plant=_plCode(r[cPlant]), pname=_plStr(r[cName]); if(!/^\d{3,5}$/.test(plant)||!pname) return;      // region / district subtotal rows have no plant #
+      const months=PL_MONTHS.map((_,i)=>{ const c=mc.find(x=>x.m===i+1); return c?_plNum(r[c.i])*1000:0; });   // thousands of short tons → short tons
+      const fy=months.reduce((a,b)=>a+b,0); if(!(fy>0)) return;
+      rows.push({fam, plant, pname, region, district, months, fy}); n++; t+=fy;
+    });
+    perFam[fam]={plants:n, fy:Math.round(t), sheet:sh};
+  });
+  if(!rows.length) throw new Error('no plant rows in sheets Cem_Use / Slag_Use / FA_Use of '+name+(warnings.length?' ('+warnings.join('; ')+')':''));
+  return {name, rows, perFam, warnings, fy:Math.round(rows.reduce((a,r)=>a+r.fy,0))};
+}
+// Shipment history (sheet SalesDetailed) → the internal rows only, compact: [sold-to, point name, day, tonnes, detail rows].
+function _plHistParse(buf, name){
+  const wb=XLSX.read(buf,{type:'array',dense:true}); const sn=wb.SheetNames.find(n=>/salesdetailed/i.test(n))||wb.SheetNames[0];
+  const A=XLSX.utils.sheet_to_json(wb.Sheets[sn],{header:1,raw:true,defval:''});
+  const h0=A.findIndex((r,i)=>i<10&&r.some(c=>/^inv_roll_name$/i.test(_plStr(c)))); if(h0<0) throw new Error(name+' has no INV_ROLL_NAME column (expected Avila_Shipments_Detail.xlsx)');
+  const hdr=_plHdrIndex(A[h0]); const cS=_plPick(hdr,'sold-to','sold to'), cSn=_plPick(hdr,'sold-to name','sold to name'), cD=_plPick(hdr,'delivery date'), cQ=_plPick(hdr,'report qty'), cN=_plPick(hdr,'inv_roll_name');
+  if(cS<0||cD<0||cQ<0) throw new Error(name+': missing Sold-To / Delivery Date / Report Qty');
+  const agg=new Map(), nm=new Map(); let dmin='', dmax='';
+  for(let i=h0+1;i<A.length;i++){ const r=A[i]; const full=_plStr(r[cN]); if(!/\/(INT|LKHT)$/.test(full)) continue; const q=_plNum(r[cQ]); if(!(q>0)) continue; const ds=_dsSalesYmd(r[cD]); if(!ds) continue;
+    const code=_plCode(r[cS]); const k=code+'\u001f'+full+'\u001f'+ds; const a=agg.get(k); if(a){ a[3]+=q; a[4]++; } else agg.set(k,[code, full, ds, q, 1]);
+    if(cSn>=0){ const nk=code+'\u001f'+_plStr(r[cSn]); nm.set(nk,(nm.get(nk)||0)+1); }
+    if(ds>dmax) dmax=ds; if(!dmin||ds<dmin) dmin=ds; }
+  const names={}; [...nm.entries()].sort((a,b)=>b[1]-a[1]).forEach(([k])=>{ const [c,n]=k.split('\u001f'); if(!(c in names)) names[c]=n; });
+  return {file:name, rows:[...agg.values()], names, dateMin:dmin, dateMax:dmax};
+}
+// Avila_Mix_Substitutions.xlsx (sheet Substitutions: from_dp, to_dp, until_date) — the same file the BGT page reads.
+function _plSubsParse(buf){
+  const wb=XLSX.read(buf,{type:'array'}); const sh=wb.Sheets['Substitutions']||wb.Sheets[wb.SheetNames[0]];
+  return XLSX.utils.sheet_to_json(sh,{header:1,raw:true,defval:''}).slice(1).filter(r=>_plStr(r[0])&&_plStr(r[1])).map(r=>({from:_plStr(r[0]).toUpperCase(), to:_plStr(r[1]), until:r[2]===''||r[2]==null?null:_dsSalesYmd(r[2])}));
+}
+// SOURCE/DEM/PRODUCT/PACK/CHANNEL → "SOURCE/PRODUCT (PACK)", the label the mix is kept on (a product may hold "/", e.g. MIA_I/II).
+function _plDpLabel(n){ const p=String(n).split('/'), c=p.length; const prod=c>=5?p.slice(2,c-2).join('/'):(c>2?p[2]:''); const pack=c>=5?p[c-2]:'BLK'; return p[0]+'/'+prod+(pack!=='BLK'?` (${pack})`:''); }
+function _plMixFam(n){ const p=String(n).split('/'); const prod=(p.length>=5?p.slice(2,p.length-2).join('/'):(p.length>2?p[2]:'')).toUpperCase(); return prod.includes('ASH')?'ASH':prod.includes('SLG')?'SLG':'CEM'; }
+function _plYmShift(ym,k){ const [y,m]=ym.split('-').map(Number); const d=new Date(y,m-1+k,1); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }   // calendar step (no ms arithmetic)
+function plMixCompute(hist, subs, s){
+  const P={months:s.mix_months||12, minShare:(s.mix_min_share_pct??5)/100, minT:s.mix_min_month_t??50, recentM:s.mix_recent_months??3, recentW:s.mix_recent_weight||2};
+  // the full point name behind each label: the most used one (an /INT name first), and per sold-to
+  const cLab=new Map(), cSold=new Map();
+  hist.rows.forEach(([code,full,,,n])=>{ const l=_plDpLabel(full); const k1=l+'\u001f'+full; cLab.set(k1,(cLab.get(k1)||0)+n); const k2=code+'\u001f'+l+'\u001f'+full; cSold.set(k2,(cSold.get(k2)||0)+n); });
+  const fullOf={}; [...cLab.entries()].sort((a,b)=>((a[0].endsWith('/INT')?0:1)-(b[0].endsWith('/INT')?0:1))||b[1]-a[1]).forEach(([k])=>{ const [l,f]=k.split('\u001f'); if(!(l in fullOf)) fullOf[l]=f; });
+  const fullSold={}; [...cSold.entries()].sort((a,b)=>b[1]-a[1]).forEach(([k])=>{ const [c,l,f]=k.split('\u001f'); const kk=c+'\u001f'+l; if(!(kk in fullSold)) fullSold[kk]=f; });
+  // the last complete month: the last shipment day's month when that day is within 3 days of the month end
+  const last=hist.dateMax; const [ly,lm,ld]=last.split('-').map(Number); const lastM=new Date(ly,lm,0).getDate()-ld<=3?last.slice(0,7):_plYmShift(last.slice(0,7),-1); const firstM=_plYmShift(lastM,-(P.months-1));
+  const recentFrom=_plYmShift(lastM,-(P.recentM-1));
+  const sub=(l,ds)=>{ const u=l.toUpperCase(); const x=(subs||[]).find(z=>z.from===u&&(!z.until||ds<=z.until)); return x?x.to:l; };
+  const g=new Map();      // sold-to × family → month → point → tonnes
+  hist.rows.forEach(([code,full,ds,q])=>{ const ym=ds.slice(0,7); if(ym<firstM||ym>lastM) return; const k=code+'\u001f'+_plMixFam(full), dp=sub(_plDpLabel(full), ds);
+    let o=g.get(k); if(!o){ o=new Map(); g.set(k,o); } let mm=o.get(ym); if(!mm){ mm=new Map(); o.set(ym,mm); } mm.set(dp,(mm.get(dp)||0)+q); });
+  const mix=new Map();
+  g.forEach((byM,k)=>{ const [code,fam]=k.split('\u001f');
+    const months=[]; [...byM.keys()].sort().forEach(ym=>{ const mm=byM.get(ym); const tot=[...mm.values()].reduce((a,b)=>a+b,0); if(tot<P.minT) return;
+      const combo=[...mm.entries()].filter(([,q])=>q/tot>=P.minShare).map(([d])=>d).sort(); months.push({ym, mm, tot, key:combo.join('\u0002'), combo}); });
+    if(!months.length) return;
+    const cnt=new Map(); let W=0;
+    months.forEach(m=>{ const w=m.ym>=recentFrom?P.recentW:1; const c=cnt.get(m.key)||{combo:m.combo, key:m.key, n:0, w:0, t:0}; c.n++; c.w+=w; c.t+=m.tot; cnt.set(m.key,c); W+=w; });
+    const ranked=[...cnt.values()].sort((a,b)=>(b.w-a.w)||(b.t-a.t)); const top=ranked[0], second=ranked[1]?ranked[1].w:0;
+    const N=months.length, freq=top.w/W, lead=freq-second/W;
+    const pooled={}; months.forEach(m=>{ if(m.key!==top.key) return; top.combo.forEach(d=>{ pooled[d]=(pooled[d]||0)+(m.mm.get(d)||0); }); });
+    const ps=Object.values(pooled).reduce((a,b)=>a+b,0); const shares={}; Object.keys(pooled).forEach(d=>{ shares[d]=pooled[d]/ps; });
+    const rec={}; let rt=0; months.forEach(m=>{ if(m.ym<recentFrom) return; m.mm.forEach((q,d)=>{ rec[d]=(rec[d]||0)+q; rt+=q; }); }); Object.keys(rec).forEach(d=>{ rec[d]=rt?rec[d]/rt:0; });
+    mix.set(k,{code, fam, name:hist.names[code]||'', read:N<4?'Thin data':freq>=.6?'Stable':(freq>=.4&&lead>=.1)?'Likely':'Mixed', n:top.n, N, shares, recent:rec});
+  });
+  return {mix, fullOf, fullSold, lastM, firstM};
+}
+function _plPlantMap(s){ const o={}; String(s.plant_map||'').split(/[,;\n]+/).forEach(p=>{ const m=p.match(/(\d+)\s*[=→>:\-]+\s*(\d+)/); if(m) o[m[1]]=m[2]; }); return o; }
+// Each RMX plant × family → its points, by the plant's mix. A plant with no internal shipments in the window is left as one row to place by hand.
+function plSplitInternal(rmx, hist, subs, s){
+  const M=plMixCompute(hist, subs, s), map=_plPlantMap(s); const rows=[], watch=[], notAlloc=[];
+  const full=(code,dp)=>M.fullSold[code+'\u001f'+dp]||M.fullOf[dp]||dp;
+  rmx.rows.forEach(b=>{ const code=map[b.plant]||b.plant; const m=M.mix.get(code+'\u001f'+b.fam); const base={rmx_plant:b.plant, rmx_name:b.pname, district:b.district};
+    if(!m){ notAlloc.push(b); rows.push({dp:`? ${b.pname} (plant ${b.plant}) · ${PL_FAM_OF_CODE[b.fam]}`, fam:b.fam, months:b.months.slice(), key:['INT',b.plant,b.fam,'?'].join('|'),
+      why:`no internal shipments for this plant and family in ${M.firstM} → ${M.lastM}: pick the demand point, or Skip`, ext:base}); return; }
+    Object.entries(m.shares).sort((a,b)=>b[1]-a[1]).forEach(([dp,sh])=>{ const f=full(code,dp);
+      rows.push({dp:f, fam:b.fam, months:b.months.map(x=>x*sh), key:['INT',b.plant,b.fam,f].join('|'), ext:{...base, sold_to:code, sold_to_name:m.name, share:Math.round(sh*10000)/10000, mix_read:m.read, mix_months:m.n+' of '+m.N}});
+      if(Math.abs((m.recent[dp]||0)-sh)>=0.2) watch.push({plant:b.pname, fam:b.fam, dp:f, share:sh, recent:m.recent[dp]||0, t:b.fy}); });
+    Object.entries(m.recent).forEach(([dp,r])=>{ if(r>=0.2&&!(dp in m.shares)) watch.push({plant:b.pname, fam:b.fam, dp:full(code,dp), share:0, recent:r, t:b.fy}); });   // a point ramping up outside the mix
+  });
+  return {rows, notAlloc, watch:watch.sort((a,b)=>Math.abs(b.recent-b.share)*b.t-Math.abs(a.recent-a.share)*a.t), firstM:M.firstM, lastM:M.lastM, mixes:M.mix.size};
+}
 // ═══ Load budget demand: every file staged here lands in ONE version ═══
-// • the External (FL) workbook as it comes — each customer row is translated to its demand point by Demand Mapping
-// • any sheet with a "Demand point" column and month columns (Jan…Dec, or 2027-01…), optional "Family" (CEM / SLG / ASH):
-//   the internal file from the split script, the master file of an earlier version, or the template filled by hand.
-PL.load={files:[], unit:1, alias:{}, view:null};
+// • Build the budget: the internal RMX workbook (split above) + the External (FL) workbook (each customer row → its demand point by Demand Mapping)
+// • optional extra tables: any sheet with a "Demand point" column and month columns (Jan…Dec, or 2027-01…), optional "Family" (CEM / SLG / ASH):
+//   the master file of an earlier version, or the template filled by hand.
+PL.load={files:[], unit:1, alias:{}, view:null, inp:{}};
+const PL_HIST_KEY='planHistory', PL_SUBS_KEY='planSubstitutions';
+function plLoadInput(kind, inp){ const f=(inp.files||[])[0]; inp.value=''; if(!f) return; f.arrayBuffer().then(buf=>{ PL.load.inp[kind]={name:f.name, buf}; planRender(); }); }
+function _plHandlesEnsure(){ if(PL._hTried) return; PL._hTried=true; Promise.all([dsLoadHandle(PL_HIST_KEY), dsLoadHandle(PL_SUBS_KEY)]).then(([h,s])=>{ PL._h={hist:h, subs:s}; planRender(); }).catch(()=>{ PL._h={}; }); }
+// The shipment history and the substitutions file are picked once and remembered (read again on every Build).
+async function plPickRemembered(kind){
+  if(!window.showOpenFilePicker){ statMsg('This browser cannot remember a file: use Chrome or Edge'); return; }
+  let h; try{ [h]=await window.showOpenFilePicker({id:'avila-budget-'+kind, types:[{description:'Excel workbook', accept:{'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':['.xlsx','.xlsm']}}]}); }catch(e){ return; }
+  await dsSaveHandle(kind==='subs'?PL_SUBS_KEY:PL_HIST_KEY, h); PL._h=PL._h||{}; PL._h[kind]=h; planRender(); statMsg((kind==='subs'?'Substitutions':'Shipment history')+' file set: '+h.name);
+}
+async function plBuildBudget(){
+  const I=PL.load.inp, H=PL._h||{}; if(!I.int&&!I.ext){ statMsg('Choose the internal and/or the external budget file first'); return; }
+  if(I.int&&!H.hist){ statMsg('Set the shipment history file first (Avila_Shipments_Detail.xlsx): the internal split reads it'); return; }
+  // both permissions are asked together, inside the click
+  const perms=await Promise.all([H.hist,H.subs].map(h=>h?h.queryPermission({mode:'read'}).then(p=>p==='granted'?p:h.requestPermission({mode:'read'})).catch(()=>'denied'):null));
+  if(I.int&&perms[0]!=='granted'){ statMsg('Allow reading the shipment history file to split the internal budget'); return; }
+  PL.busy=true; planRender(); statMsg('Building the budget…');
+  try{
+    await loadLib('xlsx'); const s=plSettings(); const staged=[]; const msg=[];
+    if(I.ext){ const ext=_plExtParse(I.ext.buf, I.ext.name); const x=_plExtToRows(ext); staged.push({name:I.ext.name, sheet:ext.sheet, kind:'EXT', rows:x.rows, left:x.left, skipped:ext.skipped}); msg.push('external '+_plFmt(ext.fy)+' ST'); }
+    if(I.int){
+      const rmx=_plRmxParse(I.int.buf, I.int.name);
+      const f=await H.hist.getFile(); let hist=null;
+      try{ const c=await dsLoadHandle('planHistory:index'); if(c&&c.v===1&&c.mod===f.lastModified&&c.size===f.size) hist=c; }catch(e){}
+      if(!hist){ hist=_plHistParse(await f.arrayBuffer(), f.name); Object.assign(hist,{v:1, mod:f.lastModified, size:f.size}); try{ await dsSaveHandle('planHistory:index', hist); }catch(e){} }
+      let subs=[]; if(H.subs&&perms[1]==='granted'){ try{ subs=_plSubsParse(await (await H.subs.getFile()).arrayBuffer()); }catch(e){ console.warn('substitutions', e); } }
+      const sp=plSplitInternal(rmx, hist, subs, s);
+      staged.push({name:I.int.name, sheet:Object.values(rmx.perFam).map(x=>x.sheet).join(', '), kind:'INT', rows:sp.rows, left:[], skipped:0,
+        info:{perFam:rmx.perFam, fy:rmx.fy, warnings:rmx.warnings, window:sp.firstM+' → '+sp.lastM, mixes:sp.mixes, notAlloc:sp.notAlloc.length, notAllocT:Math.round(sp.notAlloc.reduce((a,b)=>a+b.fy,0)),
+          watch:sp.watch, hist:`${hist.file} (${hist.dateMin} → ${hist.dateMax})`, subs:subs.length}});
+      msg.push('internal '+_plFmt(rmx.fy)+' ST');
+    }
+    PL.load.files=PL.load.files.filter(f=>f.kind==='FILE').concat(staged);   // a new Build replaces the previous one; extra tables stay
+    statMsg('Budget built: '+msg.join(' + ')+'. Check the rows below, then load it.');
+  }catch(e){ statMsg('Build failed: '+e.message); console.warn(e); }
+  PL.busy=false; planRender();
+}
 const PL_FAM_OF_CODE={CEM:'cement', CEMENT:'cement', SLG:'slag', SLAG:'slag', ASH:'ash', FA:'ash', FLYASH:'ash', 'FLY ASH':'ash'};
 const PL_CODE_OF_FAM={cement:'CEM', slag:'SLG', ash:'ASH', other:'OTH'};
 function _plLoadParse(buf, name){
@@ -35853,14 +35999,14 @@ function _plSuggestDp(name){
 // Staged rows → one line per demand point and family (the same point in two files adds up).
 function _plLoadResolve(){
   const L=PL.load, map=new Map(), unm=new Map(), left=[];
-  L.files.forEach(f=>{ const unit=f.kind==='EXT'?1:(+L.unit||1);   // the External (FL) sheet is always in short tons
+  L.files.forEach(f=>{ const unit=f.kind==='FILE'?(+L.unit||1):1;   // the built rows are already in short tons
     (f.left||[]).forEach(x=>left.push({...x, file:f.name}));
     f.rows.forEach(r=>{
       const alias=L.alias[r.dp]; const dpName=alias||r.dp; const el=(r.purchased&&!alias)?null:xlmapFindDp(dpName);
       const fam=PL_FAM_OF_CODE[String(r.fam||'').toUpperCase()]||plFamilyOfName(dpName);
-      const key=f.kind==='EXT'?'EXT|'+r.key:(el?el.id:_xlNorm(dpName))+'|'+fam;
+      const key=r.key?f.kind+'|'+r.key:(el?el.id:_xlNorm(dpName))+'|'+fam;   // built rows stay one line each (customer / plant detail)
       let o=map.get(key); if(!o){ o={dp_name:el?el.name:dpName, element_id:el?el.id:null, family:fam, src:f.kind||'FILE', file:f.name, ext:r.ext||null,
-        line_key:f.kind==='EXT'?'EXT|'+r.key:'LOAD|'+fam+'|'+_xlNorm(el?el.name:dpName), months:new Array(12).fill(0)}; map.set(key,o); }
+        line_key:r.key?f.kind+'|'+r.key:'LOAD|'+fam+'|'+_xlNorm(el?el.name:dpName), months:new Array(12).fill(0)}; map.set(key,o); }
       r.months.forEach((v,m)=>{ o.months[m]+=v*unit; });
       if(!el){ const u=unm.get(r.dp)||{dp:r.dp, fy:0, fam, why:r.why||'not a demand point of this scenario', n:0, purchased:!!r.purchased}; u.fy+=r.months.reduce((a,b)=>a+b,0)*unit; u.n++; unm.set(r.dp,u); } });
   });
@@ -35888,13 +36034,13 @@ function plLoadApply(){
   if(res.unmatched.length&&!confirm(`${res.unmatched.length} name(s) (${_plFmt(unT)} ST) are not placed on a demand point of this scenario. They stay in the version as unallocated (Regenerate picks them up once the point exists).\n\nLoad anyway?`)) return;
   const id='pv_'+Date.now().toString(36), now=new Date().toISOString();
   if(makeActive) plVersions().forEach(v=>{ if(v.status==='active') v.status='draft'; });
-  const fileT=f=>Math.round(f.rows.reduce((a,r)=>a+r.months.reduce((x,y)=>x+y,0),0)*(f.kind==='EXT'?1:(+PL.load.unit||1)));
+  const fileT=f=>Math.round(f.rows.reduce((a,r)=>a+r.months.reduce((x,y)=>x+y,0),0)*(f.kind==='FILE'?(+PL.load.unit||1):1));
   const v={id, kind:'budget', source:'load', year:s.budget_year, label, status:(makeActive||!plActiveVersion())?'active':'draft', uploaded_at:now, uploaded_by:_plWho(),
-    source_files:PL.load.files.map(f=>({slot:f.kind==='EXT'?'external':'load', name:f.name, sheet:f.sheet, rows:f.rows.length, fy_t:fileT(f)})),
+    source_files:PL.load.files.map(f=>({slot:({EXT:'external', INT:'internal'})[f.kind]||'table', name:f.name, sheet:f.sheet, rows:f.rows.length, fy_t:fileT(f)})),
     left_out:res.left.map(x=>({label:x.label, why:x.why, fy:Math.round(x.fy*10)/10, file:x.file})), note:'', generated_at:null, generated_hash:null, stale:false};
   plVersions().push(v); if(!Array.isArray(DB.plan_lines)) DB.plan_lines=[];
   res.lines.forEach((l,k)=>DB.plan_lines.push({id:`pl_${id}_${k+1}`, version_id:id, kind:'LOAD', src:l.src, file:l.file, line_key:l.line_key, family:l.family, dp_name:l.dp_name, element_id:l.element_id, months:l.months, fy:l.fy, ...(l.ext||{})}));
-  PL.load.files=[]; PL.load.alias={}; PL.load.view=null;
+  PL.load.files=[]; PL.load.alias={}; PL.load.view=null; PL.load.inp={};
   const rep=plGenerate(id);
   autoSave(); planRender();
   statMsg(`Budget "${label}" loaded: ${res.lines.length} lines, ${_plFmt(rep?rep.spread_t:0)} ST${rep&&rep.unallocated_t?' · '+_plFmt(rep.unallocated_t)+' ST unallocated':''} — saving the master file…`);
@@ -35931,7 +36077,8 @@ function _plMasterWorkbook(vid){
     return wb;
   }
   const mo=l=>{ const o={}; PL_MONTHS.forEach((m,i)=>{ o[m]=r2(+(l.months||[])[i]||0); }); o.Total=r2(l.fy||0); return o; };
-  sheet('Source lines', L.map(l=>({Source:l.src==='EXT'?'External (FL)':l.kind==='LOAD'?'Demand-point table':'Retired process', File:l.file||'', 'Demand point':l.dp_name||'', Family:PL_CODE_OF_FAM[l.family]||l.family||'',
+  sheet('Source lines', L.map(l=>({Source:l.kind!=='LOAD'?'Retired process':({EXT:'External (FL)', INT:'Internal (RMX × mix)'})[l.src]||'Demand-point table', File:l.file||'', 'Demand point':l.dp_name||'', Family:PL_CODE_OF_FAM[l.family]||l.family||'',
+    'RMX plant':l.rmx_plant||'', 'Plant name':l.rmx_name||'', Share:l.share??'', 'Mix read':l.mix_read||'',
     'Sold-to':l.sold_to||'', 'Sold-to name':l.sold_to_name||'', 'Ship-to':l.ship_to||'', 'Ship-to name':l.ship_to_name||'', Plant:l.plant||'', Material:l.material||'', 'Material description':l.material_desc||'', Incoterms:l.incoterm||'', ...mo(l)})));
   const un=((v.gen_report||{}).unallocated||[]);
   sheet('Left out', [...(v.left_out||[]).map(x=>({What:x.label, Why:x.why, File:x.file||'', 'Total (ST)':x.fy})), ...un.map(u=>({What:u.label, Why:'unallocated: '+u.why, File:'', 'Total (ST)':u.t}))]);
@@ -35958,9 +36105,10 @@ async function plSaveMaster(vid){
   statMsg(`Master file saved — ${v.master_file.folder}/${fname}`); return v.master_file;
 }
 function _plLoadCardHTML(s){
-  const L=PL.load, res=_plLoadResolve(); L.view=res; const y=s.budget_year;
-  const fT=f=>f.rows.reduce((a,r)=>a+r.months.reduce((x,z)=>x+z,0),0)*(f.kind==='EXT'?1:(+L.unit||1));
-  const files=L.files.map((f,i)=>`<tr><td><b>${_plEsc(f.name)}</b> <span class="pl-muted">sheet ${_plEsc(f.sheet)}</span> <span class="pl-flag dim">${f.kind==='EXT'?'External (FL) · translated by Demand Mapping':'demand point table'}</span></td><td class="n">${f.rows.length} rows${f.left&&f.left.length?` · ${f.left.length} left out`:''}</td><td class="n">${_plFmt(fT(f))} ST</td><td><button class="pl-btn" onclick="plLoadRemove(${i})">Remove</button></td></tr>`).join('');
+  _plHandlesEnsure(); const L=PL.load, res=_plLoadResolve(); L.view=res; const y=s.budget_year; const H=PL._h||{}, I=L.inp||{};
+  const fT=f=>f.rows.reduce((a,r)=>a+r.months.reduce((x,z)=>x+z,0),0)*(f.kind==='FILE'?(+L.unit||1):1);
+  const kindTxt={EXT:'External (FL) · translated by Demand Mapping', INT:'Internal · RMX × each plant\'s mix', FILE:'demand point table'};
+  const files=L.files.map((f,i)=>`<tr><td><b>${_plEsc(f.name)}</b> <span class="pl-muted">sheet ${_plEsc(f.sheet)}</span> <span class="pl-flag dim">${kindTxt[f.kind]||''}</span></td><td class="n">${f.rows.length} rows${f.left&&f.left.length?` · ${f.left.length} left out`:''}</td><td class="n">${_plFmt(fT(f))} ST</td><td><button class="pl-btn" onclick="plLoadRemove(${i})">Remove</button></td></tr>`).join('');
   const fam={}, mon=new Array(12).fill(0); res.lines.forEach(l=>{ fam[l.family]=(fam[l.family]||0)+l.fy; l.months.forEach((x,m)=>{ mon[m]+=x; }); });
   const matched=res.lines.filter(l=>l.element_id); const curF=(()=>{ const ids=new Set(matched.map(l=>l.element_id)); let t=0; (DB.demand_values||[]).forEach(r=>{ if(r.source!=='actual'&&r.source!=='budget'&&ids.has(r.element_id)&&String(r.date).startsWith(String(y))) t+=r.value_t||0; }); return t; })();
   const unm=res.unmatched.slice(0,60).map((u,i)=>`<tr><td><b>${_plEsc(u.dp)}</b>${u.n>1?` <span class="pl-muted">${u.n} rows</span>`:''}${u.why?`<br><span class="pl-muted">${_plEsc(u.why)}</span>`:''}</td><td class="n">${_plFmt(u.fy)}</td>
@@ -35969,21 +36117,32 @@ function _plLoadCardHTML(s){
         ${u.canCreate?`<button class="pl-btn" onclick="plLoadCreate(${i})">${u.fac?'Create point at '+_plEsc(u.fac.name):'Create '+_plEsc(u.dp.split('/')[0])+' (purchased) + point'}</button>`:''}
         <button class="pl-btn" onclick="plLoadExclude(${i})">Skip</button></td></tr>`).join('');
   const left=res.left, leftT=left.reduce((a,x)=>a+x.fy,0);
+  const intF=L.files.find(f=>f.kind==='INT'), info=intF&&intF.info;
+  const watch=info&&info.watch&&info.watch.length?`<details style="display:inline-block"><summary class="pl-muted" style="cursor:pointer">${info.watch.length} on the watch list</summary><div class="pl-muted" style="margin:4px 0">Points whose last ${s.mix_recent_months} months differ 20+ points from the mix used (a point being phased in or out). Keep the mix, or move the volume on the master file and load it again.</div><table class="pl-tbl"><tr><th>Plant</th><th>Family</th><th>Demand point</th><th>Mix used</th><th>Last months</th><th>Budget ST of the plant</th></tr>${info.watch.slice(0,40).map(w=>`<tr><td>${_plEsc(w.plant)}</td><td>${w.fam}</td><td>${_plEsc(_plDpShort(w.dp))}</td><td class="n">${Math.round(w.share*100)}%</td><td class="n">${Math.round(w.recent*100)}%</td><td class="n">${_plFmt(w.t)}</td></tr>`).join('')}</table></details>`:'';
   const act=plActiveVersion();
-  return _plCard('pl-load','Load budget demand','External (FL) workbook + demand point tables → one version', L.files.length||null,
-    `<div class="pl-muted" style="margin-bottom:8px">Stage every file of the budget, then load them together as one version:<br>
-       • the <b>External (FL)</b> workbook as it comes (2027 Volume Budget …xlsx): each customer row goes to its demand point through Demand Mapping (ship point + material + sold-to); ADJ rows are left out; cement never goes on a purchased point;<br>
-       • any sheet with a <b>Demand point</b> column and months Jan…Dec in short tons (optional <b>Family</b> CEM / SLG / ASH): the internal file of the split script, the master file of an earlier version, or the template filled by hand.<br>
-       Each month is spread over its working days (Saturday weight below), the year is simulated, and the version's master file (every demand point × month) is saved in the budget folder.</div>
-     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-       <label class="pl-btn pri" style="cursor:pointer">Choose file(s)…<input type="file" accept=".xlsx,.xls,.xlsm,.csv" multiple style="display:none" onchange="plLoadFiles(this)"></label>
-       <button class="pl-btn" onclick="plLoadTemplate()">Download template</button>
-       <label class="pl-muted">Demand point tables in <select class="fi" style="width:140px;display:inline-block" onchange="plLoadUnit(this.value)"><option value="1" ${(+L.unit||1)===1?'selected':''}>short tons</option><option value="1000" ${+L.unit===1000?'selected':''}>thousand short tons</option></select></label>
-       ${act?`<span class="pl-muted">active version: <b>${_plEsc(act.label)}</b>${act.generated_at?'':' (not generated)'}</span>`:'<span class="pl-muted">no budget version yet</span>'}
+  const pick=(kind, label, hint)=>`<b>${label}</b><span><label class="pl-btn" style="cursor:pointer">${I[kind]?'Change…':'Choose…'}<input type="file" accept=".xlsx,.xls,.xlsm" style="display:none" onchange="plLoadInput('${kind}',this)"></label> ${I[kind]?`<b>${_plEsc(I[kind].name)}</b>`:`<span class="pl-muted">${hint}</span>`}</span>`;
+  const rem=(kind, label, hint)=>`<b>${label}</b><span>${H[kind]?`📄 <b>${_plEsc(H[kind].name)}</b> <span class="pl-muted">(remembered)</span>`:`<span class="pl-muted">${hint}</span>`} <button class="pl-btn" onclick="plPickRemembered('${kind}')">${H[kind]?'Change…':'Set…'}</button></span>`;
+  return _plCard('pl-load','Load budget demand','internal + external budget → one version', L.files.length||null,
+    `<div class="pl-kv">
+       ${pick('int','1 · Internal budget','the RMX workbook (US RMX Cement_Slag_FA Demand Budget …xlsx: sheets Cem_Use / Slag_Use / FA_Use, thousand ST)')}
+       ${pick('ext','2 · External budget','the volume budget workbook with the "External (FL)" sheet (2027 Volume Budget …xlsx, ST)')}
+       ${rem('hist','Shipment history','Avila_Shipments_Detail.xlsx in _New_Roll\\RealValues: the internal split reads each plant\'s last months of shipments')}
+       ${rem('subs','Substitutions (optional)','Avila_Mix_Substitutions.xlsx in _New_Roll\\PowerBI: points that replaced others in the history')}
      </div>
-     ${L.files.length?`<table class="pl-tbl" style="margin-top:8px"><tr><th>File</th><th>Rows</th><th>Total</th><th></th></tr>${files}</table>
+     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px">
+       <button class="pl-btn pri" onclick="plBuildBudget()" ${(I.int||I.ext)&&!PL.busy?'':'disabled'}>${PL.busy?'Building…':'Build the budget'}</button>
+       <span class="pl-muted">internal: each plant's cement / slag / fly ash goes to the points that supplied it (its most common mix over the last ${s.mix_months} complete months) · external: each customer row goes to its point through Demand Mapping (ADJ rows left out) · cement never goes on a purchased point</span>
+     </div>
+     <details style="margin-top:6px"><summary class="pl-muted" style="cursor:pointer">Add a ready demand point table (the master file of an earlier version, or the template filled by hand)</summary>
+       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">
+         <label class="pl-btn" style="cursor:pointer">Choose table(s)…<input type="file" accept=".xlsx,.xls,.xlsm,.csv" multiple style="display:none" onchange="plLoadFiles(this)"></label>
+         <button class="pl-btn" onclick="plLoadTemplate()">Download template</button>
+         <label class="pl-muted">in <select class="fi" style="width:140px;display:inline-block" onchange="plLoadUnit(this.value)"><option value="1" ${(+L.unit||1)===1?'selected':''}>short tons</option><option value="1000" ${+L.unit===1000?'selected':''}>thousand short tons</option></select></label></div></details>
+     ${act?`<div class="pl-muted" style="margin-top:6px">active version: <b>${_plEsc(act.label)}</b>${act.generated_at?'':' (not generated)'}</div>`:''}
+     ${L.files.length?`<table class="pl-tbl" style="margin-top:8px"><tr><th>Built from</th><th>Rows</th><th>Total</th><th></th></tr>${files}</table>
      <div class="pl-kv" style="margin-top:8px"><b>Budget ${y}</b><span><b>${_plFmt(res.lines.reduce((a,l)=>a+l.fy,0))}</b> ST on ${new Set(res.lines.map(l=>l.element_id||l.dp_name)).size} demand points · ${Object.keys(fam).map(f=>f+' '+_plFmt(fam[f])).join(' · ')}</span>
        <b>By month</b><span>${mon.map((x,m)=>PL_MONTHS[m]+' '+_plFmt(x/1000,1)+'k').join(' · ')}</span>
+       ${info?`<b>Internal split</b><span>${Object.keys(info.perFam).map(f=>`${f} ${info.perFam[f].plants} plants · ${_plFmt(info.perFam[f].fy)} ST`).join(' · ')} · mix of ${info.mixes} sold-to × family groups, ${info.window} · ${_plEsc(info.hist)}${info.subs?' · '+info.subs+' substitutions':''}${info.notAlloc?` · <span class="pl-flag bad">${info.notAlloc} plants with no history (${_plFmt(info.notAllocT)} ST): place them below</span>`:''} ${watch}${info.warnings&&info.warnings.length?'<br>⚠ '+info.warnings.map(_plEsc).join('<br>⚠ '):''}</span>`:''}
        <b>Forecast now</b><span>${curF?_plFmt(curF)+' ST in '+y+' for the matched points (replaced by the budget)':'<span class="pl-muted">no forecast for these points in '+y+'</span>'}</span>
        ${left.length?`<b>Left out</b><span>${left.length} rows · ${_plFmt(leftT)} ST <details style="display:inline-block"><summary class="pl-muted" style="cursor:pointer">show</summary><table class="pl-tbl">${left.slice(0,80).map(x=>`<tr><td>${_plEsc(x.label)}</td><td class="pl-muted">${_plEsc(x.why)}</td><td class="n">${_plFmt(x.fy)}</td></tr>`).join('')}</table></details></span>`:''}</div>
      ${res.unmatched.length?`<div style="margin-top:8px"><span class="pl-flag bad">${res.unmatched.length} not placed on a demand point of this scenario · ${_plFmt(res.unmatched.reduce((a,u)=>a+u.fy,0))} ST</span><div style="max-height:260px;overflow:auto;border:1px solid var(--border);margin-top:4px"><table class="pl-tbl"><tr><th>Name / row</th><th>ST</th><th>Use…</th></tr>${unm}</table></div></div>`:'<div style="margin-top:8px"><span class="pl-flag ok">every row is on a demand point of this scenario</span></div>'}
