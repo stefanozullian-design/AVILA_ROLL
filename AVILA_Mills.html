@@ -408,19 +408,22 @@ function buildModel(payload,label){
     const mine=inWin.filter(r=>r.element_id===e.id), run=new Set(mine.map(r=>r.date)), by={};
     mine.forEach(r=>{ const b=by[r.product_id]||(by[r.product_id]={t:0,days:new Set()}); b.t+=num(r.volume_t); b.days.add(r.date); });
     const rated={}; caps(e.id).forEach(c=>{ if(num(c.capacity_tpd)>0) rated[c.product_id]=num(c.capacity_tpd); });
-    // A product the mill can make, or has really made in tonnes that matter (1 t is a booking slip).
-    const pids=[...new Set([...Object.keys(rated),...Object.keys(by).filter(p=>by[p].t>=10)])].filter(p=>prod[p]);
+    // A lever only for what the Roll lists on this mill: a couple of days in the feed is not proof it
+    // can make a product. Tonnes it made of anything else stay as a fixed one-off, so the start still
+    // equals the real 12 months (under 10 t is a booking slip, dropped).
+    const pids=Object.keys(rated).filter(p=>prod[p]);
     if(!pids.length) return;
+    const fixed=Object.keys(by).filter(p=>!rated[p]&&prod[p]&&by[p].t>=10).map(pid=>{ const name=prod[pid].name, short=shortName(name), f=family(short); return {name,short,c:f.c,r:f.r,clk:clkPct(pid),t:by[pid].t}; });
     const list=pids.map(pid=>{
       const name=prod[pid].name, short=shortName(name), f=family(short), b=by[pid];
-      const y=rated[pid]||(b?Math.round(b.t/b.days.size):0);
+      const y=rated[pid];
       return {id:pid,name,short,c:f.c,r:f.r,clk:clkPct(pid),yield:y,share:0,base:{yield:y,t:b?b.t:0}};
     }).sort((x,y)=>x.r-y.r||x.short.localeCompare(y.short));
     const hrs=list.map(p=>p.yield>0?p.base.t/p.yield:0), sum=hrs.reduce((a,b)=>a+b,0);
     list.forEach((p,i)=>{ p.share=sum>0?hrs[i]/sum:(i?0:1); p.base.share=p.share; });
     const outage=clamp(365-run.size,0,365), eff=run.size&&sum?sum/run.size:1;
     const name=e.name, short=(name.match(/FM\d+/)||[name])[0];
-    plantOf(facName(e)).mills.push({id:e.id,name,short,products:list,outage,eff,base:{outage,eff,run:run.size,t:list.reduce((a,p)=>a+p.base.t,0)}});
+    plantOf(facName(e)).mills.push({id:e.id,name,short,products:list,fixed,outage,eff,base:{outage,eff,run:run.size,t:list.reduce((a,p)=>a+p.base.t,0)+fixed.reduce((a,x)=>a+x.t,0)}});
   });
   (DB.elements||[]).filter(e=>e.type==='kiln'&&e.is_active!==false).sort((a,b)=>a.name.localeCompare(b.name)).forEach(e=>{
     const p=plants.get(facName(e)); if(!p) return;
@@ -431,7 +434,7 @@ function buildModel(payload,label){
   });
   M.plants=[...plants.values()].sort((a,b)=>a.mills.length-b.mills.length);
   const names=new Map();
-  M.plants.forEach(pl=>pl.mills.forEach(m=>m.products.forEach(p=>{ if(!names.has(p.name)) names.set(p.name,{name:p.name,short:p.short,c:p.c,r:p.r,plant:pl.name}); })));
+  M.plants.forEach(pl=>pl.mills.forEach(m=>[...m.products,...m.fixed].forEach(p=>{ if(!names.has(p.name)) names.set(p.name,{name:p.name,short:p.short,c:p.c,r:p.r,plant:pl.name}); })));
   M.prods=[...names.values()].sort((a,b)=>a.plant.localeCompare(b.plant)||a.r-b.r||a.short.localeCompare(b.short));
   M.days=365; M.sc=label; M.win={from,to};
 }
@@ -448,6 +451,11 @@ function calc(){
         pl.need+=p.t*p.clk; pl.bneed+=p.base.t*p.clk;
         const q=pl.prods[p.name]||(pl.prods[p.name]={name:p.name,short:p.short,c:p.c,r:p.r,t:0,b:0}); q.t+=p.t; q.b+=p.base.t;
         const g=byProd[p.name]||(byProd[p.name]={t:0,b:0}); g.t+=p.t; g.b+=p.base.t;
+      });
+      m.fixed.forEach(x=>{
+        m.t+=x.t; pl.t+=x.t; pl.bt+=x.t; pl.need+=x.t*x.clk; pl.bneed+=x.t*x.clk;
+        const q=pl.prods[x.name]||(pl.prods[x.name]={name:x.name,short:x.short,c:x.c,r:x.r,t:0,b:0}); q.t+=x.t; q.b+=x.t;
+        const g=byProd[x.name]||(byProd[x.name]={t:0,b:0}); g.t+=x.t; g.b+=x.t;
       });
     });
     pl.kilnT=pl.kilns.reduce((a,k)=>a+Math.max(0,M.days-k.outage)*k.rated*k.eff,0);
@@ -480,7 +488,7 @@ function plantHTML(pl){
     const handles=m.products.slice(0,-1).map((p,i)=>`<div class="handle" tabindex="0" role="slider" aria-label="${esc(m.short)}: ${esc(p.short)} against ${esc(m.products[i+1].short)}" data-h="${m.id}|${i}"><i></i></div><div class="notch"></div>`).join('');
     return `<div class="chartwrap"><div class="bar" data-mill="${m.id}">${segs}${handles}</div></div>`;
   };
-  const totSegs=[...new Map(pl.mills.flatMap(m=>m.products).map(p=>[p.name,p])).values()].sort((a,b)=>a.r-b.r||a.short.localeCompare(b.short));
+  const totSegs=[...new Map(pl.mills.flatMap(m=>[...m.products,...m.fixed]).map(p=>[p.name,p])).values()].sort((a,b)=>a.r-b.r||a.short.localeCompare(b.short));
   const row=(label,fn,tot,first)=>`<div class="lbl${first?' first':''}">${label}</div>`+pl.mills.map(m=>`<div class="cell${first?' first':''}">${fn(m)}</div>`).join('')+`<div class="cell tot${first?' first':''}">${tot||''}</div>`;
   return `<div class="plant card" id="pl-${esc(pl.id)}" data-n="${n}">
     <div class="phead"><span class="pname">${esc(pl.name)}</span><span class="psub">${n} finish mills · ${pl.kilns.length} kiln${pl.kilns.length===1?'':'s'}</span><span class="pt" id="pt-${esc(pl.id)}"></span><span class="pill flat" id="pd2-${esc(pl.id)}"></span></div>
@@ -490,7 +498,7 @@ function plantHTML(pl){
       ${pl.mills.map((m,i)=>`<div style="grid-row:1;grid-column:${i+2};position:relative">${chart(m)}</div>`).join('')}
       <div style="grid-row:1;grid-column:${n+2};position:relative"><div class="chartwrap"><div class="bar totbar" data-tot="${esc(pl.id)}">${totSegs.map(p=>`<div class="seg" data-p="${esc(p.name)}" style="--c:var(${p.c})"><span class="sn">${esc(p.short)}</span><span class="sp"></span><span class="st"></span></div>`).join('')}</div></div></div>
       <div class="lbl first"></div>${pl.mills.map(m=>`<div class="mname"><b title="${esc(m.name)}">${esc(m.short)}</b><span id="mt-${m.id}"></span><br><button class="mreset" data-reset="${m.id}">↺ reset</button></div>`).join('')}<div class="mname"><b>Total</b><span id="tt-${esc(pl.id)}"></span></div>
-      ${row('Time split',m=>m.products.map((p,i)=>tmplLever(m,p,i)).join(''),`<div id="ts-${esc(pl.id)}"></div>`)}
+      ${row('Time split',m=>m.products.map((p,i)=>tmplLever(m,p,i)).join('')+m.fixed.map(x=>`<div class="clkm" title="Made in the last 12 months but not listed for this mill in the Roll. Counted as a fixed amount, no lever.">+ ${fmt(x.t)} t ${esc(x.short)} one-off</div>`).join(''),`<div id="ts-${esc(pl.id)}"></div>`)}
       ${row('Yield<br>(TPD)',m=>m.products.map((p,i)=>`<div class="yl"><span class="dot" style="background:var(${p.c})" title="${esc(p.short)}"></span><input class="fi" type="number" min="0" step="10" data-yield="${m.id}|${i}" title="${esc(p.short)} tonnes per day at 100% efficiency"></div>`).join(''),`<div id="ty-${esc(pl.id)}" class="calc"></div>`)}
       ${row('Outage<br>days',m=>`<input class="fi" type="number" min="0" max="366" data-out="${m.id}">`,`<div id="to-${esc(pl.id)}" class="calc"></div>`)}
       ${row('Efficiency<br>%',m=>`<input class="fi" type="number" min="0" max="150" step="0.5" data-eff="${m.id}">`,`<div id="te-${esc(pl.id)}" class="calc"></div>`)}
