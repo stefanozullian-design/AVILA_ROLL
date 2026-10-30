@@ -10074,6 +10074,30 @@ function _supDpnArrow(base, count){
 // rail loading" (see SECTION 1), so without a row for the rail part the children
 // visibly fail to add up to the parent on any day cars were loaded. These render
 // read-only (they're derived from the rail plan/simulation, not typed here).
+// The product a demand point asks for first — the same order the simulation pulls in. A point
+// listing several counts once, under this one, so a Supply requirement never counts it twice.
+// None set: like the simulation, it takes what the first silo feeding it holds.
+function _dpFirstProd(dp){
+  const set=(dp?.products||[]).filter(p=>p.product_id).slice().sort((a,b)=>a.priority-b.priority)[0]?.product_id;
+  if(set||!dp?.element_id) return set||null;
+  const seen=new Set([dp.element_id]), queue=[dp.element_id];
+  while(queue.length){
+    const id=queue.shift();
+    for(const c of DB.connections){
+      if(c.to_element_id!==id||seen.has(c.from_element_id)) continue;
+      seen.add(c.from_element_id);
+      const up=DB.elements.find(e=>e.id===c.from_element_id); if(!up) continue;
+      if(up.type==='bulk_silo'||up.type==='packed_silo'){ const p=getSiloProducts(up)[0]; if(p) return p; }
+      else queue.push(up.id);
+    }
+  }
+  return null;
+}
+// A product's recipe as the simulation reads it: first row per material, zero rows out. A row
+// saved twice must not double what a product draws.
+function _recipeRows(pid){ const seen=new Set(); return DB.recipes.filter(rc=>{ if(rc.product_id!==pid||!(parseFloat(rc.pct)>0)||seen.has(rc.material_id)) return false; seen.add(rc.material_id); return true; }); }
+// Marks a row kept on the Supply page although its element is inactive.
+function _supInactTag(el){ return el?.is_active===false?`<span title="Marked inactive, but the simulation still runs it" style="color:var(--amber);font-size:7px;letter-spacing:.5px;margin-left:4px">INACTIVE</span>`:''; }
 function _supDpnRows(dpts, months, collapsedMonths, tdSty, depth, base, stickyLeft, extra){
   if((!dpts||!dpts.length)&&(!extra||!extra.length)) return '';
   const key=_supDpnKey(base);
@@ -10082,7 +10106,7 @@ function _supDpnRows(dpts, months, collapsedMonths, tdSty, depth, base, stickyLe
     const el=DB.elements.find(e=>e.id===dp.element_id); if(!el) return;
     hh+=`<tr class="supsec-${key}" style="background:rgba(var(--hi-rgb),.02)">
       <td style="${stickyLeft('var(--surface)',depth,'border-bottom:1px solid var(--border),')}color:var(--text-dim);font-size:8px;font-style:italic">
-        ↳ ${esc(el.name)}<button class="sp-fb-btn" onclick="event.stopPropagation();openSpForecastBuilder(${JSON.stringify([el.id]).replaceAll('"','&quot;')},${JSON.stringify(el.name).replaceAll('"','&quot;')})" title="⚙ Forecast Builder">⚙</button>
+        ↳ ${esc(el.name)}${_supInactTag(el)}<button class="sp-fb-btn" onclick="event.stopPropagation();openSpForecastBuilder(${JSON.stringify([el.id]).replaceAll('"','&quot;')},${JSON.stringify(el.name).replaceAll('"','&quot;')})" title="⚙ Forecast Builder">⚙</button>
       </td>`;
     months.forEach(mon=>{
       const isCol=collapsedMonths.has(mon.ym);
@@ -10399,6 +10423,9 @@ function _renderSupplyViewInner(wrap){
   // Memoised per (element, date, sim day) for this render: the same cell is resolved several
   // times (whole-horizon runs, the month total, the day cell, group totals). Results are read-only.
   const _rpMemo=new Map();
+  // Tonnes the simulation really got out of a mill or packer that day, so these rows reconcile
+  // with inventory. undefined = results saved before this was recorded: the rated rate stands in.
+  const _simOut=(el,dayIdx)=>{ const a=(el.type==='packing_plant'?r?.packOutputHistory:r?.millOutputHistory)?.[el.id]; return a?(a[dayIdx]||0):undefined; };
   const resolveProduction=(el, ds, dayIdx, maintDays)=>{ const _k=el.id+'|'+ds+'|'+dayIdx; let _v=_rpMemo.get(_k); if(_v===undefined){ _v=_resolveProductionRaw(el, ds, dayIdx, maintDays); _rpMemo.set(_k,_v); } return _v; };
   const _resolveProductionRaw=(el, ds, dayIdx, maintDays)=>{
     if(maintDays.has(ds)) return {product_id:null, capacity_tpd:0};
@@ -10432,14 +10459,15 @@ function _renderSupplyViewInner(wrap){
         const fallbackCap=(_capsByEl.get(el.id)||[]).find(c=>c.product_id===managerCampaign.product_id);
         const fbRate=_isPackingRow(fallbackCap)?_packLineCapT(fallbackCap):(parseFloat(fallbackCap?.capacity_tpd)||0);
         const rate=campRate||fbRate;
-        return {product_id:managerCampaign.product_id, capacity_tpd:rate, isCampaign:true};
+        const out=_simOut(el,dayIdx);
+        return {product_id:managerCampaign.product_id, capacity_tpd:out!==undefined?out:rate, planned_tpd:rate, isCampaign:true};
       }
       // __down_pm__ → the product the sim picked, at the ~50% it actually ran, still TAGGED
       // as a PM day. Returning the bare sim tier here made a saved PM day render exactly like
       // a normal production day (same colour, full rated tonnes) — it looked unrecorded.
       const base=_resolveSimTiers(el, ds, dayIdx);
-      const t=el.type==='kiln'&&hasSim&&r.kilnProdHistory?.[el.id]?.[dayIdx]!==undefined
-        ? base.capacity_tpd              // kiln history already holds the actual (halved) clinker
+      const t=(el.type==='kiln'&&hasSim&&r.kilnProdHistory?.[el.id]?.[dayIdx]!==undefined)||_simOut(el,dayIdx)!==undefined
+        ? base.capacity_tpd              // these histories already hold the actual (halved) output
         : base.capacity_tpd*0.5;
       return {...base, capacity_tpd:t, isCampaign:true, downtime:'pm'};
     }
@@ -10456,21 +10484,23 @@ function _renderSupplyViewInner(wrap){
         return {product_id:first?.product_id||null, capacity_tpd:v||0};
       }
     }
-    // Tier 1: sim results (finish mills) — product chosen by the sim, at its rated rate
+    // Tier 1: sim results (finish mills) — product chosen by the sim, at the tonnes it really made
     if(hasSim&&r.millProductHistory[el.id]){
       const pid=r.millProductHistory[el.id][dayIdx]||null;
       if(pid!==undefined){
         const cap=(_capsByEl.get(el.id)||[]).find(c=>c.product_id===pid);
-        return {product_id:pid, capacity_tpd:pid?parseFloat(cap?.capacity_tpd)||0:0};
+        const rated=pid?parseFloat(cap?.capacity_tpd)||0:0, out=_simOut(el,dayIdx);
+        return {product_id:pid, capacity_tpd:pid?(out!==undefined?out:rated):0, planned_tpd:rated};
       }
     }
     // Tier 1: sim results (packing plants) — the machine packs ONE product/day (packProductHistory),
-    // at that line's rated output tonnes/day (pallets/day × tonnes/pallet).
+    // at the tonnes it really packed (rated = pallets/day × tonnes/pallet).
     if(hasSim&&el.type==='packing_plant'&&r.packProductHistory?.[el.id]){
       const pid=r.packProductHistory[el.id][dayIdx]||null;
       if(pid!==undefined){
         const line=(_capsByEl.get(el.id)||[]).find(c=>c.product_id===pid);
-        return {product_id:pid, capacity_tpd:pid?_packLineCapT(line):0};
+        const rated=pid?_packLineCapT(line):0, out=_simOut(el,dayIdx);
+        return {product_id:pid, capacity_tpd:pid?(out!==undefined?out:rated):0, planned_tpd:rated};
       }
     }
 
@@ -10622,7 +10652,8 @@ function _renderSupplyViewInner(wrap){
         const _edges=[]; if(isCamp&&!isMaint) _edges.push('inset 0 2px 0 var(--plan)'); if(isGap) _edges.push('inset 0 -2px 0 var(--simulated)');
         if(res.isActual&&downKind) _edges.push('inset 0 -2px 0 var(--real)');   // the reason for a real 0 t day
         const campMark=_edges.length?`box-shadow:${_edges.join(',')};`:'';
-        const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?(res.isActual?_DOWN_TIP[dt].replace(/ \(manual\) — .*$/,'')+' — actual: no production that day':_DOWN_TIP[dt]+(v>0?` · ${prod?.name?esc(prod.name)+' ':''}${_fmtInt(Math.round(v))} t`:'')):isBlocked?_DOWN_TIP.blocked:isStarved?starvedTip:(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name?`${esc(prod.name)} · ${Math.round(v)} t/d`:'Idle')));
+        const _ofPlan=(v>0&&res.planned_tpd>v+.5)?` of ${_fmtInt(Math.round(res.planned_tpd))} planned`:'';
+        const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?(res.isActual?_DOWN_TIP[dt].replace(/ \(manual\) — .*$/,'')+' — actual: no production that day':_DOWN_TIP[dt]+(v>0?` · ${prod?.name?esc(prod.name)+' ':''}${_fmtInt(Math.round(v))} t`:'')):isBlocked?_DOWN_TIP.blocked:isStarved?starvedTip:(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d${_ofPlan}`:(prod?.name?`${esc(prod.name)} · ${Math.round(v)} t/d${_ofPlan}`:'Idle')));
         const zpos=isRunStart?'position:relative;z-index:2;':gPos;
         // Product name only (no rate) in the middle of each production run — small, without the
         // plant prefix ("BRS_IL(12)/BLK" → "IL(12)/BLK") and clipped to its own day cell; the
@@ -10672,8 +10703,15 @@ function _renderSupplyViewInner(wrap){
   const _supAllowedPids=fltAllowedProdIds();
   const _supProdAllows=pid=>!_supAllowedPids||_supAllowedPids.has(pid);
   let allEls=getFacElements();
-  // Filter by active status unless user has toggled to show inactive
-  if(!window._supShowInactive) allEls=allEls.filter(e=>e.is_active!==false);
+  // Filter by active status unless user has toggled to show inactive. The simulation runs
+  // inactive elements too, so one that still asks for, holds or makes tonnes keeps its row
+  // (tagged by _supInactTag) — hiding it left requirements low and section totals short of stock.
+  const _supCarries=e=>{
+    if(e.type==='demand_point') return (r?.demandFill?.[e.id]?.requested||0)>0;
+    if(e.type==='bulk_silo'||e.type==='packed_silo') return (r?.inventoryHistory?.[e.id]||[]).some(v=>v>0);
+    return (r?.kilnProdHistory?.[e.id]||r?.millOutputHistory?.[e.id]||r?.packOutputHistory?.[e.id]||[]).some(v=>v>0);
+  };
+  if(!window._supShowInactive) allEls=allEls.filter(e=>e.is_active!==false||_supCarries(e));
   // Terminal-type facilities ALWAYS render via the terminal (category-first) path,
   // even when they own production elements (e.g. a packing plant at PEV). Without
   // this exclusion a terminal packer routes the whole facility into the plant tree,
@@ -11037,17 +11075,17 @@ function _renderSupplyViewInner(wrap){
     const _dailyUse={};
     prodIds.forEach(pid=>{
       if(cat!=='clinker'){ // cement + SCM = direct product demand
-        const _dps=_scopeDps.filter(dp=>dp.products?.some(p=>p.product_id===pid));
+        const _dps=_scopeDps.filter(dp=>_dpFirstProd(dp)===pid);
         _dailyUse[pid]=_useDates.map(ds=>_dps.reduce((s,dp)=>s+(_demandRate(dp.element_id,ds)||0),0));
         return;
       }
       // clinker: the (demand point, recipe %) terms are fixed per product — collected once, in the
       // same order as before, then summed per date.
       const _terms=[];
-      _scopeDps.forEach(dp=>{ (dp.products||[]).forEach(p=>{
+      _scopeDps.forEach(dp=>{ (dp.products||[]).filter(p=>p.product_id===_dpFirstProd(dp)).forEach(p=>{
         const prod=_prodById.get(p.product_id);
         if(prod&&(prod.category==='cement_bulk'||prod.category==='cement_packed')){
-          DB.recipes.filter(rc=>rc.product_id===p.product_id&&rc.material_id===pid).forEach(rc=>{ _terms.push([dp.element_id,(parseFloat(rc.pct)||0)]); });
+          _recipeRows(p.product_id).filter(rc=>rc.material_id===pid).forEach(rc=>{ _terms.push([dp.element_id,(parseFloat(rc.pct)||0)]); });
         }
       }); });
       _dailyUse[pid]=_useDates.map(ds=>{ let t=0; for(let i=0;i<_terms.length;i++){ const cd=_demandRate(_terms[i][0],ds)||0; t+=cd*_terms[i][1]/100; } return t; });
@@ -11188,6 +11226,7 @@ function _renderSupplyViewInner(wrap){
           const productsSet=new Set();
           demandPoints.forEach(dp=>{
             (dp.products||[]).forEach(p=>{ productsSet.add(p.product_id); });
+            const _fp=_dpFirstProd(dp); if(_fp) productsSet.add(_fp);
           });
           // Also add products from rail dispatch points at this facility
           const dispEls=facEls.filter(e=>e.type==='dispatch_point'&&e.props?.dispatch_type==='Rail');
@@ -11219,7 +11258,7 @@ function _renderSupplyViewInner(wrap){
           // Helper: total need for a product on a given date
           // = local direct demand + (rail cars loaded × car_capacity_t)
           const _dpsMemo=new Map();   // demand points of a product, once per product (not per cell)
-          const _dpsOf=prodId=>{ let a=_dpsMemo.get(prodId); if(!a){ a=demandPoints.filter(dp=>(dp.products||[]).some(p=>p.product_id===prodId)); _dpsMemo.set(prodId,a); } return a; };
+          const _dpsOf=prodId=>{ let a=_dpsMemo.get(prodId); if(!a){ a=demandPoints.filter(dp=>_dpFirstProd(dp)===prodId); _dpsMemo.set(prodId,a); } return a; };
           const _demElIds=new Set(demandEls.map(e=>e.id));
           const totalNeed=(prodId, ds)=>{
             const dpts=_dpsOf(prodId);
@@ -11407,7 +11446,7 @@ function _renderSupplyViewInner(wrap){
           cementSilos.forEach(silo=>{
             const siloMax=parseFloat(silo.props?.max_capacity)||0;
             h+=`<tr class="supsec-cementInv">
-              <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${invColor};font-size:9px" title="${esc(silo.name)}">${_supLeafLabel(silo.name)}
+              <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${invColor};font-size:9px" title="${esc(silo.name)}">${_supLeafLabel(silo.name)}${_supInactTag(silo)}
                 <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${siloMax>0?'cap: '+siloMax.toLocaleString()+'t':''}</span>
               </td>`;
             const siloStart=parseFloat(silo.props?.start_inventory)||0;
@@ -11558,7 +11597,7 @@ function _renderSupplyViewInner(wrap){
               const siloMax=_siloMaxT(silo);
               const siloStart=_siloStartT(silo);
               h+=`<tr class="supsec-packedInv">
-                <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${pkColor};font-size:9px" title="${esc(silo.name)}">${_supLeafLabel(silo.name)}
+                <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${pkColor};font-size:9px" title="${esc(silo.name)}">${_supLeafLabel(silo.name)}${_supInactTag(silo)}
                   <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${siloMax>0?'cap: '+_fmtInt(Math.round(siloMax))+'t':''}</span>
                 </td>`;
               months.forEach(mon=>{
@@ -11583,7 +11622,7 @@ function _renderSupplyViewInner(wrap){
             const pkProds=[...packedProductIds].filter(pid=>_prodById.get(pid)).filter(_supProdAllows)
               .sort((a,b)=>(_prodById.get(a)?.name||a).localeCompare(_prodById.get(b)?.name||b));
             const _pkDpsMemo=new Map();
-            const _pkDpsOf=pid=>{ let a=_pkDpsMemo.get(pid); if(!a){ a=demandPoints.filter(dp=>dp.products?.some(p=>p.product_id===pid)); _pkDpsMemo.set(pid,a); } return a; };
+            const _pkDpsOf=pid=>{ let a=_pkDpsMemo.get(pid); if(!a){ a=demandPoints.filter(dp=>_dpFirstProd(dp)===pid); _pkDpsMemo.set(pid,a); } return a; };
             const pkDemand=(pid,ds)=>_pkDpsOf(pid).reduce((s,dp)=>s+(_demandRate(dp.element_id,ds)||0),0);
             if(pkProds.length){
               h+=`<tr class="sup-sec-hdr" data-seckey="packedNeed" onclick="_supToggleSec('packedNeed')" style="cursor:pointer;background:rgba(var(--blue-rgb),.05);border-top:2px solid rgba(var(--blue-rgb),.3)">
@@ -11598,7 +11637,7 @@ function _renderSupplyViewInner(wrap){
               h+=`</tr>`;
               pkProds.forEach(pid=>{
                 const prodName=_prodById.get(pid)?.name||pid;
-                const _dpnDpts=demandPoints.filter(dp=>dp.products?.some(p=>p.product_id===pid));
+                const _dpnDpts=demandPoints.filter(dp=>_dpFirstProd(dp)===pid);
                 const _dpnBase=node.id+'_packedNeed_'+pid;
                 h+=`<tr class="supsec-packedNeed">
                   <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${pkColor};font-size:9px">${esc(prodName)}${_dpnDpts.length?_supDpnArrow(_dpnBase,_dpnDpts.length):''}</td>`;
@@ -11811,7 +11850,7 @@ function _renderSupplyViewInner(wrap){
                 // draws clinker at ITS OWN recipe %, not the day's total at one recipe.
                 resolveProductionAll(m,ds,dayIdx,maintSetFor(m.id)).forEach(res=>{
                   if(!res.product_id||!res.capacity_tpd) return;
-                  DB.recipes.filter(rc=>rc.product_id===res.product_id&&clinkerProdsSet.has(rc.material_id)&&(!clkId||rc.material_id===clkId))
+                  _recipeRows(res.product_id).filter(rc=>clinkerProdsSet.has(rc.material_id)&&(!clkId||rc.material_id===clkId))
                     .forEach(rc=>{ t+=res.capacity_tpd*(parseFloat(rc.pct)||0)/100; }); }); });
               return t; };
             // Section header — total = sum of all clinker types below
@@ -11906,7 +11945,7 @@ function _renderSupplyViewInner(wrap){
             const siloMax=parseFloat(silo.props?.max_capacity)||0;
             const siloStart=parseFloat(silo.props?.start_inventory)||0;
             h+=`<tr class="supsec-clinkerInv">
-              <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${clinkerInvColor};font-size:9px" title="${esc(silo.name)}">${_supLeafLabel(silo.name)}
+              <td style="${stickyLeft('var(--surface)',node.depth+2,'border-bottom:1px solid var(--border),')}color:${clinkerInvColor};font-size:9px" title="${esc(silo.name)}">${_supLeafLabel(silo.name)}${_supInactTag(silo)}
                 <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${siloMax>0?'cap: '+siloMax.toLocaleString()+'t':''}</span>
               </td>`;
             months.forEach(mon=>{
@@ -12158,7 +12197,7 @@ function _renderSupplyViewInner(wrap){
         const _unlPlan=(pid,ds)=>{ const di=_dIdx(ds); if(di<0)return 0; return _prodSilos(pid).reduce((s,si)=>s+((r&&r.siloUnloadHistory&&r.siloUnloadHistory[si.id]||[])[di]||0),0); };
         const _unlReal=(pid,ds)=>realUnloadTonnesFacProdDay(fac.id,pid,ds);
         const _tDpsMemo=new Map();   // demand points of a product, once per product (not per cell)
-        const _tDpsOf=pid=>{ let a=_tDpsMemo.get(pid); if(!a){ a=demandPoints.filter(dp=>dp.products?.some(p=>_canon(p.product_id)===pid)); _tDpsMemo.set(pid,a); } return a; };
+        const _tDpsOf=pid=>{ let a=_tDpsMemo.get(pid); if(!a){ a=demandPoints.filter(dp=>_canon(_dpFirstProd(dp))===pid); _tDpsMemo.set(pid,a); } return a; };
         const totalNeed=(pid,ds)=>_tDpsOf(pid).reduce((s,dp)=>s+(_demandRate(dp.element_id,ds)||0),0);
 
         // ── Demand-swap split at a TERMINAL ────────────────────────────────
@@ -12200,7 +12239,7 @@ function _renderSupplyViewInner(wrap){
         const packedSilos=facEls.filter(e=>e.type==='packed_silo')
           .filter(s=>getSiloProducts(s).some(_supProdAllows));
         const _facPackers=facEls.filter(e=>e.type==='packing_plant');
-        const _demProdIds=new Set(); demandPoints.forEach(dp=>(dp.products||[]).forEach(p=>_demProdIds.add(_canon(p.product_id))));
+        const _demProdIds=new Set(); demandPoints.forEach(dp=>{ (dp.products||[]).forEach(p=>_demProdIds.add(_canon(p.product_id))); const _fp=_dpFirstProd(dp); if(_fp) _demProdIds.add(_canon(_fp)); });
         const _catRank=pid=>{ const c=_prodById.get(pid)?.category; return (c==='cement_bulk'||c==='cement_packed')?0:c==='additive'?1:c==='clinker'?2:3; };
         const _pNameOf=pid=>_prodById.get(pid)?.name||pid;
         const _packedPids=new Set(packedSilos.flatMap(getSiloProducts).filter(Boolean));
@@ -12288,7 +12327,7 @@ function _renderSupplyViewInner(wrap){
                 const siloStart=_grStartOf(silo);
                 h+=`<tr class="supsec-${invSeckey}">
                   <td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${pc};font-size:9px">${_pChip(pid)}${_pNameOf(pid)}
-                    <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${esc(silo.name)}${siloMax>0?' · cap '+_fmtInt(Math.round(siloMax))+'t':''}</span></td>`;
+                    <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${esc(silo.name)}${siloMax>0?' · cap '+_fmtInt(Math.round(siloMax))+'t':''}</span>${_supInactTag(silo)}</td>`;
                 months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
                   const mt=mon.dates.reduce((s,ds)=>s+getInv(silo.id,ds,siloStart).value,0)/(mon.dates.length||1);
                   h+=`<td style="border-left:2px solid rgba(${rgba},.1);font-size:9px;color:${pc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
@@ -12328,7 +12367,7 @@ function _renderSupplyViewInner(wrap){
             });
             h+=`</tr>`;
             _reqPids.forEach(pid=>{
-              const _dpnDpts=demandPoints.filter(dp=>dp.products?.some(p=>_canon(p.product_id)===pid));
+              const _dpnDpts=demandPoints.filter(dp=>_canon(_dpFirstProd(dp))===pid);
               const _dpnBase=fac.id+'_'+reqSeckey+'_'+pid;
               h+=`<tr class="supsec-${reqSeckey}"><td style="${stickyLeft('var(--surface)',depth+2,'border-bottom:1px solid var(--border),')}color:${reqColor};font-size:9px">${_pChip(pid)}${_pNameOf(pid)}${_dpnDpts.length?_supDpnArrow(_dpnBase,_dpnDpts.length):''}</td>`;
               months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
@@ -17818,6 +17857,8 @@ function simulate(elements, connections, horizon, includeProposed=false){
     inventoryHistory:{},
     millProductHistory:{},
     packProductHistory:{},   // packProductHistory[packerId][day-1] = OUTPUT packed product this machine ran that day (null = idle/maint), day-aligned like millProductHistory
+    millOutputHistory:{},    // millOutputHistory[millId][day-1] = tonnes the mill really made that day (the rated rate less clinker, silo room and rule limits) — what reaches inventory
+    packOutputHistory:{},    // packOutputHistory[packerId][day-1] = tonnes the machine really packed that day
     kilnProdHistory:{},      // kilnProdHistory[kilnId][day-1] = ACTUAL clinker produced that day (0 when blocked)
     demandSwapHistory:{},     // demandSwapHistory[demandPointId][day-1] = {own, swapped, toProduct, fromProduct} when a swap covers part of this DP's demand
     siloTransferHistory:{},   // siloTransferHistory[linkId][day-1] = {fwd?:{asked,moved,real}, rev?:{asked,moved,real}} or null — silo link moves that day (fwd = origin→destination)
@@ -17856,8 +17897,8 @@ function simulate(elements, connections, horizon, includeProposed=false){
     };
     r.elementStates[el.id]=[];
     r.inventoryHistory[el.id]=[];
-    if(el.type==='finish_mill') r.millProductHistory[el.id]=[];
-    if(el.type==='packing_plant') r.packProductHistory[el.id]=[];
+    if(el.type==='finish_mill'){ r.millProductHistory[el.id]=[]; r.millOutputHistory[el.id]=new Array(horizon).fill(0); }
+    if(el.type==='packing_plant'){ r.packProductHistory[el.id]=[]; r.packOutputHistory[el.id]=new Array(horizon).fill(0); }
     if(el.type==='kiln') r.kilnProdHistory[el.id]=[];
     if(el.type==='kiln') state[el.id]._blockedHighInv=false; // tracks restart_threshold rule
     if(el.type==='dispatch_point'&&el.props.dispatch_type==='Rail'){
@@ -18860,12 +18901,26 @@ function simulate(elements, connections, horizon, includeProposed=false){
             prodSilos=(dn[mill.id]||[]).map(id=>elMap[id])
               .filter(e=>e&&isCementSilo(e)&&getSiloProducts(e).includes(rp.product_id)&&!railTransferSiloIds.has(e.id));
           }
+          // Still none: the mill is not wired to this product's silo. The tonnes were made all the
+          // same, so they go to the facility's silo for the product.
+          if(!prodSilos.length){
+            const _mf=mill.assigned_facility_id||mill.facility_id;
+            prodSilos=elements.filter(e=>isCementSilo(e)&&getSiloProducts(e).includes(rp.product_id)
+              &&!railTransferSiloIds.has(e.id)&&(e.assigned_facility_id||e.facility_id)===_mf);
+          }
+          r.millOutputHistory[mill.id][day-1]+=vol;
           let bestSilo=null, bestU=-1;
           prodSilos.forEach(si=>{
             if(state[si.id]?.inventory>=(state[si.id]?.maxCap||0)*0.98) return;
             const u=urgency(si.id,mill.id);
             if(u>bestU){ bestU=u; bestSilo=si; }
           });
+          // Every silo at the 98% stop level: that stops the PLAN, not what was really made. Real
+          // tonnes go to the silo with the most room (capacity still caps it at end of day).
+          if(!bestSilo&&prodSilos.length){
+            const _room=si=>(state[si.id]?.maxCap||0)-(state[si.id]?.inventory||0)-(siloInflow[si.id]||0);
+            bestSilo=prodSilos.reduce((a,b)=>_room(b)>_room(a)?b:a);
+          }
           if(bestSilo){
             siloInflow[bestSilo.id]=(siloInflow[bestSilo.id]||0)+vol;
             if(!siloSourceTracker[bestSilo.id]) siloSourceTracker[bestSilo.id]=new Set();
@@ -18993,6 +19048,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
                 }
               }
             }
+            r.millOutputHistory[mill.id][day-1]+=tonnesToRail+toRegActual;
             if(clkSilo&&clkPct>0){
               const consumed=(tonnesToRail+toRegActual)*clkPct;
               siloOutflow[clkSilo.id]=(siloOutflow[clkSilo.id]||0)+consumed;
@@ -19062,6 +19118,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
               }
             });
             const actualProd=tpd-remainC;
+            r.millOutputHistory[mill.id][day-1]+=actualProd;
             if(clkSiloC&&clkPctC>0){
               const consumed=actualProd*clkPctC;
               siloOutflow[clkSiloC.id]=(siloOutflow[clkSiloC.id]||0)+consumed;
@@ -19277,6 +19334,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
       }
 
       r.millProductHistory[mill.id].push(chosen.prodId);
+      r.millOutputHistory[mill.id][day-1]+=actualRate;
       totProd+=actualRate;
 
       // ── NORMAL ROUTING (non-RAIL) ─────────────────────
@@ -19339,6 +19397,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
             siloInflow[si.id]=(siloInflow[si.id]||0)+put;
             state[si.id].composition[outPid]=(state[si.id].composition[outPid]||0)+put;
             remOut-=put;
+            r.packOutputHistory[el.id][day-1]+=put;
           }
         });
       };
@@ -25685,6 +25744,7 @@ const SIM_RULEBOOK={
         {t:'A product campaign forces the product and rate for its dates; downtime campaigns stop the mill (PM Day = 50%).', set:'Supply › Campaign builder'},
         {t:'Otherwise the mill picks the product whose silo is most urgent: the days of net demand (demand minus what other mills supply) needed to bring the silo up to its target. Silos at their stop level (98%) are not eligible.'},
         {t:'Output is the mill\'s capacity for that product, limited by the clinker in stock and by the space left up to the stop level.', set:'Element › Product capacities · recipes'},
+        {t:'Real production always lands in a silo: the most urgent one that is connected and under 98%, else the one with the most room, even when the mill is not connected to it. Capacity still limits the silo at end of day.'},
         {t:'If any silo is critical, only critical silos are considered that day.'},
         {t:'When nothing can run the mill is recorded as idle (no production needed or products paused), starved (no clinker) or blocked (silos full).'},
         {t:'A mill operating rule (Your rules) can set when the mill stops, when it restarts, which product it restarts with, a minimum run, which products it may make, product-change days and t/day limits.', set:'Your rules'},
