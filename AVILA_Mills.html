@@ -316,7 +316,6 @@ main{padding:16px 16px 40px;max-width:1860px;margin:0 auto;display:flex;flex-dir
   <button class="btn" id="b-mix" title="Back to the last 12 months' mix. Your yields, outages and efficiency stay.">Actual mix</button>
   <button class="btn" id="b-max" title="Every mill on its highest-yield product">Max tonnes</button>
   <button class="btn" id="b-reset" title="Everything back to the last 12 months">Reset all</button>
-  <a class="btn" href="AVILA_Roll.html" title="Back to AVILA Roll">Roll ↗</a>
 </div>
 
 <div id="gate"><div class="gcard">
@@ -358,9 +357,10 @@ main{padding:16px 16px 40px;max-width:1860px;margin:0 auto;display:flex;flex-dir
 'use strict';
 /* AVILA Mill Balance: what-if for finish mill time. Stand-alone next to AVILA_Roll.html and
    AVILA_Sales.html, same origin, same theme. It READS the active scenario file and never writes
-   it; the only thing it stores is its own what-if, in localStorage 'avila_mills_v1'. No scenario
-   data lives in this file: the repository is public. */
-const LS_KEY='avila_mills_v1';
+   it, and follows that file while open: mills, products, yields and recipes are always the
+   topology's. The only thing it stores is what the user changed on top of them, in localStorage
+   'avila_mills_v2'. No scenario data lives in this file: the repository is public. */
+const LS_KEY='avila_mills_v2';
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=n=>Math.round(n).toLocaleString('en-US');
@@ -373,7 +373,7 @@ const num=(v,f=0)=>{const n=parseFloat(v);return isFinite(n)?n:f;};
 const ymdMinus=(ymd,n)=>{const d=new Date(ymd+'T12:00:00');d.setDate(d.getDate()-n);const m=String(d.getMonth()+1).padStart(2,'0'),a=String(d.getDate()).padStart(2,'0');return `${d.getFullYear()}-${m}-${a}`;};
 
 const M={days:365,plants:[],prods:[],sc:'',win:null,file:''};
-let undo=[];
+let undo=[], LIVE=null, LAST=0, KEY='', synced='', dragging=false;
 
 // ── Products: same family, same colour and position on every bar, whichever plant ──
 function family(short){
@@ -387,7 +387,7 @@ const shortName=n=>String(n||'').replace(/\/BLK$/,'').replace(/^[A-Z]{2,5}_/,'')
 
 // ── Scenario → model. Baseline reproduces the last 12 months exactly: time on a product is the
 // tonnes it made ÷ its yield, and efficiency is whatever squares that with the days it ran. ──
-function buildModel(payload,label){
+function buildModel(payload){
   const DB=payload.DB, fac={}, prod={};
   (DB.facilities||[]).forEach(f=>fac[f.id]=f);
   (DB.products||[]).forEach(p=>prod[p.id]=p);
@@ -432,12 +432,13 @@ function buildModel(payload,label){
     const outage=clamp(365-run.size,0,365), eff=run.size&&rated?t/(run.size*rated):1;
     p.kilns.push({id:e.id,name:e.name,rated,outage,eff,base:{rated,outage,eff,t}});
   });
-  M.plants=[...plants.values()].sort((a,b)=>a.mills.length-b.mills.length);
+  const list=[...plants.values()].sort((a,b)=>a.mills.length-b.mills.length);
   const names=new Map();
-  M.plants.forEach(pl=>pl.mills.forEach(m=>[...m.products,...m.fixed].forEach(p=>{ if(!names.has(p.name)) names.set(p.name,{name:p.name,short:p.short,c:p.c,r:p.r,plant:pl.name}); })));
-  M.prods=[...names.values()].sort((a,b)=>a.plant.localeCompare(b.plant)||a.r-b.r||a.short.localeCompare(b.short));
-  M.days=365; M.sc=label; M.win={from,to};
+  list.forEach(pl=>pl.mills.forEach(m=>[...m.products,...m.fixed].forEach(p=>{ if(!names.has(p.name)) names.set(p.name,{name:p.name,short:p.short,c:p.c,r:p.r,plant:pl.name}); })));
+  return {plants:list,prods:[...names.values()].sort((a,b)=>a.plant.localeCompare(b.plant)||a.r-b.r||a.short.localeCompare(b.short)),win:{from,to}};
 }
+// What the model is built from: if this does not change, a new save of the file changes nothing here.
+const modelKey=(plants,win)=>JSON.stringify([win,plants.map(pl=>[pl.id,pl.mills.map(m=>[m.id,m.name,m.base,m.fixed,m.products.map(p=>[p.id,p.name,p.clk,p.base])]),pl.kilns.map(k=>[k.id,k.name,k.base])])]);
 
 // ── The sums, one place ──
 function calc(){
@@ -471,8 +472,9 @@ function tmplLever(m,p,i){
     <input class="fi" type="number" min="0" max="100" step="0.5" data-pct="${m.id}|${i}" title="Share of this mill's time" ${m.products.length<2?'disabled':''}>
     <input type="range" min="0" max="100" step="0.5" data-lev="${m.id}|${i}" aria-label="${esc(m.short+' '+p.short)} share of time" ${m.products.length<2?'disabled':''}></div>`;
 }
+function chip(note){ $('srcchip').innerHTML=`<b>${esc(M.sc)}</b> · last 12 months ${M.win.from} → ${M.win.to}`+(LIVE?` · ${note||('synced '+synced)}`:' · from a file'); }
 function buildUI(){
-  $('srcchip').innerHTML=`<b>${esc(M.sc)}</b> · last 12 months ${M.win.from} → ${M.win.to}`;
+  chip();
   $('days').value=M.days;
   $('h-plants').innerHTML=M.plants.map(pl=>`<a class="hplant" href="#pl-${esc(pl.id)}"><div class="row"><span class="nm">${esc(pl.name)}</span><span class="val" id="hp-t-${esc(pl.id)}">0</span></div><div class="row"><span class="sub" id="hp-c-${esc(pl.id)}"></span><span class="pill flat" id="hp-d-${esc(pl.id)}"></span></div></a>`).join('');
   $('prodlist').innerHTML=M.prods.map((p,i)=>`<div class="prow" style="--c:var(${p.c})"><div class="pn" title="${esc(p.name)}"><span class="dot" style="background:var(${p.c})"></span>${esc(p.name.replace(/\/BLK$/,''))}</div><div class="ptrack"><div class="pfill" id="pf-${i}" style="background:var(${p.c})"></div><div class="pghost" id="pg-${i}"></div></div><div class="pv" id="pv-${i}"></div><div class="pd" id="pd-${i}"></div><button class="maxbtn" data-max="${i}" title="Every mill that can make ${esc(p.short)} spends all its time on it">MAX</button></div>`).join('');
@@ -632,8 +634,42 @@ function restore(txt){
 }
 const pushUndo=()=>{ undo.push(snapshot()); if(undo.length>40) undo.shift(); };
 let _svT=0;
-function scheduleSave(){ clearTimeout(_svT); _svT=setTimeout(()=>{ try{ localStorage.setItem(LS_KEY,JSON.stringify({sc:M.sc,win:M.win.to,state:JSON.parse(snapshot())})); }catch(e){} },400); }
-function loadSaved(){ try{ const o=JSON.parse(localStorage.getItem(LS_KEY)||'null'); if(o&&o.sc===M.sc&&o.state) restore(o.state); }catch(e){} }
+// Only what differs from the topology is kept, so a rate changed in the Roll shows up here unless
+// the user has typed over that same number.
+function overrides(){
+  const o={days:M.days===365?undefined:M.days,plants:{}};
+  M.plants.forEach(pl=>{
+    const q={extra:num(pl.extra)||undefined,mills:{},kilns:{}};
+    pl.mills.forEach(m=>{ const x={};
+      if(m.outage!==m.base.outage) x.outage=m.outage;
+      if(Math.abs(m.eff-m.base.eff)>1e-6) x.eff=m.eff;
+      const y={}; m.products.forEach(p=>{ if(p.yield!==p.base.yield) y[p.id]=p.yield; }); if(Object.keys(y).length) x.yields=y;
+      if(m.products.some(p=>Math.abs(p.share-p.base.share)>1e-6)) x.shares=Object.fromEntries(m.products.map(p=>[p.id,p.share]));
+      if(Object.keys(x).length) q.mills[m.id]=x; });
+    pl.kilns.forEach(k=>{ const x={};
+      if(k.rated!==k.base.rated) x.rated=k.rated;
+      if(k.outage!==k.base.outage) x.outage=k.outage;
+      if(Math.abs(k.eff-k.base.eff)>1e-6) x.eff=k.eff;
+      if(Object.keys(x).length) q.kilns[k.id]=x; });
+    o.plants[pl.id]=q;
+  });
+  return o;
+}
+function applyOverrides(o){
+  if(!o||!o.plants) return;
+  if(o.days) M.days=o.days;
+  M.plants.forEach(pl=>{ const q=o.plants[pl.id]; if(!q) return;
+    pl.extra=q.extra||0;
+    pl.mills.forEach(m=>{ const x=(q.mills||{})[m.id]; if(!x) return;
+      if(x.outage!=null) m.outage=x.outage;
+      if(x.eff!=null) m.eff=x.eff;
+      m.products.forEach(p=>{ if(x.yields&&x.yields[p.id]!=null) p.yield=x.yields[p.id]; });
+      if(x.shares){ const sum=m.products.reduce((a,p)=>a+num(x.shares[p.id]),0); if(sum>0) m.products.forEach(p=>p.share=num(x.shares[p.id])/sum); } });
+    pl.kilns.forEach(k=>{ const x=(q.kilns||{})[k.id]; if(!x) return; if(x.rated!=null) k.rated=x.rated; if(x.outage!=null) k.outage=x.outage; if(x.eff!=null) k.eff=x.eff; });
+  });
+}
+function scheduleSave(){ clearTimeout(_svT); _svT=setTimeout(()=>{ try{ localStorage.setItem(LS_KEY,JSON.stringify({sc:M.sc,ov:overrides()})); }catch(e){} },400); }
+function loadSaved(){ try{ localStorage.removeItem('avila_mills_v1'); const o=JSON.parse(localStorage.getItem(LS_KEY)||'null'); if(o&&o.sc===M.sc) applyOverrides(o.ov); }catch(e){} }
 function resetMill(m){ m.outage=m.base.outage; m.eff=m.base.eff; m.products.forEach(p=>{ p.yield=p.base.yield; p.share=p.base.share; }); }
 
 // ── Moves ──
@@ -668,7 +704,7 @@ function handlesAt(m,k){
 }
 function dragStart(ev,h){
   const [id,idx]=h.dataset.h.split('|'), f=findMill(id); if(!f) return;
-  ev.preventDefault(); pushUndo();
+  ev.preventDefault(); pushUndo(); dragging=true;
   const {pl,m}=f, bar=m.barEl, start={t:{},s:{}};
   m.products.forEach(p=>{ start.t[p.id]=m.avail*p.share*p.yield*m.eff; start.s[p.id]=p.share; });
   const stack=handlesAt(m,+idx), y0=ev.clientY;
@@ -679,7 +715,7 @@ function dragStart(ev,h){
   const move=e=>{ if(i===null){ if(Math.abs(e.clientY-y0)<2) return; pick(e.clientY>y0?stack[0]:stack[stack.length-1]); }
     const r=bar.getBoundingClientRect(); const v=Math.round((r.bottom-e.clientY)/r.height*200)/200; const b=clamp(v,lo,lo+pair);
     m.products[i].share=b-lo; m.products[i+1].share=lo+pair-b; update(); showTicket(e.clientX,e.clientY,pl,m,start); };
-  const end=()=>{ bar.classList.remove('drag'); h.classList.remove('on'); h.removeEventListener('pointermove',move); h.removeEventListener('pointerup',end); h.removeEventListener('pointercancel',end); setTimeout(()=>ticket.classList.remove('on'),900); };
+  const end=()=>{ dragging=false; bar.classList.remove('drag'); h.classList.remove('on'); h.removeEventListener('pointermove',move); h.removeEventListener('pointerup',end); h.removeEventListener('pointercancel',end); setTimeout(()=>ticket.classList.remove('on'),900); };
   h.addEventListener('pointermove',move); h.addEventListener('pointerup',end); h.addEventListener('pointercancel',end);
   showTicket(ev.clientX,ev.clientY,pl,m,start);
 }
@@ -719,8 +755,9 @@ function wire(){
 // ── Getting the scenario: the Roll's active file, read-only, or any JSON ──
 function loadPayload(p,label){
   if(!p||typeof p.DB!=='object'||!Array.isArray(p.DB.elements)) throw new Error('That file is not an AVILA Roll scenario.');
-  buildModel(p,label);
-  if(!M.plants.length) throw new Error('No active finish mills in this scenario.');
+  const n=buildModel(p);
+  if(!n.plants.length) throw new Error('No active finish mills in this scenario.');
+  Object.assign(M,n,{sc:label,days:365}); KEY=modelKey(n.plants,n.win);
   loadSaved(); undo=[]; buildUI();
   $('gate').classList.add('off'); $('app').style.display='flex';
   update();
@@ -731,9 +768,27 @@ function idbHandle(id){
     rq.onsuccess=()=>{ const db=rq.result; try{ if(!db.objectStoreNames.contains('handles')){ db.close(); return res(null); }
       const q=db.transaction('handles','readonly').objectStore('handles').get(id); q.onsuccess=()=>{ db.close(); res(q.result||null); }; q.onerror=()=>{ db.close(); res(null); }; }catch(e){ res(null); } }; });
 }
-async function readHandle(h,name){ const f=await h.getFile(); loadPayload(JSON.parse(await f.text()),name||f.name.replace(/\.json$/i,'')); }
+const stamp=()=>{ const d=new Date(); synced=String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); };
+async function readHandle(h,name){ const f=await h.getFile(), p=JSON.parse(await f.text()); LIVE=h; LAST=f.lastModified; stamp(); loadPayload(p,name||f.name.replace(/\.json$/i,'')); }
+// Follows the scenario while open. A save that does not touch what this page shows changes nothing;
+// never mid-drag or mid-typing, the next check picks it up.
+async function checkSync(){
+  if(!LIVE||dragging||(document.activeElement&&document.activeElement.tagName==='INPUT')) return;
+  try{
+    const f=await LIVE.getFile(); stamp();
+    if(f.lastModified===LAST){ chip(); return; }
+    const n=buildModel(JSON.parse(await f.text())), k=modelKey(n.plants,n.win);
+    LAST=f.lastModified;
+    if(k===KEY){ chip(); return; }
+    if(dragging) return;
+    const ov=overrides();
+    Object.assign(M,n); KEY=k; applyOverrides(ov); undo=[]; buildUI(); update();
+  }catch(e){ chip('could not re-read the scenario'); }
+}
 async function boot(){
   wire();
+  setInterval(checkSync,30000);
+  addEventListener('focus',checkSync);
   $('g-file').onclick=()=>$('g-input').click();
   $('g-input').onchange=e=>{ const f=e.target.files[0]; if(f) readFile(f); };
   addEventListener('dragover',e=>{ e.preventDefault(); $('drop').classList.add('on'); });
@@ -747,7 +802,7 @@ async function boot(){
   b.onclick=async()=>{ try{ if(await h.requestPermission({mode:'read'})==='granted') await readHandle(h,name); else $('gmsg').textContent='Chrome did not allow reading the file.'; }catch(e){ $('gmsg').textContent=e.message; } };
   try{ if(await h.queryPermission({mode:'read'})==='granted') await readHandle(h,name); }catch(e){ $('gmsg').textContent=e.message; }
 }
-function readFile(f){ const r=new FileReader(); r.onload=()=>{ try{ loadPayload(JSON.parse(r.result),f.name.replace(/\.json$/i,'')); }catch(e){ $('gate').classList.remove('off'); $('gmsg').textContent=e.message; } }; r.readAsText(f); }
+function readFile(f){ const r=new FileReader(); r.onload=()=>{ try{ LIVE=null; loadPayload(JSON.parse(r.result),f.name.replace(/\.json$/i,'')); }catch(e){ $('gate').classList.remove('off'); $('gmsg').textContent=e.message; } }; r.readAsText(f); }
 boot();
 </script>
 </body>
