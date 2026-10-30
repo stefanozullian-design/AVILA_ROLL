@@ -29273,6 +29273,12 @@ async function dsIngestProduction(buf, name){
     if(winMax>=dateMin){
       const elName={}; const presentElDay=new Set(); const matchedEls=new Set();
       Object.values(aggMap).forEach(r=>{ elName[r.element_id]=r.element_name; presentElDay.add(r.element_id+'|'+r.date); matchedEls.add(r.element_id); });
+      // SAP books all of a plant's bags to one machine (MIA reports only MIAPK01), so a packer with
+      // no rows of its own at a plant whose packers report stood still; it is not "not in the report".
+      const facOf=e=>e.assigned_facility_id||e.facility_id;
+      const packers=(DB.elements||[]).filter(e=>e.type==='packing_plant');
+      const reportingFacs=new Set(packers.filter(e=>matchedEls.has(e.id)).map(facOf));
+      packers.filter(e=>!matchedEls.has(e.id)&&reportingFacs.has(facOf(e))).forEach(e=>{ elName[e.id]=e.name; matchedEls.add(e.id); });
       const days=[];
       for(let d=new Date(dateMin+'T00:00:00'); d._ymd()<=winMax; d.setDate(d.getDate()+1)) days.push(d._ymd());
       matchedEls.forEach(elId=>{
