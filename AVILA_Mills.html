@@ -331,7 +331,7 @@ main{padding:16px 16px 40px;max-width:1860px;margin:0 auto;display:flex;flex-dir
   <div class="tbsp"></div>
   <label class="tbf">Days in year <input class="fi" id="days" type="number" min="1" max="366" style="width:52px" value="365"></label>
   <button class="btn" id="b-undo" disabled title="Undo the last move">↶ Undo</button>
-  <button class="btn" id="b-mix" title="Back to the last 12 months' mix. Your yields, outages and efficiency stay.">Actual mix</button>
+  <button class="btn" id="b-mix" title="Back to the last 12 months' mix. Your yields and efficiency stay.">Actual mix</button>
   <button class="btn" id="b-max" title="Every mill on its highest-yield product">Max tonnes</button>
   <button class="btn" id="b-reset" title="Everything back to the last 12 months">Reset all</button>
 </div>
@@ -367,7 +367,7 @@ main{padding:16px 16px 40px;max-width:1860px;margin:0 auto;display:flex;flex-dir
   <div class="hint">
     <span><b>Drag a handle</b> on a bar to trade time between two products</span>
     <span><b>Sliders</b> rebalance the rest of the mill</span>
-    <span>Every day = 24 h on one product · Tonnes = (days − outage) × share × yield × efficiency</span>
+    <span>Every day = 24 h on one product · Tonnes = days × efficiency × share × yield · Non Productive Days = days × (1 − efficiency)</span>
   </div>
   <section id="plants"></section>
 </main>
@@ -381,8 +381,8 @@ main{padding:16px 16px 40px;max-width:1860px;margin:0 auto;display:flex;flex-dir
    AVILA_Sales.html, same origin, same theme. It READS the active scenario file and never writes
    it, and follows that file while open: mills, products, yields and recipes are always the
    topology's. The only thing it stores is what the user changed on top of them, in localStorage
-   'avila_mills_v2'. No scenario data lives in this file: the repository is public. */
-const LS_KEY='avila_mills_v2';
+   'avila_mills_v3'. No scenario data lives in this file: the repository is public. */
+const LS_KEY='avila_mills_v3';
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=n=>Math.round(n).toLocaleString('en-US');
@@ -443,16 +443,16 @@ function buildModel(payload){
     }).sort((x,y)=>x.r-y.r||x.short.localeCompare(y.short));
     const hrs=list.map(p=>p.yield>0?p.base.t/p.yield:0), sum=hrs.reduce((a,b)=>a+b,0);
     list.forEach((p,i)=>{ p.share=sum>0?hrs[i]/sum:(i?0:1); p.base.share=p.share; });
-    const outage=clamp(365-run.size,0,365), eff=run.size&&sum?sum/run.size:1;
+    const eff=sum/365;   // productive days at full yield ÷ the year; Non Productive Days is the rest of it
     const name=e.name, short=(name.match(/FM\d+/)||[name])[0];
-    plantOf(facName(e)).mills.push({id:e.id,name,short,products:list,fixed,outage,eff,base:{outage,eff,run:run.size,t:list.reduce((a,p)=>a+p.base.t,0)+fixed.reduce((a,x)=>a+x.t,0)}});
+    plantOf(facName(e)).mills.push({id:e.id,name,short,products:list,fixed,eff,base:{eff,run:run.size,t:list.reduce((a,p)=>a+p.base.t,0)+fixed.reduce((a,x)=>a+x.t,0)}});
   });
   (DB.elements||[]).filter(e=>e.type==='kiln'&&e.is_active!==false).sort((a,b)=>a.name.localeCompare(b.name)).forEach(e=>{
     const p=plants.get(facName(e)); if(!p) return;
     const mine=inWin.filter(r=>r.element_id===e.id), run=new Set(mine.map(r=>r.date)), t=mine.reduce((a,r)=>a+num(r.volume_t),0);
     const rated=caps(e.id).reduce((m,c)=>Math.max(m,num(c.capacity_tpd)),0)||(run.size?Math.round(t/run.size):0);
-    const outage=clamp(365-run.size,0,365), eff=run.size&&rated?t/(run.size*rated):1;
-    p.kilns.push({id:e.id,name:e.name,rated,outage,eff,base:{rated,outage,eff,t}});
+    const eff=rated?t/(365*rated):0;
+    p.kilns.push({id:e.id,name:e.name,rated,eff,base:{rated,eff,t}});
   });
   const list=[...plants.values()].sort((a,b)=>a.mills.length-b.mills.length);
   const names=new Map();
@@ -468,9 +468,9 @@ function calc(){
   M.plants.forEach(pl=>{
     pl.t=0; pl.bt=0; pl.need=0; pl.bneed=0; pl.prods={};
     pl.mills.forEach(m=>{
-      m.avail=Math.max(0,M.days-m.outage); m.t=0;
+      m.avail=M.days*m.eff; m.t=0;
       m.products.forEach(p=>{
-        p.t=m.avail*p.share*p.yield*m.eff; m.t+=p.t; pl.t+=p.t; pl.bt+=p.base.t;
+        p.t=m.avail*p.share*p.yield; m.t+=p.t; pl.t+=p.t; pl.bt+=p.base.t;
         pl.need+=p.t*p.clk; pl.bneed+=p.base.t*p.clk;
         const q=pl.prods[p.name]||(pl.prods[p.name]={name:p.name,short:p.short,c:p.c,r:p.r,t:0,b:0}); q.t+=p.t; q.b+=p.base.t;
         const g=byProd[p.name]||(byProd[p.name]={t:0,b:0}); g.t+=p.t; g.b+=p.base.t;
@@ -481,7 +481,7 @@ function calc(){
         const g=byProd[x.name]||(byProd[x.name]={t:0,b:0}); g.t+=x.t; g.b+=x.t;
       });
     });
-    pl.kilnT=pl.kilns.reduce((a,k)=>a+Math.max(0,M.days-k.outage)*k.rated*k.eff,0);
+    pl.kilnT=pl.kilns.reduce((a,k)=>a+M.days*k.eff*k.rated,0);
     pl.avail=pl.kilnT+num(pl.extra);
     total+=pl.t; base+=pl.bt;
   });
@@ -506,8 +506,8 @@ function clinkerHTML(pl){
       <div class="clkm" id="cm-${id}"></div></div>
     <div class="kilns">${pl.kilns.map(k=>`<div class="kiln"><div class="kn"><span>${esc(k.name)}</span><span class="dim" id="kt-${k.id}"></span></div>
       <div class="kf">Yield TPD<input class="fi" type="number" min="0" step="10" data-kr="${k.id}"></div>
-      <div class="kf">Outage days<input class="fi" type="number" min="0" max="366" data-ko="${k.id}"></div>
-      <div class="kf">Efficiency %<input class="fi" type="number" min="0" max="150" step="0.5" data-ke="${k.id}"></div></div>`).join('')}
+      <div class="kf">Non Productive Days<input class="fi" type="number" min="0" max="366" step="1" data-ko="${k.id}"></div>
+      <div class="kf">Efficiency %<input class="fi" type="number" min="0" max="100" step="0.5" data-ke="${k.id}"></div></div>`).join('')}
       <div class="kiln"><div class="kn"><span>Other clinker</span></div><div class="kf" style="grid-template-columns:1fr 70px">Stock, buys t<input class="fi" type="number" min="0" step="1000" data-extra="${id}" title="Clinker from stock or purchases, tonnes per year"></div></div>
     </div>
   </div>`;
@@ -541,9 +541,9 @@ function plantHTML(pl){
       ${pl.mills.map((m,i)=>`<div style="grid-row:1;grid-column:${i+2};position:relative">${chart(m)}</div>`).join('')}
       <div style="grid-row:1;grid-column:${n+2};position:relative"><div class="chartwrap"><div class="bar totbar" data-tot="${esc(pl.id)}">${totSegs.map(p=>`<div class="seg" data-p="${esc(p.name)}" style="--c:var(${p.c})"><span class="sn">${esc(p.short)}</span><span class="sp"></span><span class="st"></span></div>`).join('')}</div></div></div>
       <div class="lbl first"></div>${pl.mills.map(m=>`<div class="mname"><b title="${esc(m.name)}">${esc(m.short)}</b><span id="mt-${m.id}"></span><br><button class="mreset" data-reset="${m.id}">↺ reset</button></div>`).join('')}<div class="mname"><b>Total</b><span id="tt-${esc(pl.id)}"></span></div>
-      ${row('Outage<br>days',m=>`<input class="fi" type="number" min="0" max="366" data-out="${m.id}">`,`<div id="to-${esc(pl.id)}" class="calc"></div>`)}
-      ${row('Efficiency<br>%',m=>`<input class="fi" type="number" min="0" max="150" step="0.5" data-eff="${m.id}">`,`<div id="te-${esc(pl.id)}" class="calc"></div>`)}
-      ${row('Run days',m=>`<div class="calc" id="rd-${m.id}"></div>`,`<div id="tr-${esc(pl.id)}" class="calc"></div>`)}
+      ${row('Non Productive<br>Days',m=>`<input class="fi" type="number" min="0" max="366" step="1" data-out="${m.id}">`,`<div id="to-${esc(pl.id)}" class="calc"></div>`)}
+      ${row('Efficiency<br>%',m=>`<input class="fi" type="number" min="0" max="100" step="0.5" data-eff="${m.id}">`,`<div id="te-${esc(pl.id)}" class="calc"></div>`)}
+      ${row('Productive<br>days',m=>`<div class="calc" id="rd-${m.id}"></div>`,`<div id="tr-${esc(pl.id)}" class="calc"></div>`)}
       ${row('Tonnes / yr',m=>`<div class="calc big" id="tn-${m.id}"></div>`,`<div id="tn-${esc(pl.id)}" class="calc big"></div>`)}
       <div class="lbl leg"><div class="lgh"><span>Product</span><span>CLK FCT</span></div>${totSegs.map(p=>`<div class="lg"><span class="dot" style="background:var(${p.c})"></span><span title="${esc(p.name)}">${esc(p.short)}</span><input class="fi" type="number" min="0" max="1" step="0.001" data-clk="${esc(pl.id)}|${esc(p.name)}" title="Clinker factor: tonnes of clinker per tonne of ${esc(p.short)}, from its recipe"></div>`).join('')}</div>
       ${pl.mills.map(m=>`<div class="cell">${m.products.map((p,i)=>tmplLever(m,p,i)).join('')}${m.fixed.map(x=>`<div class="clkm" title="Made in the last 12 months but not listed for this mill in the Roll. Counted as a fixed amount, no lever.">+ ${fmt(x.t)} t ${esc(x.short)} one-off</div>`).join('')}</div>`).join('')}
@@ -592,9 +592,9 @@ function update(){
     roll($('cp-'+pid),pct*100,v=>v.toFixed(1)+'%');
     const gap=pl.need-pl.avail, avgClk=pl.t>0?pl.need/pl.t:0;
     $('cm-'+pid).innerHTML=`Needs <b>${fmt(pl.need)} t</b> · kilns make <b>${fmt(pl.kilnT)} t</b>${num(pl.extra)>0?` + ${fmt(pl.extra)} t other`:''}<br>`+(over?`<span class="down"><b>${fmt(gap)} t short</b> · about ${fmt(avgClk?gap/avgClk:0)} t of cement depends on stock or purchases</span>`:`<span class="up"><b>${fmt(-gap)} t spare</b> · room for about ${fmt(avgClk?-gap/avgClk:0)} t more cement</span>`);
-    let avail=0, wt=0, nm=0, outs=0;
+    let avail=0, nm=0, outs=0;
     pl.mills.forEach(m=>{
-      avail+=m.avail; nm++; outs+=m.outage; wt+=m.eff;
+      avail+=m.avail; nm++; outs+=npd(m);
       let cum=0;
       m.products.forEach((p,i)=>{
         const h=p.share*100, el=m.segEls[i];
@@ -610,9 +610,10 @@ function update(){
           const bc=m.products.slice(0,i+1).reduce((a,q)=>a+q.base.share*100,0), n=m.nEls[i]; n.style.bottom=bc+'%'; n.classList.toggle('on',Math.abs(bc-cum)>0.4); }
       });
       const o=document.querySelector(`[data-out="${m.id}"]`), e=document.querySelector(`[data-eff="${m.id}"]`);
-      setVal(o,m.outage); o.classList.toggle('mod',m.outage!==m.base.outage);
-      setVal(e,(m.eff*100).toFixed(1)); e.classList.toggle('mod',Math.abs(m.eff-m.base.eff)>1e-6);
-      $('rd-'+m.id).textContent=fmt(m.avail);
+      const moved=Math.abs(m.eff-m.base.eff)>1e-6;
+      setVal(o,npd(m).toFixed(1)); o.classList.toggle('mod',moved);
+      setVal(e,(m.eff*100).toFixed(1)); e.classList.toggle('mod',moved);
+      $('rd-'+m.id).textContent=m.avail.toFixed(1);
       const dm=m.t-m.base.t, tn=$('tn-'+m.id);
       tn.innerHTML=`${fmt(m.t)}<small class="${cls(dm)}">${Math.abs(dm)<0.5?'·':sgn(dm)}</small>`;
       $('mt-'+m.id).textContent=kt(m.t);
@@ -630,16 +631,17 @@ function update(){
     });
     $('tt-'+pid).textContent=kt(pl.t);
     $('ts-'+pid).innerHTML=`<div class="ttab"><span></span><span></span><span class="th">Total</span><span class="th">%</span>`+list.map(q=>`<span class="dot" style="background:var(${q.c})"></span><span>${esc(q.short)}</span><span class="r">${fmt(q.t)}</span><span class="r">${(pl.t>0?q.t/pl.t*100:0).toFixed(1)}%</span>`).join('')+`</div>`;
-    $('to-'+pid).textContent=fmt(outs);
-    const yEff=pl.mills.reduce((a,m)=>a+m.eff*m.avail,0)/(avail||1);
+    $('to-'+pid).textContent=outs.toFixed(1);
+    const yEff=avail/((nm*M.days)||1);
     $('te-'+pid).textContent=(yEff*100).toFixed(1)+'%';
-    $('tr-'+pid).textContent=fmt(avail);
+    $('tr-'+pid).textContent=avail.toFixed(1);
     const tn=$('tn-'+pid); tn.innerHTML=`${fmt(pl.t)}<small class="${cls(dp)}">${Math.abs(dp)<0.5?'·':sgn(dp)}</small>`;
     pl.kilns.forEach(k=>{
       const a=document.querySelector(`[data-kr="${k.id}"]`), b=document.querySelector(`[data-ko="${k.id}"]`), c=document.querySelector(`[data-ke="${k.id}"]`);
-      setVal(a,k.rated); setVal(b,k.outage); setVal(c,(k.eff*100).toFixed(1));
-      a.classList.toggle('mod',k.rated!==k.base.rated); b.classList.toggle('mod',k.outage!==k.base.outage); c.classList.toggle('mod',Math.abs(k.eff-k.base.eff)>1e-6);
-      $('kt-'+k.id).textContent=kt(Math.max(0,M.days-k.outage)*k.rated*k.eff);
+      const moved=Math.abs(k.eff-k.base.eff)>1e-6;
+      setVal(a,k.rated); setVal(b,npd(k).toFixed(1)); setVal(c,(k.eff*100).toFixed(1));
+      a.classList.toggle('mod',k.rated!==k.base.rated); b.classList.toggle('mod',moved); c.classList.toggle('mod',moved);
+      $('kt-'+k.id).textContent=kt(M.days*k.eff*k.rated);
     });
     setVal(document.querySelector(`[data-extra="${CSS.escape(pid)}"]`),num(pl.extra)||'');
     document.querySelectorAll(`[data-clk^="${CSS.escape(pid)}|"]`).forEach(el=>{ const q=plantProds(pl).find(x=>x.name===el.dataset.clk.split('|')[1]); if(!q) return; setVal(el,q.clk.toFixed(3)); el.classList.toggle('mod',Math.abs(q.clk-q.base.clk)>1e-6); });
@@ -647,19 +649,20 @@ function update(){
   $('b-undo').disabled=!undo.length;
   scheduleSave();
 }
-const isMoved=m=>m.outage!==m.base.outage||Math.abs(m.eff-m.base.eff)>1e-6||m.products.some(p=>p.yield!==p.base.yield||Math.abs(p.share-p.base.share)>1e-6);
+const npd=x=>Math.max(0,M.days*(1-x.eff));   // Non Productive Days and efficiency are one number, shown two ways
+const isMoved=m=>Math.abs(m.eff-m.base.eff)>1e-6||m.products.some(p=>p.yield!==p.base.yield||Math.abs(p.share-p.base.share)>1e-6);
 
 // ── State: undo + this browser's what-if ──
-function snapshot(){ return JSON.stringify({days:M.days,plants:M.plants.map(pl=>({id:pl.id,extra:pl.extra,clk:plantProds(pl).map(p=>[p.name,p.clk]),mills:pl.mills.map(m=>({id:m.id,outage:m.outage,eff:m.eff,p:m.products.map(p=>[p.id,p.yield,p.share])})),kilns:pl.kilns.map(k=>({id:k.id,rated:k.rated,outage:k.outage,eff:k.eff}))}))}); }
+function snapshot(){ return JSON.stringify({days:M.days,plants:M.plants.map(pl=>({id:pl.id,extra:pl.extra,clk:plantProds(pl).map(p=>[p.name,p.clk]),mills:pl.mills.map(m=>({id:m.id,eff:m.eff,p:m.products.map(p=>[p.id,p.yield,p.share])})),kilns:pl.kilns.map(k=>({id:k.id,rated:k.rated,eff:k.eff}))}))}); }
 function restore(txt){
   let s; try{ s=typeof txt==='string'?JSON.parse(txt):txt; }catch(e){ return; }
   if(!s||!s.plants) return;
   if(s.days) M.days=s.days;
   s.plants.forEach(sp=>{ const pl=M.plants.find(x=>x.id===sp.id); if(!pl) return; pl.extra=sp.extra||0; (sp.clk||[]).forEach(([n,v])=>setClk(pl,n,v));
-    (sp.mills||[]).forEach(sm=>{ const m=pl.mills.find(x=>x.id===sm.id); if(!m) return; m.outage=sm.outage; m.eff=sm.eff;
+    (sp.mills||[]).forEach(sm=>{ const m=pl.mills.find(x=>x.id===sm.id); if(!m) return; m.eff=sm.eff;
       (sm.p||[]).forEach(([id,y,sh])=>{ const p=m.products.find(x=>x.id===id); if(p){ p.yield=y; p.share=sh; } });
       const sum=m.products.reduce((a,p)=>a+p.share,0); if(sum>0) m.products.forEach(p=>p.share/=sum); });
-    (sp.kilns||[]).forEach(sk=>{ const k=pl.kilns.find(x=>x.id===sk.id); if(k){ k.rated=sk.rated; k.outage=sk.outage; k.eff=sk.eff; } });
+    (sp.kilns||[]).forEach(sk=>{ const k=pl.kilns.find(x=>x.id===sk.id); if(k){ k.rated=sk.rated; k.eff=sk.eff; } });
   });
 }
 const pushUndo=()=>{ undo.push(snapshot()); if(undo.length>40) undo.shift(); };
@@ -672,14 +675,12 @@ function overrides(){
     const q={extra:num(pl.extra)||undefined,mills:{},kilns:{},clk:{}};
     plantProds(pl).forEach(p=>{ if(Math.abs(p.clk-p.base.clk)>1e-6) q.clk[p.name]=p.clk; });
     pl.mills.forEach(m=>{ const x={};
-      if(m.outage!==m.base.outage) x.outage=m.outage;
       if(Math.abs(m.eff-m.base.eff)>1e-6) x.eff=m.eff;
       const y={}; m.products.forEach(p=>{ if(p.yield!==p.base.yield) y[p.id]=p.yield; }); if(Object.keys(y).length) x.yields=y;
       if(m.products.some(p=>Math.abs(p.share-p.base.share)>1e-6)) x.shares=Object.fromEntries(m.products.map(p=>[p.id,p.share]));
       if(Object.keys(x).length) q.mills[m.id]=x; });
     pl.kilns.forEach(k=>{ const x={};
       if(k.rated!==k.base.rated) x.rated=k.rated;
-      if(k.outage!==k.base.outage) x.outage=k.outage;
       if(Math.abs(k.eff-k.base.eff)>1e-6) x.eff=k.eff;
       if(Object.keys(x).length) q.kilns[k.id]=x; });
     o.plants[pl.id]=q;
@@ -693,16 +694,15 @@ function applyOverrides(o){
     pl.extra=q.extra||0;
     Object.entries(q.clk||{}).forEach(([n,v])=>setClk(pl,n,v));
     pl.mills.forEach(m=>{ const x=(q.mills||{})[m.id]; if(!x) return;
-      if(x.outage!=null) m.outage=x.outage;
       if(x.eff!=null) m.eff=x.eff;
       m.products.forEach(p=>{ if(x.yields&&x.yields[p.id]!=null) p.yield=x.yields[p.id]; });
       if(x.shares){ const sum=m.products.reduce((a,p)=>a+num(x.shares[p.id]),0); if(sum>0) m.products.forEach(p=>p.share=num(x.shares[p.id])/sum); } });
-    pl.kilns.forEach(k=>{ const x=(q.kilns||{})[k.id]; if(!x) return; if(x.rated!=null) k.rated=x.rated; if(x.outage!=null) k.outage=x.outage; if(x.eff!=null) k.eff=x.eff; });
+    pl.kilns.forEach(k=>{ const x=(q.kilns||{})[k.id]; if(!x) return; if(x.rated!=null) k.rated=x.rated; if(x.eff!=null) k.eff=x.eff; });
   });
 }
 function scheduleSave(){ clearTimeout(_svT); _svT=setTimeout(()=>{ try{ localStorage.setItem(LS_KEY,JSON.stringify({sc:M.sc,ov:overrides()})); }catch(e){} },400); }
-function loadSaved(){ try{ localStorage.removeItem('avila_mills_v1'); const o=JSON.parse(localStorage.getItem(LS_KEY)||'null'); if(o&&o.sc===M.sc) applyOverrides(o.ov); }catch(e){} }
-function resetMill(m){ m.outage=m.base.outage; m.eff=m.base.eff; m.products.forEach(p=>{ p.yield=p.base.yield; p.share=p.base.share; }); }
+function loadSaved(){ try{ ['avila_mills_v1','avila_mills_v2'].forEach(k=>localStorage.removeItem(k)); const o=JSON.parse(localStorage.getItem(LS_KEY)||'null'); if(o&&o.sc===M.sc) applyOverrides(o.ov); }catch(e){} }
+function resetMill(m){ m.eff=m.base.eff; m.products.forEach(p=>{ p.yield=p.base.yield; p.share=p.base.share; }); }
 
 // ── Moves ──
 function findMill(id){ for(const pl of M.plants){ const m=pl.mills.find(x=>x.id===id); if(m) return {pl,m}; } return null; }
@@ -719,7 +719,7 @@ function maxTonnes(){ pushUndo(); M.plants.forEach(pl=>pl.mills.forEach(m=>{ con
 // Trade-off ticket: the question in one card, what you gain, what you give up, the net.
 const ticket=$('ticket');
 function showTicket(x,y,pl,m,start){
-  const rows=m.products.map(p=>({p,d:m.avail*p.share*p.yield*m.eff-start.t[p.id],days:(p.share-start.s[p.id])*m.avail})).filter(r=>Math.abs(r.d)>=0.5);
+  const rows=m.products.map(p=>({p,d:m.avail*p.share*p.yield-start.t[p.id],days:(p.share-start.s[p.id])*m.avail})).filter(r=>Math.abs(r.d)>=0.5);
   const net=rows.reduce((a,r)=>a+r.d,0), clk=rows.reduce((a,r)=>a+r.d*r.p.clk,0);
   ticket.innerHTML=`<div class="th">${esc(m.short)} · ${rows.length?Math.abs(rows.reduce((a,r)=>a+Math.max(0,r.days),0)).toFixed(1)+' days moved':'move the lever'}</div>`+
     rows.map(r=>`<div class="tr"><span class="dot" style="background:var(${r.p.c})"></span><span>${esc(r.p.short)}</span><span class="${cls(r.d)}">${sgn(r.d)} t</span></div>`).join('')+
@@ -738,7 +738,7 @@ function dragStart(ev,h){
   const [id,idx]=h.dataset.h.split('|'), f=findMill(id); if(!f) return;
   ev.preventDefault(); pushUndo(); dragging=true;
   const {pl,m}=f, bar=m.barEl, start={t:{},s:{}};
-  m.products.forEach(p=>{ start.t[p.id]=m.avail*p.share*p.yield*m.eff; start.s[p.id]=p.share; });
+  m.products.forEach(p=>{ start.t[p.id]=m.avail*p.share*p.yield; start.s[p.id]=p.share; });
   const stack=handlesAt(m,+idx), y0=ev.clientY;
   let i=null, lo=0, pair=0;
   const pick=k=>{ i=k; lo=m.products.slice(0,i).reduce((a,p)=>a+p.share,0); pair=m.products[i].share+m.products[i+1].share; };
@@ -764,12 +764,12 @@ function wire(){
     if(ds.lev){ const [id,i]=ds.lev.split('|'); f=findMill(id); setShare(f.m,+i,num(t.value)/100); }
     else if(ds.pct){ const [id,i]=ds.pct.split('|'); f=findMill(id); setShare(f.m,+i,num(t.value)/100); }
     else if(ds.yield){ const [id,i]=ds.yield.split('|'); f=findMill(id); f.m.products[+i].yield=Math.max(0,num(t.value)); }
-    else if(ds.out){ f=findMill(ds.out); f.m.outage=clamp(num(t.value),0,M.days); }
-    else if(ds.eff){ f=findMill(ds.eff); f.m.eff=Math.max(0,num(t.value)/100); }
+    else if(ds.out){ f=findMill(ds.out); f.m.eff=1-clamp(num(t.value),0,M.days)/M.days; }
+    else if(ds.eff){ f=findMill(ds.eff); f.m.eff=clamp(num(t.value)/100,0,1); }
     else if(ds.clk){ const [pid,name]=ds.clk.split('|'), pl=M.plants.find(x=>x.id===pid); if(pl) setClk(pl,name,clamp(num(t.value),0,1)); }
     else if(ds.extra){ const pl=M.plants.find(x=>x.id===ds.extra); if(pl) pl.extra=Math.max(0,num(t.value)); }
     else if(ds.kr||ds.ko||ds.ke){ const id=ds.kr||ds.ko||ds.ke, k=M.plants.flatMap(p=>p.kilns).find(x=>x.id===id); if(!k) return;
-      if(ds.kr) k.rated=Math.max(0,num(t.value)); else if(ds.ko) k.outage=clamp(num(t.value),0,M.days); else k.eff=Math.max(0,num(t.value)/100); }
+      if(ds.kr) k.rated=Math.max(0,num(t.value)); else if(ds.ko) k.eff=1-clamp(num(t.value),0,M.days)/M.days; else k.eff=clamp(num(t.value)/100,0,1); }
     else if(t.id==='days'){ M.days=clamp(num(t.value,365),1,366); }
     else return;
     update();
@@ -782,7 +782,7 @@ function wire(){
   $('b-undo').onclick=()=>{ if(undo.length){ restore(undo.pop()); update(); } };
   $('b-mix').onclick=()=>{ pushUndo(); M.plants.forEach(pl=>pl.mills.forEach(m=>m.products.forEach(p=>p.share=p.base.share))); update(); };
   $('b-max').onclick=maxTonnes;
-  $('b-reset').onclick=()=>{ pushUndo(); M.days=365; $('days').value=365; M.plants.forEach(pl=>{ pl.extra=0; plantProds(pl).forEach(p=>setClk(pl,p.name,p.base.clk)); pl.mills.forEach(resetMill); pl.kilns.forEach(k=>{ k.rated=k.base.rated; k.outage=k.base.outage; k.eff=k.base.eff; }); }); update(); };
+  $('b-reset').onclick=()=>{ pushUndo(); M.days=365; $('days').value=365; M.plants.forEach(pl=>{ pl.extra=0; plantProds(pl).forEach(p=>setClk(pl,p.name,p.base.clk)); pl.mills.forEach(resetMill); pl.kilns.forEach(k=>{ k.rated=k.base.rated; k.eff=k.base.eff; }); }); update(); };
 }
 
 // ── Getting the scenario: the Roll's active file, read-only, or any JSON ──
