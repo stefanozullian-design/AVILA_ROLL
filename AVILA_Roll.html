@@ -25580,9 +25580,23 @@ function _simHorizonPresets(startStr){
   ];
 }
 
+// The horizon an end date asks for. Day 1 is the start date, so the count includes both ends.
+function _simDaysToEnd(startStr,endStr){
+  if(!endStr) return {msg:'Pick an end date'};
+  const days=dateToDayOffset(endStr,startStr)+1;
+  if(!(days>=1)) return {msg:'The end date is before the start date'};
+  if(days>730) return {msg:`${days} days — the limit is 730`};
+  return {days,msg:`${days} day${days===1?'':'s'}`};
+}
+
 function simCfgHTML(){
   const presets=_simHorizonPresets(S.simCfg.start_date);
-  const cur=S.simCfg.horizonPreset||'3m';
+  const cur=S.simCfg.horizonPreset||'custom';
+  // The end date Save would apply: a preset's, otherwise the last day of the stored horizon.
+  const curP=presets.find(p=>p.id===cur)||presets.find(p=>p.id==='custom');
+  const endDate=_addDays(S.simCfg.start_date,curP.days-1);
+  const endChk=_simDaysToEnd(S.simCfg.start_date,endDate);
+  Object.assign(presets.find(p=>p.id==='custom'),{days:curP.days,date:endDate});
   const activeRules=(DB.simulation_rules||[]).filter(r=>r.status==='active'&&_ruleIsInterpreted(r));
   const tabSty=(active)=>`padding:7px 16px;font-family:var(--mono);font-size:10px;cursor:pointer;border:none;background:transparent;border-bottom:2px solid ${active?'var(--green)':'transparent'};color:${active?'var(--green)':'var(--text-dim)'};letter-spacing:.5px;text-transform:uppercase`;
 
@@ -25604,14 +25618,17 @@ function simCfgHTML(){
 
   <!-- SETTINGS PANEL -->
   <div id="cfg-panel-settings" class="modal-body">
-    <div class="modal-sec-title">Start Date & Horizon</div>
-    <div class="fr s1"><div class="ff"><div class="fl">Start Date (Day 0 — today by default)</div>
-      <input class="fi" type="date" id="sc-start" value="${S.simCfg.start_date}">
+    <div class="modal-sec-title">Start & End Date</div>
+    <div class="fr"><div class="ff"><div class="fl">Start Date (Day 0 — today by default)</div>
+      <input class="fi" type="date" id="sc-start" value="${S.simCfg.start_date}" oninput="_scSyncHorizon()">
+    </div><div class="ff"><div class="fl">End Date (last day simulated)</div>
+      <input class="fi" type="date" id="sc-end" value="${endDate}" oninput="selectHorizonPreset('custom')">
+      <div id="sc-end-hint" style="font-family:var(--mono);font-size:9px;color:${endChk.days?'var(--text-dim)':'var(--red)'}">${endChk.msg}</div>
     </div></div>
-    <div class="fr s1"><div class="ff"><div class="fl">Simulation Horizon</div>
+    <div class="fr s1"><div class="ff"><div class="fl">Horizon Shortcuts</div>
       <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-top:4px">
         ${presets.map(p=>`
-          <div onclick="selectHorizonPreset('${p.id}',${p.days},'${p.date||''}')" id="preset-${p.id}"
+          <div onclick="selectHorizonPreset('${p.id}')" id="preset-${p.id}"
             style="padding:10px 8px;border:1px solid ${cur===p.id?'var(--green)':'var(--border2)'};
             background:${cur===p.id?'var(--green-faint)':'var(--surface2)'};
             cursor:pointer;text-align:center;transition:all .15s">
@@ -25621,11 +25638,6 @@ function simCfgHTML(){
           </div>`).join('')}
       </div>
     </div></div>
-    <div id="custom-horizon-wrap" style="display:${cur==='custom'?'block':'none'};margin-top:8px">
-      <div class="ff"><div class="fl">Custom Horizon (days)</div>
-        <input class="fi" type="number" id="sc-horizon" value="${S.simCfg.horizon}" min="1" max="730">
-      </div>
-    </div>
     <div class="modal-sec-title">Simulation Settings</div>
     <div class="fr s1"><div class="ff"><div class="fl">Simulation Mode</div>
       <select class="fi" id="sc-mode">
@@ -26407,9 +26419,26 @@ function _nrSaveEdit(i){
   if(wasActive) scheduleSimulation();
 }
 
-function selectHorizonPreset(id, days, endDate){
+// Keeps the Settings form consistent while it is edited: the tiles follow the start date, a preset
+// owns the end date, the Custom tile mirrors it, and the line under it shows what Save would apply.
+function _scSyncHorizon(){
+  const start=document.getElementById('sc-start')?.value, endEl=document.getElementById('sc-end'), hint=document.getElementById('sc-end-hint');
+  if(!start||!endEl||!hint) return;
+  _simHorizonPresets(start).forEach(p=>{
+    if(p.id==='custom') return;
+    const t=document.querySelectorAll(`#preset-${p.id} div`);
+    t[1].textContent=`${p.days}d`; t[2].textContent=p.date;
+    if(p.id===S.simCfg.horizonPreset) endEl.value=_addDays(start,p.days-1);
+  });
+  const chk=_simDaysToEnd(start,endEl.value), t=document.querySelectorAll('#preset-custom div');
+  t[1].textContent=chk.days?`${chk.days}d`:'—'; t[2].textContent=endEl.value||'—';
+  hint.textContent=chk.msg; hint.style.color=chk.days?'var(--text-dim)':'var(--red)';
+}
+
+function selectHorizonPreset(id){
+  const p=_simHorizonPresets(document.getElementById('sc-start')?.value||S.simCfg.start_date).find(x=>x.id===id);
   S.simCfg.horizonPreset=id;
-  S.simCfg.horizon=days;
+  S.simCfg.horizon=p.days;
   // Highlight selected
   document.querySelectorAll('[id^="preset-"]').forEach(el=>{
     const pid=el.id.replace('preset-','');
@@ -26421,8 +26450,7 @@ function selectHorizonPreset(id, days, endDate){
       if(i===1) d.style.color=active?'var(--green)':'var(--text)';
     });
   });
-  const cw=document.getElementById('custom-horizon-wrap');
-  if(cw) cw.style.display=id==='custom'?'block':'none';
+  _scSyncHorizon();
 }
 
 // ─────────────────────────────────────────────────────────
@@ -26527,23 +26555,26 @@ function _nrSave(){
 
 
 function saveSimCfg(){
-  S.simCfg.start_date=document.getElementById('sc-start')?.value||S.simCfg.start_date;
-  const preset=S.simCfg.horizonPreset||'3m';
+  const start=document.getElementById('sc-start')?.value||S.simCfg.start_date;
+  const preset=S.simCfg.horizonPreset||'custom';
   if(preset==='custom'){
-    S.simCfg.horizon=parseInt(document.getElementById('sc-horizon')?.value)||90;
-  } else if(S.simCfg.horizonPreset){
+    // The typed end date holds when the start date moves: the day count is what follows from them.
+    const chk=_simDaysToEnd(start,document.getElementById('sc-end')?.value);
+    if(!chk.days){ _scSyncHorizon(); return; }   // the line under the end date says why
+    S.simCfg.horizon=chk.days;
+  } else {
     // Recompute from the saved start date: the count stored when the tile was last clicked goes
     // stale once the start date changes (and older saves carry the old one-day-short count).
-    // Only for an explicitly chosen preset — a config without one keeps its stored horizon.
-    const p=_simHorizonPresets(S.simCfg.start_date).find(x=>x.id===preset);
+    const p=_simHorizonPresets(start).find(x=>x.id===preset);
     if(p) S.simCfg.horizon=p.days;
   }
+  S.simCfg.start_date=start;
   S.simCfg.mode=document.getElementById('sc-mode')?.value||'planning';
   { const role=document.getElementById('sc-role'); if(role){ if(role.value==='planning') S.simCfg.role='planning'; else delete S.simCfg.role; } }
   S.simCfg.conflict_resolution=document.getElementById('sc-conflict')?.value||'rolling_avg';
   if(typeof scUpdatePill==='function') scUpdatePill();
   document.getElementById('sim-date-lbl').textContent=`Day 0 / ${S.simCfg.horizon}`;
-  closeModal(); statMsg(`Simulation configured — ${S.simCfg.horizon} day horizon`);
+  closeModal(); statMsg(`Simulation configured — ${S.simCfg.start_date} to ${_addDays(S.simCfg.start_date,S.simCfg.horizon-1)}, ${S.simCfg.horizon} days`);
 }
 
 // ═══════════════════════════════════════════════════════
@@ -35284,7 +35315,7 @@ function _plSourceCardHTML(s){
   return _plCard('pl-source','From the trend scenario','topology, settings and the 31 Dec closing state come from '+_plEsc(srcName), null,
     `<div class="pl-kv">
       <b>Linked to</b><span>${_plEsc(srcName)} ${srcId&&!SC.meta[srcId]?'<span class="pl-flag bad">not in this browser\'s scenario list</span>':''}</span>
-      <b>Simulation</b><span>${S.simCfg.start_date} · ${S.simCfg.horizon} days (${S.simCfg.horizonPreset||'custom'})</span>
+      <b>Simulation</b><span>${S.simCfg.start_date} to ${_addDays(S.simCfg.start_date,S.simCfg.horizon-1)} · ${S.simCfg.horizon} days (${S.simCfg.horizonPreset||'custom'})</span>
       <b>Closing state</b><span>${rep?_plEsc(rep.summary)+' <span class="pl-muted">('+String(rep.at||'').slice(0,16).replace('T',' ')+')</span>':'<span class="pl-muted">not copied yet</span>'}</span>
       ${rep&&rep.topology?`<b>Topology</b><span>${_plEsc(rep.topology)}</span>`:''}
      </div>
