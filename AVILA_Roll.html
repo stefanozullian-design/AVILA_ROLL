@@ -8937,9 +8937,9 @@ function openProductModal(p){
     <div class="modal-body">
       <div class="fr">
         <div class="ff"><div class="fl">Name</div><input class="fi" id="pm-name" value="${p?.name||''}" placeholder="e.g. BRS IL(K1)/CLK"></div>
-        <div class="ff"><div class="fl">SAP Material Code</div><input class="fi" id="pm-code" value="${p?.material_code||''}" placeholder="e.g. 4802-000000000001638064 or 1638064">
+        <div class="ff"><div class="fl">SAP Material Code(s)</div><input class="fi" id="pm-code" value="${p?.material_code||''}" placeholder="e.g. 4802-000000000001638064 or 1638064, 1638065">
           <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-top:3px">
-            Demand Mapping places SAP sales on this product by this code, and real production imports read it too. Left blank, its sales cannot be imported.
+            Demand Mapping places SAP sales on this product by these codes, and real production imports read them too. One product can carry several: separate them with commas. Left blank, its sales cannot be imported.
           </div></div>
       </div>
       <div class="fr">
@@ -9009,12 +9009,14 @@ function updateIngTotal(){
 
 function saveProduct(){
   const name=document.getElementById('pm-name')?.value?.trim(); if(!name) return;
-  const material_code=document.getElementById('pm-code')?.value?.trim()||'';
+  const material_code=_xlCodeList(document.getElementById('pm-code')?.value).join(', ');
   const desc=document.getElementById('pm-desc')?.value||'';
   const category=document.getElementById('pm-cat')?.value||'cement_bulk';
   const scm_type=document.getElementById('pm-scmtype')?.value||'';
-  // Generate stable id from name
-  const pid=name.toLowerCase().replace(/[\s\/\(\)\-]+/g,'_').replace(/__+/g,'_').replace(/^_|_$/g,'');
+  // Generate stable id from name. An edit keeps the id it has: silos, demand points and packing
+  // lines point at it, so a rename must not cut them off.
+  const pid=S._editProductIdx!=null?DB.products[S._editProductIdx].id
+    :name.toLowerCase().replace(/[\s\/\(\)\-]+/g,'_').replace(/__+/g,'_').replace(/^_|_$/g,'');
   // Facility: a topology facility id, a reused typed label ('~name'), or a freshly typed
   // name. A typed name that matches an existing facility resolves to that facility rather
   // than becoming a duplicate label.
@@ -19378,6 +19380,8 @@ function simulate(elements, connections, horizon, includeProposed=false){
       const lines=packLineMap[el.id]||[];
 
       // Withdraw `bulkNeeded` of inPid from sourcing silos + add `outputT` of outPid to packed silos.
+      // A packed silo with no capacity set holds nothing: the day-end clamp would wipe whatever
+      // went in, so it offers no space (the bulk stays where it is and other lines can run).
       const _runLine=(outPid,inPid,ratio,outputT,srcSilos,outSilos)=>{
         let remBulk=outputT*ratio;
         srcSilos.forEach(si=>{
@@ -19394,7 +19398,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
         let remOut=outputT;
         outSilos.forEach(si=>{
           if(remOut<=0) return;
-          const space=Math.max(0,(state[si.id].maxCap||Infinity)-(state[si.id].inventory||0)-(siloInflow[si.id]||0));
+          const space=Math.max(0,(state[si.id].maxCap||0)-(state[si.id].inventory||0)-(siloInflow[si.id]||0));
           const put=Math.min(remOut, space);
           if(put>0){
             siloInflow[si.id]=(siloInflow[si.id]||0)+put;
@@ -19412,7 +19416,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
         return a+Math.max(0, have-(siloOutflow[si.id]||0));
       },0);
       // Packed-silo space (tonnes) toward the 98% stop level, net of same-day inflow.
-      const _packSpace=(outSilos)=>outSilos.reduce((a,si)=>a+Math.max(0,(state[si.id].maxCap||Infinity)*0.98-(state[si.id].inventory||0)-(siloInflow[si.id]||0)),0);
+      const _packSpace=(outSilos)=>outSilos.reduce((a,si)=>a+Math.max(0,(state[si.id].maxCap||0)*0.98-(state[si.id].inventory||0)-(siloInflow[si.id]||0)),0);
 
       const packDate=new Date(simStartDate.getTime()+(day-1)*864e5)._ymd();
 
@@ -19434,6 +19438,14 @@ function simulate(elements, connections, horizon, includeProposed=false){
           });
           s.status='running'; s.runDays++; s.currentProduct=top.outPid;
           r.packProductHistory[el.id].push(top.outPid);
+          return;
+        }
+        // The production feed reported this machine and it packed nothing that day (a zero-filled
+        // day, product_id null): it stood still, the simulator must not propose a run on it.
+        const _rows=realProdMap[el.id]?.[packDate]||[];
+        if(_rows.length&&_rows.every(rp=>!rp.product_id)){
+          s.status='idle'; s.currentProduct=null;
+          r.packProductHistory[el.id].push(null);
           return;
         }
       }
@@ -19513,7 +19525,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
         s.status='idle'; s.currentProduct=null;
         if(!lines.length){ /* not configured */ }
         else if(anyStarved) logStop(el.id,el.name,day,'starved','No bulk cement in sourcing silo');
-        else if(anyBlocked){ s.status='blocked'; logStop(el.id,el.name,day,'blocked','Packed silo full'); }
+        else if(anyBlocked){ s.status='blocked'; logStop(el.id,el.name,day,'blocked','Packed silo full or no capacity set'); }
         r.packProductHistory[el.id].push(null);
       }
     });
@@ -27771,7 +27783,7 @@ const DS_SLOTS = [
   { id:'realSales',      label:'Real Sales',       description:'Avila_Shipments_Summary.xlsx — tonnes per demand point per day; this is where actual demand comes from. Written by Publish in Configuration → Demand Mapping (formerly by the Excel pivot).', handler:'spIngestFile',  dbKey:'real_shipments_daily' },
   { id:'realTransfers',  label:'Real Transfers',   description:'Avila_Transfers_Summary.xlsx — rail/plant transfer tonnes per day (Delivery Date, INV_ROLL_NAME like BRS/TRF/BRS_IL(12)/BLK/INT, Report Qty). Written by Publish in Configuration → Demand Mapping from the movements the rules park as transfers. Bind it to read the history into the app.', handler:'dsIngestTransfers', dbKey:'real_transfers_file_daily' },
   { id:'demandSales',    label:'Demand — SAP Sales', description:'The raw SAP sales export (Ship Pt, Material, Sold-To, Ship Type, Delivery Date, Report Qty …; .xlsx or .csv). Bind it once — a SharePoint folder synced to this machine is re-read on every refresh. Rows are translated by Configuration → Demand Mapping; Publish there writes the Summary, Detail and Transfers files that Real Sales, the Sales page and Power BI read.', handler:'dsIngestDemandSales', dbKey:'' },
-  { id:'realProduction', label:'Real Production',  description:'ProductionReal.xlsx — SAP export with DATE, EQUIPMENT, MATERIAL CODE, PRODUCTION columns. EQUIPMENT must match element names (e.g. BROSFM01, BROSKL02). MATERIAL CODE matched via product material_code field.', handler:'dsIngestProduction', dbKey:'real_production_daily' },
+  { id:'realProduction', label:'Real Production',  description:'ProductionReal.xlsx — SAP export with DATE, EQUIPMENT, MATERIAL CODE, PRODUCTION columns. EQUIPMENT must match element names (e.g. BROSFM01, BROSKL02, BROSPK01). MATERIAL CODE matched via the SAP material codes on each product.', handler:'dsIngestProduction', dbKey:'real_production_daily' },
   { id:'transportCost',  label:'Transport Cost',   description:'Freight and logistics cost matrix',            handler:'dsIngestTransport',  dbKey:'transport_costs' },
   { id:'custom',         label:'Custom',           description:'User-defined data file',                       handler:'dsIngestCustom',     dbKey:'custom_data' },
 ];
@@ -28988,9 +29000,8 @@ function xlmapRulesPayload(){
   if(!XLMAP) xlmapLoad();
   const catalog=[];
   (DB.products||[]).forEach(p=>{
-    const k=_xlCatCode(p.material_code); if(!k) return;
     const sp=_xlSplitProduct(p.name);
-    catalog.push({code:k.sap, ship_pt:k.ship, product:sp.product, pres:sp.pres, name:p.name});
+    _xlCatCodes(p.material_code).forEach(k=>catalog.push({code:k.sap, ship_pt:k.ship, product:sp.product, pres:sp.pres, name:p.name}));
   });
   // The topology's own ship points (facility Plant # codes, product material codes): the
   // script asks SAP for these too and names a code the table lacks after its facility.
@@ -29169,8 +29180,8 @@ async function dsIngestTopology(buf, name){
 
 // ── Real Production ingest ────────────────────────────
 // Reads SAP production export: DATE, EQUIPMENT, MATERIAL CODE, PRODUCTION
-// EQUIPMENT must match an element name (finish_mill or kiln).
-// MATERIAL CODE is matched to DB.products via material_code field (exact then numeric fallback).
+// EQUIPMENT must match an element name (finish_mill, kiln or packing_plant).
+// MATERIAL CODE is matched to DB.products via their SAP codes (exact, then plant + code, then numeric fallback).
 async function dsIngestProduction(buf, name){
   await loadLib('xlsx'); // pinned version + SRI — see LIBS
 
@@ -29183,21 +29194,24 @@ async function dsIngestProduction(buf, name){
   if(!cols.includes('DATE') || !cols.includes('EQUIPMENT') || !cols.includes('MATERIAL CODE') || !cols.includes('PRODUCTION'))
     throw new Error('Unrecognised column format — expected DATE, EQUIPMENT, MATERIAL CODE, PRODUCTION');
 
-  // Build equipment → element lookup (finish_mill + kiln)
+  // Build equipment → element lookup (finish_mill + kiln + packing_plant)
   const equipMap = {};
-  (DB.elements||[]).filter(e=>['finish_mill','kiln','raw_meal_mill'].includes(e.type))
+  (DB.elements||[]).filter(e=>['finish_mill','kiln','raw_meal_mill','packing_plant'].includes(e.type))
     .forEach(e=>{ equipMap[e.name] = e.id; });
 
   // Build material_code → product_id lookup (exact match first)
   const matExact = {};
+  const matShip = {};    // "4802|1626560" → product: a code two plants share goes to the plant that reports it
   const matNumeric = {};
   (DB.products||[]).forEach(p=>{
-    const mc = (p.material_code||'').trim();
-    if(!mc) return;
-    matExact[mc] = p.id;
-    // Numeric fallback: strip "NNNN-" facility prefix, then leading zeros
-    const num = mc.replace(/^\d{4}-0*/,'').replace(/^0+/,'') || mc;
-    if(!matNumeric[num]) matNumeric[num] = p.id;
+    _xlCodeList(p.material_code).forEach(mc=>{
+      matExact[mc] = p.id;
+      const k = _xlCatCode(mc);
+      if(k&&k.ship) matShip[k.ship+'|'+k.sap] = p.id;
+      // Numeric fallback: strip "NNNN-" facility prefix, then leading zeros
+      const num = mc.replace(/^\d{4}-0*/,'').replace(/^0+/,'') || mc;
+      if(!matNumeric[num]) matNumeric[num] = p.id;
+    });
   });
 
   function normDate(v){
@@ -29227,7 +29241,8 @@ async function dsIngestProduction(buf, name){
     if(!elId){ unmatchedEquip.add(equip); skipped++; return; }
 
     const matRaw = (r['MATERIAL CODE']||'').trim();
-    let prodId = matExact[matRaw];
+    const matKey = _xlCatCode(matRaw);
+    let prodId = matExact[matRaw] || (matKey&&matKey.ship ? matShip[matKey.ship+'|'+matKey.sap] : null);
     if(!prodId){
       const num = matRaw.replace(/^\d{4}-0*/,'').replace(/^0+/,'') || matRaw;
       prodId = matNumeric[num];
@@ -29675,9 +29690,11 @@ function xlmapTranslate(row){
   const warn=[], picked=mCode.startsWith('cat:')?(DB.products||[]).find(x=>x.id===mCode.slice(4)):null;
   // Builder only: a catalog product picked by id. With a SAP code it runs exactly as
   // a real row carrying that code would (a shared code → the ship point decides).
-  if(picked&&_xlCatCode(picked.material_code)) mCode=_xlCatCode(picked.material_code).sap;
+  if(picked&&_xlCatCodes(picked.material_code)[0]) mCode=_xlCatCodes(picked.material_code)[0].sap;
   // Several rows may share a code when the ship point decides the product (a row with a
-  // ship point wins for that ship point; the row without one is the default).
+  // ship point wins for that ship point; the row without one is the default). A sale from a
+  // ship point no row covers goes to the catalog, and failing that to the code's first row.
+  // MatRowFor + Translate in the .vbs do the same: change both together.
   const _matRows=(XLMAP.materials||[]).filter(r=>String(r.code??'').trim()===mCode);
   let mat=_matRows.find(r=>r.ship_pt&&_xlNorm(r.ship_pt)===_xlNorm(spCode))||_matRows.find(r=>!r.ship_pt), catalogId=null;
   if(!mat&&picked&&mCode.startsWith('cat:')){
@@ -29692,7 +29709,7 @@ function xlmapTranslate(row){
       const s=_xlSplitProduct(cat[0].name); mat={product:s.product, pres:s.pres}; catalogId=cat[0].id;
       const nShare=_xlCatalogProductsFor(mCode,'').length;
       trace.push({t:'Material', r:`${mCode} → ${s.product}${s.pres?' / '+s.pres:''} (from the product catalog — no table row${nShare>1?`; ${nShare} products share the code, ship point ${spCode} picks this one`:''})`});
-    }
+    }else if(_matRows.length) mat=_matRows[0];
   }
   const skipMat=!!(mat&&mat.action==='skip');
   if(skipMat) trace.push({t:'Material', r:`${mCode} → not demand (its material row says skip${mat.note?' — '+mat.note:''})`});
@@ -29914,7 +29931,7 @@ function _xlCatalogStrip(){
   if(noc.length) h+=grp('⚠','var(--amber)',`${noc.length} topology product${noc.length===1?' has':'s have'} no SAP material code — SAP sales cannot land on ${noc.length===1?'it':'them'}`,
     noc.map(c=>item(c,'',`<span class="tbl-act" style="margin:0" onclick="_xlEditProduct('${esc(c.id)}')">set code</span>`)).join(''));
   if(cat.length) h+=grp('✓','var(--green)',`${cat.length} placed straight from the catalog's SAP code — no row needed`,
-    cat.map(c=>item(c,c.sap,`<span class="tbl-act" style="margin:0" title="Optional: write it into this table" onclick="_xlPinCatalog('${esc(c.id)}')">pin</span>`)).join(''));
+    cat.map(c=>item(c,c.saps.join(' · '),`<span class="tbl-act" style="margin:0" title="Optional: write it into this table" onclick="_xlPinCatalog('${esc(c.id)}')">pin</span>`)).join(''));
   // Only offer the rename when the demand points carry the catalog's name and not the
   // table's — MIA_I/II's demand points follow the table, renaming would orphan them.
   const drNote=c=>c.dpTable&&!c.dpCatalog?`demand points use ${esc(c.tableName)} ✓`
@@ -30065,6 +30082,20 @@ function _xlCatCode(mc){ // "4802-000000000001638064" → {ship:"4802", sap:"163
   const m=/^(?:(\d{3,6})[-\s]+)?0*(\d+)$/.exec(String(mc||'').trim()); // not "OPC-001"
   return m?{ship:m[1]||'', sap:m[2]}:null;
 }
+// A product may carry several material numbers when one cement has several SAP codes
+// (Titan's IL arrives under four): "1623645, 1634026". Commas, semicolons or line breaks
+// separate them, and so do spaces when the text is not one "4802 000…" pair.
+function _xlCodeList(mc){
+  const out=[];
+  String(mc||'').split(/[,;\r\n]+/).forEach(s=>{
+    s=s.trim(); if(!s) return;
+    (_xlCatCode(s)||!/\s/.test(s)?[s]:s.split(/\s+/)).forEach(c=>{ if(!out.includes(c)) out.push(c); });
+  });
+  return out;
+}
+const _xlCatCodes=mc=>_xlCodeList(mc).map(_xlCatCode).filter(Boolean);
+// Does this material-table row speak for this catalog code? (Same code, and its ship point if both name one.)
+const _xlRowFor=(r,k)=>String(r.code??'').trim()===k.sap&&(!r.ship_pt||!k.ship||_xlNorm(r.ship_pt)===_xlNorm(k.ship));
 // ── Ship points the TOPOLOGY defines ─────────────────────────────────────────────
 // A facility's Plant # codes (Organization → facility) are its SAP shipping points, and a
 // product whose material code carries one ("4802-000…1638064") ships from it too. They go
@@ -30079,9 +30110,8 @@ function _xlTopologyShipPoints(){
   (DB.facilities||[]).forEach(f=>facPlantCodes(f).forEach(c=>
     add(c.code,{source:_xlFacSource(f), facility:f.name, from:'facility', label:c.label||''})));
   (DB.products||[]).forEach(p=>{
-    const k=_xlCatCode(p.material_code); if(!k||!k.ship) return;
     const f=p.facility_id?(DB.facilities||[]).find(x=>x.id===p.facility_id):null;
-    add(k.ship,{source:f?_xlFacSource(f):'', facility:f?f.name:'', from:'product', label:p.name});
+    _xlCatCodes(p.material_code).forEach(k=>{ if(k.ship) add(k.ship,{source:f?_xlFacSource(f):'', facility:f?f.name:'', from:'product', label:p.name}); });
   });
   return out;
 }
@@ -30137,10 +30167,10 @@ function _xlSourceCoverageHTML(){
 }
 function _xlCatalogProductsFor(code, shipPt){
   const c=String(code||'').trim().replace(/^0+/,''); if(!c) return [];
-  const hits=(DB.products||[]).filter(p=>{ const k=_xlCatCode(p.material_code); return !!(k&&k.sap===c); });
+  const hits=(DB.products||[]).filter(p=>_xlCatCodes(p.material_code).some(k=>k.sap===c));
   if(hits.length<2) return hits;
   const s=String(shipPt||'').trim();
-  const byShip=s?hits.filter(p=>_xlCatCode(p.material_code).ship===s):[];
+  const byShip=s?hits.filter(p=>_xlCatCodes(p.material_code).some(k=>k.sap===c&&k.ship===s)):[];
   return byShip.length?byShip:hits;
 }
 function _xlSplitProduct(name){ // catalog "BRS_IL(HE)/BLK" → table-style {product:"BRS_IL(HE)", pres:"BLK"}
@@ -30166,14 +30196,18 @@ function _xlCatalogCoverage(){
   const dpNames=(DB.elements||[]).filter(e=>e.type==='demand_point').map(e=>_xlNorm(e.name));
   (DB.products||[]).forEach(p=>{
     if(!used.has(p.id)||!p.name) return;
-    const sp=_xlSplitProduct(p.name), k=_xlCatCode(p.material_code);
-    const byName=rows.some(r=>_xlNorm(r.product)===_xlNorm(sp.product)&&_xlNorm(r.pres||'')===_xlNorm(sp.pres));
-    const byCode=k?rows.find(r=>String(r.code??'').trim()===k.sap):null;
-    const kind=byName?'table':byCode?'drift':k?'catalog':'nocode';
+    const sp=_xlSplitProduct(p.name), ks=_xlCatCodes(p.material_code), k=ks[0]||null;
+    const named=r=>_xlNorm(r.product)===_xlNorm(sp.product)&&_xlNorm(r.pres||'')===_xlNorm(sp.pres);
+    const byName=rows.some(named);
+    // Several codes: each must read this product. One row left under its old name still sends
+    // that code's sales elsewhere, so it counts as a drift even when the others are right.
+    const stray=ks.length>1?ks.map(x=>rows.find(r=>_xlRowFor(r,x)&&!named(r)&&r.action!=='skip')).find(Boolean):null;
+    const byCode=stray||(k?rows.find(r=>String(r.code??'').trim()===k.sap):null);
+    const kind=stray?'drift':byName?'table':byCode?'drift':k?'catalog':'nocode';
     const tableName=byCode?(byCode.product+(byCode.pres?'/'+byCode.pres:'')):'';
     // For a drift: which of the two names do the demand points carry? Only that one lands.
     const dpWith=n=>n?dpNames.filter(d=>d.includes('/'+_xlNorm(n)+'/')).length:0;
-    out.push({id:p.id, name:p.name, product:sp.product, pres:sp.pres, sap:k?k.sap:'', ship:k?k.ship:'', kind, tableName,
+    out.push({id:p.id, name:p.name, product:sp.product, pres:sp.pres, sap:stray?String(stray.code).trim():k?k.sap:'', saps:ks.map(x=>x.sap), ship:k?k.ship:'', kind, tableName,
       dpTable:kind==='drift'?dpWith(tableName):0, dpCatalog:kind==='drift'?dpWith(p.name):0});
   });
   return out.sort((a,b)=>a.name.localeCompare(b.name));
@@ -30181,15 +30215,17 @@ function _xlCatalogCoverage(){
 // Pin a catalog-derived translation as an explicit table row (optional — the fallback already works).
 function _xlPinCatalog(pid){
   const c=_xlCatalogCoverage().find(x=>x.id===pid); if(!c) return;
-  (XLMAP.materials=XLMAP.materials||[]).push({code:c.sap||'', product:c.product, pres:c.pres, note:'from the product catalog'});
-  _xlUi.check=null; xlmapSave(c.sap?`Material ${c.sap} → ${c.name} added to the table`:`Row added for ${c.name} — type its SAP material code`);
+  const codes=(c.saps.length?c.saps:['']).filter(code=>!code||!_xlTableHasCode(code));
+  (XLMAP.materials=XLMAP.materials||[]).push(...codes.map(code=>({code, product:c.product, pres:c.pres, note:'from the product catalog'})));
+  _xlUi.check=null; xlmapSave(c.sap?`Material ${codes.join(', ')} → ${c.name} added to the table`:`Row added for ${c.name} — type its SAP material code`);
   xlmapRender();
 }
 // Make the table row agree with the catalog's name for the same SAP code.
 function _xlUseCatalogName(pid){
   const c=_xlCatalogCoverage().find(x=>x.id===pid); if(!c||!c.sap) return;
-  (XLMAP.materials||[]).forEach(r=>{ if(String(r.code??'').trim()===c.sap){ r.product=c.product; r.pres=c.pres; } });
-  _xlUi.check=null; xlmapSave(`Material ${c.sap} now reads ${c.name}`); xlmapRender();
+  const ks=_xlCatCodes((DB.products||[]).find(p=>p.id===pid)?.material_code);
+  (XLMAP.materials||[]).forEach(r=>{ if(ks.some(k=>_xlRowFor(r,k))){ r.product=c.product; r.pres=c.pres; } });
+  _xlUi.check=null; xlmapSave(`Material ${c.saps.join(', ')} now reads ${c.name}`); xlmapRender();
 }
 
 // Build a demand point — pick by name, never by code. The codes are what SAP
@@ -30237,13 +30273,13 @@ function _xlMaterialOptions(){
     by.set(label,e);
   });
   const known=new Set([...by.keys()].map(_xlNorm)), used=_xlTopologyProductIds();
-  const shared=code=>(DB.products||[]).filter(x=>_xlCatCode(x.material_code)?.sap===code).length>1;
+  const shared=code=>(DB.products||[]).filter(x=>_xlCatCodes(x.material_code).some(k=>k.sap===code)).length>1;
   (DB.products||[]).forEach(p=>{
     if(!p.name||known.has(_xlNorm(p.name))) return;
-    const k=_xlCatCode(p.material_code), s=_xlSplitProduct(p.name);
+    const ks=_xlCatCodes(p.material_code), k=ks.find(x=>!_xlTableHasCode(x.sap)), s=_xlSplitProduct(p.name);
     // A code shared by several products (clinker 1035907) would make identical options — pick by product.
-    if(k&&!_xlTableHasCode(k.sap)) by.set(p.name,{label:p.name,product:s.product,pres:s.pres,codes:[shared(k.sap)?'cat:'+p.id:k.sap],catalog:true});
-    else if(!k&&used.has(p.id))    by.set(p.name,{label:p.name,product:s.product,pres:s.pres,codes:['cat:'+p.id],catalog:true,nocode:true});
+    if(k) by.set(p.name,{label:p.name,product:s.product,pres:s.pres,codes:[shared(k.sap)?'cat:'+p.id:k.sap],catalog:true});
+    else if(!ks.length&&used.has(p.id))    by.set(p.name,{label:p.name,product:s.product,pres:s.pres,codes:['cat:'+p.id],catalog:true,nocode:true});
   });
   return [...by.values()].sort((a,b)=>a.label.localeCompare(b.label));
 }
@@ -30371,7 +30407,7 @@ function _xlTestOutHTML(){
 // The builder's 'cat:<id>' picks shown as the SAP code a real row would carry.
 function _xlShownCode(v){
   const s=String(v||''); if(!s.startsWith('cat:')) return s;
-  const p=(DB.products||[]).find(x=>x.id===s.slice(4)), k=p&&_xlCatCode(p.material_code);
+  const p=(DB.products||[]).find(x=>x.id===s.slice(4)), k=p&&_xlCatCodes(p.material_code)[0];
   return k?k.sap:'no SAP code';
 }
 function _xlCopyName(name){
