@@ -652,14 +652,24 @@ function showTicket(x,y,pl,m,start){
   ticket.style.left=clamp(x+22,8,innerWidth-W-8)+'px'; ticket.style.top=clamp(y-H/2,56,innerHeight-H-8)+'px';
   ticket.classList.add('on');
 }
+// A product at 0% leaves two handles on one spot, and the top one cannot go down past it. So the
+// handles sharing a spot are one choice, settled by the direction the lever moves.
+function handlesAt(m,k){
+  const cum=j=>m.products.slice(0,j+1).reduce((a,p)=>a+p.share,0), at=cum(k);
+  return m.products.slice(0,-1).map((p,j)=>j).filter(j=>Math.abs(cum(j)-at)<0.01);
+}
 function dragStart(ev,h){
-  const [id,idx]=h.dataset.h.split('|'), i=+idx, f=findMill(id); if(!f) return;
+  const [id,idx]=h.dataset.h.split('|'), f=findMill(id); if(!f) return;
   ev.preventDefault(); pushUndo();
   const {pl,m}=f, bar=m.barEl, start={t:{},s:{}};
   m.products.forEach(p=>{ start.t[p.id]=m.avail*p.share*p.yield*m.eff; start.s[p.id]=p.share; });
-  const lo=m.products.slice(0,i).reduce((a,p)=>a+p.share,0), pair=m.products[i].share+m.products[i+1].share;
+  const stack=handlesAt(m,+idx), y0=ev.clientY;
+  let i=null, lo=0, pair=0;
+  const pick=k=>{ i=k; lo=m.products.slice(0,i).reduce((a,p)=>a+p.share,0); pair=m.products[i].share+m.products[i+1].share; };
+  if(stack.length===1) pick(stack[0]);
   bar.classList.add('drag'); h.classList.add('on'); try{ h.setPointerCapture(ev.pointerId); }catch(e){}
-  const move=e=>{ const r=bar.getBoundingClientRect(); const v=Math.round((r.bottom-e.clientY)/r.height*200)/200; const b=clamp(v,lo,lo+pair);
+  const move=e=>{ if(i===null){ if(Math.abs(e.clientY-y0)<2) return; pick(e.clientY>y0?stack[0]:stack[stack.length-1]); }
+    const r=bar.getBoundingClientRect(); const v=Math.round((r.bottom-e.clientY)/r.height*200)/200; const b=clamp(v,lo,lo+pair);
     m.products[i].share=b-lo; m.products[i+1].share=lo+pair-b; update(); showTicket(e.clientX,e.clientY,pl,m,start); };
   const end=()=>{ bar.classList.remove('drag'); h.classList.remove('on'); h.removeEventListener('pointermove',move); h.removeEventListener('pointerup',end); h.removeEventListener('pointercancel',end); setTimeout(()=>ticket.classList.remove('on'),900); };
   h.addEventListener('pointermove',move); h.addEventListener('pointerup',end); h.addEventListener('pointercancel',end);
@@ -669,7 +679,7 @@ function dragStart(ev,h){
 function wire(){
   document.addEventListener('pointerdown',e=>{ const h=e.target.closest('.handle'); if(h) dragStart(e,h); });
   document.addEventListener('keydown',e=>{ const h=e.target.closest&&e.target.closest('.handle'); if(!h||!['ArrowUp','ArrowDown'].includes(e.key)) return; e.preventDefault();
-    const [id,idx]=h.dataset.h.split('|'), i=+idx, {m}=findMill(id), s=e.key==='ArrowUp'?.01:-.01, a=m.products[i], b=m.products[i+1], d=clamp(s,-a.share,b.share); a.share+=d; b.share-=d; update(); });
+    const [id,idx]=h.dataset.h.split('|'), {m}=findMill(id), up=e.key==='ArrowUp', st=handlesAt(m,+idx), i=up?st[st.length-1]:st[0], s=up?.01:-.01, a=m.products[i], b=m.products[i+1], d=clamp(s,-a.share,b.share); a.share+=d; b.share-=d; update(); });
   let burst=0;
   document.addEventListener('input',e=>{
     const t=e.target, ds=t.dataset; let f;
