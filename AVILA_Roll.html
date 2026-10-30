@@ -5698,7 +5698,7 @@ function saveProps(id){
         if(v>0) allocs[b.id]=v;
       });
       el.props.berth_allocations=Object.keys(allocs).length?allocs:null;
-    }
+    } else if(el.props.berth_allocations) el.props.berth_allocations=null;   // one berth left: an old split no longer applies (the panel is hidden, so it could not be cleared)
   }
   autoSave(); statMsg('Properties saved');
 }
@@ -17411,17 +17411,17 @@ function _writeProposedVesselCalls(r){
 
     const downBerths=(dn[ss.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='berth');
     const berthAllocs=ss.props.berth_allocations||null;
+    // Only berths this source still connects to: removing a link leaves its old split behind in the props
+    // (MEDCEM kept {PEV:125, SUT:100} after losing SUT, so every proposed ship carried 225 t).
+    const allocBerths=Object.entries(berthAllocs||{})
+      .map(([berthId,qty])=>({berth:elMap[berthId],qty:parseFloat(qty)||0}))
+      .filter(x=>x.berth&&x.qty>0&&downBerths.includes(x.berth));
 
-    // If berth_allocations is set and covers multiple berths → propose split vessels
+    // A split over two or more connected berths → propose split vessels
     // Otherwise → propose independent full vessels per berth (original behaviour)
-    if(berthAllocs&&Object.keys(berthAllocs).length>1){
+    if(allocBerths.length>1){
       // Split mode: one vessel call with legs. Use the PRIMARY berth (largest allocation)
       // for trigger calculation; all berths share the lead time.
-      // Find the silo + demand for each allocated berth
-      const allocBerths=Object.entries(berthAllocs)
-        .map(([berthId,qty])=>({berth:elMap[berthId],qty:parseFloat(qty)||0}))
-        .filter(x=>x.berth&&x.qty>0);
-      if(allocBerths.length<2) return; // fall through to individual mode
 
       // Use the largest allocation berth as the primary for inventory trigger
       const primary=allocBerths.reduce((a,b)=>b.qty>a.qty?b:a);
