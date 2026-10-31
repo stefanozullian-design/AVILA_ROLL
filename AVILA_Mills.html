@@ -782,14 +782,15 @@ function resetMill(m){ m.eff=m.base.eff; m.products.forEach(p=>{ p.yield=p.base.
 
 // ── Moves ──
 function findMill(id){ for(const pl of M.plants){ const m=pl.mills.find(x=>x.id===id); if(m) return {pl,m}; } return null; }
-function setShare(m,i,v){   // one lever: the rest of the mill gives up time in proportion; a held cement on this mill keeps its time
-  const p=m.products[i], others=m.products.filter((q,j)=>j!==i), free=others.filter(q=>!M.locks[q.name]), held=others.reduce((a,q)=>a+(M.locks[q.name]?q.share:0),0);
+function setShare(m,i,v){   // one lever: the free cements on the mill give up (or take) time in proportion; a held one only once they have none left
+  const p=m.products[i], others=m.products.filter((q,j)=>j!==i), free=others.filter(q=>!M.locks[q.name]), held=others.filter(q=>M.locks[q.name]);
   if(!others.length){ p.share=1; return; }
-  if(!free.length) return;
-  v=clamp(v,0,1-held); p.share=v;
-  const rest=free.reduce((a,q)=>a+q.share,0), left=1-held-v;
-  if(rest>1e-9) free.forEach(q=>q.share=q.share/rest*left); else free.forEach(q=>q.share=left/free.length);
-  SRC=new Set([p,...free].map(q=>m.id+'|'+q.name));
+  v=clamp(v,0,1); p.share=v;
+  const hs=held.reduce((a,q)=>a+q.share,0), fs=free.reduce((a,q)=>a+q.share,0);
+  const fLeft=free.length?Math.max(0,1-hs-v):0, hLeft=1-v-fLeft;
+  if(fs>1e-9) free.forEach(q=>q.share=q.share/fs*fLeft); else free.forEach(q=>q.share=fLeft/free.length);
+  if(hs>1e-9) held.forEach(q=>q.share=q.share/hs*hLeft); else held.forEach(q=>q.share=hLeft/held.length);
+  SRC=new Set([p,...free,...held].map(q=>m.id+'|'+q.name));
 }
 const touch=m=>m.products.forEach(p=>SRC.add(m.id+'|'+p.name));
 function maxProduct(name){ pushUndo(); const hold=M.locks[name]; delete M.locks[name];   // MAX on a held cement moves the hold to the new most
