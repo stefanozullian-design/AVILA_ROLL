@@ -643,9 +643,9 @@ function update(){
   M.prods.forEach((p,i)=>{
     const g=R.byProd[p.name], dd=g.t-g.b;
     $('pf-'+i).style.width=(g.t/maxP*100)+'%'; $('pg-'+i).style.left=(g.b/maxP*100)+'%';
-    const pv=$('pv-'+i), held=!!M.locks[p.name]; if(document.activeElement!==pv) pv.value=fmt(g.t); pv.readOnly=!held; pv.title=held?`Type the t/yr to hold ${p.short} at (750k works) and press Enter`:'';
+    const pv=$('pv-'+i), held=isHeld(p.name); if(document.activeElement!==pv) pv.value=fmt(g.t); pv.readOnly=!held; pv.title=held?`Type the t/yr to hold ${p.short} at (750k works) and press Enter`:'';
     const e=$('pd-'+i); e.className='pd '+cls(dd); e.textContent=Math.abs(dd)<0.5?'·':sgn(dd);
-    const lk=document.querySelector(`[data-lock="${i}"]`); if(lk){ const on=!!M.locks[p.name]; lk.classList.toggle('on',on); lk.closest('.prow').classList.toggle('locked',on);
+    const lk=document.querySelector(`[data-lock="${i}"]`); if(lk){ const on=isHeld(p.name); lk.classList.toggle('on',on); lk.closest('.prow').classList.toggle('locked',on);
       lk.title=on?`${p.short} held at ${fmt(M.locks[p.name])} t/yr · type a new total in the field · click to release`:`Hold ${p.short} at this total: whatever the levers do, the mills rearrange so it stays, and other cements give way`; }
   });
   M.plants.forEach(pl=>{
@@ -788,7 +788,7 @@ function resetMill(m){ m.eff=m.base.eff; m.products.forEach(p=>{ p.yield=p.base.
 // ── Moves ──
 function findMill(id){ for(const pl of M.plants){ const m=pl.mills.find(x=>x.id===id); if(m) return {pl,m}; } return null; }
 function setShare(m,i,v){   // one lever: the free cements on the mill give up (or take) time in proportion; a held one only once they have none left
-  const p=m.products[i], others=m.products.filter((q,j)=>j!==i), free=others.filter(q=>!M.locks[q.name]), held=others.filter(q=>M.locks[q.name]);
+  const p=m.products[i], others=m.products.filter((q,j)=>j!==i), free=others.filter(q=>!isHeld(q.name)), held=others.filter(q=>isHeld(q.name));
   if(!others.length){ p.share=1; return; }
   v=clamp(v,0,1); p.share=v;
   const hs=held.reduce((a,q)=>a+q.share,0), fs=free.reduce((a,q)=>a+q.share,0);
@@ -799,20 +799,21 @@ function setShare(m,i,v){   // one lever: the free cements on the mill give up (
 }
 // MAX: the most of one cement the holds allow, from every mill that makes it or a held cement; the rest stays put.
 function maxProduct(name){ pushUndo(); const hold=M.locks[name]; delete M.locks[name];   // MAX on a held cement moves the hold to the new most
-  guarded(()=>lpMove(varsFor(m=>m.products.some(p=>p.name===name||M.locks[p.name]),1e-3),v=>v.p.name===name?v.p.yield:0));
+  guarded(()=>lpMove(varsFor(m=>m.products.some(p=>p.name===name||isHeld(p.name)),1e-3),v=>v.p.name===name?v.p.yield:0));
   if(hold!=null){ M.locks[name]=calc().byProd[name].t; update(); } }
 function maxTonnes(){ pushUndo(); guarded(()=>lpMove(varsFor(()=>true,1e-3),v=>v.p.yield)); }
-function toggleLock(name){ pushUndo(); const R=calc(); if(M.locks[name]) delete M.locks[name]; else M.locks[name]=R.byProd[name]?R.byProd[name].t:0; update(); }
+function toggleLock(name){ pushUndo(); const R=calc(); if(isHeld(name)) delete M.locks[name]; else M.locks[name]=R.byProd[name]?R.byProd[name].t:0; update(); }
 function setLock(name,v){ pushUndo(); guarded(()=>{ M.locks[name]=Math.max(0,v); }); return Math.abs(M.locks[name]-v)<=0.5; }
 
 // ── The hold. A held cement's network total stays what it was when locked. Whatever moves it, the
 // other mills that make it take the difference back, in proportion to the room they have, out of the
 // time of cements that are not held; only when they cannot cover it does the mill the user is moving
 // give the move back. A change that still breaks a hold is refused (guarded). ──
+const isHeld=n=>n in M.locks;   // a hold at 0 t is a hold
 let SRC=null;   // `${millId}|${cement}` the user just set by hand: these resist moving, the other mills make it up
 function enforce(src){
   if(!Object.keys(M.locks).length) return;
-  const vars=varsFor(m=>m.products.some(p=>M.locks[p.name]),(m,p)=>src&&src.has(m.id+'|'+p.name)?1000:1);
+  const vars=varsFor(m=>m.products.some(p=>isHeld(p.name)),(m,p)=>src&&src.has(m.id+'|'+p.name)?1000:1);
   if(vars.length) lpMove(vars,null);
 }
 // The mills a move may touch, as (mill, cement) pairs with the days they have now and how much each resists moving.
@@ -859,7 +860,7 @@ const ticket=$('ticket');
 const netNeed=()=>M.plants.reduce((a,pl)=>a+pl.need,0);
 function showTicket(x,y,pl,m,start){
   const R=calc(), days=m.products.reduce((a,p)=>a+Math.max(0,(p.share-start.s[p.id])*m.avail),0);
-  const rows=M.prods.map(p=>({p,d:(R.byProd[p.name]?R.byProd[p.name].t:0)-(start.bp[p.name]||0),lk:!!M.locks[p.name]&&m.products.some(q=>q.name===p.name)})).filter(r=>Math.abs(r.d)>=0.5||r.lk);
+  const rows=M.prods.map(p=>({p,d:(R.byProd[p.name]?R.byProd[p.name].t:0)-(start.bp[p.name]||0),lk:isHeld(p.name)&&m.products.some(q=>q.name===p.name)})).filter(r=>Math.abs(r.d)>=0.5||r.lk);
   const net=rows.reduce((a,r)=>a+r.d,0), clk=netNeed()-start.need;
   ticket.innerHTML=`<div class="th">${esc(m.short)} · ${days>=0.05?days.toFixed(1)+' days moved':'move the lever'}</div>`+
     rows.map(r=>`<div class="tr"><span class="dot" style="background:var(${r.p.c})"></span><span>${esc(r.p.name.replace(/\/BLK$/,''))}${r.lk?'<i class="lk">held</i>':''}</span><span class="${cls(r.d)}">${sgn(r.d)} t</span></div>`).join('')+
@@ -916,7 +917,7 @@ function wire(){
   });
   document.addEventListener('focusout',e=>{ if(e.target.matches('input.fi')) update(); });
   document.addEventListener('keydown',e=>{ if(e.key==='Enter'&&e.target.matches('[data-lockv]')) e.target.blur(); });
-  document.addEventListener('change',e=>{ const t=e.target; if(!t.dataset.lockv) return; const p=M.prods[+t.dataset.lockv]; if(!M.locks[p.name]){ update(); return; }
+  document.addEventListener('change',e=>{ const t=e.target; if(!t.dataset.lockv) return; const p=M.prods[+t.dataset.lockv]; if(!isHeld(p.name)){ update(); return; }
     const s=String(t.value).trim().toLowerCase(); let v=num(s.replace(/[^\d.]/g,'')); if(/\d\s*k\b/.test(s)) v*=1e3; else if(/\d\s*m\b/.test(s)) v*=1e6;
     if(!setLock(p.name,v)){ const row=t.closest('.prow'); row.classList.add('nope'); t.title=`No mix of the mills holds ${p.short} at ${fmt(v)} t/yr together with the other holds`; setTimeout(()=>row.classList.remove('nope'),1500); } });
   document.addEventListener('click',e=>{
