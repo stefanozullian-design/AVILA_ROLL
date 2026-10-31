@@ -375,6 +375,7 @@ main{height:calc(100vh - 48px);overflow:auto;padding:10px 14px;max-width:1900px;
   <p id="gtxt">How much cement can we make? It depends which cement. Connect your scenario to start. This page only reads it and never changes anything in the Roll.</p>
   <div class="gbtns">
     <button class="btn pri" id="g-conn" style="display:none"></button>
+    <button class="btn" id="g-bund" style="display:none"></button>
     <button class="btn" id="g-file">Open a scenario JSON</button>
   </div>
   <input type="file" id="g-input" accept=".json,application/json" style="display:none">
@@ -405,6 +406,7 @@ main{height:calc(100vh - 48px);overflow:auto;padding:10px 14px;max-width:1900px;
 <div id="ticket"></div>
 <div id="drop">Drop the scenario JSON</div>
 
+<script src="AVILA_Mills_data.js"></script>
 <script>
 'use strict';
 /* AVILA Mill Balance: what-if for finish mill time. Stand-alone next to AVILA_Roll.html and
@@ -427,7 +429,7 @@ const num=(v,f=0)=>{const n=parseFloat(v);return isFinite(n)?n:f;};
 const ymdMinus=(ymd,n)=>{const d=new Date(ymd+'T12:00:00');d.setDate(d.getDate()-n);const m=String(d.getMonth()+1).padStart(2,'0'),a=String(d.getDate()).padStart(2,'0');return `${d.getFullYear()}-${m}-${a}`;};
 
 const M={days:365,plants:[],prods:[],sc:'',win:null,basis:'rated',span:'12m',locks:{}};   // locks: cement name → tonnes/yr it is held at
-let undo=[], LIVE=null, LAST=0, KEY='', synced='', dragging=false, PAYLOAD=null;
+let undo=[], LIVE=null, LAST=0, KEY='', synced='', dragging=false, PAYLOAD=null, BUNDLED=null;
 const mode=()=>M.basis+'|'+M.span;
 const wl=()=>M.span==='ytd'?'YTD':'last 12 months', bl=()=>M.span==='ytd'?'YTD pace':'last 12 months';
 
@@ -554,7 +556,7 @@ function clinkerHTML(pl){
     <div class="clkm" id="cm-${id}"></div>
   </div>`;
 }
-function chip(note){ $('srcchip').innerHTML=`<b>${esc(M.sc)}</b> · ${wl()} ${M.win.from} → ${M.win.to} · ${M.win.days} d · ${M.win.real?'proven':'rated'} yields`+(isCustom()?' · custom':'')+(LIVE?` · ${note||('synced '+synced)}`:' · from a file'); }
+function chip(note){ $('srcchip').innerHTML=`<b>${esc(M.sc)}</b> · ${wl()} ${M.win.from} → ${M.win.to} · ${M.win.days} d · ${M.win.real?'proven':'rated'} yields`+(isCustom()?' · custom':'')+(LIVE?` · ${note||('synced '+synced)}`:BUNDLED?` · published copy of ${BUNDLED.made}`:' · from a file'); }
 // Custom: a yield or an efficiency, on a mill or a kiln, that is not the basis's own number. The mix is not performance.
 const isCustom=()=>M.plants.some(pl=>pl.mills.some(m=>Math.abs(m.eff-m.base.eff)>1e-6||m.products.some(p=>p.yield!==p.base.yield))||pl.kilns.some(k=>k.rated!==k.base.rated||Math.abs(k.eff-k.base.eff)>1e-6));
 function revertPerf(){ M.plants.forEach(pl=>{ pl.mills.forEach(m=>{ m.eff=m.base.eff; m.products.forEach(p=>p.yield=p.base.yield); }); pl.kilns.forEach(k=>{ k.rated=k.base.rated; k.eff=k.base.eff; }); }); }
@@ -919,7 +921,7 @@ function idbHandle(id){
       const q=db.transaction('handles','readonly').objectStore('handles').get(id); q.onsuccess=()=>{ db.close(); res(q.result||null); }; q.onerror=()=>{ db.close(); res(null); }; }catch(e){ res(null); } }; });
 }
 const stamp=()=>{ const d=new Date(); synced=String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); };
-async function readHandle(h,name){ const f=await h.getFile(), p=JSON.parse(await f.text()); LIVE=h; LAST=f.lastModified; stamp(); loadPayload(p,name||f.name.replace(/\.json$/i,'')); }
+async function readHandle(h,name){ const f=await h.getFile(), p=JSON.parse(await f.text()); LIVE=h; BUNDLED=null; LAST=f.lastModified; stamp(); loadPayload(p,name||f.name.replace(/\.json$/i,'')); }
 // Follows the scenario while open. A save that does not touch what this page shows changes nothing;
 // never mid-drag or mid-typing, the next check picks it up.
 async function checkSync(){
@@ -948,13 +950,16 @@ async function boot(){
   addEventListener('drop',e=>{ e.preventDefault(); $('drop').classList.remove('on'); const f=e.dataTransfer.files[0]; if(f) readFile(f); });
   let meta=null; try{ meta=JSON.parse(localStorage.getItem('avila_scenarios')||'null'); }catch(e){}
   const id=meta&&meta.activeId, name=id&&meta.meta&&meta.meta[id]?meta.meta[id].name:'';
-  const h=id?await idbHandle(id):null;
-  if(!h||!h.queryPermission) return;
+  const h=id?await idbHandle(id):null, pub=window.AVILA_MILLS_DATA&&window.AVILA_MILLS_DATA._bundled?window.AVILA_MILLS_DATA:null;
+  // No Roll scenario on this machine (someone the page was shared with): the published copy opens straight away.
+  if(!h||!h.queryPermission){ if(pub) useBundled(pub); return; }
   const b=$('g-conn'); b.textContent=`Open ${name||'active scenario'}`; b.style.display='inline-block';
   b.onclick=async()=>{ try{ if(await h.requestPermission({mode:'read'})==='granted') await readHandle(h,name); else $('gmsg').textContent='Chrome did not allow reading the file.'; }catch(e){ $('gmsg').textContent=e.message; } };
+  if(pub){ const c=$('g-bund'); c.textContent=`Use the published copy (${pub._bundled.window[1]})`; c.style.display='inline-block'; c.onclick=()=>useBundled(pub); }
   try{ if(await h.queryPermission({mode:'read'})==='granted') await readHandle(h,name); }catch(e){ $('gmsg').textContent=e.message; }
 }
-function readFile(f){ const r=new FileReader(); r.onload=()=>{ try{ LIVE=null; loadPayload(JSON.parse(r.result),f.name.replace(/\.json$/i,'')); }catch(e){ $('gate').classList.remove('off'); $('gmsg').textContent=e.message; } }; r.readAsText(f); }
+function useBundled(pub){ try{ LIVE=null; BUNDLED=pub._bundled; loadPayload(pub,pub._bundled.from); }catch(e){ $('gate').classList.remove('off'); $('gmsg').textContent=e.message; } }
+function readFile(f){ const r=new FileReader(); r.onload=()=>{ try{ LIVE=null; BUNDLED=null; loadPayload(JSON.parse(r.result),f.name.replace(/\.json$/i,'')); }catch(e){ $('gate').classList.remove('off'); $('gmsg').textContent=e.message; } }; r.readAsText(f); }
 boot();
 </script>
 </body>
