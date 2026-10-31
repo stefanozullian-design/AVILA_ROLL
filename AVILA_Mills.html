@@ -207,6 +207,9 @@ main{height:calc(100vh - 48px);overflow:auto;padding:10px 14px;max-width:1900px;
 .pfill{position:absolute;left:0;top:0;bottom:0;transition:width .35s cubic-bezier(.2,.8,.2,1);}
 .pghost{position:absolute;top:-1px;bottom:-1px;width:2px;background:var(--text);opacity:.65;transition:left .35s;}
 .prow .pv,.prow .pd{font-family:var(--mono);font-size:11px;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;}
+input.pv{background:none;border:0;border-bottom:1px solid transparent;color:inherit;padding:0;min-width:0;width:100%;outline:none;cursor:default;}
+.prow.locked input.pv{border-bottom-color:var(--green);cursor:text;} .prow.locked input.pv:focus{background:rgba(var(--green-rgb),.14);}
+.prow.nope input.pv{color:var(--red)!important;border-bottom-color:var(--red);}
 .prow .pd.up{color:var(--green);}.prow .pd.down{color:var(--red);}.prow .pd.flat{color:var(--text-dim);}
 .maxbtn{font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:.5px;padding:2px 0;background:transparent;border:1px solid var(--border2);color:var(--text-dim);cursor:pointer;transition:all .15s;}
 .maxbtn:hover{border-color:var(--green);color:var(--green);background:rgba(var(--green-rgb),.08);}
@@ -367,7 +370,7 @@ main{height:calc(100vh - 48px);overflow:auto;padding:10px 14px;max-width:1900px;
   <button class="btn" id="b-mix" title="Back to the last 12 months' mix. Your yields and efficiency stay.">Actual mix</button>
   <button class="btn" id="b-max" title="Every mill on its highest-yield product">Max tonnes</button>
   <button class="btn" id="b-reset" title="Everything back to the last 12 months">Reset all</button>
-  <button class="btn" id="b-help" title="Drag a handle on a bar to trade time between two products. A slider rebalances the rest of the mill. Every day is 24 h on one product. Tonnes = days × efficiency × share × yield · Non Productive Days = days × (1 − efficiency). Clinker: what the kilns make against what this cement mix needs. The lock beside a cement holds its total: whatever the levers do, the other mills that make it take the difference back, and other cements give way.">?</button>
+  <button class="btn" id="b-help" title="Drag a handle on a bar to trade time between two products. A slider rebalances the rest of the mill. Every day is 24 h on one product. Tonnes = days × efficiency × share × yield · Non Productive Days = days × (1 − efficiency). Clinker: what the kilns make against what this cement mix needs. The lock beside a cement holds its total, and you can type the tonnes you need in its field (750k): whatever the levers do, the mills rearrange so every held total stays, other cements give way, and MAX on a free cement is the most of it the holds allow.">?</button>
 </div>
 
 <div id="gate"><div class="gcard">
@@ -578,7 +581,7 @@ function buildUI(){
   $('h-prodlbl').textContent=`By cement · bar = this mix, tick = ${bl()} · MAX = the most we can make of it`;
   $('b-mix').title=`Back to the ${wl()} mix. Your yields and efficiency stay.`; $('b-reset').title=`Everything back to the ${wl()}`;
   $('h-plants').innerHTML=M.plants.map(pl=>`<a class="hplant" href="#pl-${esc(pl.id)}"><div class="row"><span class="nm">${esc(pl.name)}</span><span class="val" id="hp-t-${esc(pl.id)}">0</span></div><div class="row"><span class="sub" id="hp-c-${esc(pl.id)}"></span><span class="pill flat" id="hp-d-${esc(pl.id)}"></span></div></a>`).join('');
-  const prow=(p,i)=>`<div class="prow" style="--c:var(${p.c})"><div class="pn" title="${esc(p.name)}"><span class="dot" style="background:var(${p.c})"></span>${esc(p.name.replace(/\/BLK$/,''))}</div><div class="ptrack"><div class="pfill" id="pf-${i}" style="background:var(${p.c})"></div><div class="pghost" id="pg-${i}"></div></div><div class="pv" id="pv-${i}"></div><div class="pd" id="pd-${i}"></div><button class="maxbtn" data-max="${i}" title="Every mill that can make ${esc(p.short)} spends all its time on it">MAX</button>${hasLever(p.name)?`<button class="lockbtn" data-lock="${i}" aria-label="Hold ${esc(p.short)} at this total"><svg class="o" viewBox="0 0 16 16"><rect x="3" y="7.5" width="10" height="7.5" rx="1.2" fill="currentColor"/><path d="M5.5 7.5V5a2.5 2.5 0 0 1 5-.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><svg class="c" viewBox="0 0 16 16"><rect x="3" y="7.5" width="10" height="7.5" rx="1.2" fill="currentColor"/><path d="M5.5 7.5V5a2.5 2.5 0 0 1 5 0v2.5" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></button>`:'<span></span>'}</div>`;
+  const prow=(p,i)=>`<div class="prow" style="--c:var(${p.c})"><div class="pn" title="${esc(p.name)}"><span class="dot" style="background:var(${p.c})"></span>${esc(p.name.replace(/\/BLK$/,''))}</div><div class="ptrack"><div class="pfill" id="pf-${i}" style="background:var(${p.c})"></div><div class="pghost" id="pg-${i}"></div></div><input class="pv" id="pv-${i}" data-lockv="${i}" readonly><div class="pd" id="pd-${i}"></div><button class="maxbtn" data-max="${i}" title="Every mill that can make ${esc(p.short)} spends all its time on it">MAX</button>${hasLever(p.name)?`<button class="lockbtn" data-lock="${i}" aria-label="Hold ${esc(p.short)} at this total"><svg class="o" viewBox="0 0 16 16"><rect x="3" y="7.5" width="10" height="7.5" rx="1.2" fill="currentColor"/><path d="M5.5 7.5V5a2.5 2.5 0 0 1 5-.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><svg class="c" viewBox="0 0 16 16"><rect x="3" y="7.5" width="10" height="7.5" rx="1.2" fill="currentColor"/><path d="M5.5 7.5V5a2.5 2.5 0 0 1 5 0v2.5" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></button>`:'<span></span>'}</div>`;
   const cols=M.plants.map(pl=>M.prods.map((p,i)=>[p,i]).filter(([p])=>p.plant===pl.name)), rows=Math.max(1,...cols.map(c=>c.length));
   $('prodlist').style.setProperty('--rows',rows);
   $('prodlist').innerHTML=cols.map(c=>c.map(([p,i])=>prow(p,i)).join('')+'<div class="prow"></div>'.repeat(rows-c.length)).join('');
@@ -640,10 +643,10 @@ function update(){
   M.prods.forEach((p,i)=>{
     const g=R.byProd[p.name], dd=g.t-g.b;
     $('pf-'+i).style.width=(g.t/maxP*100)+'%'; $('pg-'+i).style.left=(g.b/maxP*100)+'%';
-    $('pv-'+i).textContent=fmt(g.t);
+    const pv=$('pv-'+i), held=!!M.locks[p.name]; if(document.activeElement!==pv) pv.value=fmt(g.t); pv.readOnly=!held; pv.title=held?`Type the t/yr to hold ${p.short} at (750k works) and press Enter`:'';
     const e=$('pd-'+i); e.className='pd '+cls(dd); e.textContent=Math.abs(dd)<0.5?'·':sgn(dd);
     const lk=document.querySelector(`[data-lock="${i}"]`); if(lk){ const on=!!M.locks[p.name]; lk.classList.toggle('on',on); lk.closest('.prow').classList.toggle('locked',on);
-      lk.title=on?`${p.short} held at ${fmt(M.locks[p.name])} t/yr · the levers cannot change it · click to release`:`Hold ${p.short} at this total: whatever the levers do, the other mills that make it take the difference back and other cements give way`; }
+      lk.title=on?`${p.short} held at ${fmt(M.locks[p.name])} t/yr · type a new total in the field · click to release`:`Hold ${p.short} at this total: whatever the levers do, the mills rearrange so it stays, and other cements give way`; }
   });
   M.plants.forEach(pl=>{
     const pid=pl.id, dp=pl.t-pl.bt, pct=pl.avail>0?pl.need/pl.avail:0;
@@ -794,37 +797,59 @@ function setShare(m,i,v){   // one lever: the free cements on the mill give up (
   if(hs>1e-9) held.forEach(q=>q.share=q.share/hs*hLeft); else held.forEach(q=>q.share=hLeft/held.length);
   SRC=new Set([p,...free,...held].map(q=>m.id+'|'+q.name));
 }
-const touch=m=>m.products.forEach(p=>SRC.add(m.id+'|'+p.name));
+// MAX: the most of one cement the holds allow, from every mill that makes it or a held cement; the rest stays put.
 function maxProduct(name){ pushUndo(); const hold=M.locks[name]; delete M.locks[name];   // MAX on a held cement moves the hold to the new most
-  guarded(()=>{ SRC=new Set(); M.plants.forEach(pl=>pl.mills.forEach(m=>{ if(!m.products.some(p=>p.name===name)) return; m.products.forEach(p=>p.share=p.name===name?1:0); touch(m); })); });
+  guarded(()=>lpMove(varsFor(m=>m.products.some(p=>p.name===name||M.locks[p.name]),1e-3),v=>v.p.name===name?v.p.yield:0));
   if(hold!=null){ M.locks[name]=calc().byProd[name].t; update(); } }
-function maxTonnes(){ pushUndo(); guarded(()=>{ SRC=new Set(); M.plants.forEach(pl=>pl.mills.forEach(m=>{ const top=Math.max(...m.products.map(p=>p.yield)), best=m.products.filter(p=>p.yield===top), w=best.reduce((a,p)=>a+p.base.share,0); m.products.forEach(p=>p.share=best.includes(p)?(w>0?p.base.share/w:1/best.length):0); touch(m); })); }); }
+function maxTonnes(){ pushUndo(); guarded(()=>lpMove(varsFor(()=>true,1e-3),v=>v.p.yield)); }
 function toggleLock(name){ pushUndo(); const R=calc(); if(M.locks[name]) delete M.locks[name]; else M.locks[name]=R.byProd[name]?R.byProd[name].t:0; update(); }
+function setLock(name,v){ pushUndo(); guarded(()=>{ M.locks[name]=Math.max(0,v); }); return Math.abs(M.locks[name]-v)<=0.5; }
 
 // ── The hold. A held cement's network total stays what it was when locked. Whatever moves it, the
 // other mills that make it take the difference back, in proportion to the room they have, out of the
 // time of cements that are not held; only when they cannot cover it does the mill the user is moving
 // give the move back. A change that still breaks a hold is refused (guarded). ──
-let SRC=null;   // `${millId}|${cement}` the user just set by hand: made up on other mills first
+let SRC=null;   // `${millId}|${cement}` the user just set by hand: these resist moving, the other mills make it up
 function enforce(src){
-  const names=Object.keys(M.locks); if(!names.length) return;
-  const inSrc=(m,p)=>!!(src&&src.has(m.id+'|'+p.name));
-  [false,true].forEach(onSrc=>{
-    const R=calc();
-    names.forEach(name=>{
-      const have=R.byProd[name]?R.byProd[name].t:0, d=M.locks[name]-have; if(Math.abs(d)<0.5) return;
-      const cands=[];
-      M.plants.forEach(pl=>pl.mills.forEach(m=>m.products.forEach(p=>{
-        if(p.name!==name||inSrc(m,p)!==onSrc||m.avail<=0||p.yield<=0) return;
-        const free=m.products.filter(q=>q!==p&&!M.locks[q.name]&&(!onSrc||inSrc(m,q)));
-        if(free.length) cands.push({m,p,free,fs:free.reduce((a,q)=>a+q.share,0)});
-      })));
-      const room=c=>(d>0?c.fs:c.p.share)*c.m.avail*c.p.yield, Rm=cands.reduce((a,c)=>a+room(c),0); if(Rm<=0) return;
-      const take=Math.sign(d)*Math.min(Math.abs(d),Rm);
-      cands.forEach(c=>{ const r=room(c); if(r<=0) return; const ds=take*r/Rm/(c.m.avail*c.p.yield);
-        c.p.share=clamp(c.p.share+ds,0,1); c.free.forEach(q=>q.share=clamp(c.fs>1e-9?q.share-ds*q.share/c.fs:q.share-ds/c.free.length,0,1)); });
-    });
-  });
+  if(!Object.keys(M.locks).length) return;
+  const vars=varsFor(m=>m.products.some(p=>M.locks[p.name]),(m,p)=>src&&src.has(m.id+'|'+p.name)?1000:1);
+  if(vars.length) lpMove(vars,null);
+}
+// The mills a move may touch, as (mill, cement) pairs with the days they have now and how much each resists moving.
+function varsFor(pick,w){ calc(); const vars=[]; M.plants.forEach(pl=>pl.mills.forEach(m=>{ if(m.avail<=0||!pick(m)) return; m.products.forEach(p=>vars.push({m,p,cur:m.avail*p.share,w:typeof w==='function'?w(m,p):w})); })); return vars; }
+// Days = now + up − down per pair. Every mill keeps all its time, every held cement lands on its total (in kt),
+// days never go below zero; maximise the tonnes `gain` pays for, minus the days moved times their resistance.
+// False when no mix can honour the holds: nothing is changed.
+function lpMove(vars,gain){
+  const R=calc(), n=vars.length, g=v=>gain?gain(v)/1000:0, c=[];
+  vars.forEach((v,i)=>{ c[i]=g(v)-v.w; c[n+i]=-g(v)-v.w; });
+  const Aeq=[], beq=[], Ale=[], ble=[], row=()=>new Array(2*n).fill(0), push=(a,b)=>{ if(b<0){ b=-b; for(let j=0;j<2*n;j++) a[j]=-a[j]; } Aeq.push(a); beq.push(b); };
+  [...new Set(vars.map(v=>v.m))].forEach(m=>{ const a=row(); let cur=0; vars.forEach((v,i)=>{ if(v.m===m){ a[i]=1; a[n+i]=-1; cur+=v.cur; } }); push(a,m.avail-cur); });
+  Object.entries(M.locks).forEach(([name,t])=>{ if(!vars.some(v=>v.p.name===name)) return;
+    const a=row(); vars.forEach((v,i)=>{ if(v.p.name===name){ a[i]=v.p.yield/1000; a[n+i]=-v.p.yield/1000; } }); push(a,(t-(R.byProd[name]?R.byProd[name].t:0))/1000); });
+  vars.forEach((v,i)=>{ const a=row(); a[i]=-1; a[n+i]=1; Ale.push(a); ble.push(v.cur); });
+  const x=simplex(c,Aeq,beq,Ale,ble); if(!x) return false;
+  vars.forEach((v,i)=>{ v.p.share=clamp((v.cur+x[i]-x[n+i])/v.m.avail,0,1); });
+  return true;
+}
+// Dense two-phase simplex (Bland's rule): maximise c·x with A_eq x = b_eq, A_le x ≤ b_le, x ≥ 0, every b ≥ 0.
+// Returns x, or null when there is no feasible x. The problems here are a few dozen variables.
+function simplex(c,Aeq,beq,Ale,ble){
+  const n=c.length, ml=Ale.length, me=Aeq.length, N=n+ml+me, EPS=1e-9, T=[], basis=[];
+  Ale.forEach((a,i)=>{ const r=new Float64Array(N+1); a.forEach((v,j)=>r[j]=v); r[n+i]=1; r[N]=ble[i]; T.push(r); basis.push(n+i); });
+  Aeq.forEach((a,i)=>{ const r=new Float64Array(N+1); a.forEach((v,j)=>r[j]=v); r[n+ml+i]=1; r[N]=beq[i]; T.push(r); basis.push(n+ml+i); });
+  const pivot=(l,e)=>{ const pr=T[l], pv=pr[e]; for(let j=0;j<=N;j++) pr[j]/=pv; T.forEach((r,i)=>{ if(i===l) return; const f=r[e]; if(Math.abs(f)>EPS) for(let j=0;j<=N;j++) r[j]-=f*pr[j]; }); basis[l]=e; };
+  const run=(obj,allow)=>{ for(let it=0;it<4000;it++){
+    let e=-1; for(let j=0;j<N&&e<0;j++){ if(!allow(j)||basis.includes(j)) continue; let z=obj[j]; T.forEach((r,i)=>{ z-=obj[basis[i]]*r[j]; }); if(z>1e-7) e=j; }
+    if(e<0) return true;
+    let l=-1, best=Infinity; T.forEach((r,i)=>{ if(r[e]>EPS){ const q=r[N]/r[e]; if(q<best-EPS||(Math.abs(q-best)<=EPS&&basis[i]<basis[l])){ best=q; l=i; } } });
+    if(l<0) return false; pivot(l,e); } return false; };
+  if(me){ const o=new Float64Array(N); for(let i=0;i<me;i++) o[n+ml+i]=-1; run(o,()=>true);
+    if(T.reduce((a,r,i)=>a+(basis[i]>=n+ml?r[N]:0),0)>1e-6) return null;
+    for(let i=T.length-1;i>=0;i--){ if(basis[i]<n+ml) continue; const j=T[i].findIndex((v,k)=>k<n+ml&&Math.abs(v)>EPS); if(j>=0) pivot(i,j); else { T.splice(i,1); basis.splice(i,1); } } }
+  const o=new Float64Array(N); for(let j=0;j<n;j++) o[j]=c[j];
+  if(!run(o,j=>j<n+ml)) return null;
+  const x=new Float64Array(n); basis.forEach((b,i)=>{ if(b<n) x[b]=T[i][N]; }); return x;
 }
 const lockGap=()=>{ const R=calc(); return Object.entries(M.locks).reduce((g,[n,w])=>Math.max(g,Math.abs((R.byProd[n]?R.byProd[n].t:0)-w)),0); };
 function guarded(fn){ const b=snapshot(); fn(); update(); if(lockGap()>0.5){ restore(b); SRC=null; update(); } }
@@ -873,7 +898,7 @@ function wire(){
     const [id,idx]=h.dataset.h.split('|'), {m}=findMill(id), up=e.key==='ArrowUp', st=handlesAt(m,+idx), i=up?st[st.length-1]:st[0], s=up?.01:-.01, a=m.products[i], b=m.products[i+1], d=clamp(s,-a.share,b.share); guarded(()=>{ a.share+=d; b.share-=d; SRC=new Set([m.id+'|'+a.name,m.id+'|'+b.name]); }); });
   let burst=0;
   document.addEventListener('input',e=>{
-    const t=e.target, ds=t.dataset; let f;
+    const t=e.target, ds=t.dataset; let f; if(ds.lockv) return;   // a held total applies on Enter
     if(!burst&&t.tagName==='INPUT'&&t.type!=='file') pushUndo();
     clearTimeout(burst); burst=setTimeout(()=>{ burst=0; },700);
     guarded(()=>{
@@ -890,6 +915,10 @@ function wire(){
     });
   });
   document.addEventListener('focusout',e=>{ if(e.target.matches('input.fi')) update(); });
+  document.addEventListener('keydown',e=>{ if(e.key==='Enter'&&e.target.matches('[data-lockv]')) e.target.blur(); });
+  document.addEventListener('change',e=>{ const t=e.target; if(!t.dataset.lockv) return; const p=M.prods[+t.dataset.lockv]; if(!M.locks[p.name]){ update(); return; }
+    const s=String(t.value).trim().toLowerCase(); let v=num(s.replace(/[^\d.]/g,'')); if(/\d\s*k\b/.test(s)) v*=1e3; else if(/\d\s*m\b/.test(s)) v*=1e6;
+    if(!setLock(p.name,v)){ const row=t.closest('.prow'); row.classList.add('nope'); t.title=`No mix of the mills holds ${p.short} at ${fmt(v)} t/yr together with the other holds`; setTimeout(()=>row.classList.remove('nope'),1500); } });
   document.addEventListener('click',e=>{
     const mx=e.target.closest('[data-max]'); if(mx){ maxProduct(M.prods[+mx.dataset.max].name); return; }
     const lk=e.target.closest('[data-lock]'); if(lk){ toggleLock(M.prods[+lk.dataset.lock].name); return; }
