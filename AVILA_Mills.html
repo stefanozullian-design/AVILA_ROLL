@@ -162,6 +162,7 @@ button,input{font:inherit;color:inherit;}
 .sb+.sb{border-left:1px solid var(--border2);}
 .sb:hover{color:var(--text);}
 .sb.on{background:var(--green);color:var(--on-green);}
+.sb[data-custom].on{background:var(--amber);color:var(--on-green);}
 
 main{height:calc(100vh - 48px);overflow:auto;padding:10px 14px;max-width:1900px;margin:0 auto;display:flex;flex-direction:column;gap:10px;}
 
@@ -359,7 +360,7 @@ main{height:calc(100vh - 48px);overflow:auto;padding:10px 14px;max-width:1900px;
   <div class="pagename">Mill Balance</div>
   <div class="tbchip" id="srcchip"></div>
   <div class="tbsp"></div>
-  <span class="tbf">Basis <span class="seg2"><button class="sb" data-basis="rated" title="Yields are the rated capacities in the Roll, and a mill has a lever for every product the Roll lists on it">Topology</button><button class="sb" data-basis="real" title="Current performance: yields are the average t/day each mill really ran at on each product, and a mill has a lever for every product it really made (7 days or more)">Current performance</button></span></span>
+  <span class="tbf">Basis <span class="seg2"><button class="sb" data-basis="rated" title="Yields are the rated capacities in the Roll, and a mill has a lever for every product the Roll lists on it">Topology</button><button class="sb" data-basis="real" title="Proven: yields are the average t/day each mill really ran at on each product, and a mill has a lever for every product it really made (7 days or more)">Proven</button><button class="sb" data-custom="1" title="Lit when a yield or an efficiency you typed no longer matches the basis. Click the basis to get its values back; your mix stays.">Custom</button></span></span>
   <span class="tbf">Window <span class="seg2"><button class="sb" data-span="12m" title="The last 12 months of real production">12 months</button><button class="sb" data-span="ytd" title="This year up to the last real day, projected to a full year at the same pace">YTD</button></span></span>
   <label class="tbf">Days in year <input class="fi" id="days" type="number" min="1" max="366" style="width:56px" value="365"></label>
   <button class="btn" id="b-undo" disabled title="Undo the last move">↶ Undo</button>
@@ -413,7 +414,7 @@ main{height:calc(100vh - 48px);overflow:auto;padding:10px 14px;max-width:1900px;
    'avila_mills_v3' (per basis and window), and which basis and window it was on. No scenario data
    lives in this file: the repository is public. */
 const LS_KEY='avila_mills_v3', VIEW_KEY='avila_mills_view';
-const MIN_DAYS=7;   // Current performance: a product a mill ran on fewer days than this is a one-off, not something it makes
+const MIN_DAYS=7;   // Proven: a product a mill ran on fewer days than this is a one-off, not something it makes
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=n=>Math.round(n).toLocaleString('en-US');
@@ -442,7 +443,7 @@ const shortName=n=>String(n||'').replace(/\/BLK$/,'').replace(/^[A-Z]{2,5}_/,'')
 
 // ── Scenario → model. The baseline reproduces the window exactly (projected to a year when it is
 // YTD): time on a product is the tonnes it made ÷ its yield, and efficiency is what squares that
-// with the days in the window. Topology: rated yields, the Roll's product list. Current performance:
+// with the days in the window. Topology: rated yields, the Roll's product list. Proven:
 // the yields and products the mills really showed. ──
 function buildModel(payload){
   const DB=payload.DB, fac={}, prod={};
@@ -470,7 +471,7 @@ function buildModel(payload){
     mine.forEach(r=>{ const b=by[r.product_id]||(by[r.product_id]={t:0,d:0,days:new Set()}), v=num(r.volume_t); b.t+=v; b.d+=v/dayT[r.date]; b.days.add(r.date); });
     const rated={}; caps(e.id).forEach(c=>{ if(num(c.capacity_tpd)>0) rated[c.product_id]=num(c.capacity_tpd); });
     // Topology: a lever for what the Roll lists on this mill, at the rated yield; a couple of days in the
-    // feed is not proof it can make a product. Current performance: a lever for what the mill really ran
+    // feed is not proof it can make a product. Proven: a lever for what the mill really ran
     // on MIN_DAYS days or more, at the average it really ran at. Anything else it made stays as a fixed
     // one-off, so the start still equals the real window (under 10 t is a booking slip, dropped).
     const pids=(real?Object.keys(by).filter(p=>by[p].days.size>=MIN_DAYS):Object.keys(rated)).filter(p=>prod[p]);
@@ -553,8 +554,11 @@ function clinkerHTML(pl){
     <div class="clkm" id="cm-${id}"></div>
   </div>`;
 }
-function chip(note){ $('srcchip').innerHTML=`<b>${esc(M.sc)}</b> · ${wl()} ${M.win.from} → ${M.win.to} · ${M.win.days} d · ${M.win.real?'real':'rated'} yields`+(LIVE?` · ${note||('synced '+synced)}`:' · from a file'); }
-function modeBtns(){ document.querySelectorAll('.sb').forEach(b=>b.classList.toggle('on',b.dataset.basis?b.dataset.basis===M.basis:b.dataset.span===M.span)); }
+function chip(note){ $('srcchip').innerHTML=`<b>${esc(M.sc)}</b> · ${wl()} ${M.win.from} → ${M.win.to} · ${M.win.days} d · ${M.win.real?'proven':'rated'} yields`+(isCustom()?' · custom':'')+(LIVE?` · ${note||('synced '+synced)}`:' · from a file'); }
+// Custom: a yield or an efficiency, on a mill or a kiln, that is not the basis's own number. The mix is not performance.
+const isCustom=()=>M.plants.some(pl=>pl.mills.some(m=>Math.abs(m.eff-m.base.eff)>1e-6||m.products.some(p=>p.yield!==p.base.yield))||pl.kilns.some(k=>k.rated!==k.base.rated||Math.abs(k.eff-k.base.eff)>1e-6));
+function revertPerf(){ M.plants.forEach(pl=>{ pl.mills.forEach(m=>{ m.eff=m.base.eff; m.products.forEach(p=>p.yield=p.base.yield); }); pl.kilns.forEach(k=>{ k.rated=k.base.rated; k.eff=k.base.eff; }); }); }
+function modeBtns(){ const c=PAYLOAD?isCustom():false; document.querySelectorAll('.sb').forEach(b=>b.classList.toggle('on',b.dataset.custom?c:b.dataset.basis?(b.dataset.basis===M.basis&&!c):b.dataset.span===M.span)); }
 // One screen: when the page is taller than the window it is scaled to fit, never below three quarters.
 let _fzT=0;
 function fit(){
@@ -705,6 +709,7 @@ function update(){
     document.querySelectorAll(`[data-clk^="${CSS.escape(pid)}|"]`).forEach(el=>{ const q=plantProds(pl).find(x=>x.name===el.dataset.clk.split('|')[1]); if(!q) return; setVal(el,q.clk.toFixed(3)); el.classList.toggle('mod',Math.abs(q.clk-q.base.clk)>1e-6); });
   });
   $('b-undo').disabled=!undo.length;
+  modeBtns(); chip();
   scheduleSave();
 }
 const npd=x=>Math.max(0,M.days*(1-x.eff));   // Non Productive Days and efficiency are one number, shown two ways
@@ -766,7 +771,7 @@ function scheduleSave(){ clearTimeout(_svT); _svT=setTimeout(saveNow,400); }
 function loadSaved(){ try{ ['avila_mills_v1','avila_mills_v2'].forEach(k=>localStorage.removeItem(k)); applyOverrides(readLS().ov[mode()]); }catch(e){} }
 // Basis and window: the same scenario, read a different way. What the user changed on the one they leave waits for them there.
 function setMode(basis,span){
-  if(basis===M.basis&&span===M.span) return;
+  if(basis===M.basis&&span===M.span){ if(PAYLOAD&&isCustom()){ pushUndo(); guarded(revertPerf); } return; }
   if(PAYLOAD) saveNow();
   const old=[M.basis,M.span]; M.basis=basis; M.span=span;
   try{ localStorage.setItem(VIEW_KEY,JSON.stringify({basis,span})); }catch(e){}
@@ -886,7 +891,7 @@ function wire(){
     const mx=e.target.closest('[data-max]'); if(mx){ maxProduct(M.prods[+mx.dataset.max].name); return; }
     const lk=e.target.closest('[data-lock]'); if(lk){ toggleLock(M.prods[+lk.dataset.lock].name); return; }
     const rs=e.target.closest('[data-reset]'); if(rs){ const f=findMill(rs.dataset.reset); if(f){ pushUndo(); guarded(()=>resetMill(f.m)); } return; }
-    const sb=e.target.closest('.sb'); if(sb) setMode(sb.dataset.basis||M.basis,sb.dataset.span||M.span);
+    const sb=e.target.closest('.sb'); if(sb&&!sb.dataset.custom) setMode(sb.dataset.basis||M.basis,sb.dataset.span||M.span);
   });
   $('b-undo').onclick=()=>{ if(undo.length){ restore(undo.pop()); update(); } };
   $('b-mix').onclick=()=>{ pushUndo(); guarded(()=>M.plants.forEach(pl=>pl.mills.forEach(m=>m.products.forEach(p=>p.share=p.base.share)))); };
