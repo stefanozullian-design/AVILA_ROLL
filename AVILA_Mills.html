@@ -364,7 +364,9 @@ body:not([data-view="all"]) .clk{border-left:none;padding-left:0;}
 .asleft,.asright{display:flex;flex-direction:column;gap:8px;min-width:0;}
 .asin{display:grid;grid-template-columns:repeat(3,minmax(84px,1fr));gap:4px 8px;align-items:center;align-content:start;}
 .asgrid.one{grid-template-columns:1fr;}
-.clkecon{flex:1 1 600px;min-width:0;display:grid;grid-template-columns:auto minmax(280px,1fr);gap:0 18px;align-items:start;border-left:1px solid var(--border);padding-left:18px;}
+.clkecon{flex:1 1 600px;min-width:0;border-left:1px solid var(--border);padding-left:18px;}
+.ecotab{width:auto;} .ecotab th,.ecotab td{padding:1px 4px;text-align:right;} .ecotab .ml{text-align:left;font-weight:700;} .ecotab th .dot{vertical-align:-1px;margin-right:3px;}
+.ecotab input.fi{width:60px;height:17px;line-height:15px;font-size:10px;text-align:right;padding:0 4px;} .ecotab th,.ecotab td{padding:0 4px;height:19px;} .ecotab td.calc2{color:var(--text-dim);} .ecotab td.mt{color:var(--text-dim);} .ecotab tr.mix td{font-weight:700;border-top:1px solid var(--border2);}
 .clkecon .asin .h:first-child{margin-top:0;}
 .asin .h{grid-column:1/-1;font-family:var(--mono);font-size:9px;letter-spacing:1.2px;text-transform:uppercase;color:var(--text-dim);margin-top:3px;}
 .asin .ufi{display:flex;}
@@ -527,10 +529,10 @@ function buildModel(payload){
     const pids=(real?[...new Set([...Object.keys(by).filter(proven),...Object.keys(rated)])]:Object.keys(rated)).filter(p=>prod[p]);
     if(!pids.length) return;
     const mk=pid=>{ const name=prod[pid].name, short=shortName(name), f=family(short), b=by[pid]; const rc=recipe(pid); return {id:pid,name,short,c:f.c,r:f.r,clk:rc.clk,gyp:rc.gyp,rated:rated[pid]||0,real:b?{t:b.t,days:b.days.size,y:b.d>0?Math.round(b.t/b.d):0}:null}; };
-    const fixed=Object.keys(by).filter(p=>!pids.includes(p)&&prod[p]&&by[p].t>=10).map(pid=>{ const x=mk(pid); x.t=by[pid].t*ann; x.base={clk:x.clk}; return x; });
+    const fixed=Object.keys(by).filter(p=>!pids.includes(p)&&prod[p]&&by[p].t>=10).map(pid=>{ const x=mk(pid); x.t=by[pid].t*ann; x.base={clk:x.clk,gyp:x.gyp}; return x; });
     const list=pids.map(pid=>{
       const x=mk(pid), y=real&&proven(pid)?x.real.y:x.rated, t=(by[pid]?by[pid].t:0)*ann;
-      return Object.assign(x,{yield:y,share:0,unproven:real&&!proven(pid),base:{yield:y,t,clk:x.clk}});
+      return Object.assign(x,{yield:y,share:0,unproven:real&&!proven(pid),base:{yield:y,t,clk:x.clk,gyp:x.gyp}});
     }).sort((x,y)=>x.r-y.r||x.short.localeCompare(y.short));
     const hrs=list.map(p=>p.yield>0?p.base.t/p.yield:0), sum=hrs.reduce((a,b)=>a+b,0);
     list.forEach((p,i)=>{ p.share=sum>0?hrs[i]/sum:(i?0:1); p.base.share=p.share; });
@@ -592,6 +594,7 @@ const yieldNote=p=>{ const ran=p.real?`really ran ${esc(p.short)} at ${fmt(p.rea
 const hasLever=name=>M.plants.some(pl=>pl.mills.some(m=>m.products.some(p=>p.name===name)));
 const plantProds=pl=>[...new Map(pl.mills.flatMap(m=>[...m.products,...m.fixed]).map(p=>[p.name,p])).values()].sort((a,b)=>a.r-b.r||a.short.localeCompare(b.short));
 function setClk(pl,name,v){ pl.mills.forEach(m=>[...m.products,...m.fixed].forEach(p=>{ if(p.name===name) p.clk=v; })); }
+function setGyp(pl,name,v){ pl.mills.forEach(m=>[...m.products,...m.fixed].forEach(p=>{ if(p.name===name) p.gyp=v; })); }
 function clinkerHTML(pl){
   const id=esc(pl.id);
   return `<div class="clk" data-plant="${id}">
@@ -777,14 +780,14 @@ function setView(v){ M.view=v; saveEcon(); applyView(); update(); fit(); request
 // ── Cost & CO₂ of the mix. Costs are USD per short ton (everything on this page is short tons);
 // CO₂ is kg per metric tonne, the usual unit, so the year's total converts the tonnes. ──
 const ECON_KEY='avila_mills_econ', ST2T=0.90718474;   // short ton → metric tonne
-const ECON_DEF={cc:0,cg:0,cl:0,co:0,ec:850,eo:0};     // USD/STn clinker, gypsum, limestone, other; kg CO₂/t clinker (typical, overwrite), other
+const ECON_DEF={cc:0,cg:0,cl:0,co:0,ec:850,eg:0,el:0,eo:0};   // USD/STn clinker, gypsum, limestone, other (per t cement); kg CO₂/metric t clinker (typical, overwrite), gypsum, limestone, other (per t cement)
 const fx=(v,d)=>(isFinite(v)?v:0).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
 function econ(pid){ if(!M.econ[pid]) M.econ[pid]={...ECON_DEF}; return M.econ[pid]; }
 function loadEcon(){ try{ const o=JSON.parse(localStorage.getItem(ECON_KEY)||'{}'); M.econ={}; Object.entries(o.plants||{}).forEach(([k,v])=>M.econ[k]={...ECON_DEF,...v}); M.sweep=o.sweep||{}; if(o.view) M.view=o.view; }catch(e){ M.econ={}; M.sweep={}; } }
 function saveEcon(){ try{ localStorage.setItem(ECON_KEY,JSON.stringify({plants:M.econ,sweep:M.sweep,view:M.view})); }catch(e){} }
 const limOf=p=>Math.max(0,1-p.clk-(p.gyp||0));                                          // limestone is what the clinker factor leaves
 const costOf=(pl,p)=>{ const e=econ(pl.id); return p.clk*e.cc+(p.gyp||0)*e.cg+limOf(p)*e.cl+e.co; };   // USD per short ton of this cement
-const co2Of=(pl,p)=>{ const e=econ(pl.id); return p.clk*e.ec+e.eo; };                                    // kg CO₂ per metric tonne of this cement
+const co2Of=(pl,p)=>{ const e=econ(pl.id); return p.clk*e.ec+(p.gyp||0)*e.eg+limOf(p)*e.el+e.eo; };                                    // kg CO₂ per metric tonne of this cement
 function plantEcon(pl){ let t=0,usd=0,kg=0; const prods=plantProds(pl);
   Object.values(pl.prods||{}).forEach(q=>{ const p=prods.find(x=>x.name===q.name); if(!p) return; t+=q.t; usd+=q.t*costOf(pl,p); kg+=q.t*co2Of(pl,p); });
   const ept=t>0?kg/t:0; return {t,usd,cpt:t>0?usd/t:0,ept,co2t:ept*t*ST2T/1000}; }   // co2t: tonnes of CO₂ in the year
@@ -798,20 +801,32 @@ function assessHTML(pl){ const id=esc(pl.id), f=(k,lbl,title,step)=>`<span class
       </div>
     </div></section>`; }
 // Cost inputs and the per-cement table sit in the clinker strip, beside the kilns
-function econHTML(pl){ const id=esc(pl.id), f=(k,lbl,title,step)=>`<span class="ufi"><i>${lbl}</i><input class="fi" type="number" min="0" step="${step}" data-ec="${id}|${k}" title="${esc(title)}"></span>`;
-  return `<div class="clkecon" data-plant="${id}">
-    <div class="asin"><div class="h">Cost · USD per short ton</div>${f('cc','CLK','Clinker: USD per short ton',1)}${f('cg','GYP','Gypsum: USD per short ton',1)}${f('cl','LIM','Limestone: USD per short ton',1)}
-      <div class="h">kg CO₂ per metric tonne · other per t cement</div>${f('ec','CLK','kg CO₂ per metric tonne of clinker: calcination + kiln fuel. 850 is a typical figure, type yours.',10)}${f('eo','CO₂','Other kg CO₂ per metric tonne of cement, the same for every cement: grinding power…',1)}${f('co','USD','Other cost per short ton of cement, the same for every cement: grinding, power, bags…',1)}</div>
-    <table class="astab" id="as-tab-${id}"></table>
-  </div>`; }
+function econHTML(pl){ const id=esc(pl.id), prods=plantProds(pl);
+  const inp=(attr,step,title,extra='')=>`<input class="fi" type="number" min="0" step="${step}" ${attr} title="${esc(title)}"${extra}>`;
+  const row=(lbl,cost,co2,cells,yr)=>`<tr><td class="ml">${lbl}</td><td>${cost}</td>${cells}<td>${co2}</td><td class="mt" id="${yr}"></td></tr>`;
+  return `<div class="clkecon" data-plant="${id}"><table class="astab ecotab" id="as-tab-${id}">
+    <tr><th class="ml">Material</th><th>USD/STn</th>${prods.map(p=>`<th title="${esc(p.name)}"><span class="dot" style="background:var(${p.c})"></span>${esc(p.short)}</th>`).join('')}<th>kg CO₂/TM</th><th>kSTn/yr</th></tr>
+    ${row('CLK',inp(`data-ec="${id}|cc"`,1,'Clinker: USD per short ton'),inp(`data-ec="${id}|ec"`,10,'kg CO₂ per metric tonne of clinker: calcination + kiln fuel. 850 is a typical figure, type yours.'),prods.map(p=>`<td>${inp(`data-rc="${id}|${esc(p.name)}|clk"`,0.1,`Clinker in ${p.short}, % of the recipe`,' max="100"')}</td>`).join(''),`as-m-${id}-clk`)}
+    ${row('GYP',inp(`data-ec="${id}|cg"`,1,'Gypsum: USD per short ton'),inp(`data-ec="${id}|eg"`,1,'kg CO₂ per metric tonne of gypsum'),prods.map(p=>`<td>${inp(`data-rc="${id}|${esc(p.name)}|gyp"`,0.1,`Gypsum in ${p.short}, % of the recipe`,' max="100"')}</td>`).join(''),`as-m-${id}-gyp`)}
+    ${row('LIM',inp(`data-ec="${id}|cl"`,1,'Limestone: USD per short ton'),inp(`data-ec="${id}|el"`,1,'kg CO₂ per metric tonne of limestone'),prods.map((p,i)=>`<td class="calc2" id="as-l-${id}-${i}" title="Limestone: what clinker and gypsum leave of ${esc(p.short)}"></td>`).join(''),`as-m-${id}-lim`)}
+    ${row('OTHER',inp(`data-ec="${id}|co"`,1,'Other cost per short ton of cement, the same for every cement: grinding, power, bags…'),inp(`data-ec="${id}|eo"`,1,'Other kg CO₂ per metric tonne of cement, the same for every cement: grinding power…'),prods.map(p=>`<td class="calc2" title="Per tonne of cement, whatever the recipe">per t</td>`).join(''),`as-m-${id}-oth`)}
+    <tr class="mix"><td class="ml">USD/STn</td><td></td>${prods.map((p,i)=>`<td id="as-c-${id}-${i}"></td>`).join('')}<td></td><td></td></tr>
+    <tr class="mix"><td class="ml">kg CO₂/TM</td><td></td>${prods.map((p,i)=>`<td id="as-e-${id}-${i}"></td>`).join('')}<td></td><td></td></tr>
+  </table></div>`; }
 function assessUpdate(){
   M.plants.forEach(pl=>{
     const id=pl.id, e=econ(id), selA=document.querySelector(`[data-swa="${CSS.escape(id)}"]`), selB=document.querySelector(`[data-swb="${CSS.escape(id)}"]`); if(!selA) return;
     document.querySelectorAll(`[data-ec^="${CSS.escape(id)}|"]`).forEach(el=>setVal(el,e[el.dataset.ec.split('|')[1]]));
     const prods=plantProds(pl), pe=plantEcon(pl);
-    $('as-tab-'+id).innerHTML=`<tr><th>Cement</th><th>CLK</th><th>GYP</th><th>LIM</th><th>USD/STn</th><th>kg CO₂/t</th><th>kt/yr</th></tr>`
-      +prods.map(p=>{ const q=pl.prods[p.name]||{t:0}; return `<tr><td><span class="dot" style="background:var(${p.c})"></span>${esc(p.short)}</td><td>${(p.clk*100).toFixed(1)}%</td><td>${((p.gyp||0)*100).toFixed(1)}%</td><td>${(limOf(p)*100).toFixed(1)}%</td><td>${fx(costOf(pl,p),2)}</td><td>${fx(co2Of(pl,p),0)}</td><td>${fx(q.t/1000,1)}</td></tr>`; }).join('')
-      +`<tr class="mix"><td>This mix</td><td>${(pe.t>0?pl.need/pe.t*100:0).toFixed(1)}%</td><td></td><td></td><td>${fx(pe.cpt,2)}</td><td>${fx(pe.ept,0)}</td><td>${fx(pe.t/1000,1)}</td></tr>`;
+    let mClk=0, mGyp=0, mLim=0;
+    prods.forEach((p,i)=>{ const q=pl.prods[p.name]||{t:0};
+      const c=document.querySelector(`[data-rc="${CSS.escape(id)}|${CSS.escape(p.name)}|clk"]`), g=document.querySelector(`[data-rc="${CSS.escape(id)}|${CSS.escape(p.name)}|gyp"]`);
+      setVal(c,(p.clk*100).toFixed(1)); c.classList.toggle('mod',Math.abs(p.clk-p.base.clk)>1e-6);
+      setVal(g,((p.gyp||0)*100).toFixed(1)); g.classList.toggle('mod',Math.abs((p.gyp||0)-(p.base.gyp||0))>1e-6);
+      $(`as-l-${id}-${i}`).textContent=(limOf(p)*100).toFixed(1)+'%';
+      $(`as-c-${id}-${i}`).textContent=fx(costOf(pl,p),2); $(`as-e-${id}-${i}`).textContent=fx(co2Of(pl,p),0);
+      mClk+=q.t*p.clk; mGyp+=q.t*(p.gyp||0); mLim+=q.t*limOf(p); });
+    $(`as-m-${id}-clk`).textContent=fx(mClk/1000,1); $(`as-m-${id}-gyp`).textContent=fx(mGyp/1000,1); $(`as-m-${id}-lim`).textContent=fx(mLim/1000,1); $(`as-m-${id}-oth`).textContent=fx(pe.t/1000,1);
     const cf=pe.t>0?pl.need/pe.t:0;   // plant clinker factor: tonnes of clinker per tonne of cement, weighted by what each cement makes
     $('as-cards-'+id).innerHTML=[['CLK factor',fx(cf,3),`Plant clinker factor: the clinker factor of each cement weighted by its tonnes · ${fx(pl.need/1000,1)} kt clinker in ${fx(pe.t/1000,1)} kt cement`],['USD/STn',fx(pe.cpt,2),`Cost of the mix per short ton of cement · ${fx(pe.usd/1e6,1)} USD M in the year`],['kg CO₂/t',fx(pe.ept,0),`kg CO₂ per metric tonne of cement = clinker factor ${fx(cf,3)} × ${fx(e.ec,0)} kg/t clinker + ${fx(e.eo,0)} other · ${fx(pe.co2t/1000,0)} kt CO₂ in the year`]].map(([l,v,t])=>`<div class="asc" title="${esc(t)}"><div class="l">${l}</div><div class="v">${v}</div></div>`).join('');
     const opts=prods.filter(p=>hasLever(p.name)), sw=M.sweep[id]=(M.sweep[id]&&typeof M.sweep[id]==='object')?M.sweep[id]:{}, bt=n=>pl.prods[n]?pl.prods[n].b:0;
@@ -898,13 +913,13 @@ const npd=x=>Math.max(0,M.days*(1-x.eff));   // Non Productive Days and efficien
 const isMoved=m=>Math.abs(m.eff-m.base.eff)>1e-6||m.products.some(p=>p.yield!==p.base.yield||Math.abs(p.share-p.base.share)>1e-6);
 
 // ── State: undo + this browser's what-if ──
-function snapshot(){ return JSON.stringify({locks:M.locks,days:M.days,plants:M.plants.map(pl=>({id:pl.id,extra:pl.extra,clk:plantProds(pl).map(p=>[p.name,p.clk]),mills:pl.mills.map(m=>({id:m.id,eff:m.eff,p:m.products.map(p=>[p.id,p.yield,p.share])})),kilns:pl.kilns.map(k=>({id:k.id,rated:k.rated,eff:k.eff}))}))}); }
+function snapshot(){ return JSON.stringify({locks:M.locks,days:M.days,plants:M.plants.map(pl=>({id:pl.id,extra:pl.extra,clk:plantProds(pl).map(p=>[p.name,p.clk]),gyp:plantProds(pl).map(p=>[p.name,p.gyp||0]),mills:pl.mills.map(m=>({id:m.id,eff:m.eff,p:m.products.map(p=>[p.id,p.yield,p.share])})),kilns:pl.kilns.map(k=>({id:k.id,rated:k.rated,eff:k.eff}))}))}); }
 function restore(txt){
   let s; try{ s=typeof txt==='string'?JSON.parse(txt):txt; }catch(e){ return; }
   if(!s||!s.plants) return;
   if(s.days) M.days=s.days;
   if(s.locks) M.locks={...s.locks};
-  s.plants.forEach(sp=>{ const pl=M.plants.find(x=>x.id===sp.id); if(!pl) return; pl.extra=sp.extra||0; (sp.clk||[]).forEach(([n,v])=>setClk(pl,n,v));
+  s.plants.forEach(sp=>{ const pl=M.plants.find(x=>x.id===sp.id); if(!pl) return; pl.extra=sp.extra||0; (sp.clk||[]).forEach(([n,v])=>setClk(pl,n,v)); (sp.gyp||[]).forEach(([n,v])=>setGyp(pl,n,v));
     (sp.mills||[]).forEach(sm=>{ const m=pl.mills.find(x=>x.id===sm.id); if(!m) return; m.eff=sm.eff;
       (sm.p||[]).forEach(([id,y,sh])=>{ const p=m.products.find(x=>x.id===id); if(p){ p.yield=y; p.share=sh; } });
       const sum=m.products.reduce((a,p)=>a+p.share,0); if(sum>0) m.products.forEach(p=>p.share/=sum); });
@@ -918,8 +933,8 @@ let _svT=0;
 function overrides(){
   const o={days:M.days===365?undefined:M.days,plants:{},locks:Object.keys(M.locks).length?{...M.locks}:undefined};
   M.plants.forEach(pl=>{
-    const q={extra:num(pl.extra)||undefined,mills:{},kilns:{},clk:{}};
-    plantProds(pl).forEach(p=>{ if(Math.abs(p.clk-p.base.clk)>1e-6) q.clk[p.name]=p.clk; });
+    const q={extra:num(pl.extra)||undefined,mills:{},kilns:{},clk:{},gyp:{}};
+    plantProds(pl).forEach(p=>{ if(Math.abs(p.clk-p.base.clk)>1e-6) q.clk[p.name]=p.clk; if(Math.abs((p.gyp||0)-(p.base.gyp||0))>1e-6) q.gyp[p.name]=p.gyp; });
     pl.mills.forEach(m=>{ const x={};
       if(Math.abs(m.eff-m.base.eff)>1e-6) x.eff=m.eff;
       const y={}; m.products.forEach(p=>{ if(p.yield!==p.base.yield) y[p.id]=p.yield; }); if(Object.keys(y).length) x.yields=y;
@@ -939,7 +954,7 @@ function applyOverrides(o){
   M.locks=o.locks&&typeof o.locks==='object'?{...o.locks}:{};
   M.plants.forEach(pl=>{ const q=o.plants[pl.id]; if(!q) return;
     pl.extra=q.extra||0;
-    Object.entries(q.clk||{}).forEach(([n,v])=>setClk(pl,n,v));
+    Object.entries(q.clk||{}).forEach(([n,v])=>setClk(pl,n,v)); Object.entries(q.gyp||{}).forEach(([n,v])=>setGyp(pl,n,v));
     pl.mills.forEach(m=>{ const x=(q.mills||{})[m.id]; if(!x) return;
       if(x.eff!=null) m.eff=x.eff;
       m.products.forEach(p=>{ if(x.yields&&x.yields[p.id]!=null) p.yield=x.yields[p.id]; });
@@ -1088,6 +1103,7 @@ function wire(){
     else if(ds.clk){ const [pid,name]=ds.clk.split('|'), pl=M.plants.find(x=>x.id===pid); if(pl) setClk(pl,name,clamp(num(t.value),0,1)); }
     else if(ds.extra){ const pl=M.plants.find(x=>x.id===ds.extra); if(pl) pl.extra=Math.max(0,num(t.value)); }
     else if(ds.ec){ const [pid,k]=ds.ec.split('|'); econ(pid)[k]=Math.max(0,num(t.value)); saveEcon(); }
+    else if(ds.rc){ const [pid,name,k]=ds.rc.split('|'), pl=M.plants.find(x=>x.id===pid); if(pl){ const v=clamp(num(t.value)/100,0,1); if(k==='clk') setClk(pl,name,v); else setGyp(pl,name,v); } }
     else if(ds.kr||ds.ko||ds.ke){ const id=ds.kr||ds.ko||ds.ke, k=M.plants.flatMap(p=>p.kilns).find(x=>x.id===id); if(!k) return;
       if(ds.kr) k.rated=Math.max(0,num(t.value)); else if(ds.ko) k.eff=1-clamp(num(t.value),0,M.days)/M.days; else k.eff=clamp(num(t.value)/100,0,1); }
     else if(t.id==='days'){ M.days=clamp(num(t.value,365),1,366); }
