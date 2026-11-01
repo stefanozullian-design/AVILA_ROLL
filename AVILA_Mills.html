@@ -234,7 +234,12 @@ input.pv{background:none;border:0;border-bottom:1px solid transparent;color:inhe
 .phead .psub{font-family:var(--mono);font-size:10px;color:var(--text-dim);}
 .phead .pt{margin-left:auto;font-family:var(--mono);font-weight:700;font-size:17px;font-variant-numeric:tabular-nums;white-space:nowrap;}
 .scrollx{flex:1;min-height:0;display:flex;padding:14px 12px 8px;}
-.stage{display:grid;grid-template-rows:minmax(170px,1fr) repeat(4,auto);column-gap:9px;row-gap:0;align-items:stretch;position:relative;width:100%;flex:1;}
+.stage{display:grid;grid-template-rows:minmax(170px,1fr) repeat(4,auto);column-gap:9px;row-gap:0;align-items:stretch;position:relative;min-width:0;flex:1;}
+.totcol{display:grid;grid-template-rows:minmax(170px,1fr) repeat(4,auto);flex:0 0 150px;margin-left:9px;min-width:0;}
+.totcol .chartcol{min-height:170px;position:relative;}
+.totcol .gls.abs{position:absolute;inset:0;} .totcol .gl{left:0;}
+.totcol .cell.tot{border-top:1px solid var(--border);}
+.asbody{display:flex;gap:10px;flex:1;min-height:0;} .asbody .aschart{flex:1;} .asbody .totcol{margin-left:0;}
 .lbl{font-family:var(--mono);font-size:10px;color:var(--text-dim);display:flex;align-items:flex-start;justify-content:flex-end;text-align:right;padding:8px 4px 0 0;line-height:1.25;}
 .cell{border-top:1px solid var(--border);padding:5px 4px;min-width:0;display:flex;flex-direction:column;justify-content:flex-start;gap:4px;}
 .cell.tot{background:var(--surface2);padding:6px 7px;}
@@ -356,7 +361,13 @@ input.pv{background:none;border:0;border-bottom:1px solid transparent;color:inhe
 /* one plant on screen: everything tagged data-plant for the others is hidden (rule written by applyView) */
 #pview{margin-left:2px;}
 body:not([data-view="all"]) #h-plants{display:none;}
-body:not([data-view="all"]) #hero{grid-template-columns:minmax(300px,.9fr) minmax(480px,2.1fr);}
+body:not([data-view="all"]) #hero{grid-template-columns:minmax(0,1.9fr) minmax(0,1fr);}
+#h-left{display:contents;}
+body:not([data-view="all"]) #h-left{display:grid;grid-template-columns:minmax(190px,.5fr) minmax(0,1.5fr);gap:10px;}
+body:not([data-view="all"]) #h-main{padding:8px 14px;}
+body:not([data-view="all"]) #h-total{font-size:clamp(24px,2.1vw,34px);letter-spacing:-1px;}
+body:not([data-view="all"]) #plants{display:grid;grid-template-columns:minmax(0,1.9fr) minmax(0,1fr);gap:10px;}
+body:not([data-view="all"]) .plant{max-width:none;}
 body:not([data-view="all"]) .clk{border-left:none;padding-left:0;}
 /* cost & CO2 */
 .assess{flex:1 1 520px;min-width:0;display:flex;flex-direction:column;}
@@ -364,7 +375,7 @@ body:not([data-view="all"]) .clk{border-left:none;padding-left:0;}
 .asleft,.asright{display:flex;flex-direction:column;gap:8px;min-width:0;}
 .asin{display:grid;grid-template-columns:repeat(3,minmax(84px,1fr));gap:4px 8px;align-items:center;align-content:start;}
 .asgrid.one{grid-template-columns:1fr;}
-.clkecon{flex:1 1 600px;min-width:0;border-left:1px solid var(--border);padding-left:18px;}
+.clkecon{min-width:0;padding:6px 10px;display:flex;align-items:center;overflow:auto;}
 .ecotab{width:auto;} .ecotab th,.ecotab td{padding:1px 4px;text-align:right;} .ecotab .ml{text-align:left;font-weight:700;} .ecotab th .dot{vertical-align:-1px;margin-right:3px;}
 .ecotab input.fi{width:60px;height:17px;line-height:15px;font-size:10px;text-align:right;padding:0 4px;} .ecotab th,.ecotab td{padding:0 4px;height:19px;} .ecotab td.calc2{color:var(--text-dim);} .ecotab td.mt{color:var(--text-dim);} .ecotab tr.mix td{font-weight:700;border-top:1px solid var(--border2);}
 .clkecon .asin .h:first-child{margin-top:0;}
@@ -432,7 +443,7 @@ body:not([data-view="all"]) .clk{border-left:none;padding-left:0;}
     <div id="clkgrid"></div>
   </section>
   <div class="sech" id="cemh"><span class="t">Cement production</span><span class="s">What the finish mills make with the time this page gives each cement</span></div>
-  <section id="hero">
+  <section id="hero"><div id="h-left">
     <div class="card" id="h-main">
       <div class="herolbl" id="h-lbl">Total cement production · t/yr</div>
       <div id="h-total">0</div>
@@ -443,7 +454,7 @@ body:not([data-view="all"]) .clk{border-left:none;padding-left:0;}
       <div class="herolbl" id="h-prodlbl"></div>
       <div id="prodlist"></div>
     </div>
-  </section>
+  </div></section>
   <section id="plants"></section>
 </main>
 
@@ -636,13 +647,14 @@ function buildUI(){
   const cols=M.plants.map(pl=>M.prods.map((p,i)=>[p,i]).filter(([p])=>p.plant===pl.name)), rows=Math.max(1,...cols.map(c=>c.length));
   $('prodlist').style.setProperty('--rows',rows);
   $('prodlist').innerHTML=cols.map((c,k)=>c.map(([p,i])=>prow(p,i)).join('')+`<div class="prow" data-plant="${esc(M.plants[k].id)}"></div>`.repeat(rows-c.length)).join('');
-  $('clkgrid').innerHTML=M.plants.map(pl=>clinkerHTML(pl)+econHTML(pl)).join('');
+  $('clkgrid').innerHTML=M.plants.map(clinkerHTML).join('');
+  document.querySelectorAll('#hero .clkecon').forEach(e=>e.remove()); $('hero').insertAdjacentHTML('beforeend',M.plants.map(econHTML).join(''));
   $('plants').innerHTML=M.plants.map(plantHTML).join('')+M.plants.map(assessHTML).join('');
-  fit(); requestAnimationFrame(()=>M.plants.forEach(drawCurve));
+  applyView(); fit(); alignTot(); requestAnimationFrame(()=>M.plants.forEach(drawCurve));
   M.plants.forEach(pl=>pl.mills.forEach(m=>{ m.barEl=document.querySelector(`.bar[data-mill="${m.id}"]`); m.segEls=[...m.barEl.querySelectorAll('.seg')]; m.hEls=[...m.barEl.querySelectorAll('.handle')]; m.nEls=[...m.barEl.querySelectorAll('.notch')]; m.levEls=m.products.map((p,i)=>document.querySelector(`[data-lev="${m.id}|${i}"]`)); m.pctEls=m.products.map((p,i)=>document.querySelector(`[data-pct="${m.id}|${i}"]`)); }));
 }
 function plantHTML(pl){
-  const n=pl.mills.length, cols=`116px repeat(${n},minmax(118px,1fr)) minmax(140px,1fr)`;
+  const n=pl.mills.length, cols=`116px repeat(${n},minmax(118px,1fr))`;
   const ticks=[0,25,50,75,100].map(v=>`<span style="bottom:${v}%">${v}%</span>`).join('');
   const lines=[0,25,50,75].map(v=>`<div class="gl" style="bottom:${v}%"></div>`).join('');
   const chart=m=>{
@@ -650,22 +662,28 @@ function plantHTML(pl){
     const handles=m.products.slice(0,-1).map((p,i)=>`<div class="handle" tabindex="0" role="slider" aria-label="${esc(m.short)}: ${esc(p.short)} against ${esc(m.products[i+1].short)}" data-h="${m.id}|${i}"><i></i></div><div class="notch"></div>`).join('');
     return `<div class="bar" data-mill="${m.id}">${segs}${handles}</div>`;
   };
-  const totSegs=plantProds(pl);
-  const row=(label,fn,tot,first)=>`<div class="lbl${first?' first':''}">${label}</div>`+pl.mills.map(m=>`<div class="cell${first?' first':''}">${fn(m)}</div>`).join('')+`<div class="cell tot${first?' first':''}">${tot||''}</div>`;
-  return `<div class="plant card" id="pl-${esc(pl.id)}" data-plant="${esc(pl.id)}" data-n="${n}">
-    <div class="phead"><span class="pname">${esc(pl.name)}</span><span class="psub">${n} finish mills · ${pl.kilns.length} kiln${pl.kilns.length===1?'':'s'}</span><span class="pt" id="pt-${esc(pl.id)}"></span><span class="pill flat" id="pd2-${esc(pl.id)}"></span></div>
+  const totSegs=plantProds(pl), id=esc(pl.id);
+  const row=(label,fn,first)=>`<div class="lbl${first?' first':''}">${label}</div>`+pl.mills.map(m=>`<div class="cell${first?' first':''}">${fn(m)}</div>`).join('');
+  // The plant's Total: the stacked bar and its numbers, one block that sits beside the mills (Network) or beside the cost chart (plant view)
+  const totcol=`<div class="totcol" id="tc-${id}">
+      <div class="chartcol"><div class="gls abs">${lines}<div class="gl top" style="top:0"></div></div><div class="bar totbar" data-tot="${id}">${totSegs.map(p=>`<div class="seg" data-p="${esc(p.name)}" style="--c:var(${p.c})"><span class="sn">${esc(p.short)}</span><span class="sp"></span><span class="st"></span></div>`).join('')}</div></div>
+      <div class="mname"><b>Total</b><span id="tt-${id}"></span></div>
+      <div class="cell tot"><div class="two"><div id="to-${id}" class="calc" title="Non Productive Days, all mills"></div><div id="te-${id}" class="calc" title="Efficiency, all mills"></div></div></div>
+      <div class="cell tot"><div id="tn-${id}" class="calc big"></div></div>
+      <div class="cell tot"><div id="ts-${id}"></div></div>
+    </div>`;
+  return `<div class="plant card" id="pl-${id}" data-plant="${id}" data-n="${n}">
+    <div class="phead"><span class="pname">${esc(pl.name)}</span><span class="psub">${n} finish mills · ${pl.kilns.length} kiln${pl.kilns.length===1?'':'s'}</span><span class="pt" id="pt-${id}"></span><span class="pill flat" id="pd2-${id}"></span></div>
     <div class="scrollx"><div class="stage" style="grid-template-columns:${cols}">
       <div class="axis" style="grid-row:1;grid-column:1">${ticks}</div>
       <div class="gls" style="grid-row:1;grid-column:1/-1">${lines}<div class="gl top" style="top:0"><span class="gltag">100%</span></div></div>
       ${pl.mills.map((m,i)=>`<div class="chartcol" style="grid-row:1;grid-column:${i+2}">${chart(m)}</div>`).join('')}
-      <div class="chartcol" style="grid-row:1;grid-column:${n+2}"><div class="bar totbar" data-tot="${esc(pl.id)}">${totSegs.map(p=>`<div class="seg" data-p="${esc(p.name)}" style="--c:var(${p.c})"><span class="sn">${esc(p.short)}</span><span class="sp"></span><span class="st"></span></div>`).join('')}</div></div>
-      <div class="lbl first"></div>${pl.mills.map(m=>`<div class="mname"><b title="${esc(m.name)}">${esc(m.short)}</b><span class="sub"><span id="mt-${m.id}"></span><button class="mreset" data-reset="${m.id}">↺ reset</button></span></div>`).join('')}<div class="mname"><b>Total</b><span id="tt-${esc(pl.id)}"></span></div>
-      ${row('Non Productive<br>Days · Eff %',m=>`<div class="two"><input class="fi" type="number" min="0" max="366" step="1" data-out="${m.id}" title="Non Productive Days"><input class="fi" type="number" min="0" max="100" step="0.5" data-eff="${m.id}" title="Efficiency %: the share of the year at full yield"></div>`,`<div class="two"><div id="to-${esc(pl.id)}" class="calc"></div><div id="te-${esc(pl.id)}" class="calc"></div></div>`)}
-      ${row('Productive days<br>Tonnes / yr',m=>`<div class="calc big" id="tn-${m.id}"></div>`,`<div id="tn-${esc(pl.id)}" class="calc big"></div>`)}
-      <div class="lbl leg" style="grid-row:5"><div class="lgh"><span>Product</span><span>CLK FCT</span></div>${totSegs.map(p=>`<div class="lg"><span class="dot" style="background:var(${p.c})"></span><span title="${esc(p.name)}">${esc(p.short)}</span><input class="fi" type="number" min="0" max="1" step="0.001" data-clk="${esc(pl.id)}|${esc(p.name)}" title="Clinker factor: tonnes of clinker per tonne of ${esc(p.short)}, from its recipe"></div>`).join('')}</div>
+      <div class="lbl first"></div>${pl.mills.map(m=>`<div class="mname"><b title="${esc(m.name)}">${esc(m.short)}</b><span class="sub"><span id="mt-${m.id}"></span><button class="mreset" data-reset="${m.id}">↺ reset</button></span></div>`).join('')}
+      ${row('Non Productive<br>Days · Eff %',m=>`<div class="two"><input class="fi" type="number" min="0" max="366" step="1" data-out="${m.id}" title="Non Productive Days"><input class="fi" type="number" min="0" max="100" step="0.5" data-eff="${m.id}" title="Efficiency %: the share of the year at full yield"></div>`)}
+      ${row('Productive days<br>Tonnes / yr',m=>`<div class="calc big" id="tn-${m.id}"></div>`)}
+      <div class="lbl leg" style="grid-row:5"><div class="lgh"><span>Product</span><span>CLK FCT</span></div>${totSegs.map(p=>`<div class="lg"><span class="dot" style="background:var(${p.c})"></span><span title="${esc(p.name)}">${esc(p.short)}</span><input class="fi" type="number" min="0" max="1" step="0.001" data-clk="${id}|${esc(p.name)}" title="Clinker factor: tonnes of clinker per tonne of ${esc(p.short)}, from its recipe"></div>`).join('')}</div>
       ${pl.mills.map(m=>`<div class="cell">${m.products.map((p,i)=>tmplLever(m,p,i)).join('')}${m.fixed.map(x=>`<div class="clkm" title="Made in the ${wl()} but ${M.basis==='real'?'on fewer than '+MIN_DAYS+' days':'not listed for this mill in the Roll'}. Counted as a fixed amount, no lever.">+ ${fmt(x.t)} t ${esc(x.short)} one-off</div>`).join('')}</div>`).join('')}
-      <div class="cell tot"><div id="ts-${esc(pl.id)}"></div></div>
-    </div></div>
+    </div>${totcol}</div>
   </div>`;
 }
 
@@ -768,14 +786,20 @@ function update(){
   });
   $('b-undo').disabled=!undo.length;
   modeBtns(); chip();
-  assessUpdate();
+  assessUpdate(); alignTot();
   scheduleSave();
 }
 // ── One plant on screen, or the network ──
 const viewPlant=()=>M.view&&M.view!=='all'?M.plants.find(pl=>pl.id===M.view)||null:null;
 function applyView(){ if(!M.plants.some(pl=>pl.id===M.view)&&M.view!=='all') M.view=M.plants.length?M.plants[0].id:'all';
-  document.body.dataset.view=M.view; $('viewcss').textContent=M.view==='all'?'.assess,.clkecon{display:none;}':`[data-plant]:not([data-plant="${CSS.escape(M.view)}"]){display:none!important;}`; modeBtns(); }
-function setView(v){ M.view=v; saveEcon(); applyView(); update(); fit(); requestAnimationFrame(()=>M.plants.forEach(drawCurve)); }
+  document.body.dataset.view=M.view; $('viewcss').textContent=M.view==='all'?'.assess,.clkecon{display:none;}':`[data-plant]:not([data-plant="${CSS.escape(M.view)}"]){display:none!important;}`; modeBtns();
+  M.plants.forEach(pl=>{ const tc=$('tc-'+pl.id); if(!tc) return; const home=M.view===pl.id?document.querySelector(`.assess[data-plant="${CSS.escape(pl.id)}"] .asbody`):document.querySelector(`#pl-${CSS.escape(pl.id)} .scrollx`); if(home&&tc.parentElement!==home) home.appendChild(tc); }); }
+function setView(v){ M.view=v; saveEcon(); applyView(); update(); fit(); alignTot(); requestAnimationFrame(()=>M.plants.forEach(drawCurve)); }
+// Network view: the Total block stands beside the mills, so its rows take the mills' row heights; in a plant view the bar fills the chart's height
+function alignTot(){ M.plants.forEach(pl=>{ const tc=$('tc-'+pl.id); if(!tc) return; const st=document.querySelector(`#pl-${CSS.escape(pl.id)} .stage`);
+  if(M.view!=='all'||!st){ tc.style.gridTemplateRows=''; return; }
+  const h=[st.querySelector('.chartcol'),st.querySelector('.mname'),...st.querySelectorAll('.lbl:not(.first):not(.leg)'),st.querySelector('.lbl.leg')].map(e=>e?e.offsetHeight:0);
+  tc.style.gridTemplateRows=h.map(v=>v+'px').join(' '); }); }
 
 // ── Cost & CO₂ of the mix. Costs are USD per short ton (everything on this page is short tons);
 // CO₂ is kg per metric tonne, the usual unit, so the year's total converts the tonnes. ──
@@ -797,14 +821,14 @@ function assessHTML(pl){ const id=esc(pl.id), f=(k,lbl,title,step)=>`<span class
     <div class="asgrid one">
       <div class="asright">
         <div class="aschh">Held: <span id="as-fx-${id}"></span> · variable <select data-swa="${id}" title="Cement A: gives way as B grows"></select> ↔ <select data-swb="${id}" title="Cement B: its share of A+B runs along the bottom"></select></div>
-        <div class="aschart" id="as-ch-${id}"><svg></svg></div>
+        <div class="asbody"><div class="aschart" id="as-ch-${id}"><svg></svg></div></div>
       </div>
     </div></section>`; }
 // Cost inputs and the per-cement table sit in the clinker strip, beside the kilns
 function econHTML(pl){ const id=esc(pl.id), prods=plantProds(pl);
   const inp=(attr,step,title,extra='')=>`<input class="fi" type="number" min="0" step="${step}" ${attr} title="${esc(title)}"${extra}>`;
   const row=(lbl,cost,co2,cells,yr)=>`<tr><td class="ml">${lbl}</td><td>${cost}</td>${cells}<td>${co2}</td><td class="mt" id="${yr}"></td></tr>`;
-  return `<div class="clkecon" data-plant="${id}"><table class="astab ecotab" id="as-tab-${id}">
+  return `<div class="clkecon card" data-plant="${id}"><table class="astab ecotab" id="as-tab-${id}">
     <tr><th class="ml">Material</th><th>USD/STn</th>${prods.map(p=>`<th title="${esc(p.name)}"><span class="dot" style="background:var(${p.c})"></span>${esc(p.short)}</th>`).join('')}<th>kg CO₂/TM</th><th>kSTn/yr</th></tr>
     ${row('CLK',inp(`data-ec="${id}|cc"`,1,'Clinker: USD per short ton'),inp(`data-ec="${id}|ec"`,10,'kg CO₂ per metric tonne of clinker: calcination + kiln fuel. 850 is a typical figure, type yours.'),prods.map(p=>`<td>${inp(`data-rc="${id}|${esc(p.name)}|clk"`,0.1,`Clinker in ${p.short}, % of the recipe`,' max="100"')}</td>`).join(''),`as-m-${id}-clk`)}
     ${row('GYP',inp(`data-ec="${id}|cg"`,1,'Gypsum: USD per short ton'),inp(`data-ec="${id}|eg"`,1,'kg CO₂ per metric tonne of gypsum'),prods.map(p=>`<td>${inp(`data-rc="${id}|${esc(p.name)}|gyp"`,0.1,`Gypsum in ${p.short}, % of the recipe`,' max="100"')}</td>`).join(''),`as-m-${id}-gyp`)}
@@ -1166,7 +1190,7 @@ async function boot(){
   modeBtns(); wire();
   setInterval(checkSync,30000);
   addEventListener('focus',checkSync);
-  addEventListener('resize',()=>{ clearTimeout(_fzT); _fzT=setTimeout(()=>{ fit(); M.plants.forEach(drawCurve); },120); });
+  addEventListener('resize',()=>{ clearTimeout(_fzT); _fzT=setTimeout(()=>{ fit(); alignTot(); M.plants.forEach(drawCurve); },120); });
   $('g-file').onclick=()=>$('g-input').click();
   $('g-input').onchange=e=>{ const f=e.target.files[0]; if(f) readFile(f); };
   addEventListener('dragover',e=>{ e.preventDefault(); $('drop').classList.add('on'); });
