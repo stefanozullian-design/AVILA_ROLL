@@ -362,7 +362,10 @@ body:not([data-view="all"]) .clk{border-left:none;padding-left:0;}
 .assess{flex:1 1 520px;min-width:0;display:flex;flex-direction:column;}
 .asgrid{display:grid;grid-template-columns:minmax(250px,.85fr) minmax(300px,1.3fr);gap:8px 16px;padding:8px 12px 10px;flex:1;min-height:0;}
 .asleft,.asright{display:flex;flex-direction:column;gap:8px;min-width:0;}
-.asin{display:grid;grid-template-columns:1fr 1fr;gap:4px 8px;align-items:center;}
+.asin{display:grid;grid-template-columns:repeat(3,minmax(84px,1fr));gap:4px 8px;align-items:center;align-content:start;}
+.asgrid.one{grid-template-columns:1fr;}
+.clkecon{flex:1 1 600px;min-width:0;display:grid;grid-template-columns:auto minmax(280px,1fr);gap:0 18px;align-items:start;border-left:1px solid var(--border);padding-left:18px;}
+.clkecon .asin .h:first-child{margin-top:0;}
 .asin .h{grid-column:1/-1;font-family:var(--mono);font-size:9px;letter-spacing:1.2px;text-transform:uppercase;color:var(--text-dim);margin-top:3px;}
 .asin .ufi{display:flex;}
 .astab{font-family:var(--mono);font-size:10px;font-variant-numeric:tabular-nums;width:100%;border-collapse:collapse;}
@@ -628,7 +631,7 @@ function buildUI(){
   const cols=M.plants.map(pl=>M.prods.map((p,i)=>[p,i]).filter(([p])=>p.plant===pl.name)), rows=Math.max(1,...cols.map(c=>c.length));
   $('prodlist').style.setProperty('--rows',rows);
   $('prodlist').innerHTML=cols.map((c,k)=>c.map(([p,i])=>prow(p,i)).join('')+`<div class="prow" data-plant="${esc(M.plants[k].id)}"></div>`.repeat(rows-c.length)).join('');
-  $('clkgrid').innerHTML=M.plants.map(clinkerHTML).join('');
+  $('clkgrid').innerHTML=M.plants.map(pl=>clinkerHTML(pl)+econHTML(pl)).join('');
   $('plants').innerHTML=M.plants.map(plantHTML).join('')+M.plants.map(assessHTML).join('');
   fit(); requestAnimationFrame(()=>M.plants.forEach(drawCurve));
   M.plants.forEach(pl=>pl.mills.forEach(m=>{ m.barEl=document.querySelector(`.bar[data-mill="${m.id}"]`); m.segEls=[...m.barEl.querySelectorAll('.seg')]; m.hEls=[...m.barEl.querySelectorAll('.handle')]; m.nEls=[...m.barEl.querySelectorAll('.notch')]; m.levEls=m.products.map((p,i)=>document.querySelector(`[data-lev="${m.id}|${i}"]`)); m.pctEls=m.products.map((p,i)=>document.querySelector(`[data-pct="${m.id}|${i}"]`)); }));
@@ -766,7 +769,7 @@ function update(){
 // ── One plant on screen, or the network ──
 const viewPlant=()=>M.view&&M.view!=='all'?M.plants.find(pl=>pl.id===M.view)||null:null;
 function applyView(){ if(!M.plants.some(pl=>pl.id===M.view)&&M.view!=='all') M.view=M.plants.length?M.plants[0].id:'all';
-  document.body.dataset.view=M.view; $('viewcss').textContent=M.view==='all'?'.assess{display:none;}':`[data-plant]:not([data-plant="${CSS.escape(M.view)}"]){display:none!important;}`; modeBtns(); }
+  document.body.dataset.view=M.view; $('viewcss').textContent=M.view==='all'?'.assess,.clkecon{display:none;}':`[data-plant]:not([data-plant="${CSS.escape(M.view)}"]){display:none!important;}`; modeBtns(); }
 function setView(v){ M.view=v; saveEcon(); applyView(); update(); fit(); requestAnimationFrame(()=>M.plants.forEach(drawCurve)); }
 
 // ── Cost & CO₂ of the mix. Costs are USD per short ton (everything on this page is short tons);
@@ -786,18 +789,20 @@ function plantEcon(pl){ let t=0,usd=0,kg=0; const prods=plantProds(pl);
 function assessHTML(pl){ const id=esc(pl.id), f=(k,lbl,title,step)=>`<span class="ufi"><i>${lbl}</i><input class="fi" type="number" min="0" step="${step}" data-ec="${id}|${k}" title="${esc(title)}"></span>`;
   return `<section class="card assess" data-plant="${id}">
     <div class="phead"><span class="pname">Cost &amp; CO₂</span><span class="psub">${esc(pl.name)} · USD per short ton · CO₂ per metric tonne</span><span class="pt" id="as-t-${id}"></span></div>
-    <div class="asgrid">
-      <div class="asleft">
-        <div class="asin"><div class="h">USD per short ton</div>${f('cc','CLK','Clinker: USD per short ton',1)}${f('cg','GYP','Gypsum: USD per short ton',1)}${f('cl','LIM','Limestone: USD per short ton',1)}${f('co','OTHER','Other cost per short ton of cement, the same for every cement: grinding, power, bags…',1)}
-          <div class="h">kg CO₂ per metric tonne</div>${f('ec','CLK','kg CO₂ per metric tonne of clinker: calcination + kiln fuel. 850 is a typical figure, type yours.',10)}${f('eo','OTHER','Other kg CO₂ per metric tonne of cement, the same for every cement: grinding power…',1)}</div>
-        <table class="astab" id="as-tab-${id}"></table>
-      </div>
+    <div class="asgrid one">
       <div class="asright">
         <div class="ascards" id="as-cards-${id}"></div>
         <div class="aschh">Fixed at their totals: <span id="as-fx-${id}"></span> · variable <select data-swa="${id}" title="Cement A: gives way as B grows"></select> ↔ <select data-swb="${id}" title="Cement B: its share of A+B runs along the bottom"></select></div>
         <div class="aschart" id="as-ch-${id}"><svg></svg></div>
       </div>
     </div></section>`; }
+// Cost inputs and the per-cement table sit in the clinker strip, beside the kilns
+function econHTML(pl){ const id=esc(pl.id), f=(k,lbl,title,step)=>`<span class="ufi"><i>${lbl}</i><input class="fi" type="number" min="0" step="${step}" data-ec="${id}|${k}" title="${esc(title)}"></span>`;
+  return `<div class="clkecon" data-plant="${id}">
+    <div class="asin"><div class="h">Cost · USD per short ton</div>${f('cc','CLK','Clinker: USD per short ton',1)}${f('cg','GYP','Gypsum: USD per short ton',1)}${f('cl','LIM','Limestone: USD per short ton',1)}
+      <div class="h">kg CO₂ per metric tonne · other per t cement</div>${f('ec','CLK','kg CO₂ per metric tonne of clinker: calcination + kiln fuel. 850 is a typical figure, type yours.',10)}${f('eo','CO₂','Other kg CO₂ per metric tonne of cement, the same for every cement: grinding power…',1)}${f('co','USD','Other cost per short ton of cement, the same for every cement: grinding, power, bags…',1)}</div>
+    <table class="astab" id="as-tab-${id}"></table>
+  </div>`; }
 function assessUpdate(){
   M.plants.forEach(pl=>{
     const id=pl.id, e=econ(id), selA=document.querySelector(`[data-swa="${CSS.escape(id)}"]`), selB=document.querySelector(`[data-swb="${CSS.escape(id)}"]`); if(!selA) return;
