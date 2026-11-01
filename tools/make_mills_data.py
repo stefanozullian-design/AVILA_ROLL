@@ -38,11 +38,11 @@ rows = [{'date': r['date'][:10], 'element_id': r['element_id'], 'product_id': r.
 
 caps = [c for c in DB.get('element_product_capacities', []) if c.get('element_id') in eids]
 pids = {r['product_id'] for r in rows} | {c.get('product_id') for c in caps}
-clk = {q['id'] for q in DB.get('products', []) if q.get('category') == 'clinker'}
 recipes = [{'product_id': x['product_id'], 'material_id': x['material_id'], 'pct': x.get('pct')}
-           for x in DB.get('recipes', []) if x.get('product_id') in pids and x.get('material_id') in clk]
+           for x in DB.get('recipes', []) if x.get('product_id') in pids]          # clinker, gypsum, limestone shares
 pids |= {x['material_id'] for x in recipes}
 products = [{'id': q['id'], 'name': q.get('name'), 'category': q.get('category')} for q in DB.get('products', []) if q['id'] in pids]
+raw_materials = [{'id': r['id'], 'name': r.get('name')} for r in DB.get('raw_materials', [])]
 fids = {e.get('assigned_facility_id') or e.get('facility_id') for e in elems}
 facilities = [{'id': f['id'], 'name': f.get('name')} for f in DB.get('facilities', []) if f['id'] in fids]
 elements = [{'id': e['id'], 'name': e.get('name'), 'type': e['type'], 'is_active': True,
@@ -51,7 +51,7 @@ caps = [{'element_id': c['element_id'], 'product_id': c.get('product_id'), 'capa
 
 label = os.path.basename(src).replace('.json', '')
 data = {'_bundled': {'from': label, 'made': dt.date.today().isoformat(), 'window': [frm, to]},
-        'DB': {'facilities': facilities, 'elements': elements, 'products': products, 'recipes': recipes,
+        'DB': {'facilities': facilities, 'elements': elements, 'products': products, 'recipes': recipes, 'raw_materials': raw_materials,
                'element_product_capacities': caps, 'real_production_daily': rows}}
 body = json.dumps(data, separators=(',', ':'))
 open(out, 'w', encoding='utf-8', newline='\r\n').write('window.AVILA_MILLS_DATA=' + body + ';\n')   # loads by itself next to the page
