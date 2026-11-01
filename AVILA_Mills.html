@@ -997,32 +997,57 @@ function drawCurve(pl){
 const npd=x=>Math.max(0,M.days*(1-x.eff));   // Non Productive Days and efficiency are one number, shown two ways
 const isMoved=m=>Math.abs(m.eff-m.base.eff)>1e-6||m.products.some(p=>p.yield!==p.base.yield||Math.abs(p.share-p.base.share)>1e-6);
 
-// ── Scenarios: named what-ifs of this page, kept in this browser per Roll scenario. The one on screen
-// autosaves (every move lands in it); opening another restores it; the table compares them all. ──
+// ── Scenarios: named what-ifs of ONE plant, kept in this browser per Roll scenario. Each plant has its own
+// list; a scenario holds only that plant's holds, mills, kilns, recipe and prices, so BRS and MIA never touch.
+// The one on screen autosaves (every move lands in it); opening another restores it; the table compares them. ──
 const SCEN_KEY='avila_mills_scen';
-let SCEN={sc:'',list:[],active:null,delta:false};
-function scenLoad(){ try{ let o=JSON.parse(localStorage.getItem(SCEN_KEY)||'null'); if(!o&&DEF().scenarios&&Array.isArray(DEF().scenarios.list)) o={...DEF().scenarios,sc:M.sc}; SCEN=o&&o.sc===M.sc&&Array.isArray(o.list)?o:{sc:M.sc,list:[],active:null,delta:false}; }catch(e){ SCEN={sc:M.sc,list:[],active:null,delta:false}; } if(!SCEN.list.some(x=>x.id===SCEN.active)) SCEN.active=null; }
+let SCEN={sc:'',plants:{},delta:false};   // plants: plant id → {list:[{id,name,ts,basis,span,state,econ,sum}],active}
+const scenP=pid=>SCEN.plants[pid]||(SCEN.plants[pid]={list:[],active:null});
+const scenActiveOf=pl=>{ const q=scenP(pl.id); return q.list.find(x=>x.id===q.active)||null; };
+const scenActive=()=>{ const vp=viewPlant(); return vp?scenActiveOf(vp):null; };
+const plantNames=pl=>new Set(M.prods.filter(p=>p.plant===pl.name).map(p=>p.name));
+function scenLoad(){ let o=null; try{ o=JSON.parse(localStorage.getItem(SCEN_KEY)||'null'); }catch(e){}
+  if(!o&&DEF().scenarios) o={...DEF().scenarios,sc:M.sc};
+  if(!o||o.sc!==M.sc) o=null;
+  SCEN={sc:M.sc,plants:{},delta:!!(o&&o.delta)};
+  if(o&&o.plants&&!Array.isArray(o.list)) SCEN.plants=o.plants;
+  else if(o&&Array.isArray(o.list)) M.plants.forEach(pl=>{   // older whole-network scenarios: each plant keeps its own slice of them
+    const nm=plantNames(pl); SCEN.plants[pl.id]={active:o.active,list:o.list.map(x=>({id:x.id,name:x.name,ts:x.ts,basis:x.basis,span:x.span,
+      state:x.state?{locks:Object.fromEntries(Object.entries(x.state.locks||{}).filter(([n])=>nm.has(n))),plants:(x.state.plants||[]).filter(q=>q.id===pl.id)}:null,
+      econ:x.econ&&x.econ[pl.id]?{[pl.id]:x.econ[pl.id]}:null,sum:x.sum&&x.sum.plants&&x.sum.plants[pl.id]?{plants:{[pl.id]:x.sum.plants[pl.id]}}:null}))}; });
+  M.plants.forEach(pl=>{ const q=scenP(pl.id); if(!Array.isArray(q.list)) q.list=[]; if(!q.list.some(x=>x.id===q.active)) q.active=null; }); }
 function scenWrite(){ try{ localStorage.setItem(SCEN_KEY,JSON.stringify(SCEN)); }catch(e){} }
-const scenActive=()=>SCEN.list.find(x=>x.id===SCEN.active)||null;
 const modeLbl=(b,sp)=>(b==='real'?'proven':'rated')+' · '+(sp==='ytd'?'YTD':'12 m');
 // what the table shows of a scenario: the numbers at the time it was last on screen
 function scenSummary(){ const R=calc(), o={total:R.total,days:M.days,byProd:{},plants:{}};
   M.prods.forEach(p=>o.byProd[p.name]=R.byProd[p.name]?R.byProd[p.name].t:0);
   M.plants.forEach(pl=>{ const pe=plantEcon(pl); o.plants[pl.id]={t:pl.t,need:pl.need,avail:pl.avail,cf:pe.t>0?pl.need/pe.t:0,cpt:pe.cpt,ept:pe.ept,usd:pe.usd,co2t:pe.co2t,prods:Object.fromEntries(Object.values(pl.prods).map(q=>[q.name,q.t]))}; });
   return o; }
-function scenSync(){ const x=scenActive(); if(!x) return; x.state=JSON.parse(snapshot()); x.basis=M.basis; x.span=M.span; x.econ=JSON.parse(JSON.stringify(M.econ)); x.sum=scenSummary(); x.ts=Date.now(); scenWrite(); }
-function scenApply(){ const x=scenActive(); if(!x||!x.state) return; restore(x.state,x.basis===M.basis&&x.span===M.span); if(x.econ){ M.econ={}; Object.entries(x.econ).forEach(([k,v])=>M.econ[k]={...ECON_DEF,...v}); saveEcon(); } $('days').value=M.days; }
-function scenNew(){ saveNow(); const x=scenActive(), id='s'+Date.now().toString(36);
-  SCEN.list.push({id,name:x?x.name+' copy':'Scenario '+(SCEN.list.length+1),ts:Date.now()}); SCEN.active=id; scenSync(); update(); const f=$('sc-name'); f.focus(); f.select(); }
-function scenGo(id){ if(id===SCEN.active||!SCEN.list.some(x=>x.id===id)) return; saveNow(); SCEN.active=id; scenWrite(); const x=scenActive();
+function scenState(pl){ const full=JSON.parse(snapshot()), nm=plantNames(pl), r6=v=>Math.round(v*1e6)/1e6;
+  const plants=full.plants.filter(q=>q.id===pl.id); plants.forEach(q=>{ (q.mills||[]).forEach(m=>{ m.eff=r6(m.eff); (m.p||[]).forEach(x=>{ x[2]=r6(x[2]); }); }); (q.kilns||[]).forEach(k=>{ k.eff=r6(k.eff); }); });
+  return {locks:Object.fromEntries(Object.entries(M.locks).filter(([n])=>nm.has(n)).map(([n,v])=>[n,Math.round(v*100)/100])),plants}; }
+function scenSync(){ let any=false; const sum=scenSummary();
+  M.plants.forEach(pl=>{ const x=scenActiveOf(pl); if(!x) return; const st=scenState(pl), ec={[pl.id]:JSON.parse(JSON.stringify(econ(pl.id)))};
+    const same=JSON.stringify([st,ec,M.basis,M.span])===JSON.stringify([x.state,x.econ,x.basis,x.span]); if(same) return;
+    x.state=st; x.econ=ec; x.basis=M.basis; x.span=M.span; x.sum={plants:{[pl.id]:sum.plants[pl.id]}}; x.ts=Date.now(); any=true; });
+  if(any) scenWrite(); }
+function scenApplyPlant(pl,x,perf){ if(!x||!x.state) return; const nm=plantNames(pl), keep=Object.fromEntries(Object.entries(M.locks).filter(([n])=>!nm.has(n)));
+  restore({plants:x.state.plants||[]},perf); M.locks={...keep,...(x.state.locks||{})};
+  if(x.econ&&x.econ[pl.id]){ M.econ[pl.id]={...ECON_DEF,...x.econ[pl.id]}; saveEcon(); } }
+function scenApply(){ M.plants.forEach(pl=>{ const x=scenActiveOf(pl); if(x) scenApplyPlant(pl,x,x.basis===M.basis&&x.span===M.span); }); }
+function scenNew(){ const vp=viewPlant(); if(!vp) return; saveNow(); const q=scenP(vp.id), x=scenActiveOf(vp), id='s'+Date.now().toString(36);
+  q.list.push({id,name:x?x.name+' copy':vp.name+' '+(q.list.length+1),ts:Date.now()}); q.active=id; scenSync(); update(); const f=$('sc-name'); f.focus(); f.select(); }
+function scenGo(id){ const vp=viewPlant(); if(!vp) return; const q=scenP(vp.id); if(id===q.active||!q.list.some(x=>x.id===id)) return; saveNow(); q.active=id; scenWrite(); const x=scenActiveOf(vp);
   if(x.basis&&x.span&&(x.basis!==M.basis||x.span!==M.span)){ M.basis=x.basis; M.span=x.span; try{ localStorage.setItem(VIEW_KEY,JSON.stringify({basis:M.basis,span:M.span})); }catch(e){} rebuild(); return; }
-  scenApply(); undo=[]; SRC=null; update(); }
+  scenApplyPlant(vp,x,true); undo=[]; SRC=null; update(); }
 let _delT=0;
-function scenDel(){ const x=scenActive(), b=$('sc-del'); if(!x) return;
+function scenDel(){ const vp=viewPlant(), x=scenActive(), b=$('sc-del'); if(!vp||!x) return;
   if(!b.classList.contains('arm')){ b.classList.add('arm'); b.textContent='Delete?'; clearTimeout(_delT); _delT=setTimeout(()=>{ b.classList.remove('arm'); b.textContent='Delete'; },3000); return; }
-  clearTimeout(_delT); b.classList.remove('arm'); b.textContent='Delete'; SCEN.list=SCEN.list.filter(y=>y.id!==x.id); SCEN.active=null; scenWrite(); update(); }
-function scenRender(){ const tab=$('sc-tab'); if(!tab) return; const x=scenActive(), cur=scenSummary(), vp=viewPlant();
-  const f=$('sc-name'); if(document.activeElement!==f) f.value=x?x.name:''; f.readOnly=!x; $('sc-del').style.display=x?'':'none'; $('sc-delta').classList.toggle('on',!!SCEN.delta);
+  clearTimeout(_delT); b.classList.remove('arm'); b.textContent='Delete'; const q=scenP(vp.id); q.list=q.list.filter(y=>y.id!==x.id); q.active=null; scenWrite(); update(); }
+function scenRender(){ const tab=$('sc-tab'); if(!tab) return; const vp=viewPlant(), x=scenActive(), cur=scenSummary(), f=$('sc-name');
+  if(vp){ if(document.activeElement!==f) f.value=x?x.name:''; f.readOnly=!x; f.placeholder='Working copy · not saved'; $('sc-new').style.display=''; $('sc-del').style.display=x?'':'none'; }
+  else { f.value=M.plants.map(pl=>{ const y=scenActiveOf(pl); return pl.name+': '+(y?y.name:'working copy'); }).join(' · '); f.readOnly=true; f.placeholder=''; $('sc-new').style.display='none'; $('sc-del').style.display='none'; }
+  $('sc-delta').classList.toggle('on',!!SCEN.delta);
   const P=(o,id)=>o&&o.plants&&o.plants[id]||null, sumP=(o,k)=>M.plants.reduce((a,pl)=>{ const q=P(o,pl.id); return a+(q?num(q[k]):0); },0);
   const rows=[], add=(l,g,d,low,sep)=>rows.push({l,g,d,low,sep});   // low: a lower number is the better one
   if(vp){ const id=vp.id, Q=o=>P(o,id)||{prods:{}};
@@ -1047,8 +1072,9 @@ function scenRender(){ const tab=$('sc-tab'); if(!tab) return; const x=scenActiv
     add('kg CO₂/TM',o=>{ const t=sumP(o,'t'); return t>0?sumP(o,'co2t')*1000/(t*ST2T):0; },0,true);
     add('CO₂ kt/yr',o=>sumP(o,'co2t')/1000,0,true);
   }
-  const cols=SCEN.list.map(y=>({id:y.id,name:y.name,on:y.id===SCEN.active,sum:y.id===SCEN.active?cur:y.sum,meta:y.id===SCEN.active?modeLbl(M.basis,M.span):modeLbl(y.basis,y.span)}));
-  if(!x) cols.unshift({id:'',name:'Now',on:true,sum:cur,meta:modeLbl(M.basis,M.span)});
+  const now={id:'',name:'Now',on:true,sum:cur,meta:modeLbl(M.basis,M.span)}; let cols;
+  if(vp){ const q=scenP(vp.id); cols=q.list.map(y=>({id:y.id,name:y.name,on:y.id===q.active,sum:y.id===q.active?cur:y.sum,meta:y.id===q.active?modeLbl(M.basis,M.span):modeLbl(y.basis,y.span)})); if(!x) cols.unshift(now); }
+  else cols=[now];   // the network: the two plants' scenarios are separate lists, so only what is on screen
   const ref=cols.find(c=>c.on), val=(c,r)=>{ try{ const v=c.sum?r.g(c.sum):NaN; return isFinite(v)?v:NaN; }catch(e){ return NaN; } };
   const cell=(c,r)=>{ const v=val(c,r); if(!isFinite(v)) return '<td>—</td>';
     const rv=val(ref,r), d=v-rv, k=!isFinite(d)||Math.abs(d)<Math.pow(10,-r.d)/2?'flat':(d>0)!==!!r.low?'up':'down', dt=isFinite(d)?(d>=0?'+':'−')+fx(Math.abs(d),r.d):'—';
@@ -1137,7 +1163,8 @@ function setShare(m,i,v){   // one lever: the free cements on the mill give up (
 }
 // MAX: the most of one cement the holds allow, from every mill that makes it or a held cement; the rest stays put.
 function maxProduct(name){ pushUndo(); const hold=M.locks[name]; delete M.locks[name];   // MAX on a held cement moves the hold to the new most
-  guarded(()=>lpMove(varsFor(m=>m.products.some(p=>p.name===name||isHeld(p.name)),1e-3),v=>v.p.name===name?v.p.yield:0));
+  const mine=new Set(M.plants.filter(pl=>pl.mills.some(m=>m.products.some(p=>p.name===name))).flatMap(pl=>pl.mills));
+  guarded(()=>lpMove(varsFor(m=>mine.has(m)&&m.products.some(p=>p.name===name||isHeld(p.name)),1e-3),v=>v.p.name===name?v.p.yield:0));
   if(hold!=null){ M.locks[name]=calc().byProd[name].t; update(); } }
 function maxTonnes(){ pushUndo(); guarded(()=>lpMove(varsFor(()=>true,1e-3),v=>v.p.yield)); }
 function toggleLock(name){ pushUndo(); const R=calc(); if(isHeld(name)) delete M.locks[name]; else M.locks[name]=R.byProd[name]?R.byProd[name].t:0; update(); }
@@ -1151,8 +1178,11 @@ const isHeld=n=>n in M.locks;   // a hold at 0 t is a hold
 let SRC=null;   // `${millId}|${cement}` the user just set by hand: these resist moving, the other mills make it up
 function enforce(src){
   if(!Object.keys(M.locks).length) return;
-  const vars=varsFor(m=>m.products.some(p=>isHeld(p.name)),(m,p)=>src&&src.has(m.id+'|'+p.name)?1000:1);
-  if(vars.length) lpMove(vars,null);
+  calc();
+  M.plants.forEach(pl=>{   // plant by plant: a hold only ever moves the mills of its own plant, and only when its holds are off
+    const gap=plantProds(pl).filter(p=>isHeld(p.name)).reduce((a,p)=>a+Math.abs((pl.prods[p.name]?pl.prods[p.name].t:0)-M.locks[p.name]),0); if(gap<=0.5) return;
+    const vars=varsFor(m=>pl.mills.includes(m)&&m.products.some(p=>isHeld(p.name)),(m,p)=>src&&src.has(m.id+'|'+p.name)?1000:1);
+    if(vars.length) lpMove(vars,null); });
 }
 // The mills a move may touch, as (mill, cement) pairs with the days they have now and how much each resists moving.
 function varsFor(pick,w){ calc(); const vars=[]; M.plants.forEach(pl=>pl.mills.forEach(m=>{ if(m.avail<=0||!pick(m)) return; m.products.forEach(p=>vars.push({m,p,cur:m.avail*p.share,w:typeof w==='function'?w(m,p):w})); })); return vars; }
@@ -1280,7 +1310,7 @@ function wire(){
   $('b-max').onclick=maxTonnes;
   $('sc-new').onclick=scenNew; $('sc-del').onclick=scenDel;
   $('sc-delta').onclick=()=>{ SCEN.delta=!SCEN.delta; scenWrite(); scenRender(); };
-  $('sc-name').onchange=e=>{ const x=scenActive(); if(!x) return; x.name=e.target.value.trim()||x.name; scenWrite(); scenRender(); };
+  $('sc-name').onchange=e=>{ const x=scenActive(); if(!x){ scenRender(); return; } x.name=e.target.value.trim()||x.name; scenWrite(); scenRender(); };
   document.addEventListener('keydown',e=>{ if(e.key==='Enter'&&e.target.id==='sc-name') e.target.blur(); });
   document.addEventListener('click',e=>{ const th=e.target.closest('th.scol[data-sc]'); if(th&&th.dataset.sc) scenGo(th.dataset.sc); });
   $('b-reset').onclick=()=>{ pushUndo(); M.locks={}; M.days=365; $('days').value=365; M.plants.forEach(pl=>{ pl.extra=0; plantProds(pl).forEach(p=>setClk(pl,p.name,p.base.clk)); pl.mills.forEach(resetMill); pl.kilns.forEach(k=>{ k.rated=k.base.rated; k.eff=k.base.eff; }); }); update(); };
