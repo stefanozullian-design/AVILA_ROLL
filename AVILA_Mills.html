@@ -1015,10 +1015,15 @@ function scenLoad(){ let o=null; try{ o=JSON.parse(localStorage.getItem(SCEN_KEY
   if(!o||o.sc!==M.sc) o=null;
   SCEN={sc:M.sc,plants:{},delta:!!(o&&o.delta)};
   if(o&&o.plants&&!Array.isArray(o.list)) SCEN.plants=o.plants;
-  else if(o&&Array.isArray(o.list)) M.plants.forEach(pl=>{   // older whole-network scenarios: each plant keeps its own slice of them
-    const nm=plantNames(pl); SCEN.plants[pl.id]={active:o.active,list:o.list.map(x=>({id:x.id,name:x.name,ts:x.ts,basis:x.basis,span:x.span,
-      state:x.state?{locks:Object.fromEntries(Object.entries(x.state.locks||{}).filter(([n])=>nm.has(n))),plants:(x.state.plants||[]).filter(q=>q.id===pl.id)}:null,
-      econ:x.econ&&x.econ[pl.id]?{[pl.id]:x.econ[pl.id]}:null,sum:x.sum&&x.sum.plants&&x.sum.plants[pl.id]?{plants:{[pl.id]:x.sum.plants[pl.id]}}:null}))}; });
+  else if(o&&Array.isArray(o.list)) M.plants.forEach(pl=>{   // older whole-network scenarios: each plant keeps its own slice of them, but only the slices that differ
+    const nm=plantNames(pl), r6=v=>Math.round(v*1e6)/1e6;
+    const list=o.list.map(x=>({id:x.id,name:x.name,ts:x.ts,basis:x.basis,span:x.span,
+      state:x.state?{locks:Object.fromEntries(Object.entries(x.state.locks||{}).filter(([n])=>nm.has(n)).map(([n,v])=>[n,Math.round(v*100)/100])),plants:(x.state.plants||[]).filter(q=>q.id===pl.id)}:null,
+      econ:x.econ&&x.econ[pl.id]?{[pl.id]:x.econ[pl.id]}:null,sum:x.sum&&x.sum.plants&&x.sum.plants[pl.id]?{plants:{[pl.id]:x.sum.plants[pl.id]}}:null}));
+    list.forEach(x=>(x.state&&x.state.plants||[]).forEach(q=>{ (q.mills||[]).forEach(m=>{ m.eff=r6(m.eff); (m.p||[]).forEach(a=>{ a[2]=r6(a[2]); }); }); (q.kilns||[]).forEach(k=>{ k.eff=r6(k.eff); }); }));
+    const seen=new Set(), kept=list.filter(x=>{ const k=JSON.stringify([x.state,x.econ,x.basis,x.span]); if(seen.has(k)) return false; seen.add(k); return true; });
+    const mine=kept.length>1?kept:[];   // one state only: those scenarios were about the other plant
+    SCEN.plants[pl.id]={active:mine.some(x=>x.id===o.active)?o.active:null,list:mine}; });
   M.plants.forEach(pl=>{ const q=scenP(pl.id); if(!Array.isArray(q.list)) q.list=[]; if(!q.list.some(x=>x.id===q.active)) q.active=null; }); }
 function scenWrite(){ try{ localStorage.setItem(SCEN_KEY,JSON.stringify(SCEN)); }catch(e){} }
 const modeLbl=(b,sp)=>(b==='real'?'proven':'rated')+' · '+(sp==='ytd'?'YTD':'12 m');
