@@ -23,7 +23,7 @@ tag = '<script src="AVILA_Mills_data.js"></script>'
 assert html.count(tag) == 1, 'data script tag not found once'
 if '</script' in js:
     raise SystemExit('the data file contains </script>')
-inline = '<script>\n' + js + '\n'
+inline = '<script>\n' + js + '\nwindow.AVILA_MILLS_STANDALONE=true;\n'   # the page then never reads a Roll scenario on the same machine
 if defs:
     d = json.load(open(defs, encoding='utf-8'))
     d = {k: v for k, v in d.items() if k in ('econ', 'overrides', 'scenarios') and v}

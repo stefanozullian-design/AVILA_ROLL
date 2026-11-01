@@ -655,7 +655,7 @@ function clinkerHTML(pl){
     <div class="clkm" id="cm-${id}"></div>
   </div>`;
 }
-function chip(note){ $('srcchip').innerHTML=`<b>${esc(M.sc)}</b> · ${wl()} ${M.win.from} → ${M.win.to} · ${M.win.days} d · ${M.win.real?'proven':'rated'} yields`+(isCustom()?' · custom':'')+(LIVE?` · ${note||('synced '+synced)}`:BUNDLED?` · published copy of ${BUNDLED.made}`:' · from a file'); }
+function chip(note){ $('srcchip').innerHTML=`<b>${esc(M.sc)}</b> · ${wl()} ${M.win.from} → ${M.win.to} · ${M.win.days} d · ${M.win.real?'proven':'rated'} yields`+(isCustom()?' · custom':'')+(LIVE?` · ${note||('synced '+synced)}`:BUNDLED?` · ${window.AVILA_MILLS_STANDALONE?'self-contained':'published'} copy of ${BUNDLED.made}`:' · from a file'); }
 // Custom: a yield or an efficiency, on a mill or a kiln, that is not the basis's own number. The mix is not performance.
 const isCustom=()=>M.plants.some(pl=>pl.mills.some(m=>Math.abs(m.eff-m.base.eff)>1e-6||m.products.some(p=>p.yield!==p.base.yield))||pl.kilns.some(k=>k.rated!==k.base.rated||Math.abs(k.eff-k.base.eff)>1e-6));
 function revertPerf(){ M.plants.forEach(pl=>{ pl.mills.forEach(m=>{ m.eff=m.base.eff; m.products.forEach(p=>p.yield=p.base.yield); }); pl.kilns.forEach(k=>{ k.rated=k.base.rated; k.eff=k.base.eff; }); }); }
@@ -1335,8 +1335,9 @@ async function boot(){
   let meta=null; try{ meta=JSON.parse(localStorage.getItem('avila_scenarios')||'null'); }catch(e){}
   const id=meta&&meta.activeId, name=id&&meta.meta&&meta.meta[id]?meta.meta[id].name:'';
   const h=id?await idbHandle(id):null, pub=window.AVILA_MILLS_DATA&&window.AVILA_MILLS_DATA._bundled?window.AVILA_MILLS_DATA:null;
-  // No Roll scenario on this machine (someone the page was shared with): the published copy opens straight away.
-  if(!h||!h.queryPermission){ if(pub) useBundled(pub); return; }
+  // No Roll scenario on this machine (someone the page was shared with), or the self-contained build, which
+  // carries its own data and never reads a Roll scenario that happens to be on the same machine: the copy opens straight away.
+  if(!h||!h.queryPermission||window.AVILA_MILLS_STANDALONE){ if(pub) useBundled(pub); return; }
   const b=$('g-conn'); b.textContent=`Open ${name||'active scenario'}`; b.style.display='inline-block';
   b.onclick=async()=>{ try{ if(await h.requestPermission({mode:'read'})==='granted') await readHandle(h,name); else $('gmsg').textContent='Chrome did not allow reading the file.'; }catch(e){ $('gmsg').textContent=e.message; } };
   if(pub){ const c=$('g-bund'); c.textContent=`Use the published copy (${pub._bundled.window[1]})`; c.style.display='inline-block'; c.onclick=()=>useBundled(pub); }
