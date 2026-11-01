@@ -366,12 +366,29 @@ input.pv{background:none;border:0;border-bottom:1px solid transparent;color:inhe
 body:not([data-view="all"]) #h-plants{display:none;}
 body:not([data-view="all"]) #hero{grid-template-columns:minmax(0,1.9fr) minmax(0,1fr);}
 #h-left{display:contents;}
-body:not([data-view="all"]) #h-left{display:grid;grid-template-columns:minmax(190px,.5fr) minmax(0,1.5fr);gap:10px;}
+body:not([data-view="all"]) #h-main{display:none;}
 body:not([data-view="all"]) #h-main{padding:8px 14px;}
 body:not([data-view="all"]) #h-total{font-size:clamp(24px,2.1vw,34px);letter-spacing:-1px;}
 body:not([data-view="all"]) #plants{display:grid;grid-template-columns:minmax(0,1.9fr) minmax(0,1fr);gap:10px;}
 body:not([data-view="all"]) .plant{max-width:none;}
 body:not([data-view="all"]) .clk{border-left:none;padding-left:0;}
+/* ── Scenarios: the left column beside the clinker strip and the cement hero; the plants row spans both ── */
+main#app{display:grid;grid-template-columns:minmax(345px,.25fr) minmax(0,1fr);grid-template-rows:auto auto auto 1fr;}
+#scen{grid-column:1;grid-row:1/4;display:flex;flex-direction:column;min-width:0;min-height:0;}
+#clinker{grid-column:2;grid-row:1;} #cemh{grid-column:2;grid-row:2;} #hero{grid-column:2;grid-row:3;} #plants{grid-column:1/-1;grid-row:4;}
+#scen .phead{gap:8px;}
+.scname{flex:1;min-width:0;background:none;border:0;border-bottom:1px solid transparent;font-family:var(--sans);font-weight:800;font-size:15px;letter-spacing:.3px;color:var(--text);outline:none;padding:0;}
+.scname:focus{border-bottom-color:var(--green);} .scname:read-only{color:var(--text-dim);font-weight:600;cursor:default;}
+.scbtns{display:flex;gap:4px;flex-shrink:0;} .scbtns .btn{padding:4px 7px;letter-spacing:.5px;} .scbtns .btn.arm{border-color:var(--red);color:var(--red);}
+.scbtns .sb{padding:4px 8px;border:1px solid var(--border2);font-size:11px;}
+.scbody{flex:1;min-height:0;overflow:auto;padding:4px 10px 8px;}
+.sctab th,.sctab td{padding:2px 3px;} .sctab th.scol{cursor:pointer;text-transform:none;letter-spacing:0;vertical-align:bottom;padding:3px 3px 2px;}
+.sctab th.scol .nm{display:block;font-family:var(--sans);font-size:11px;font-weight:800;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:96px;}
+.sctab th.scol .meta{display:block;font-size:8px;color:var(--text-dim);font-weight:400;}
+.sctab th.scol:hover .nm{text-decoration:underline;} .sctab th.scol.on{cursor:default;} .sctab th.scol.on .nm{color:var(--green);text-decoration:none;}
+.sctab td.on{background:rgba(var(--green-rgb),.08);font-weight:700;} .sctab td.dl.up{color:var(--green);} .sctab td.dl.down{color:var(--red);} .sctab td.dl.flat{color:var(--text-dim);}
+.sctab tr.sep td{border-top:1px solid var(--border2);}
+@media (max-width:1180px){main#app{grid-template-columns:1fr;}#scen,#clinker,#cemh,#hero,#plants{grid-column:1;grid-row:auto;}}
 /* cost & CO2 */
 .assess{flex:1 1 520px;min-width:0;display:flex;flex-direction:column;}
 .asgrid{display:grid;grid-template-columns:minmax(250px,.85fr) minmax(300px,1.3fr);gap:8px 16px;padding:8px 12px 10px;flex:1;min-height:0;}
@@ -441,6 +458,10 @@ body:not([data-view="all"]) .clk{border-left:none;padding-left:0;}
 
 <style id="viewcss"></style>
 <main id="app" style="display:none">
+  <section class="card" id="scen">
+    <div class="phead"><input id="sc-name" class="scname" placeholder="Working copy · not saved" title="This scenario's name: type to rename" spellcheck="false"><span class="scbtns"><button class="sb" id="sc-delta" title="Show the other scenarios as the difference from the one on screen">Δ</button><button class="btn" id="sc-new" title="A new scenario that starts from what is on screen. Everything you change afterwards is kept in it.">+ New</button><button class="btn" id="sc-del" title="Forget this scenario; what is on screen stays">Delete</button></span></div>
+    <div class="scbody"><table class="astab sctab" id="sc-tab"></table></div>
+  </section>
   <section class="card" id="clinker">
     <div class="sech"><span class="t">Clinker production</span><span class="s">What the kilns make, against what the cement mix on this page needs</span></div>
     <div id="clkgrid"></div>
@@ -789,7 +810,7 @@ function update(){
   });
   $('b-undo').disabled=!undo.length;
   modeBtns(); chip();
-  assessUpdate(); alignTot();
+  assessUpdate(); alignTot(); scenRender();
   scheduleSave();
 }
 // ── One plant on screen, or the network ──
@@ -823,7 +844,7 @@ function assessHTML(pl){ const id=esc(pl.id), f=(k,lbl,title,step)=>`<span class
     <div class="phead"><span class="pname">Cost &amp; CO₂</span><div class="ascards" id="as-cards-${id}"></div></div>
     <div class="asgrid one">
       <div class="asright">
-        <div class="aschh">Held: <span id="as-fx-${id}"></span> · variable <select data-swa="${id}" title="Cement A: gives way as B grows"></select> ↔ <select data-swb="${id}" title="Cement B: its share of A+B runs along the bottom"></select></div>
+        <div class="aschh">Held: <span id="as-fx-${id}"></span> · variable <span id="as-ab-${id}" title="The two cements that float, the biggest as A and the smallest as B: hold the others to take them out of the picture"></span></div>
         <div class="asbody"><div class="aschart" id="as-ch-${id}"><svg></svg></div></div>
       </div>
     </div></section>`; }
@@ -842,7 +863,7 @@ function econHTML(pl){ const id=esc(pl.id), prods=plantProds(pl);
   </table></div>`; }
 function assessUpdate(){
   M.plants.forEach(pl=>{
-    const id=pl.id, e=econ(id), selA=document.querySelector(`[data-swa="${CSS.escape(id)}"]`), selB=document.querySelector(`[data-swb="${CSS.escape(id)}"]`); if(!selA) return;
+    const id=pl.id, e=econ(id); if(!$('as-ab-'+id)) return;
     document.querySelectorAll(`[data-ec^="${CSS.escape(id)}|"]`).forEach(el=>setVal(el,e[el.dataset.ec.split('|')[1]]));
     const prods=plantProds(pl), pe=plantEcon(pl);
     let mClk=0, mGyp=0, mLim=0;
@@ -856,13 +877,11 @@ function assessUpdate(){
     $(`as-m-${id}-clk`).textContent=fx(mClk/1000,1); $(`as-m-${id}-gyp`).textContent=fx(mGyp/1000,1); $(`as-m-${id}-lim`).textContent=fx(mLim/1000,1); $(`as-m-${id}-oth`).textContent=fx(pe.t/1000,1);
     const cf=pe.t>0?pl.need/pe.t:0;   // plant clinker factor: tonnes of clinker per tonne of cement, weighted by what each cement makes
     $('as-cards-'+id).innerHTML=[['CLK factor',fx(cf,3),`Plant clinker factor: the clinker factor of each cement weighted by its tonnes · ${fx(pl.need/1000,1)} kt clinker in ${fx(pe.t/1000,1)} kt cement`],['USD/STn',fx(pe.cpt,2),`Cost of the mix per short ton of cement · ${fx(pe.usd/1e6,1)} USD M in the year`],['kg CO₂/t',fx(pe.ept,0),`kg CO₂ per metric tonne of cement = clinker factor ${fx(cf,3)} × ${fx(e.ec,0)} kg/t clinker + ${fx(e.eo,0)} other · ${fx(pe.co2t/1000,0)} kt CO₂ in the year`]].map(([l,v,t])=>`<div class="asc" title="${esc(t)}"><div class="l">${l}</div><div class="v">${v}</div></div>`).join('');
-    const opts=prods.filter(p=>hasLever(p.name)), sw=M.sweep[id]=(M.sweep[id]&&typeof M.sweep[id]==='object')?M.sweep[id]:{}, bt=n=>pl.prods[n]?pl.prods[n].b:0;
-    // a held cement cannot be one of the pair: swap in a free one while there is one (user's own pick otherwise stays)
-    const freeFor=o=>opts.filter(p=>!isHeld(p.name)&&p.name!==o), bad=(n,o)=>!opts.some(p=>p.name===n)||n===o||(isHeld(n)&&freeFor(o).length>0);
-    if(bad(sw.b,sw.a)){ const free=freeFor(sw.a).sort((x,y)=>bt(x.name)-bt(y.name)); sw.b=(free[0]||opts.find(p=>p.name!==sw.a)||{}).name; }
-    if(bad(sw.a,sw.b)){ const free=freeFor(sw.b).sort((x,y)=>bt(y.name)-bt(x.name)); sw.a=(free[0]||opts.find(p=>p.name!==sw.b)||{}).name; }
-    const opt=(sel,v)=>{ sel.innerHTML=opts.map(p=>`<option value="${esc(p.name)}"${p.name===v?' selected':''}>${esc(p.short)}</option>`).join(''); };
-    opt(selA,sw.a); opt(selB,sw.b);
+    // the pair follows the locks: of the cements that float, the biggest is A and the smallest B; a held one steps in only when fewer than two float
+    const opts=prods.filter(p=>hasLever(p.name)), bt=n=>pl.prods[n]?pl.prods[n].b:0, byT=(x,y)=>bt(y.name)-bt(x.name);
+    const free=opts.filter(p=>!isHeld(p.name)).sort(byT), pick=free.length>=2?free:[...free,...opts.filter(p=>isHeld(p.name)).sort(byT)];
+    const sw=M.sweep[id]={a:(pick[0]||{}).name,b:(pick[pick.length-1]||{}).name};
+    $('as-ab-'+id).textContent=pick.length>=2?`${shortOf(pl,sw.a)} ↔ ${shortOf(pl,sw.b)}`+(free.length>2?` · ${free.slice(1,-1).map(p=>p.short).join(', ')} also float${free.length>3?'':'s'}, hold to take out`:free.length<2?' · fewer than two float, release a hold':''):'nothing floats';
     $('as-fx-'+id).textContent=prods.filter(p=>isHeld(p.name)).map(p=>`${p.short} ${kt(M.locks[p.name])}`).join(' · ')||'none, the other cements float';
     if(M.view===id) drawCurve(pl);
   });
@@ -939,18 +958,79 @@ function drawCurve(pl){
 const npd=x=>Math.max(0,M.days*(1-x.eff));   // Non Productive Days and efficiency are one number, shown two ways
 const isMoved=m=>Math.abs(m.eff-m.base.eff)>1e-6||m.products.some(p=>p.yield!==p.base.yield||Math.abs(p.share-p.base.share)>1e-6);
 
+// ── Scenarios: named what-ifs of this page, kept in this browser per Roll scenario. The one on screen
+// autosaves (every move lands in it); opening another restores it; the table compares them all. ──
+const SCEN_KEY='avila_mills_scen';
+let SCEN={sc:'',list:[],active:null,delta:false};
+function scenLoad(){ try{ const o=JSON.parse(localStorage.getItem(SCEN_KEY)||'null'); SCEN=o&&o.sc===M.sc&&Array.isArray(o.list)?o:{sc:M.sc,list:[],active:null,delta:false}; }catch(e){ SCEN={sc:M.sc,list:[],active:null,delta:false}; } if(!SCEN.list.some(x=>x.id===SCEN.active)) SCEN.active=null; }
+function scenWrite(){ try{ localStorage.setItem(SCEN_KEY,JSON.stringify(SCEN)); }catch(e){} }
+const scenActive=()=>SCEN.list.find(x=>x.id===SCEN.active)||null;
+const modeLbl=(b,sp)=>(b==='real'?'proven':'rated')+' · '+(sp==='ytd'?'YTD':'12 m');
+// what the table shows of a scenario: the numbers at the time it was last on screen
+function scenSummary(){ const R=calc(), o={total:R.total,days:M.days,byProd:{},plants:{}};
+  M.prods.forEach(p=>o.byProd[p.name]=R.byProd[p.name]?R.byProd[p.name].t:0);
+  M.plants.forEach(pl=>{ const pe=plantEcon(pl); o.plants[pl.id]={t:pl.t,need:pl.need,avail:pl.avail,cf:pe.t>0?pl.need/pe.t:0,cpt:pe.cpt,ept:pe.ept,usd:pe.usd,co2t:pe.co2t,prods:Object.fromEntries(Object.values(pl.prods).map(q=>[q.name,q.t]))}; });
+  return o; }
+function scenSync(){ const x=scenActive(); if(!x) return; x.state=JSON.parse(snapshot()); x.basis=M.basis; x.span=M.span; x.econ=JSON.parse(JSON.stringify(M.econ)); x.sum=scenSummary(); x.ts=Date.now(); scenWrite(); }
+function scenApply(){ const x=scenActive(); if(!x||!x.state) return; restore(x.state,x.basis===M.basis&&x.span===M.span); if(x.econ){ M.econ={}; Object.entries(x.econ).forEach(([k,v])=>M.econ[k]={...ECON_DEF,...v}); saveEcon(); } $('days').value=M.days; }
+function scenNew(){ saveNow(); const x=scenActive(), id='s'+Date.now().toString(36);
+  SCEN.list.push({id,name:x?x.name+' copy':'Scenario '+(SCEN.list.length+1),ts:Date.now()}); SCEN.active=id; scenSync(); update(); const f=$('sc-name'); f.focus(); f.select(); }
+function scenGo(id){ if(id===SCEN.active||!SCEN.list.some(x=>x.id===id)) return; saveNow(); SCEN.active=id; scenWrite(); const x=scenActive();
+  if(x.basis&&x.span&&(x.basis!==M.basis||x.span!==M.span)){ M.basis=x.basis; M.span=x.span; try{ localStorage.setItem(VIEW_KEY,JSON.stringify({basis:M.basis,span:M.span})); }catch(e){} rebuild(); return; }
+  scenApply(); undo=[]; SRC=null; update(); }
+let _delT=0;
+function scenDel(){ const x=scenActive(), b=$('sc-del'); if(!x) return;
+  if(!b.classList.contains('arm')){ b.classList.add('arm'); b.textContent='Delete?'; clearTimeout(_delT); _delT=setTimeout(()=>{ b.classList.remove('arm'); b.textContent='Delete'; },3000); return; }
+  clearTimeout(_delT); b.classList.remove('arm'); b.textContent='Delete'; SCEN.list=SCEN.list.filter(y=>y.id!==x.id); SCEN.active=null; scenWrite(); update(); }
+function scenRender(){ const tab=$('sc-tab'); if(!tab) return; const x=scenActive(), cur=scenSummary(), vp=viewPlant();
+  const f=$('sc-name'); if(document.activeElement!==f) f.value=x?x.name:''; f.readOnly=!x; $('sc-del').style.display=x?'':'none'; $('sc-delta').classList.toggle('on',!!SCEN.delta);
+  const P=(o,id)=>o&&o.plants&&o.plants[id]||null, sumP=(o,k)=>M.plants.reduce((a,pl)=>{ const q=P(o,pl.id); return a+(q?num(q[k]):0); },0);
+  const rows=[], add=(l,g,d,low,sep)=>rows.push({l,g,d,low,sep});   // low: a lower number is the better one
+  if(vp){ const id=vp.id, Q=o=>P(o,id)||{prods:{}};
+    add('Cement · kt',o=>Q(o).t/1000,1);
+    plantProds(vp).forEach(p=>add('· '+p.short,o=>(Q(o).prods||{})[p.name]/1000,1));
+    add('Clinker · kt',o=>Q(o).need/1000,1,true,true);
+    add('Clk spare · kt',o=>(Q(o).avail-Q(o).need)/1000,1);
+    add('CLK factor',o=>Q(o).cf,3,true);
+    add('USD/STn',o=>Q(o).cpt,2,true,true);
+    add('USD M/yr',o=>Q(o).usd/1e6,1,true);
+    add('kg CO₂/TM',o=>Q(o).ept,0,true);
+    add('CO₂ kt/yr',o=>Q(o).co2t/1000,0,true);
+  }else{
+    add('Cement · kt',o=>o.total/1000,1);
+    M.plants.forEach(pl=>add('· '+pl.name,o=>(P(o,pl.id)||{}).t/1000,1));
+    M.prods.forEach(p=>add('· '+p.plant+' '+p.short,o=>(o.byProd||{})[p.name]/1000,1));
+    add('Clinker · kt',o=>sumP(o,'need')/1000,1,true,true);
+    add('Clk spare · kt',o=>(sumP(o,'avail')-sumP(o,'need'))/1000,1);
+    add('CLK factor',o=>{ const t=sumP(o,'t'); return t>0?sumP(o,'need')/t:0; },3,true);
+    add('USD/STn',o=>{ const t=sumP(o,'t'); return t>0?sumP(o,'usd')/t:0; },2,true,true);
+    add('USD M/yr',o=>sumP(o,'usd')/1e6,1,true);
+    add('kg CO₂/TM',o=>{ const t=sumP(o,'t'); return t>0?sumP(o,'co2t')*1000/(t*ST2T):0; },0,true);
+    add('CO₂ kt/yr',o=>sumP(o,'co2t')/1000,0,true);
+  }
+  const cols=SCEN.list.map(y=>({id:y.id,name:y.name,on:y.id===SCEN.active,sum:y.id===SCEN.active?cur:y.sum,meta:y.id===SCEN.active?modeLbl(M.basis,M.span):modeLbl(y.basis,y.span)}));
+  if(!x) cols.unshift({id:'',name:'Now',on:true,sum:cur,meta:modeLbl(M.basis,M.span)});
+  const ref=cols.find(c=>c.on), val=(c,r)=>{ try{ const v=c.sum?r.g(c.sum):NaN; return isFinite(v)?v:NaN; }catch(e){ return NaN; } };
+  const cell=(c,r)=>{ const v=val(c,r); if(!isFinite(v)) return '<td>—</td>';
+    const rv=val(ref,r), d=v-rv, k=!isFinite(d)||Math.abs(d)<Math.pow(10,-r.d)/2?'flat':(d>0)!==!!r.low?'up':'down', dt=isFinite(d)?(d>=0?'+':'−')+fx(Math.abs(d),r.d):'—';
+    if(c.on) return `<td class="on" title="${esc(c.name)}: on screen now">${fx(v,r.d)}</td>`;
+    if(!SCEN.delta) return `<td title="${esc(c.name)} · ${dt} vs ${esc(ref.name)}">${fx(v,r.d)}</td>`;
+    return `<td class="dl ${k}" title="${esc(c.name)} ${fx(v,r.d)} · ${esc(ref.name)} ${fx(rv,r.d)}">${k==='flat'?'·':dt}</td>`; };
+  tab.innerHTML=`<tr><th></th>${cols.map(c=>`<th class="scol${c.on?' on':''}" data-sc="${esc(c.id)}" title="${c.on?'On screen now':'Open '+esc(c.name)+': the page goes back to it'}"><span class="nm">${esc(c.name)}</span><span class="meta">${c.meta}</span></th>`).join('')}</tr>`
+    +rows.map(r=>`<tr${r.sep?' class="sep"':''}><td>${esc(r.l)}</td>${cols.map(c=>cell(c,r)).join('')}</tr>`).join(''); }
+
 // ── State: undo + this browser's what-if ──
 function snapshot(){ return JSON.stringify({locks:M.locks,days:M.days,plants:M.plants.map(pl=>({id:pl.id,extra:pl.extra,clk:plantProds(pl).map(p=>[p.name,p.clk]),gyp:plantProds(pl).map(p=>[p.name,p.gyp||0]),mills:pl.mills.map(m=>({id:m.id,eff:m.eff,p:m.products.map(p=>[p.id,p.yield,p.share])})),kilns:pl.kilns.map(k=>({id:k.id,rated:k.rated,eff:k.eff}))}))}); }
-function restore(txt){
+function restore(txt,perf=true){
   let s; try{ s=typeof txt==='string'?JSON.parse(txt):txt; }catch(e){ return; }
   if(!s||!s.plants) return;
   if(s.days) M.days=s.days;
   if(s.locks) M.locks={...s.locks};
   s.plants.forEach(sp=>{ const pl=M.plants.find(x=>x.id===sp.id); if(!pl) return; pl.extra=sp.extra||0; (sp.clk||[]).forEach(([n,v])=>setClk(pl,n,v)); (sp.gyp||[]).forEach(([n,v])=>setGyp(pl,n,v));
-    (sp.mills||[]).forEach(sm=>{ const m=pl.mills.find(x=>x.id===sm.id); if(!m) return; m.eff=sm.eff;
-      (sm.p||[]).forEach(([id,y,sh])=>{ const p=m.products.find(x=>x.id===id); if(p){ p.yield=y; p.share=sh; } });
+    (sp.mills||[]).forEach(sm=>{ const m=pl.mills.find(x=>x.id===sm.id); if(!m) return; if(perf) m.eff=sm.eff;
+      (sm.p||[]).forEach(([id,y,sh])=>{ const p=m.products.find(x=>x.id===id); if(p){ if(perf) p.yield=y; p.share=sh; } });
       const sum=m.products.reduce((a,p)=>a+p.share,0); if(sum>0) m.products.forEach(p=>p.share/=sum); });
-    (sp.kilns||[]).forEach(sk=>{ const k=pl.kilns.find(x=>x.id===sk.id); if(k){ k.rated=sk.rated; k.eff=sk.eff; } });
+    if(perf) (sp.kilns||[]).forEach(sk=>{ const k=pl.kilns.find(x=>x.id===sk.id); if(k){ k.rated=sk.rated; k.eff=sk.eff; } });
   });
 }
 const pushUndo=()=>{ undo.push(snapshot()); if(undo.length>40) undo.shift(); };
@@ -990,7 +1070,7 @@ function applyOverrides(o){
   });
 }
 function readLS(){ try{ const o=JSON.parse(localStorage.getItem(LS_KEY)||'null'); if(!o||o.sc!==M.sc) return {sc:M.sc,ov:{}}; if(o.ov&&o.ov.plants) o.ov={'rated|12m':o.ov}; o.ov=o.ov||{}; return o; }catch(e){ return {sc:M.sc,ov:{}}; } }
-function saveNow(){ clearTimeout(_svT); try{ const o=readLS(); o.ov[mode()]=overrides(); localStorage.setItem(LS_KEY,JSON.stringify(o)); }catch(e){} }
+function saveNow(){ clearTimeout(_svT); try{ const o=readLS(); o.ov[mode()]=overrides(); localStorage.setItem(LS_KEY,JSON.stringify(o)); }catch(e){} scenSync(); }
 function scheduleSave(){ clearTimeout(_svT); _svT=setTimeout(saveNow,400); }
 function loadSaved(){ try{ ['avila_mills_v1','avila_mills_v2'].forEach(k=>localStorage.removeItem(k)); applyOverrides(readLS().ov[mode()]); }catch(e){} }
 // Basis and window: the same scenario, read a different way. What the user changed on the one they leave waits for them there.
@@ -1138,7 +1218,7 @@ function wire(){
   });
   document.addEventListener('focusout',e=>{ if(e.target.matches('input.fi')) update(); });
   document.addEventListener('keydown',e=>{ if(e.key==='Enter'&&e.target.matches('[data-lockv]')) e.target.blur(); });
-  document.addEventListener('change',e=>{ const t=e.target; if(t.dataset.swa||t.dataset.swb){ const id=t.dataset.swa||t.dataset.swb, sw=M.sweep[id]=(M.sweep[id]&&typeof M.sweep[id]==='object')?M.sweep[id]:{}; if(t.dataset.swa) sw.a=t.value; else sw.b=t.value; saveEcon(); update(); return; } if(!t.dataset.lockv) return; const p=M.prods[+t.dataset.lockv]; if(!isHeld(p.name)){ update(); return; }
+  document.addEventListener('change',e=>{ const t=e.target; if(!t.dataset.lockv) return; const p=M.prods[+t.dataset.lockv]; if(!isHeld(p.name)){ update(); return; }
     const s=String(t.value).trim().toLowerCase(); let v=num(s.replace(/[^\d.]/g,'')); if(/\d\s*k\b/.test(s)) v*=1e3; else if(/\d\s*m\b/.test(s)) v*=1e6;
     if(!setLock(p.name,v)){ const row=t.closest('.prow'); row.classList.add('nope'); t.title=`No mix of the mills holds ${p.short} at ${fmt(v)} t/yr together with the other holds`; setTimeout(()=>row.classList.remove('nope'),1500); } });
   document.addEventListener('click',e=>{
@@ -1150,6 +1230,11 @@ function wire(){
   $('b-undo').onclick=()=>{ if(undo.length){ restore(undo.pop()); update(); } };
   $('b-mix').onclick=()=>{ pushUndo(); guarded(()=>M.plants.forEach(pl=>pl.mills.forEach(m=>m.products.forEach(p=>p.share=p.base.share)))); };
   $('b-max').onclick=maxTonnes;
+  $('sc-new').onclick=scenNew; $('sc-del').onclick=scenDel;
+  $('sc-delta').onclick=()=>{ SCEN.delta=!SCEN.delta; scenWrite(); scenRender(); };
+  $('sc-name').onchange=e=>{ const x=scenActive(); if(!x) return; x.name=e.target.value.trim()||x.name; scenWrite(); scenRender(); };
+  document.addEventListener('keydown',e=>{ if(e.key==='Enter'&&e.target.id==='sc-name') e.target.blur(); });
+  document.addEventListener('click',e=>{ const th=e.target.closest('th.scol[data-sc]'); if(th&&th.dataset.sc) scenGo(th.dataset.sc); });
   $('b-reset').onclick=()=>{ pushUndo(); M.locks={}; M.days=365; $('days').value=365; M.plants.forEach(pl=>{ pl.extra=0; plantProds(pl).forEach(p=>setClk(pl,p.name,p.base.clk)); pl.mills.forEach(resetMill); pl.kilns.forEach(k=>{ k.rated=k.base.rated; k.eff=k.base.eff; }); }); update(); };
 }
 
@@ -1157,13 +1242,13 @@ function wire(){
 function loadPayload(p,label){
   if(!p||typeof p.DB!=='object'||!Array.isArray(p.DB.elements)) throw new Error('That file is not an AVILA Roll scenario.');
   PAYLOAD=p; M.sc=label; rebuild();
-  $('gate').classList.add('off'); $('app').style.display='flex'; fit();
+  $('gate').classList.add('off'); $('app').style.display='grid'; fit();
 }
 function rebuild(){
   const n=buildModel(PAYLOAD);
   if(!n.plants.length) throw new Error('No active finish mills in this scenario.');
   Object.assign(M,n,{days:365,locks:{}}); KEY=modelKey(n.plants,n.win);
-  loadEcon(); loadSaved(); undo=[]; buildUI(); update();
+  scenLoad(); loadEcon(); loadSaved(); scenApply(); undo=[]; buildUI(); update();
 }
 function idbHandle(id){
   return new Promise(res=>{ let rq; try{ rq=indexedDB.open('avila_scenarios'); }catch(e){ return res(null); }
