@@ -852,8 +852,10 @@ function sweepCurve(pl,sw){
 function drawCurve(pl){
   const box=$('as-ch-'+pl.id); if(!box) return; const svg=box.querySelector('svg'), sw=M.sweep[pl.id]||{}; const W=box.clientWidth||420, H=box.clientHeight||160; if(W<40||H<40) return;
   calc(); const cv=sweepCurve(pl,sw), pts=cv.pts, pe=plantEcon(pl), prods=plantProds(pl), a=sw.a, b=sw.b, sa=esc(shortOf(pl,a)), sb=esc(shortOf(pl,b));
-  const pad={l:50,r:50,t:18,b:24}, xw=W-pad.l-pad.r, yh=H-pad.t-pad.b, X=x=>pad.l+x*xw;
+  const pad={l:50,r:50,t:18,b:24}, xw=W-pad.l-pad.r, yh=H-pad.t-pad.b;
   const An=pl.prods[a]?pl.prods[a].t:0, Bn=pl.prods[b]?pl.prods[b].t:0, xn=An+Bn>0?Bn/(An+Bn):0;
+  let xlo=pts.length?pts[0].x:0, xhi=pts.length?pts[pts.length-1].x:1; if(xhi-xlo<1e-6){ xlo=0; xhi=1; }   // the chart spans what the mills can reach
+  const X=x=>pad.l+(x-xlo)/(xhi-xlo)*xw, pc=x=>Math.round(x*100)+'%';
   const cs=[...pts.map(q=>q.c),pe.cpt], es=[...pts.map(q=>q.e),pe.ept], ts=[...pts.map(q=>q.t),pe.t];
   const rng=arr=>{ let lo=Math.min(...arr), hi=Math.max(...arr); if(hi-lo<1e-9){ lo*=0.9; hi=hi*1.1||1; } const m=(hi-lo)*0.3; return [Math.max(0,lo-m),hi+m]; };
   const [c0,c1]=rng(cs), [e0,e1]=rng(es), tmax=Math.max(1,...ts)*1.08;
@@ -872,15 +874,15 @@ function drawCurve(pl){
   const yl=(f,cls,v,d,x,an)=>`<text class="lab ${cls}" x="${x}" y="${(f(v)+3).toFixed(1)}" text-anchor="${an}">${fx(v,d)}</text>`;
   svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
   svg.innerHTML=`<defs>${defs}</defs>`+areas
-    +[0,.25,.5,.75,1].map(f=>`<line class="gl2" x1="${X(f).toFixed(1)}" x2="${X(f).toFixed(1)}" y1="${pad.t}" y2="${pad.t+yh}"/>`).join('')
+    +[0,.25,.5,.75,1].map(f=>`<line class="gl2" x1="${X(xlo+(xhi-xlo)*f).toFixed(1)}" x2="${X(xlo+(xhi-xlo)*f).toFixed(1)}" y1="${pad.t}" y2="${pad.t+yh}"/>`).join('')
     +`<line class="ax" x1="${pad.l}" y1="${pad.t+yh}" x2="${W-pad.r}" y2="${pad.t+yh}"/>`
     +`<path class="cur c" d="${line(q=>YC(q.c))}"/><path class="cur e" d="${line(q=>YE(q.e))}"/>`
-    +(pts.length>1?`<line class="now" x1="${X(xn).toFixed(1)}" x2="${X(xn).toFixed(1)}" y1="${pad.t}" y2="${pad.t+yh}"/><circle class="dot2 c" cx="${X(xn).toFixed(1)}" cy="${YC(pe.cpt).toFixed(1)}" r="4.5"/><circle class="dot2 e" cx="${X(xn).toFixed(1)}" cy="${YE(pe.ept).toFixed(1)}" r="4.5"/>`:'')
+    +(pts.length>1?`<line class="now" x1="${X(clamp(xn,xlo,xhi)).toFixed(1)}" x2="${X(clamp(xn,xlo,xhi)).toFixed(1)}" y1="${pad.t}" y2="${pad.t+yh}"/><circle class="dot2 c" cx="${X(clamp(xn,xlo,xhi)).toFixed(1)}" cy="${YC(pe.cpt).toFixed(1)}" r="4.5"/><circle class="dot2 e" cx="${X(clamp(xn,xlo,xhi)).toFixed(1)}" cy="${YE(pe.ept).toFixed(1)}" r="4.5"/>`:'')
     +labels
     +yl(YC,'c',c1,2,pad.l-5,'end')+yl(YC,'c',c0,2,pad.l-5,'end')+yl(YE,'e',e1,0,W-pad.r+5,'start')+yl(YE,'e',e0,0,W-pad.r+5,'start')
     +`<text class="lab c" x="${pad.l-5}" y="${pad.t-6}" text-anchor="end">USD/STn</text><text class="lab e" x="${W-pad.r+5}" y="${pad.t-6}" text-anchor="start">kg CO₂/t</text>`
-    +`<text class="lab" x="${pad.l}" y="${H-7}" text-anchor="start">0% · all ${sa}</text><text class="lab" x="${X(.5).toFixed(1)}" y="${H-7}" text-anchor="middle">${sb} as % of ${sa}+${sb}</text><text class="lab" x="${W-pad.r}" y="${H-7}" text-anchor="end">100% · all ${sb}</text>`
-    +(pts.length>1?`<text class="lab t" x="${clamp(X(xn),pad.l+100,W-pad.r-100).toFixed(1)}" y="${pad.t+10}" text-anchor="middle">now ${Math.round(xn*100)}% ${sb} · ${fx(pe.cpt,2)} $/STn · ${fx(pe.ept,0)} kg/t</text>`:'')
+    +`<text class="lab" x="${pad.l}" y="${H-7}" text-anchor="start">${pc(xlo)} ${sb}${xlo<1e-6?' · all '+sa:''}</text><text class="lab" x="${(pad.l+xw/2).toFixed(1)}" y="${H-7}" text-anchor="middle">${sb} as % of ${sa}+${sb}</text><text class="lab" x="${W-pad.r}" y="${H-7}" text-anchor="end">${pc(xhi)} ${sb}${xhi>0.999999?' · all '+sb:' · the most the mills can make'}</text>`
+    +(pts.length>1?`<text class="lab t" x="${clamp(X(clamp(xn,xlo,xhi)),pad.l+100,W-pad.r-100).toFixed(1)}" y="${pad.t+10}" text-anchor="middle">now ${pc(xn)} ${sb} · ${fx(pe.cpt,2)} $/STn · ${fx(pe.ept,0)} kg/t</text>`:'')
     +(cv.note?`<text class="lab" x="${(W/2).toFixed(1)}" y="${(pad.t+yh/2).toFixed(1)}" text-anchor="middle">${esc(cv.note)}</text>`:'');
 }
 const npd=x=>Math.max(0,M.days*(1-x.eff));   // Non Productive Days and efficiency are one number, shown two ways
