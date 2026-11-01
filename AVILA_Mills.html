@@ -425,6 +425,8 @@ body[data-view="all"] #h-prods .gut,body[data-view="all"] .plant .gut{display:no
 .aschart .cur{fill:none;stroke-width:2;stroke-linejoin:round;} .aschart .cur.c{stroke:var(--text);} .aschart .cur.e{stroke:var(--amber);stroke-dasharray:5 3;}
 .aschart .area{opacity:.5;} .aschart .area.fx{opacity:1;} .aschart .lab.b{fill:var(--text);font-weight:700;}
 .aschart .now{stroke:var(--text);stroke-dasharray:3 3;opacity:.55;}
+.aschart .grip{fill:transparent;cursor:ew-resize;} .aschart .dot2{cursor:ew-resize;} .aschart.drag{cursor:ew-resize;} .aschart.drag .now{opacity:1;stroke:var(--green);}
+.aschh .dim{color:var(--text-dim);}
 .aschart .guide{stroke-dasharray:2 3;opacity:.8;stroke-width:1.2;} .aschart .guide.c{stroke:var(--text);} .aschart .guide.e{stroke:var(--amber);}
 .aschart .nowbox rect{fill:var(--surface);stroke:var(--border2);opacity:.96;} .aschart .nowbox text{font-family:var(--mono);font-size:10px;font-weight:700;fill:var(--text);} .aschart .nowbox text.c{fill:var(--text);} .aschart .nowbox text.e{fill:var(--amber);}
 .aschart .dot2.c{fill:var(--text);stroke:var(--surface);stroke-width:1.5;} .aschart .dot2.e{fill:var(--amber);stroke:var(--surface);stroke-width:1.5;}
@@ -866,7 +868,7 @@ function assessHTML(pl){ const id=esc(pl.id), f=(k,lbl,title,step)=>`<span class
     <div class="phead"><span class="pname">Cost &amp; CO₂</span><div class="ascards" id="as-cards-${id}"></div></div>
     <div class="asgrid one">
       <div class="asright">
-        <div class="aschh">Held: <span id="as-fx-${id}"></span> · variable <span id="as-ab-${id}" title="The two cements that float, the biggest as A and the smallest as B: hold the others to take them out of the picture"></span></div>
+        <div class="aschh">Held: <span id="as-fx-${id}"></span> · variable <span id="as-ab-${id}" title="The two cements that float, the biggest as A and the smallest as B: hold the others to take them out of the picture"></span> · <span class="dim">drag the dot to set the split</span></div>
         <div class="asbody"><div class="aschart" id="as-ch-${id}"><svg></svg></div></div>
       </div>
     </div></section>`; }
@@ -909,11 +911,21 @@ function assessUpdate(){
   });
 }
 // The chart: two cements of the plant trade against each other; the cements the user holds keep their
-// totals and the rest float. Along the bottom, B's share of A+B. For each point the cheapest mix of this
-// plant's mills that keeps every hold, drawn as stacked tonnes (the other cements hatched at the bottom, then A, then B) with
+// totals and the rest float. Along the bottom, B's share of A+B. For each point the mix of this plant's
+// mills that makes the most tonnes while keeping every hold, drawn as stacked tonnes (the other cements hatched at the bottom, then A, then B) with
 // the mix's USD/STn (left axis) and kg CO₂/t (right axis) over it. Solved on a scratch copy of the mix and
 // put back; cached until a yield, efficiency, hold, total, recipe or price moves.
 const _curve={};
+function setPairShare(pl,x){ const sw=M.sweep[pl.id]||{}, pts=sweepCurve(pl,sw).pts; if(pts.length<2||!sw.b||isHeld(sw.b)) return false;
+  let i=0; while(i<pts.length-2&&pts[i+1].x<x) i++; const q=pts[i], r=pts[i+1], B=o=>o.bands[sw.b]||0;   // B's tonnes at that share, read off the curve
+  const t=r.x>q.x?clamp((x-q.x)/(r.x-q.x),0,1):0, target=B(q)+(B(r)-B(q))*t;
+  M.locks[sw.b]=target; const ok=lpMove(varsFor(m=>pl.mills.includes(m),1e-3),v=>v.p.yield); delete M.locks[sw.b]; return ok; }
+function dotDrag(e,box){ const pl=M.plants.find(x=>'as-ch-'+x.id===box.id), svg=box.querySelector('svg'), mp=box._map; if(!pl||!mp) return; e.preventDefault();
+  pushUndo(); dragging=true; box.classList.add('drag'); svg.setPointerCapture(e.pointerId); let raf=0, last=null;
+  const move=ev=>{ last=ev; if(raf) return; raf=requestAnimationFrame(()=>{ raf=0; const r=svg.getBoundingClientRect(); if(r.width<=0) return;
+    const fx=(last.clientX-r.left)/r.width*mp.W, x=clamp(mp.xlo+(fx-mp.l)/mp.w*(mp.xhi-mp.xlo),mp.xlo,mp.xhi); if(setPairShare(pl,x)) update(); }); };
+  const up=()=>{ dragging=false; box.classList.remove('drag'); svg.removeEventListener('pointermove',move); svg.removeEventListener('pointerup',up); svg.removeEventListener('pointercancel',up); if(raf){ cancelAnimationFrame(raf); raf=0; } update(); };
+  svg.addEventListener('pointermove',move); svg.addEventListener('pointerup',up); svg.addEventListener('pointercancel',up); }
 const shortOf=(pl,name)=>{ const p=plantProds(pl).find(x=>x.name===name); return p?p.short:String(name||''); };
 function sweepCurve(pl,sw){
   const a=sw.a, b=sw.b;
@@ -929,7 +941,7 @@ function sweepCurve(pl,sw){
     if(ok){ ok=lpMove(vars(),v=>v.p.name===b?v.p.yield:0); if(ok) hi=qB(); restore(s1); }
     if(!ok) note='the holds cannot all be met on these mills';
     else { const N=hi-lo>1?30:0;
-      for(let k=0;k<=N;k++){ const x=lo+(hi-lo)*k/Math.max(1,N); M.locks[b]=x; if(lpMove(vars(),v=>-costOf(pl,v.p)*v.p.yield)){ calc(); const pe=plantEcon(pl); pts.push({c:pe.cpt,e:pe.ept,t:pe.t,bands:Object.fromEntries(Object.values(pl.prods).map(q=>[q.name,q.t]))}); } restore(s1); }
+      for(let k=0;k<=N;k++){ const x=lo+(hi-lo)*k/Math.max(1,N); M.locks[b]=x; if(lpMove(vars(),v=>v.p.yield)){ calc(); const pe=plantEcon(pl); pts.push({c:pe.cpt,e:pe.ept,t:pe.t,bands:Object.fromEntries(Object.values(pl.prods).map(q=>[q.name,q.t]))}); } restore(s1); }
       if(pts.length<2) note=`${shortOf(pl,b)} has no room against ${shortOf(pl,a)} with these holds`; }
     restore(s0); calc();
   }
@@ -943,7 +955,7 @@ function drawCurve(pl){
   const pad={l:50,r:50,t:18,b:24}, xw=W-pad.l-pad.r, yh=H-pad.t-pad.b;
   const An=pl.prods[a]?pl.prods[a].t:0, Bn=pl.prods[b]?pl.prods[b].t:0, xn=An+Bn>0?Bn/(An+Bn):0;
   let xlo=pts.length?pts[0].x:0, xhi=pts.length?pts[pts.length-1].x:1; if(xhi-xlo<1e-6){ xlo=0; xhi=1; }   // the chart spans what the mills can reach
-  const X=x=>pad.l+(x-xlo)/(xhi-xlo)*xw, pc=x=>Math.round(x*100)+'%';
+  const X=x=>pad.l+(x-xlo)/(xhi-xlo)*xw, pc=x=>Math.round(x*100)+'%'; box._map={W,l:pad.l,w:xw,xlo,xhi};
   const cs=[...pts.map(q=>q.c),pe.cpt], es=[...pts.map(q=>q.e),pe.ept], ts=[...pts.map(q=>q.t),pe.t];
   const rng=arr=>{ let lo=Math.min(...arr), hi=Math.max(...arr); if(hi-lo<1e-9){ lo*=0.9; hi=hi*1.1||1; } const m=(hi-lo)*0.3; return [Math.max(0,lo-m),hi+m]; };
   const [c0,c1]=rng(cs), [e0,e1]=rng(es), tmax=Math.max(1,...ts)*1.08;
@@ -970,6 +982,7 @@ function drawCurve(pl){
         +`<line class="guide c" x1="${pad.l}" x2="${x.toFixed(1)}" y1="${yc.toFixed(1)}" y2="${yc.toFixed(1)}"/><line class="guide e" x1="${x.toFixed(1)}" x2="${W-pad.r}" y1="${ye.toFixed(1)}" y2="${ye.toFixed(1)}"/>`
         +`<text class="lab t c" x="${pad.l-5}" y="${(yc+3).toFixed(1)}" text-anchor="end">${fx(pe.cpt,2)}</text><text class="lab t e" x="${W-pad.r+5}" y="${(ye+3).toFixed(1)}" text-anchor="start">${fx(pe.ept,0)}</text>`
         +`<circle class="dot2 c" cx="${x.toFixed(1)}" cy="${yc.toFixed(1)}" r="4.5"/><circle class="dot2 e" cx="${x.toFixed(1)}" cy="${ye.toFixed(1)}" r="4.5"/>`
+        +`<rect class="grip" x="${(x-8).toFixed(1)}" y="${pad.t}" width="16" height="${yh}"><title>Drag: the mills rearrange so ${sb} is this share of ${sa}+${sb}, your holds kept</title></rect>`
         +`<g class="nowbox"><rect x="${bx.toFixed(1)}" y="${by.toFixed(1)}" width="118" height="44" rx="2"/><text x="${(bx+6).toFixed(1)}" y="${(by+13).toFixed(1)}">now ${pc(xn)} ${sb}</text><text class="c" x="${(bx+6).toFixed(1)}" y="${(by+26).toFixed(1)}">${fx(pe.cpt,2)} $/STn</text><text class="e" x="${(bx+6).toFixed(1)}" y="${(by+39).toFixed(1)}">${fx(pe.ept,0)} kg CO₂/t</text></g>`; })():'')
     +labels
     +[[YC,'c',c1,2,pad.l-5,'end',pe.cpt],[YC,'c',c0,2,pad.l-5,'end',pe.cpt],[YE,'e',e1,0,W-pad.r+5,'start',pe.ept],[YE,'e',e0,0,W-pad.r+5,'start',pe.ept]].map(([f,cls,v,d,x,an,cur])=>pts.length>1&&Math.abs(f(v)-f(cur))<11?'':yl(f,cls,v,d,x,an)).join('')
@@ -1215,7 +1228,7 @@ function dragStart(ev,h){
 }
 
 function wire(){
-  document.addEventListener('pointerdown',e=>{ const h=e.target.closest('.handle'); if(h) dragStart(e,h); const g=e.target.closest('.gut'); if(g) gutDrag(e,g); });
+  document.addEventListener('pointerdown',e=>{ const h=e.target.closest('.handle'); if(h) dragStart(e,h); const g=e.target.closest('.gut'); if(g) gutDrag(e,g); const d=e.target.closest('.aschart .grip,.aschart .dot2'); if(d) dotDrag(e,d.closest('.aschart')); });
   document.addEventListener('dblclick',e=>{ const g=e.target.closest('.gut'); if(g){ delete COLS[g.dataset.g]; saveCols(); applyCols(); colsSettled(); } });
   document.addEventListener('keydown',e=>{ const h=e.target.closest&&e.target.closest('.handle'); if(!h||!['ArrowUp','ArrowDown'].includes(e.key)) return; e.preventDefault();
     const [id,idx]=h.dataset.h.split('|'), {m}=findMill(id), up=e.key==='ArrowUp', st=handlesAt(m,+idx), i=up?st[st.length-1]:st[0], s=up?.01:-.01, a=m.products[i], b=m.products[i+1], d=clamp(s,-a.share,b.share); guarded(()=>{ a.share+=d; b.share-=d; SRC=new Set([m.id+'|'+a.name,m.id+'|'+b.name]); }); });
