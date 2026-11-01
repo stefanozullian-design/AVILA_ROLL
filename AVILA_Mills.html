@@ -1191,7 +1191,15 @@ function simplex(c,Aeq,beq,Ale,ble){
   const x=new Float64Array(n); basis.forEach((b,i)=>{ if(b<n) x[b]=T[i][N]; }); return x;
 }
 const lockGap=()=>{ const R=calc(); return Object.entries(M.locks).reduce((g,[n,w])=>Math.max(g,Math.abs((R.byProd[n]?R.byProd[n].t:0)-w)),0); };
-function guarded(fn){ const b=snapshot(); fn(); update(); if(lockGap()>0.5){ restore(b); SRC=null; update(); } }
+// A move the holds cannot absorb is put back; one they can only absorb by pulling the user's own lever
+// somewhere else is kept. Either way the held rows flash, so the user sees what answered.
+function guarded(fn){ const b=snapshot(); fn();
+  const want=SRC?[...SRC].map(k=>{ const [id,name]=k.split('|'), f=findMill(id), p=f&&f.m.products.find(x=>x.name===name); return p?[p,p.share]:null; }).filter(Boolean):[];
+  update();
+  if(lockGap()>0.5){ restore(b); SRC=null; update(); heldFlash(); }
+  else if(want.some(([p,sh])=>Math.abs(p.share-sh)>0.005)) heldFlash(); }
+let _hfT=0;
+function heldFlash(){ const rows=[...document.querySelectorAll('.prow.locked')]; rows.forEach(r=>{ r.classList.add('nope'); r.title='A hold answered that move: the other mills cannot keep this total on their own, so the lever was pulled back. Release the hold or type a smaller total.'; }); clearTimeout(_hfT); _hfT=setTimeout(()=>rows.forEach(r=>{ r.classList.remove('nope'); r.title=''; }),1600); }
 
 // Trade-off ticket: the question in one card, what you gain, what you give up, the net.
 const ticket=$('ticket');
