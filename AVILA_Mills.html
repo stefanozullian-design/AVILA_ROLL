@@ -374,10 +374,10 @@ body:not([data-view="all"]) .clk{border-left:none;padding-left:0;}
 .astab th:first-child,.astab td:first-child{text-align:left;}
 .astab td:first-child .dot{vertical-align:-1px;margin-right:3px;}
 .astab tr.mix td{font-weight:700;border-top:1px solid var(--border2);}
-.ascards{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;}
-.asc{background:var(--surface2);padding:6px 8px;min-width:0;}
+.ascards{display:flex;gap:6px;margin-left:6px;flex-wrap:wrap;}
+.asc{background:var(--surface2);padding:3px 10px;min-width:0;display:flex;align-items:baseline;gap:7px;}
 .asc .l{font-family:var(--mono);font-size:8.5px;letter-spacing:.8px;text-transform:uppercase;color:var(--text-dim);white-space:nowrap;}
-.asc .v{font-family:var(--mono);font-weight:700;font-size:17px;font-variant-numeric:tabular-nums;white-space:nowrap;}
+.asc .v{font-family:var(--mono);font-weight:700;font-size:15px;font-variant-numeric:tabular-nums;white-space:nowrap;}
 .aschh{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10px;color:var(--text-dim);flex-wrap:wrap;}
 .aschh select{font-family:var(--mono);font-size:10px;font-weight:700;background:var(--surface2);color:var(--text);border:1px solid var(--border2);padding:1px 4px;}
 .aschart{flex:1;min-height:150px;position:relative;}
@@ -788,10 +788,9 @@ function plantEcon(pl){ let t=0,usd=0,kg=0; const prods=plantProds(pl);
   const ept=t>0?kg/t:0; return {t,usd,cpt:t>0?usd/t:0,ept,co2t:ept*t*ST2T/1000}; }   // co2t: tonnes of CO₂ in the year
 function assessHTML(pl){ const id=esc(pl.id), f=(k,lbl,title,step)=>`<span class="ufi"><i>${lbl}</i><input class="fi" type="number" min="0" step="${step}" data-ec="${id}|${k}" title="${esc(title)}"></span>`;
   return `<section class="card assess" data-plant="${id}">
-    <div class="phead"><span class="pname">Cost &amp; CO₂</span><span class="psub">${esc(pl.name)} · USD per short ton · CO₂ per metric tonne</span><span class="pt" id="as-t-${id}"></span></div>
+    <div class="phead"><span class="pname">Cost &amp; CO₂</span><div class="ascards" id="as-cards-${id}"></div></div>
     <div class="asgrid one">
       <div class="asright">
-        <div class="ascards" id="as-cards-${id}"></div>
         <div class="aschh">Held: <span id="as-fx-${id}"></span> · variable <select data-swa="${id}" title="Cement A: gives way as B grows"></select> ↔ <select data-swb="${id}" title="Cement B: its share of A+B runs along the bottom"></select></div>
         <div class="aschart" id="as-ch-${id}"><svg></svg></div>
       </div>
@@ -808,12 +807,11 @@ function assessUpdate(){
     const id=pl.id, e=econ(id), selA=document.querySelector(`[data-swa="${CSS.escape(id)}"]`), selB=document.querySelector(`[data-swb="${CSS.escape(id)}"]`); if(!selA) return;
     document.querySelectorAll(`[data-ec^="${CSS.escape(id)}|"]`).forEach(el=>setVal(el,e[el.dataset.ec.split('|')[1]]));
     const prods=plantProds(pl), pe=plantEcon(pl);
-    $('as-t-'+id).textContent=`${fx(pe.cpt,2)} $/STn · ${fx(pe.ept,0)} kg/t`;
     $('as-tab-'+id).innerHTML=`<tr><th>Cement</th><th>CLK</th><th>GYP</th><th>LIM</th><th>USD/STn</th><th>kg CO₂/t</th><th>kt/yr</th></tr>`
       +prods.map(p=>{ const q=pl.prods[p.name]||{t:0}; return `<tr><td><span class="dot" style="background:var(${p.c})"></span>${esc(p.short)}</td><td>${(p.clk*100).toFixed(1)}%</td><td>${((p.gyp||0)*100).toFixed(1)}%</td><td>${(limOf(p)*100).toFixed(1)}%</td><td>${fx(costOf(pl,p),2)}</td><td>${fx(co2Of(pl,p),0)}</td><td>${fx(q.t/1000,1)}</td></tr>`; }).join('')
       +`<tr class="mix"><td>This mix</td><td>${(pe.t>0?pl.need/pe.t*100:0).toFixed(1)}%</td><td></td><td></td><td>${fx(pe.cpt,2)}</td><td>${fx(pe.ept,0)}</td><td>${fx(pe.t/1000,1)}</td></tr>`;
     const cf=pe.t>0?pl.need/pe.t:0;   // plant clinker factor: tonnes of clinker per tonne of cement, weighted by what each cement makes
-    $('as-cards-'+id).innerHTML=[['CLK factor',fx(cf,3),`Plant clinker factor: the clinker factor of each cement weighted by its tonnes · ${fx(pl.need/1000,1)} kt clinker in ${fx(pe.t/1000,1)} kt cement`],['USD/STn',fx(pe.cpt,2),'Cost of the mix per short ton of cement'],['kg CO₂/t',fx(pe.ept,0),`kg CO₂ per metric tonne of cement = clinker factor ${fx(cf,3)} × ${fx(e.ec,0)} kg/t clinker + ${fx(e.eo,0)} other`],['USD M/yr',fx(pe.usd/1e6,1),'Cost of the year’s cement'],['kt CO₂/yr',fx(pe.co2t/1000,0),'CO₂ of the year’s cement, tonnes converted to metric']].map(([l,v,t])=>`<div class="asc" title="${esc(t)}"><div class="l">${l}</div><div class="v">${v}</div></div>`).join('');
+    $('as-cards-'+id).innerHTML=[['CLK factor',fx(cf,3),`Plant clinker factor: the clinker factor of each cement weighted by its tonnes · ${fx(pl.need/1000,1)} kt clinker in ${fx(pe.t/1000,1)} kt cement`],['USD/STn',fx(pe.cpt,2),`Cost of the mix per short ton of cement · ${fx(pe.usd/1e6,1)} USD M in the year`],['kg CO₂/t',fx(pe.ept,0),`kg CO₂ per metric tonne of cement = clinker factor ${fx(cf,3)} × ${fx(e.ec,0)} kg/t clinker + ${fx(e.eo,0)} other · ${fx(pe.co2t/1000,0)} kt CO₂ in the year`]].map(([l,v,t])=>`<div class="asc" title="${esc(t)}"><div class="l">${l}</div><div class="v">${v}</div></div>`).join('');
     const opts=prods.filter(p=>hasLever(p.name)), sw=M.sweep[id]=(M.sweep[id]&&typeof M.sweep[id]==='object')?M.sweep[id]:{}, bt=n=>pl.prods[n]?pl.prods[n].b:0;
     // a held cement cannot be one of the pair: swap in a free one while there is one (user's own pick otherwise stays)
     const freeFor=o=>opts.filter(p=>!isHeld(p.name)&&p.name!==o), bad=(n,o)=>!opts.some(p=>p.name===n)||n===o||(isHeld(n)&&freeFor(o).length>0);
