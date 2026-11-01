@@ -395,7 +395,7 @@ body:not([data-view="all"]) .clk{border-left:none;padding-left:0;}
   <span class="seg2" id="pview"></span>
   <div class="tbchip" id="srcchip"></div>
   <div class="tbsp"></div>
-  <span class="tbf">Basis <span class="seg2"><button class="sb" data-basis="rated" title="Yields are the rated capacities in the Roll, and a mill has a lever for every product the Roll lists on it">Topology</button><button class="sb" data-basis="real" title="Proven: yields are the average t/day each mill really ran at on each product, and a mill has a lever for every product it really made (7 days or more)">Proven</button><button class="sb" data-custom="1" title="Lit when a yield or an efficiency you typed no longer matches the basis. Click the basis to get its values back; your mix stays.">Custom</button></span></span>
+  <span class="tbf">Basis <span class="seg2"><button class="sb" data-basis="rated" title="Yields are the rated capacities in the Roll, and a mill has a lever for every product the Roll lists on it">Topology</button><button class="sb" data-basis="real" title="Proven: yields are the average t/day each mill really ran at on each product; a mill has a lever for every product it really made (7 days or more) and, at the rated yield, for one the Roll lists that it has not run yet">Proven</button><button class="sb" data-custom="1" title="Lit when a yield or an efficiency you typed no longer matches the basis. Click the basis to get its values back; your mix stays.">Custom</button></span></span>
   <span class="tbf">Window <span class="seg2"><button class="sb" data-span="12m" title="The last 12 months of real production">12 months</button><button class="sb" data-span="ytd" title="This year up to the last real day, projected to a full year at the same pace">YTD</button></span></span>
   <label class="tbf">Days in year <input class="fi" id="days" type="number" min="1" max="366" style="width:56px" value="365"></label>
   <button class="btn" id="b-undo" disabled title="Undo the last move">↶ Undo</button>
@@ -514,15 +514,17 @@ function buildModel(payload){
     const rated={}; caps(e.id).forEach(c=>{ if(num(c.capacity_tpd)>0) rated[c.product_id]=num(c.capacity_tpd); });
     // Topology: a lever for what the Roll lists on this mill, at the rated yield; a couple of days in the
     // feed is not proof it can make a product. Proven: a lever for what the mill really ran
-    // on MIN_DAYS days or more, at the average it really ran at. Anything else it made stays as a fixed
+    // on MIN_DAYS days or more, at the average it really ran at, and for what the Roll lists but the
+    // mill has not run yet, at the rated yield (unproven). Anything else it made stays as a fixed
     // one-off, so the start still equals the real window (under 10 t is a booking slip, dropped).
-    const pids=(real?Object.keys(by).filter(p=>by[p].days.size>=MIN_DAYS):Object.keys(rated)).filter(p=>prod[p]);
+    const proven=p=>!!(by[p]&&by[p].days.size>=MIN_DAYS);
+    const pids=(real?[...new Set([...Object.keys(by).filter(proven),...Object.keys(rated)])]:Object.keys(rated)).filter(p=>prod[p]);
     if(!pids.length) return;
     const mk=pid=>{ const name=prod[pid].name, short=shortName(name), f=family(short), b=by[pid]; const rc=recipe(pid); return {id:pid,name,short,c:f.c,r:f.r,clk:rc.clk,gyp:rc.gyp,rated:rated[pid]||0,real:b?{t:b.t,days:b.days.size,y:b.d>0?Math.round(b.t/b.d):0}:null}; };
     const fixed=Object.keys(by).filter(p=>!pids.includes(p)&&prod[p]&&by[p].t>=10).map(pid=>{ const x=mk(pid); x.t=by[pid].t*ann; x.base={clk:x.clk}; return x; });
     const list=pids.map(pid=>{
-      const x=mk(pid), y=real?x.real.y:x.rated, t=(by[pid]?by[pid].t:0)*ann;
-      return Object.assign(x,{yield:y,share:0,base:{yield:y,t,clk:x.clk}});
+      const x=mk(pid), y=real&&proven(pid)?x.real.y:x.rated, t=(by[pid]?by[pid].t:0)*ann;
+      return Object.assign(x,{yield:y,share:0,unproven:real&&!proven(pid),base:{yield:y,t,clk:x.clk}});
     }).sort((x,y)=>x.r-y.r||x.short.localeCompare(y.short));
     const hrs=list.map(p=>p.yield>0?p.base.t/p.yield:0), sum=hrs.reduce((a,b)=>a+b,0);
     list.forEach((p,i)=>{ p.share=sum>0?hrs[i]/sum:(i?0:1); p.base.share=p.share; });
@@ -580,7 +582,7 @@ function tmplLever(m,p,i){
     <span class="ufi pct"><i>%</i><input class="fi" type="number" min="0" max="100" step="0.5" data-pct="${m.id}|${i}" title="Share of this mill's time" ${off}></span></div>`;
 }
 const yieldNote=p=>{ const ran=p.real?`really ran ${esc(p.short)} at ${fmt(p.real.y)} t/d on ${p.real.days} days (${wl()})`:`did not make ${esc(p.short)} in the ${wl()}`;
-  return M.basis==='real'?`${p.short} yield: the average of the days it ${ran}`+(p.rated?` · rated ${fmt(p.rated)} t/d in the Roll`:' · not listed for this mill in the Roll'):`${p.short} yield: rated t/day in the Roll at 100% efficiency · ${ran}`; };
+  return M.basis==='real'?(p.unproven?`${p.short} yield: rated ${fmt(p.rated)} t/d in the Roll, nothing proven yet: the mill ${ran}`:`${p.short} yield: the average of the days it ${ran}`+(p.rated?` · rated ${fmt(p.rated)} t/d in the Roll`:' · not listed for this mill in the Roll')):`${p.short} yield: rated t/day in the Roll at 100% efficiency · ${ran}`; };
 const hasLever=name=>M.plants.some(pl=>pl.mills.some(m=>m.products.some(p=>p.name===name)));
 const plantProds=pl=>[...new Map(pl.mills.flatMap(m=>[...m.products,...m.fixed]).map(p=>[p.name,p])).values()].sort((a,b)=>a.r-b.r||a.short.localeCompare(b.short));
 function setClk(pl,name,v){ pl.mills.forEach(m=>[...m.products,...m.fixed].forEach(p=>{ if(p.name===name) p.clk=v; })); }
