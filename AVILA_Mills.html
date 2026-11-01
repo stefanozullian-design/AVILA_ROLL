@@ -792,7 +792,7 @@ function assessHTML(pl){ const id=esc(pl.id), f=(k,lbl,title,step)=>`<span class
     <div class="asgrid one">
       <div class="asright">
         <div class="ascards" id="as-cards-${id}"></div>
-        <div class="aschh">Fixed at their totals: <span id="as-fx-${id}"></span> · variable <select data-swa="${id}" title="Cement A: gives way as B grows"></select> ↔ <select data-swb="${id}" title="Cement B: its share of A+B runs along the bottom"></select></div>
+        <div class="aschh">Held: <span id="as-fx-${id}"></span> · variable <select data-swa="${id}" title="Cement A: gives way as B grows"></select> ↔ <select data-swb="${id}" title="Cement B: its share of A+B runs along the bottom"></select></div>
         <div class="aschart" id="as-ch-${id}"><svg></svg></div>
       </div>
     </div></section>`; }
@@ -820,34 +820,33 @@ function assessUpdate(){
     if(bad(sw.a,sw.b)){ const free=freeFor(sw.b).sort((x,y)=>bt(y.name)-bt(x.name)); sw.a=(free[0]||opts.find(p=>p.name!==sw.b)||{}).name; }
     const opt=(sel,v)=>{ sel.innerHTML=opts.map(p=>`<option value="${esc(p.name)}"${p.name===v?' selected':''}>${esc(p.short)}</option>`).join(''); };
     opt(selA,sw.a); opt(selB,sw.b);
-    $('as-fx-'+id).textContent=prods.filter(p=>p.name!==sw.a&&p.name!==sw.b).map(p=>`${p.short} ${kt(pl.prods[p.name]?pl.prods[p.name].t:0)}`).join(' · ')||'nothing else';
+    $('as-fx-'+id).textContent=prods.filter(p=>isHeld(p.name)).map(p=>`${p.short} ${kt(M.locks[p.name])}`).join(' · ')||'none, the other cements float';
     if(M.view===id) drawCurve(pl);
   });
 }
-// The chart: two cements of the plant trade against each other while every other cement stays at its
-// total. Along the bottom, B's share of A+B. For each point the cheapest mix of this plant's mills that
-// keeps every total, drawn as stacked tonnes (fixed cements hatched at the bottom, then A, then B) with
+// The chart: two cements of the plant trade against each other; the cements the user holds keep their
+// totals and the rest float. Along the bottom, B's share of A+B. For each point the cheapest mix of this
+// plant's mills that keeps every hold, drawn as stacked tonnes (the other cements hatched at the bottom, then A, then B) with
 // the mix's USD/STn (left axis) and kg CO₂/t (right axis) over it. Solved on a scratch copy of the mix and
 // put back; cached until a yield, efficiency, hold, total, recipe or price moves.
 const _curve={};
 const shortOf=(pl,name)=>{ const p=plantProds(pl).find(x=>x.name===name); return p?p.short:String(name||''); };
 function sweepCurve(pl,sw){
-  const a=sw.a, b=sw.b, others=Object.values(pl.prods||{}).filter(q=>q.name!==a&&q.name!==b);
-  const key=JSON.stringify([a,b,M.days,M.locks,econ(pl.id),others.map(q=>[q.name,Math.round(q.t)]),pl.mills.map(m=>[m.eff,m.products.map(p=>[p.yield,p.clk,p.gyp])])]);
+  const a=sw.a, b=sw.b;
+  const key=JSON.stringify([a,b,M.days,M.locks,econ(pl.id),pl.mills.map(m=>[m.eff,m.products.map(p=>[p.yield,p.clk,p.gyp])])]);
   if(_curve[pl.id]&&_curve[pl.id].key===key) return _curve[pl.id];
   const pts=[]; let note='';
   if(!a||!b||a===b) note='pick two different cements';
   else if(isHeld(a)||isHeld(b)) note=`${shortOf(pl,isHeld(a)?a:b)} is held: release it, or pick another pair`;
   else {
     const s0=snapshot(); calc();
-    others.forEach(q=>{ if(hasLever(q.name)&&!isHeld(q.name)) M.locks[q.name]=q.t; });   // the rest stays where it is
-    const s1=snapshot(), vars=()=>varsFor(m=>pl.mills.includes(m),1e-3), qB=()=>{ const R=calc(); return R.byProd[b]?R.byProd[b].t:0; };
+    const s1=s0, vars=()=>varsFor(m=>pl.mills.includes(m),1e-3), qB=()=>{ const R=calc(); return R.byProd[b]?R.byProd[b].t:0; };
     let lo=0, hi=0, ok=lpMove(vars(),v=>v.p.name===b?-v.p.yield:0); if(ok) lo=qB(); restore(s1);
     if(ok){ ok=lpMove(vars(),v=>v.p.name===b?v.p.yield:0); if(ok) hi=qB(); restore(s1); }
-    if(!ok) note='the other cements cannot all stay at their totals on these mills';
+    if(!ok) note='the holds cannot all be met on these mills';
     else { const N=hi-lo>1?30:0;
       for(let k=0;k<=N;k++){ const x=lo+(hi-lo)*k/Math.max(1,N); M.locks[b]=x; if(lpMove(vars(),v=>-costOf(pl,v.p)*v.p.yield)){ calc(); const pe=plantEcon(pl); pts.push({c:pe.cpt,e:pe.ept,t:pe.t,bands:Object.fromEntries(Object.values(pl.prods).map(q=>[q.name,q.t]))}); } restore(s1); }
-      if(pts.length<2) note=`${shortOf(pl,b)} has no room against ${shortOf(pl,a)} with the rest fixed`; }
+      if(pts.length<2) note=`${shortOf(pl,b)} has no room against ${shortOf(pl,a)} with these holds`; }
     restore(s0); calc();
   }
   pts.forEach(q=>{ const A=q.bands[a]||0, B=q.bands[b]||0; q.x=A+B>0?B/(A+B):0; });
