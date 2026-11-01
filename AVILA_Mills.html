@@ -374,7 +374,13 @@ body:not([data-view="all"]) .plant{max-width:none;}
 body:not([data-view="all"]) .clk{border-left:none;padding-left:0;}
 /* ── Scenarios: the left column beside the clinker strip and the cement hero; the plants row spans both ── */
 main#app{display:grid;grid-template-columns:minmax(345px,.25fr) minmax(0,1fr);grid-template-rows:auto auto auto 1fr;}
-#scen{grid-column:1;grid-row:1/4;display:flex;flex-direction:column;min-width:0;min-height:0;}
+#scen{grid-column:1;grid-row:1/4;display:flex;flex-direction:column;min-width:0;min-height:0;position:relative;}
+/* movable borders: the gutter sits in the gap right of the left-hand card; drag it, double-click to reset */
+#h-prods,.plant{position:relative;}
+.gut{position:absolute;top:0;bottom:0;right:-10px;width:10px;cursor:col-resize;z-index:6;touch-action:none;}
+.gut::after{content:'';position:absolute;left:4px;top:0;bottom:0;width:2px;background:transparent;transition:background .15s;}
+.gut:hover::after,.gut.on::after{background:var(--green);}
+body[data-view="all"] #h-prods .gut,body[data-view="all"] .plant .gut{display:none;}
 #clinker{grid-column:2;grid-row:1;} #cemh{grid-column:2;grid-row:2;} #hero{grid-column:2;grid-row:3;} #plants{grid-column:1/-1;grid-row:4;}
 #scen .phead{gap:8px;}
 .scname{flex:1;min-width:0;background:none;border:0;border-bottom:1px solid transparent;font-family:var(--sans);font-weight:800;font-size:15px;letter-spacing:.3px;color:var(--text);outline:none;padding:0;}
@@ -461,6 +467,7 @@ main#app{display:grid;grid-template-columns:minmax(345px,.25fr) minmax(0,1fr);gr
   <section class="card" id="scen">
     <div class="phead"><input id="sc-name" class="scname" placeholder="Working copy · not saved" title="This scenario's name: type to rename" spellcheck="false"><span class="scbtns"><button class="sb" id="sc-delta" title="Show the other scenarios as the difference from the one on screen">Δ</button><button class="btn" id="sc-new" title="A new scenario that starts from what is on screen. Everything you change afterwards is kept in it.">+ New</button><button class="btn" id="sc-del" title="Forget this scenario; what is on screen stays">Delete</button></span></div>
     <div class="scbody"><table class="astab sctab" id="sc-tab"></table></div>
+    <div class="gut" data-g="main" title="Drag to change the width · double-click to reset"></div>
   </section>
   <section class="card" id="clinker">
     <div class="sech"><span class="t">Clinker production</span><span class="s">What the kilns make, against what the cement mix on this page needs</span></div>
@@ -477,6 +484,7 @@ main#app{display:grid;grid-template-columns:minmax(345px,.25fr) minmax(0,1fr);gr
     <div class="card" id="h-prods">
       <div class="herolbl" id="h-prodlbl"></div>
       <div id="prodlist"></div>
+      <div class="gut" data-g="hero" title="Drag to change the width · double-click to reset"></div>
     </div>
   </div></section>
   <section id="plants"></section>
@@ -708,6 +716,7 @@ function plantHTML(pl){
       <div class="lbl leg" style="grid-row:5"><div class="lgh"><span>Product</span><span>CLK FCT</span></div>${totSegs.map(p=>`<div class="lg"><span class="dot" style="background:var(${p.c})"></span><span title="${esc(p.name)}">${esc(p.short)}</span><input class="fi" type="number" min="0" max="1" step="0.001" data-clk="${id}|${esc(p.name)}" title="Clinker factor: tonnes of clinker per tonne of ${esc(p.short)}, from its recipe"></div>`).join('')}</div>
       ${pl.mills.map(m=>`<div class="cell">${m.products.map((p,i)=>tmplLever(m,p,i)).join('')}${m.fixed.map(x=>`<div class="clkm" title="Made in the ${wl()} but ${M.basis==='real'?'on fewer than '+MIN_DAYS+' days':'not listed for this mill in the Roll'}. Counted as a fixed amount, no lever.">+ ${fmt(x.t)} t ${esc(x.short)} one-off</div>`).join('')}</div>`).join('')}
     </div>${totcol}</div>
+    <div class="gut" data-g="plants" title="Drag to change the width · double-click to reset"></div>
   </div>`;
 }
 
@@ -813,11 +822,24 @@ function update(){
   assessUpdate(); alignTot(); scenRender();
   scheduleSave();
 }
+// ── Movable borders: the share of the width the left-hand area takes, kept in this browser ──
+const COLS_KEY='avila_mills_cols'; let COLS={};
+function loadCols(){ try{ COLS=JSON.parse(localStorage.getItem(COLS_KEY)||'{}')||{}; }catch(e){ COLS={}; } }
+function applyCols(){ const t=(k,el,min)=>{ if(!el) return; const f=COLS[k]; el.style.gridTemplateColumns=f&&(k==='main'||M.view!=='all')?`minmax(${min},${f}fr) minmax(0,${1-f}fr)`:''; };
+  t('main',$('app'),'240px'); t('hero',$('hero'),'0'); t('plants',$('plants'),'0'); }
+function saveCols(){ try{ localStorage.setItem(COLS_KEY,JSON.stringify(COLS)); }catch(e){} }
+function colsSettled(){ fit(); alignTot(); M.plants.forEach(drawCurve); }
+function gutDrag(e,g){ const k=g.dataset.g, box=k==='main'?$('app'):$(k); if(!box) return; e.preventDefault(); g.classList.add('on'); g.setPointerCapture(e.pointerId);
+  const move=ev=>{ const r=box.getBoundingClientRect(), cs=getComputedStyle(box), pl=parseFloat(cs.paddingLeft)||0, pr=parseFloat(cs.paddingRight)||0, gap=parseFloat(cs.columnGap)||0, W=r.width-pl-pr-gap; if(W<=0) return;
+    COLS[k]=Math.round(clamp((ev.clientX-r.left-pl-gap/2)/W,.12,.85)*1000)/1000; applyCols(); };
+  const up=()=>{ g.classList.remove('on'); g.removeEventListener('pointermove',move); g.removeEventListener('pointerup',up); g.removeEventListener('pointercancel',up); saveCols(); colsSettled(); };
+  g.addEventListener('pointermove',move); g.addEventListener('pointerup',up); g.addEventListener('pointercancel',up); }
+
 // ── One plant on screen, or the network ──
 const viewPlant=()=>M.view&&M.view!=='all'?M.plants.find(pl=>pl.id===M.view)||null:null;
 function applyView(){ if(!M.plants.some(pl=>pl.id===M.view)&&M.view!=='all') M.view=M.plants.length?M.plants[0].id:'all';
   document.body.dataset.view=M.view; $('viewcss').textContent=M.view==='all'?'.assess,.clkecon{display:none;}':`[data-plant]:not([data-plant="${CSS.escape(M.view)}"]){display:none!important;}`; modeBtns();
-  M.plants.forEach(pl=>{ const tc=$('tc-'+pl.id); if(!tc) return; const home=M.view===pl.id?document.querySelector(`.assess[data-plant="${CSS.escape(pl.id)}"] .asbody`):document.querySelector(`#pl-${CSS.escape(pl.id)} .scrollx`); if(home&&tc.parentElement!==home) home.appendChild(tc); }); }
+  M.plants.forEach(pl=>{ const tc=$('tc-'+pl.id); if(!tc) return; const home=M.view===pl.id?document.querySelector(`.assess[data-plant="${CSS.escape(pl.id)}"] .asbody`):document.querySelector(`#pl-${CSS.escape(pl.id)} .scrollx`); if(home&&tc.parentElement!==home) home.appendChild(tc); }); applyCols(); }
 function setView(v){ M.view=v; saveEcon(); applyView(); update(); fit(); alignTot(); requestAnimationFrame(()=>M.plants.forEach(drawCurve)); }
 // Network view: the Total block stands beside the mills, so its rows take the mills' row heights; in a plant view the bar fills the chart's height
 function alignTot(){ M.plants.forEach(pl=>{ const tc=$('tc-'+pl.id); if(!tc) return; const st=document.querySelector(`#pl-${CSS.escape(pl.id)} .stage`);
@@ -1193,7 +1215,8 @@ function dragStart(ev,h){
 }
 
 function wire(){
-  document.addEventListener('pointerdown',e=>{ const h=e.target.closest('.handle'); if(h) dragStart(e,h); });
+  document.addEventListener('pointerdown',e=>{ const h=e.target.closest('.handle'); if(h) dragStart(e,h); const g=e.target.closest('.gut'); if(g) gutDrag(e,g); });
+  document.addEventListener('dblclick',e=>{ const g=e.target.closest('.gut'); if(g){ delete COLS[g.dataset.g]; saveCols(); applyCols(); colsSettled(); } });
   document.addEventListener('keydown',e=>{ const h=e.target.closest&&e.target.closest('.handle'); if(!h||!['ArrowUp','ArrowDown'].includes(e.key)) return; e.preventDefault();
     const [id,idx]=h.dataset.h.split('|'), {m}=findMill(id), up=e.key==='ArrowUp', st=handlesAt(m,+idx), i=up?st[st.length-1]:st[0], s=up?.01:-.01, a=m.products[i], b=m.products[i+1], d=clamp(s,-a.share,b.share); guarded(()=>{ a.share+=d; b.share-=d; SRC=new Set([m.id+'|'+a.name,m.id+'|'+b.name]); }); });
   let burst=0;
@@ -1275,7 +1298,7 @@ async function checkSync(){
 }
 async function boot(){
   try{ const v=JSON.parse(localStorage.getItem(VIEW_KEY)||'null'); if(v){ if(['rated','real'].includes(v.basis)) M.basis=v.basis; if(['12m','ytd'].includes(v.span)) M.span=v.span; } }catch(e){}
-  modeBtns(); wire();
+  loadCols(); modeBtns(); wire();
   setInterval(checkSync,30000);
   addEventListener('focus',checkSync);
   addEventListener('resize',()=>{ clearTimeout(_fzT); _fzT=setTimeout(()=>{ fit(); alignTot(); M.plants.forEach(drawCurve); },120); });
