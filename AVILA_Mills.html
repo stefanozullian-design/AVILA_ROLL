@@ -386,6 +386,8 @@ body:not([data-view="all"]) .clk{border-left:none;padding-left:0;}
 .aschart .cur{fill:none;stroke-width:2;stroke-linejoin:round;} .aschart .cur.c{stroke:var(--text);} .aschart .cur.e{stroke:var(--amber);stroke-dasharray:5 3;}
 .aschart .area{opacity:.5;} .aschart .area.fx{opacity:1;} .aschart .lab.b{fill:var(--text);font-weight:700;}
 .aschart .now{stroke:var(--text);stroke-dasharray:3 3;opacity:.55;}
+.aschart .guide{stroke-dasharray:2 3;opacity:.8;stroke-width:1.2;} .aschart .guide.c{stroke:var(--text);} .aschart .guide.e{stroke:var(--amber);}
+.aschart .nowbox rect{fill:var(--surface);stroke:var(--border2);opacity:.96;} .aschart .nowbox text{font-family:var(--mono);font-size:10px;font-weight:700;fill:var(--text);} .aschart .nowbox text.c{fill:var(--text);} .aschart .nowbox text.e{fill:var(--amber);}
 .aschart .dot2.c{fill:var(--text);stroke:var(--surface);stroke-width:1.5;} .aschart .dot2.e{fill:var(--amber);stroke:var(--surface);stroke-width:1.5;}
 .aschart .lab{font-family:var(--mono);font-size:9px;fill:var(--text-dim);} .aschart .lab.c{fill:var(--green);} .aschart .lab.e{fill:var(--amber);} .aschart .lab.t{fill:var(--text);font-weight:700;}
 @media (max-width:720px){#hero{grid-template-columns:1fr;}.phead .psub{display:none;}.tbchip{display:none;}#topbar{overflow-x:auto;}.stage{min-width:max-content;}.prow{grid-template-columns:82px minmax(30px,1fr) 58px 58px 38px;gap:5px;}}
@@ -880,12 +882,16 @@ function drawCurve(pl){
     +[0,.25,.5,.75,1].map(f=>`<line class="gl2" x1="${X(xlo+(xhi-xlo)*f).toFixed(1)}" x2="${X(xlo+(xhi-xlo)*f).toFixed(1)}" y1="${pad.t}" y2="${pad.t+yh}"/>`).join('')
     +`<line class="ax" x1="${pad.l}" y1="${pad.t+yh}" x2="${W-pad.r}" y2="${pad.t+yh}"/>`
     +`<path class="cur c" d="${line(q=>YC(q.c))}"/><path class="cur e" d="${line(q=>YE(q.e))}"/>`
-    +(pts.length>1?`<line class="now" x1="${X(clamp(xn,xlo,xhi)).toFixed(1)}" x2="${X(clamp(xn,xlo,xhi)).toFixed(1)}" y1="${pad.t}" y2="${pad.t+yh}"/><circle class="dot2 c" cx="${X(clamp(xn,xlo,xhi)).toFixed(1)}" cy="${YC(pe.cpt).toFixed(1)}" r="4.5"/><circle class="dot2 e" cx="${X(clamp(xn,xlo,xhi)).toFixed(1)}" cy="${YE(pe.ept).toFixed(1)}" r="4.5"/>`:'')
+    +(pts.length>1?(()=>{ const x=X(clamp(xn,xlo,xhi)), yc=YC(pe.cpt), ye=YE(pe.ept), right=x>pad.l+xw*0.62, bx=right?x-12-118:x+12, by=clamp(Math.min(yc,ye)-8,pad.t+2,pad.t+yh-46);
+      return `<line class="now" x1="${x.toFixed(1)}" x2="${x.toFixed(1)}" y1="${pad.t}" y2="${pad.t+yh}"/>`
+        +`<line class="guide c" x1="${pad.l}" x2="${x.toFixed(1)}" y1="${yc.toFixed(1)}" y2="${yc.toFixed(1)}"/><line class="guide e" x1="${x.toFixed(1)}" x2="${W-pad.r}" y1="${ye.toFixed(1)}" y2="${ye.toFixed(1)}"/>`
+        +`<text class="lab t c" x="${pad.l-5}" y="${(yc+3).toFixed(1)}" text-anchor="end">${fx(pe.cpt,2)}</text><text class="lab t e" x="${W-pad.r+5}" y="${(ye+3).toFixed(1)}" text-anchor="start">${fx(pe.ept,0)}</text>`
+        +`<circle class="dot2 c" cx="${x.toFixed(1)}" cy="${yc.toFixed(1)}" r="4.5"/><circle class="dot2 e" cx="${x.toFixed(1)}" cy="${ye.toFixed(1)}" r="4.5"/>`
+        +`<g class="nowbox"><rect x="${bx.toFixed(1)}" y="${by.toFixed(1)}" width="118" height="44" rx="2"/><text x="${(bx+6).toFixed(1)}" y="${(by+13).toFixed(1)}">now ${pc(xn)} ${sb}</text><text class="c" x="${(bx+6).toFixed(1)}" y="${(by+26).toFixed(1)}">${fx(pe.cpt,2)} $/STn</text><text class="e" x="${(bx+6).toFixed(1)}" y="${(by+39).toFixed(1)}">${fx(pe.ept,0)} kg CO₂/t</text></g>`; })():'')
     +labels
-    +yl(YC,'c',c1,2,pad.l-5,'end')+yl(YC,'c',c0,2,pad.l-5,'end')+yl(YE,'e',e1,0,W-pad.r+5,'start')+yl(YE,'e',e0,0,W-pad.r+5,'start')
+    +[[YC,'c',c1,2,pad.l-5,'end',pe.cpt],[YC,'c',c0,2,pad.l-5,'end',pe.cpt],[YE,'e',e1,0,W-pad.r+5,'start',pe.ept],[YE,'e',e0,0,W-pad.r+5,'start',pe.ept]].map(([f,cls,v,d,x,an,cur])=>pts.length>1&&Math.abs(f(v)-f(cur))<11?'':yl(f,cls,v,d,x,an)).join('')
     +`<text class="lab c" x="${pad.l-5}" y="${pad.t-6}" text-anchor="end">USD/STn</text><text class="lab e" x="${W-pad.r+5}" y="${pad.t-6}" text-anchor="start">kg CO₂/t</text>`
     +`<text class="lab" x="${pad.l}" y="${H-7}" text-anchor="start">${pc(xlo)} ${sb}${xlo<1e-6?' · all '+sa:''}</text><text class="lab" x="${(pad.l+xw/2).toFixed(1)}" y="${H-7}" text-anchor="middle">${sb} as % of ${sa}+${sb}</text><text class="lab" x="${W-pad.r}" y="${H-7}" text-anchor="end">${pc(xhi)} ${sb}${xhi>0.999999?' · all '+sb:' · the most the mills can make'}</text>`
-    +(pts.length>1?`<text class="lab t" x="${clamp(X(clamp(xn,xlo,xhi)),pad.l+100,W-pad.r-100).toFixed(1)}" y="${pad.t+10}" text-anchor="middle">now ${pc(xn)} ${sb} · ${fx(pe.cpt,2)} $/STn · ${fx(pe.ept,0)} kg/t</text>`:'')
     +(cv.note?`<text class="lab" x="${(W/2).toFixed(1)}" y="${(pad.t+yh/2).toFixed(1)}" text-anchor="middle">${esc(cv.note)}</text>`:'');
 }
 const npd=x=>Math.max(0,M.days*(1-x.eff));   // Non Productive Days and efficiency are one number, shown two ways
