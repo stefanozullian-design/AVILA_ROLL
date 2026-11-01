@@ -387,6 +387,10 @@ body[data-view="all"] #h-prods .gut,body[data-view="all"] .plant .gut{display:no
 #scen .phead{gap:8px;}
 .scname{flex:1;min-width:0;background:none;border:0;border-bottom:1px solid transparent;font-family:var(--mono);font-weight:700;font-size:12px;letter-spacing:.2px;color:var(--text);outline:none;padding:0;}
 .scname:focus{border-bottom-color:var(--green);} .scname:read-only{color:var(--text-dim);font-weight:600;cursor:default;}
+.scpick{display:none;flex:1;min-width:0;gap:4px 10px;flex-wrap:wrap;align-items:center;}
+body[data-view="all"] .scpick{display:flex;} body[data-view="all"] #sc-name{display:none;}
+.scpick label{font-family:var(--mono);font-size:10px;font-weight:700;color:var(--text-dim);display:flex;align-items:center;gap:4px;white-space:nowrap;}
+.scpick select{font-family:var(--mono);font-size:11px;font-weight:700;background:var(--surface2);color:var(--text);border:1px solid var(--border2);padding:2px 4px;max-width:160px;}
 .scbtns{display:flex;gap:4px;flex-shrink:0;} .scbtns .btn{padding:4px 7px;letter-spacing:.5px;} .scbtns .btn.arm{border-color:var(--red);color:var(--red);}
 .scbtns .sb{padding:4px 8px;border:1px solid var(--border2);font-size:11px;}
 .scbody{flex:1;min-height:0;overflow:auto;padding:4px 10px 8px;}
@@ -470,7 +474,7 @@ body[data-view="all"] #h-prods .gut,body[data-view="all"] .plant .gut{display:no
 <style id="viewcss"></style>
 <main id="app" style="display:none">
   <section class="card" id="scen">
-    <div class="phead"><input id="sc-name" class="scname" placeholder="Working copy · not saved" title="This scenario's name: type to rename" spellcheck="false"><span class="scbtns"><button class="sb" id="sc-delta" title="Show the other scenarios as the difference from the one on screen">Δ</button><button class="btn" id="sc-new" title="A new scenario that starts from what is on screen. Everything you change afterwards is kept in it.">+ New</button><button class="btn" id="sc-del" title="Forget this scenario; what is on screen stays">Delete</button></span></div>
+    <div class="phead"><input id="sc-name" class="scname" placeholder="Working copy · not saved" title="This scenario's name: type to rename" spellcheck="false"><span id="sc-pick" class="scpick"></span><span class="scbtns"><button class="sb" id="sc-delta" title="Show the other scenarios as the difference from the one on screen">Δ</button><button class="btn" id="sc-new" title="A new scenario that starts from what is on screen. Everything you change afterwards is kept in it.">+ New</button><button class="btn" id="sc-del" title="Forget this scenario; what is on screen stays">Delete</button></span></div>
     <div class="scbody"><table class="astab sctab" id="sc-tab"></table></div>
     <div class="gut" data-g="main" title="Drag to change the width · double-click to reset"></div>
   </section>
@@ -1037,7 +1041,9 @@ function scenApplyPlant(pl,x,perf){ if(!x||!x.state) return; const nm=plantNames
 function scenApply(){ M.plants.forEach(pl=>{ const x=scenActiveOf(pl); if(x) scenApplyPlant(pl,x,x.basis===M.basis&&x.span===M.span); }); }
 function scenNew(){ const vp=viewPlant(); if(!vp) return; saveNow(); const q=scenP(vp.id), x=scenActiveOf(vp), id='s'+Date.now().toString(36);
   q.list.push({id,name:x?x.name+' copy':vp.name+' '+(q.list.length+1),ts:Date.now()}); q.active=id; scenSync(); update(); const f=$('sc-name'); f.focus(); f.select(); }
-function scenGo(id){ const vp=viewPlant(); if(!vp) return; const q=scenP(vp.id); if(id===q.active||!q.list.some(x=>x.id===id)) return; saveNow(); q.active=id; scenWrite(); const x=scenActiveOf(vp);
+function scenGo(id,pl){ const vp=pl||viewPlant(); if(!vp) return; const q=scenP(vp.id); if(id===q.active) return;
+  if(!id){ saveNow(); q.active=null; scenWrite(); update(); return; }   // "working copy": leave the scenario, keep what is on screen
+  if(!q.list.some(x=>x.id===id)) return; saveNow(); q.active=id; scenWrite(); const x=scenActiveOf(vp);
   if(x.basis&&x.span&&(x.basis!==M.basis||x.span!==M.span)){ M.basis=x.basis; M.span=x.span; try{ localStorage.setItem(VIEW_KEY,JSON.stringify({basis:M.basis,span:M.span})); }catch(e){} rebuild(); return; }
   scenApplyPlant(vp,x,true); undo=[]; SRC=null; update(); }
 let _delT=0;
@@ -1046,7 +1052,9 @@ function scenDel(){ const vp=viewPlant(), x=scenActive(), b=$('sc-del'); if(!vp|
   clearTimeout(_delT); b.classList.remove('arm'); b.textContent='Delete'; const q=scenP(vp.id); q.list=q.list.filter(y=>y.id!==x.id); q.active=null; scenWrite(); update(); }
 function scenRender(){ const tab=$('sc-tab'); if(!tab) return; const vp=viewPlant(), x=scenActive(), cur=scenSummary(), f=$('sc-name');
   if(vp){ if(document.activeElement!==f) f.value=x?x.name:''; f.readOnly=!x; f.placeholder='Working copy · not saved'; $('sc-new').style.display=''; $('sc-del').style.display=x?'':'none'; }
-  else { f.value=M.plants.map(pl=>{ const y=scenActiveOf(pl); return pl.name+': '+(y?y.name:'working copy'); }).join(' · '); f.readOnly=true; f.placeholder=''; $('sc-new').style.display='none'; $('sc-del').style.display='none'; }
+  else { f.value=''; f.readOnly=true; f.placeholder=''; $('sc-new').style.display='none'; $('sc-del').style.display='none';
+    const pk=$('sc-pick'), key=JSON.stringify(M.plants.map(pl=>{ const q=scenP(pl.id); return [pl.id,q.active,q.list.map(y=>[y.id,y.name])]; }));
+    if(pk.dataset.key!==key){ pk.dataset.key=key; pk.innerHTML=M.plants.map(pl=>{ const q=scenP(pl.id); return `<label>${esc(pl.name)}<select data-scsel="${esc(pl.id)}" title="Which of ${esc(pl.name)}'s scenarios the network uses"><option value=""${q.active?'':' selected'}>working copy</option>${q.list.map(y=>`<option value="${esc(y.id)}"${y.id===q.active?' selected':''}>${esc(y.name)}</option>`).join('')}</select></label>`; }).join(''); } }
   $('sc-delta').classList.toggle('on',!!SCEN.delta);
   const P=(o,id)=>o&&o.plants&&o.plants[id]||null, sumP=(o,k)=>M.plants.reduce((a,pl)=>{ const q=P(o,pl.id); return a+(q?num(q[k]):0); },0);
   const rows=[], add=(l,g,d,low,sep)=>rows.push({l,g,d,low,sep});   // low: a lower number is the better one
@@ -1311,6 +1319,7 @@ function wire(){
   $('sc-new').onclick=scenNew; $('sc-del').onclick=scenDel;
   $('sc-delta').onclick=()=>{ SCEN.delta=!SCEN.delta; scenWrite(); scenRender(); };
   $('sc-name').onchange=e=>{ const x=scenActive(); if(!x){ scenRender(); return; } x.name=e.target.value.trim()||x.name; scenWrite(); scenRender(); };
+  document.addEventListener('change',e=>{ const t=e.target; if(!t.dataset.scsel) return; const pl=M.plants.find(x=>x.id===t.dataset.scsel); if(pl) scenGo(t.value,pl); });
   document.addEventListener('keydown',e=>{ if(e.key==='Enter'&&e.target.id==='sc-name') e.target.blur(); });
   document.addEventListener('click',e=>{ const th=e.target.closest('th.scol[data-sc]'); if(th&&th.dataset.sc) scenGo(th.dataset.sc); });
   $('b-reset').onclick=()=>{ pushUndo(); M.locks={}; M.days=365; $('days').value=365; M.plants.forEach(pl=>{ pl.extra=0; plantProds(pl).forEach(p=>setClk(pl,p.name,p.base.clk)); pl.mills.forEach(resetMill); pl.kilns.forEach(k=>{ k.rated=k.base.rated; k.eff=k.base.eff; }); }); update(); };
