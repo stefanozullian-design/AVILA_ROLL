@@ -1011,6 +1011,12 @@ td.sx-dm.sx-nwd>input.dem-cell{border:1px dashed rgba(var(--red-rgb),.5);}
   border-right:3px solid rgba(var(--hi-rgb),.32)!important;
   box-shadow:inset 0 0 0 999px rgba(var(--hi-rgb),.045);
 }
+/* Year-total columns (Σ YYYY) on the Demand and Supply tables — heavier than a month total */
+#supply-table-wrap .sx-ycol,#demand-table-wrap .sx-ycol{
+  border-left:3px double rgba(var(--hi-rgb),.6)!important;
+  border-right:3px solid rgba(var(--hi-rgb),.32)!important;
+  box-shadow:inset 0 0 0 999px rgba(var(--hi-rgb),.09);
+}
 
 /* Text labels for color coding legend */
 .label-real{color:var(--real);font-weight:700;}
@@ -1816,6 +1822,7 @@ td.camp-drag-cut>div:first-child{opacity:.3}
           </div>
         </div>
         <div style="margin-left:auto;display:flex;gap:6px">
+          <button class="tb-btn sec" id="dem-months-btn" onclick="_demToggleAllMonths()" title="Fold every month to its total — only the month and year totals stay">◂ Collapse months</button>
           <button class="tb-btn sec" onclick="demandScrollToday()">Today</button>
           <button class="tb-btn" onclick="saveDemandValues()" style="background:var(--green);color:var(--bg)">↓ Save Forecast</button>
         </div>
@@ -1908,7 +1915,8 @@ td.camp-drag-cut>div:first-child{opacity:.3}
           <input type="checkbox" id="sup-show-inactive" onchange="window._supShowInactive=this.checked;renderSupplyView()" style="width:14px;height:14px;accent-color:var(--green);cursor:pointer">
           <span>Show inactive</span>
         </label>
-        <!-- Today button -->
+        <!-- Collapse / expand every month (the month and year totals stay) · Today -->
+        <button class="tb-btn sec" id="sup-months-btn" style="font-size:9px;padding:3px 10px" onclick="_supToggleAllMonths()" title="Fold every month to its total — only the month and year totals stay">◂ Collapse months</button>
         <button class="tb-btn sec" style="font-size:9px;padding:3px 10px" onclick="supplyScrollToday()">Today</button>
       </div>
 
@@ -2094,6 +2102,7 @@ td.camp-drag-cut>div:first-child{opacity:.3}
               <div class="tp-header-left">
                 <button class="vw-btn logi-charts-btn" onclick="_toggleLogiCharts()" title="Show/hide the inventory charts to give the tables more room">Hide Charts</button>
                 <button class="vw-btn logi-months-btn" onclick="_toggleLogiMonths()" title="Show/hide the monthly summary columns">Hide Monthly Totals</button>
+                <button class="vw-btn logi-fold-btn" onclick="_toggleLogiFold()" title="Fold every month to its total — only the month and year totals stay">Collapse Months</button>
                 <button class="vw-btn logi-sim-toggle" onclick="_toggleAutoPropose()" title="When ON, Run Simulation auto-proposes vessel calls to cover shortfalls. When OFF (Forecast mode), it only projects inventory from vessels/rail you have proposed — it adds nothing.">Auto-Propose: ON</button>
               </div>
             </div>
@@ -2138,6 +2147,7 @@ td.camp-drag-cut>div:first-child{opacity:.3}
               <div class="tp-header-left">
                 <button class="vw-btn logi-charts-btn" onclick="_toggleLogiCharts()" title="Show/hide the inventory charts to give the tables more room">Hide Charts</button>
                 <button class="vw-btn logi-months-btn" onclick="_toggleLogiMonths()" title="Show/hide the monthly summary columns">Hide Monthly Totals</button>
+                <button class="vw-btn logi-fold-btn" onclick="_toggleLogiFold()" title="Fold every month to its total — only the month and year totals stay">Collapse Months</button>
                 <button class="vw-btn logi-sim-toggle" onclick="_toggleAutoPropose()" title="When ON, Run Simulation auto-proposes vessel calls to cover shortfalls. When OFF (Forecast mode), it only projects inventory from vessels/rail you have proposed — it adds nothing.">Auto-Propose: ON</button>
               </div>
             </div>
@@ -9429,6 +9439,9 @@ function renderDemandView(){
   h+=`</tbody></table>`;
   wrap.innerHTML=h;
   _monthTotalsToEnd(wrap,'dem-day-',false); // month total at END of each month
+  window._demMonths=months.map(m=>m.ym);
+  _yearTotalsAfterMonths(wrap,'dem-day-',months,collapsed,'_demToggleYear'); // Σ YYYY after each year
+  _monthsBtnLabel('dem-months-btn',collapsed,window._demMonths);
 
   // Sync top scrollbar + fix Total ALL sticky top
   const topScroll=document.getElementById('dem-top-scroll');
@@ -9699,6 +9712,10 @@ function _demToggleMonth(ym){
   else window._demColapsed.add(ym);
   renderDemandView();
 }
+// Σ YYYY header click: fold that year's months to their totals, or open them when all are folded.
+function _demToggleYear(y){ _foldMonths(window._demColapsed,(window._demMonths||[]).filter(m=>m.slice(0,4)===y)); renderDemandView(); }
+// Toolbar button: every month in view folded (month + year totals only) ⇄ every month open.
+function _demToggleAllMonths(){ _foldMonths(window._demColapsed,window._demMonths||[]); renderDemandView(); }
 
 // Shared by the Today buttons (Demand + Supply): put today's column exactly 7 day-columns
 // to the right of the sticky row-header column, so the user sees the week before today.
@@ -9882,16 +9899,23 @@ function _logiYearTotalsToEnd(root, cls, monYms, yearEnds, nYears){
   });
 }
 // Header variant: inserts a Σ YYYY <th> after each year's last month header cell.
-function _logiYearHeader(root, cls, monYms, yearEnds){
+// `toggleFn` + `collapsed` (optional): the cell folds / opens that year's months on click.
+function _logiYearHeader(root, cls, monYms, yearEnds, toggleFn, collapsed){
   if(!root) return;
   const mcols=[...root.children].filter(c=>(c.className||'').includes(cls));
   if(mcols.length!==monYms.length) return;
   mcols.forEach((th,k)=>{
     if(!yearEnds[k]) return;
+    const y=monYms[k].slice(0,4);
     const yth=document.createElement('th');
     yth.className='logi-ycol';
     yth.setAttribute('style','border-left:3px double var(--border2);border-right:1px solid var(--border2);color:var(--total);font-size:8px;font-weight:700;text-align:center;padding:4px 7px;position:sticky;top:0;background:var(--surface2);white-space:nowrap');
-    yth.textContent='Σ '+monYms[k].slice(0,4);
+    if(toggleFn){
+      const yms=monYms.filter(m=>m.slice(0,4)===y), allCol=!!collapsed&&yms.every(m=>collapsed.has(m));
+      yth.innerHTML=`<span style="margin-right:3px">${allCol?'▶':'▼'}</span>Σ ${y}`;
+      yth.title=allCol?`Open the months of ${y}`:`Fold the months of ${y} to their totals`;
+      yth.style.cursor='pointer'; yth.setAttribute('onclick',`${toggleFn}('${y}')`);
+    } else yth.textContent='Σ '+y;
     th.parentNode.insertBefore(yth, th.nextSibling);
   });
 }
@@ -9900,6 +9924,73 @@ function _logiYearMeta(months){
   const monYms=months.map(m=>m.ym);
   const yearEnds=months.map((m,i)=>i===months.length-1||months[i+1].ym.slice(0,4)!==m.ym.slice(0,4));
   return {monYms, yearEnds, nYears:yearEnds.filter(Boolean).length};
+}
+
+// ── Year-total columns for the Demand and Supply tables (post-render DOM pass) ──
+// Runs AFTER _monthTotalsToEnd(wrap, dayCls, false): in every row the cells after the label are
+// day cells (class dayCls + 'YYYY-MM') and one unclassed month-total cell at the END of each month.
+// This inserts a Σ YYYY cell after each year's last month — in the header (a click folds or opens
+// that year's months) and in every row whose month cells line up with the header.
+//   • A row's Σ is the sum of its month totals. A month cell marked sx-mavg (the inventory rows,
+//     which show a monthly average) gives a day-weighted average for the year instead.
+//   • A unit suffix after the number ("12d") is kept; a blank month row stays blank.
+//   • Full-width rows (one cell with a colspan) are widened by the number of year columns.
+//   • The year cell copies the month cell's inline style, so it keeps the row's colour; the
+//     sx-ycol rule in <style> gives it the heavier double border.
+function _yearTotalsAfterMonths(wrap, dayCls, months, collapsed, toggleFn){
+  if(!wrap||!months||!months.length) return;
+  const monYms=months.map(m=>m.ym), monDays=months.map(m=>(m.dates||m.days||[]).length||1);
+  const yearEnds=monYms.map((ym,i)=>i===monYms.length-1||monYms[i+1].slice(0,4)!==ym.slice(0,4));
+  const nYears=yearEnds.filter(Boolean).length;
+  const num=txt=>{ const m=/^\s*(-?[\d,]*\.?\d+)\s*([A-Za-z%]*)/.exec(txt||''); return m?{v:parseFloat(m[1].replace(/,/g,'')),u:m[2]||''}:null; };
+  wrap.querySelectorAll('tr').forEach(tr=>{
+    const cells=[...tr.children]; if(cells.length<2) return;
+    const mcols=cells.slice(1).filter(c=>!(c.className||'').includes(dayCls));
+    if(mcols.length!==monYms.length){
+      // Not a month-grid row: a full-width divider / section header spans the new columns too.
+      const wide=cells.find(c=>(parseInt(c.getAttribute('colspan'))||1)>1);
+      if(wide){ const cs=parseInt(wide.getAttribute('colspan')); if(cs<900) wide.setAttribute('colspan',cs+nYears); }
+      return;
+    }
+    const isHead=mcols[0].tagName==='TH';
+    let acc=0, days=0, has=false, unit='', avg=false;
+    for(let k=0;k<mcols.length;k++){
+      const c=mcols[k];
+      if(!isHead){
+        const isAvg=c.classList.contains('sx-mavg'); if(isAvg) avg=true;
+        const n=num(c.textContent);
+        if(n){ has=true; unit=n.u; if(isAvg){ acc+=n.v*monDays[k]; days+=monDays[k]; } else acc+=n.v; }
+      }
+      if(!yearEnds[k]) continue;
+      const y=monYms[k].slice(0,4);
+      const yc=document.createElement(isHead?'th':'td'); yc.className='sx-ycol';
+      yc.setAttribute('style',(c.getAttribute('style')||'')+';font-weight:700;padding:4px 8px;white-space:nowrap');
+      if(isHead){
+        const yms=monYms.filter(m=>m.slice(0,4)===y), allCol=!!collapsed&&yms.every(m=>collapsed.has(m));
+        yc.innerHTML=`<span style="margin-right:3px">${allCol?'▶':'▼'}</span>Σ ${y}`;
+        yc.title=allCol?`Open the months of ${y}`:`Fold the months of ${y} to their totals`;
+        if(toggleFn){ yc.style.cursor='pointer'; yc.setAttribute('onclick',`${toggleFn}('${y}')`); }
+      } else {
+        const v=avg?(days?acc/days:0):acc;
+        yc.textContent=has&&v>0?_fmtInt(Math.round(v))+unit:'';
+        if(avg&&has) yc.title=`Average over ${y}`;
+      }
+      c.parentNode.insertBefore(yc,c.nextSibling);
+      acc=0; days=0; has=false; unit=''; avg=false;
+    }
+  });
+}
+// Fold every month in `yms` to its total — or, when they are all folded already, open them all.
+function _foldMonths(set, yms){
+  if(!set||!yms||!yms.length) return;
+  if(yms.every(m=>set.has(m))) yms.forEach(m=>set.delete(m)); else yms.forEach(m=>set.add(m));
+}
+// The "Collapse months / Expand months" button of a page says what a click will do next.
+function _monthsBtnLabel(id, set, yms){
+  const b=document.getElementById(id); if(!b) return;
+  const all=!!(yms&&yms.length)&&yms.every(m=>set&&set.has(m));
+  b.textContent=all?'▸ Expand months':'◂ Collapse months';
+  b.title=all?'Show the day columns of every month':'Fold every month to its total — only the month and year totals stay';
 }
 
 // Production-Gantt downtime fills — one distinct diagonal hatch per reason, so a
@@ -11437,7 +11528,7 @@ function _renderSupplyViewInner(wrap){
           months.forEach(mon=>{
             const isCol=collapsed.has(mon.ym);
             const mt=mon.dates.reduce((a,ds)=>a+_cemInvDay(ds),0)/(mon.dates.length||1);
-            h+=`<td style="border-left:2px solid rgba(var(--teal-rgb),.2);font-size:9px;font-weight:700;color:${invColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
+            h+=`<td class="sx-mavg" style="border-left:2px solid rgba(var(--teal-rgb),.2);font-size:9px;font-weight:700;color:${invColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
             if(!isCol){
               mon.dates.forEach(ds=>{
                 const v=_cemInvDay(ds);
@@ -11462,7 +11553,7 @@ function _renderSupplyViewInner(wrap){
                 return s+inv.value;
               },0);
               const avgMonthly=mt/mon.dates.length;
-              h+=`<td style="border-left:2px solid rgba(var(--teal-rgb),.1);font-size:9px;color:${invColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${avgMonthly>0?_fmtInt(Math.round(avgMonthly)):''}</td>`;
+              h+=`<td class="sx-mavg" style="border-left:2px solid rgba(var(--teal-rgb),.1);font-size:9px;color:${invColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${avgMonthly>0?_fmtInt(Math.round(avgMonthly)):''}</td>`;
               if(!isCol){
                 mon.dates.forEach((ds)=>{
                   const inv=getInventoryValue(silo.id, ds, siloStart);
@@ -11593,7 +11684,7 @@ function _renderSupplyViewInner(wrap){
             months.forEach(mon=>{
               const isCol=collapsed.has(mon.ym);
               const mt=mon.dates.reduce((a,ds)=>a+_pkInvDay(ds),0)/(mon.dates.length||1);
-              h+=`<td style="border-left:2px solid rgba(var(--blue-rgb),.2);font-size:9px;font-weight:700;color:${pkColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
+              h+=`<td class="sx-mavg" style="border-left:2px solid rgba(var(--blue-rgb),.2);font-size:9px;font-weight:700;color:${pkColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
               if(!isCol) mon.dates.forEach(ds=>{ const v=_pkInvDay(ds);
                 h+=`<td class="sup-day-${mon.ym} sx-nb" style="color:${pkColor};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):''}</td>`; });
             });
@@ -11608,7 +11699,7 @@ function _renderSupplyViewInner(wrap){
               months.forEach(mon=>{
                 const isCol=collapsed.has(mon.ym);
                 const mt=mon.dates.reduce((s,ds)=>s+_packInvVal(silo.id,ds,siloStart).value,0)/(mon.dates.length||1);
-                h+=`<td style="border-left:2px solid rgba(var(--blue-rgb),.1);font-size:9px;color:${pkColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
+                h+=`<td class="sx-mavg" style="border-left:2px solid rgba(var(--blue-rgb),.1);font-size:9px;color:${pkColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
                 if(!isCol) mon.dates.forEach(ds=>{
                   const inv=_packInvVal(silo.id,ds,siloStart); const v=inv.value;
                   const lvlColor=invLevelColor(v,siloMax);
@@ -11935,7 +12026,7 @@ function _renderSupplyViewInner(wrap){
           months.forEach(mon=>{
             const isCol=collapsed.has(mon.ym);
             const mt=mon.dates.reduce((a,ds)=>a+_clkInvDay(ds),0)/(mon.dates.length||1);
-            h+=`<td style="border-left:2px solid rgba(var(--orange-rgb),.2);font-size:9px;font-weight:700;color:${clinkerInvColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
+            h+=`<td class="sx-mavg" style="border-left:2px solid rgba(var(--orange-rgb),.2);font-size:9px;font-weight:700;color:${clinkerInvColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
             if(!isCol){
               mon.dates.forEach(ds=>{
                 const v=_clkInvDay(ds);
@@ -11960,7 +12051,7 @@ function _renderSupplyViewInner(wrap){
                 return s+inv.value;
               },0);
               const avgMonthly=mt/mon.dates.length;
-              h+=`<td style="border-left:2px solid rgba(var(--orange-rgb),.1);font-size:9px;color:${clinkerInvColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${avgMonthly>0?_fmtInt(Math.round(avgMonthly)):''}</td>`;
+              h+=`<td class="sx-mavg" style="border-left:2px solid rgba(var(--orange-rgb),.1);font-size:9px;color:${clinkerInvColor};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${avgMonthly>0?_fmtInt(Math.round(avgMonthly)):''}</td>`;
               if(!isCol){
                 mon.dates.forEach((ds)=>{
                   const inv=getClkInvValue(silo.id, ds, siloStart);
@@ -12320,7 +12411,7 @@ function _renderSupplyViewInner(wrap){
               <td style="${stickyLeft('var(--surface)',depth+1,'border-bottom:1px solid var(--border),')}color:${accent};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow(invSeckey)}</span> STARTING INVENTORY ${suffix}</td>`;
             months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
               const mt=mon.dates.reduce((a,ds)=>a+_invDay(ds),0)/(mon.dates.length||1);
-              h+=`<td style="border-left:2px solid rgba(${rgba},.2);font-size:9px;font-weight:700;color:${accent};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
+              h+=`<td class="sx-mavg" style="border-left:2px solid rgba(${rgba},.2);font-size:9px;font-weight:700;color:${accent};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
               if(!isCol) mon.dates.forEach(ds=>{ const v=_invDay(ds);
                 h+=`<td class="sup-day-${mon.ym} sx-nb" style="color:${accent};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):''}</td>`; });
             });
@@ -12335,7 +12426,7 @@ function _renderSupplyViewInner(wrap){
                     <span style="color:var(--text-dim);font-size:8px;margin-left:4px">${esc(silo.name)}${siloMax>0?' · cap '+_fmtInt(Math.round(siloMax))+'t':''}</span>${_supInactTag(silo)}</td>`;
                 months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
                   const mt=mon.dates.reduce((s,ds)=>s+getInv(silo.id,ds,siloStart).value,0)/(mon.dates.length||1);
-                  h+=`<td style="border-left:2px solid rgba(${rgba},.1);font-size:9px;color:${pc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
+                  h+=`<td class="sx-mavg" style="border-left:2px solid rgba(${rgba},.1);font-size:9px;color:${pc};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
                   if(!isCol) mon.dates.forEach(ds=>{
                     const inv=getInv(silo.id,ds,siloStart); const v=inv.value;
                     const lvlColor=invLevelColor(v,siloMax);
@@ -12620,6 +12711,9 @@ function _renderSupplyViewInner(wrap){
   h+=`</tbody></table>`;
   wrap.innerHTML=h;
   _monthTotalsToEnd(wrap,'sup-day-',false); // month total at END of each month
+  window._supMonths=months.map(m=>m.ym);
+  _yearTotalsAfterMonths(wrap,'sup-day-',months,collapsed,'_supToggleYear'); // Σ YYYY after each year
+  _monthsBtnLabel('sup-months-btn',collapsed,window._supMonths);
   _supApplySecStyle();
   _supMarkHeaderSource(wrap);
 
@@ -12678,6 +12772,8 @@ function _supToggleMonth(ym){
   window._supColapsed.has(ym)?window._supColapsed.delete(ym):window._supColapsed.add(ym);
   renderSupplyView();
 }
+function _supToggleYear(y){ _foldMonths(window._supColapsed,(window._supMonths||[]).filter(m=>m.slice(0,4)===y)); renderSupplyView(); }
+function _supToggleAllMonths(){ _foldMonths(window._supColapsed,window._supMonths||[]); renderSupplyView(); }
 
 function _supToggleGrp(id){
   if(!window._supGrpCol) window._supGrpCol=new Set();
@@ -14011,6 +14107,22 @@ try{ S.logiHideCharts=localStorage.getItem('avila_logi_hide_charts')==='1'; }cat
 document.addEventListener('DOMContentLoaded',_logiChartsApply);
 if(document.readyState!=='loading') setTimeout(_logiChartsApply,0);
 
+// Fold every month of both planners to its total (month + year totals only), or open them all
+// when the planner on screen has them all folded. Both planners' sets move together; the one
+// on screen re-renders now, the other when its tab is opened (setSchedTab renders it).
+function _toggleLogiFold(){
+  const v=S.activeSchedTab==='vessels';
+  const set=v?window._vpColapsed:window._rpColapsed, yms=(v?window._vpMonths:window._rpMonths)||[];
+  if(!set||!yms.length) return;
+  const open=yms.every(m=>set.has(m));
+  [[window._rpColapsed,window._rpMonths],[window._vpColapsed,window._vpMonths]].forEach(([s,ms])=>{ if(s&&ms) ms.forEach(m=>open?s.delete(m):s.add(m)); });
+  if(v) vpRender(); else rpRender();
+}
+function _logiFoldBtn(set, yms){
+  const all=!!(yms&&yms.length)&&yms.every(m=>set&&set.has(m));
+  document.querySelectorAll('.logi-fold-btn').forEach(b=>{ b.textContent=all?'Expand Months':'Collapse Months'; b.classList.toggle('active',all);
+    b.title=all?'Show the day columns of every month':'Fold every month to its total — only the month and year totals stay'; });
+}
 // Collapse / expand the monthly-summary columns in the logistics planners (rail + vessel).
 function _toggleLogiMonths(){
   S.logiHideMonths=!S.logiHideMonths;
@@ -15746,6 +15858,7 @@ function _rpToggleMonth(ym){
   window._rpColapsed.has(ym)?window._rpColapsed.delete(ym):window._rpColapsed.add(ym);
   rpRender();
 }
+function _rpToggleYear(y){ _foldMonths(window._rpColapsed,(window._rpMonths||[]).filter(m=>m.slice(0,4)===y)); rpRender(); }
 
 // ── Main render ───────────────────────────────────────────────────
 function rpRender(){
@@ -15811,7 +15924,8 @@ function rpRender(){
   document.getElementById('rp-thead-row').innerHTML=thHtml;
   _monthTotalsToEnd(document.getElementById('rp-thead-row'),'logi-mcol',true); // month total at END
   const _rpYr=_logiYearMeta(months);
-  _logiYearHeader(document.getElementById('rp-thead-row'),'logi-mcol',_rpYr.monYms,_rpYr.yearEnds);
+  window._rpMonths=_rpYr.monYms; _logiFoldBtn(window._rpColapsed,window._rpMonths);
+  _logiYearHeader(document.getElementById('rp-thead-row'),'logi-mcol',_rpYr.monYms,_rpYr.yearEnds,'_rpToggleYear',window._rpColapsed);
   const _railColspan=days.length+months.length+1;
 
   // ── TREE ROW HELPERS ──────────────────────────────────────────
@@ -16531,6 +16645,7 @@ function _vpToggleMonth(ym){
   window._vpColapsed.has(ym)?window._vpColapsed.delete(ym):window._vpColapsed.add(ym);
   vpRender();
 }
+function _vpToggleYear(y){ _foldMonths(window._vpColapsed,(window._vpMonths||[]).filter(m=>m.slice(0,4)===y)); vpRender(); }
 
 function vpRender(){
   if(!_IDX.depth) return _idxRun(()=>vpRender.apply(this,arguments)); // fast lookups for this whole block
@@ -16591,8 +16706,9 @@ function vpRender(){
   _monthTotalsToEnd(document.getElementById('vp-dest-thead-row'),'logi-mcol',true); // month total at END
   _monthTotalsToEnd(document.getElementById('vp-orig-thead-row'),'logi-mcol',true);
   const _vpYr=_logiYearMeta(months);
-  _logiYearHeader(document.getElementById('vp-dest-thead-row'),'logi-mcol',_vpYr.monYms,_vpYr.yearEnds);
-  _logiYearHeader(document.getElementById('vp-orig-thead-row'),'logi-mcol',_vpYr.monYms,_vpYr.yearEnds);
+  window._vpMonths=_vpYr.monYms; _logiFoldBtn(window._vpColapsed,window._vpMonths);
+  _logiYearHeader(document.getElementById('vp-dest-thead-row'),'logi-mcol',_vpYr.monYms,_vpYr.yearEnds,'_vpToggleYear',window._vpColapsed);
+  _logiYearHeader(document.getElementById('vp-orig-thead-row'),'logi-mcol',_vpYr.monYms,_vpYr.yearEnds,'_vpToggleYear',window._vpColapsed);
 
   const _statusPriority=['In Transit','Unloading','Confirmed','Planned','Proposed','Finished'];
   // ── TREE (tree 'vp' — see _logiTreeKit) ───────────────────────────
