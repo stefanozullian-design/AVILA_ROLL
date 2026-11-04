@@ -35939,8 +35939,10 @@ async function plPeekBudget(opts){
   (D.plan_demand||[]).forEach(p=>{ const bv=byVersion[p.version_id]=byVersion[p.version_id]||{byEl:{}, names:{}}; (bv.byEl[p.element_id]=bv.byEl[p.element_id]||{})[p.ym]=p.days; bv.names[p.element_id]=p.dp_name||'';
     if(v&&p.version_id===v.id){ (byEl[p.element_id]=byEl[p.element_id]||{})[p.ym]=p.days; if(p.dp_name) (byName[p.dp_name]=byName[p.dp_name]||{})[p.ym]=p.days; tot+=p.spread_t||0; } });
   const set=(D.plan_settings||[]).find(x=>x.id==='default')||{};
+  // The Planning scenario's own plan — what its simulation ran on — kept whole so a push can carry it across with the demand.
+  const plan={}; PL_PLAN_TABLES.forEach(d=>{ plan[d.t]=(D[d.t]||[]).map(r=>JSON.parse(JSON.stringify(r))); });
   PL.bgt={scenarioId:link.id, scenarioName:pk.name, versionId:v&&v.id, versionLabel:v&&v.label, generated_at:v&&v.generated_at, year:(v&&v.year)||set.budget_year||(new Date().getFullYear()+1), byEl, byName, total_t:Math.round(tot), fileMod:pk.fileMod, at:Date.now(),
-    versions:(D.plan_versions||[]).filter(x=>x.generated_at).map(x=>({id:x.id, label:x.label, status:x.status, year:x.year, generated_at:x.generated_at})), byVersion};
+    versions:(D.plan_versions||[]).filter(x=>x.generated_at).map(x=>({id:x.id, label:x.label, status:x.status, year:x.year, generated_at:x.generated_at})), byVersion, plan};
   PL._bgtErr=v?null:'the Planning scenario has no active, generated version';
   return PL.bgt;
 }
@@ -35969,8 +35971,45 @@ function plImports(){ return (DB.plan_imports=DB.plan_imports||[]); }
 function _plImportInputs(){
   const g=id=>document.getElementById(id); const b=PL.bgt||{};
   const sel=g('pli-dps'); const picked=sel?[...sel.selectedOptions].map(o=>o.value).filter(Boolean):[];
-  return {vid:g('pli-version')?.value||b.versionId, from:g('pli-from')?.value, to:g('pli-to')?.value, picked, fac:g('pli-fac')?.value||'', fam:g('pli-fam')?.value||'', mode:g('pli-mode')?.value||'replace'};
+  return {vid:g('pli-version')?.value||b.versionId, from:g('pli-from')?.value, to:g('pli-to')?.value, picked, fac:g('pli-fac')?.value||'', fam:g('pli-fam')?.value||'', mode:g('pli-mode')?.value||'replace', plan:!!g('pli-plan')?.checked};
 }
+// ── The plan behind the budget: the Planning scenario's vessel calls, rail movements, production campaigns, silo transfers,
+// maintenance events and non-working days. Pushed with the demand, they let a run HERE reproduce the budget scenario's
+// simulation from this scenario's own closing state — the trend flowing into the budget year as one continuum.
+//   on(r)   → [first day, last day] the record covers (a record is in the push when that overlaps From → To)
+//   fac(r)  → the facility the record belongs to, for the Facility filter (rail: either end)
+//   refs(r) → element ids the record points at; links(r) → silo-link ids. A record pointing at something this scenario
+//             lacks is skipped and counted. A record whose id is already here (an earlier push, the shared topology)
+//             is skipped too, as is a maintenance event / non-working day already here for the same element and day.
+const PL_PLAN_TABLES=[
+  {t:'vessel_calls',               label:'vessel calls',         on:r=>[r.arrival_date,r.arrival_date],              fac:r=>r.facility_id,                         refs:r=>[r.berth_element_id].concat((r.legs||[]).map(l=>l.berth_element_id)).filter(Boolean)},
+  {t:'rail_movements',             label:'rail movements',       on:r=>[r.departure_date,r.departure_date],          fac:r=>r.to_facility_id, fac2:r=>r.from_facility_id, refs:r=>[r.from_dispatch_id,r.to_berth_id,r.to_silo_id].filter(Boolean)},
+  {t:'production_campaigns',       label:'production campaigns', on:r=>[r.start_date,r.end_date||r.start_date],       fac:r=>_plElFac(r.element_id),                refs:r=>[r.element_id]},
+  {t:'silo_transfer_plans',        label:'silo transfers',       on:r=>[r.start_date,r.end_date||r.start_date],       fac:r=>_plElFac(r.from_silo_id),              refs:r=>[r.from_silo_id,r.to_silo_id], links:r=>[r.link_id]},
+  {t:'element_maintenance_events', label:'maintenance events',   on:r=>[r.start_date,r.end_date||r.start_date],       fac:r=>r.facility_id||_plElFac(r.element_id), refs:r=>[r.element_id], same:r=>r.element_id+'|'+r.start_date},
+  {t:'non_working_days',           label:'non-working days',     on:r=>[r.date,r.date],                              fac:()=>null,                                 refs:()=>[], same:r=>r.date},
+];
+function _plElFac(id){ const el=(DB.elements||[]).find(e=>e.id===id); return el?el.facility_id:null; }
+// What the plan push would copy for the inputs: {copy:[{t,rec}], counts:{t:n}, exists, unknown}. Picked demand points mean a
+// partial push, so the plan stays out of it; the Facility filter applies to plan records as it does to demand.
+function _plPlanRecords(inp, b){
+  const out={copy:[], counts:{}, exists:0, unknown:0, n:0};
+  if(!inp.plan||!b||!b.plan||(inp.picked&&inp.picked.length)) return out;
+  const facId=inp.fac?((DB.facilities||[]).find(f=>f.name===inp.fac)||{}).id:null;
+  const els=new Set((DB.elements||[]).map(e=>e.id)), links=new Set((DB.silo_links||[]).map(l=>l.id)), facs=new Set((DB.facilities||[]).map(f=>f.id));
+  PL_PLAN_TABLES.forEach(d=>{
+    const here=DB[d.t]||[]; const ids=new Set(here.map(r=>r.id)); const sameKeys=d.same?new Set(here.map(d.same)):null;
+    (b.plan[d.t]||[]).forEach(r=>{
+      const [a,z]=d.on(r); if(!a||String(a)>inp.to||String(z||a)<inp.from) return;
+      if(facId&&!(d.fac(r)===facId||(d.fac2&&d.fac2(r)===facId))) return;
+      if(ids.has(r.id)||(sameKeys&&sameKeys.has(d.same(r)))){ out.exists++; return; }
+      if(d.refs(r).some(id=>!els.has(id))||(d.links&&d.links(r).some(id=>!links.has(id)))||(d.t==='rail_movements'&&[r.from_facility_id,r.to_facility_id].some(id=>id&&!facs.has(id)))){ out.unknown++; return; }
+      out.copy.push({t:d.t, rec:r}); out.counts[d.t]=(out.counts[d.t]||0)+1; out.n++;
+    });
+  });
+  return out;
+}
+function _plPlanSummary(pr){ return PL_PLAN_TABLES.filter(d=>pr.counts[d.t]).map(d=>`${pr.counts[d.t]} ${d.label}`).join(' · ')||'nothing in these dates'; }
 function _plImportEls(inp, bv){
   if(!bv) return [];
   const nameOf=el=>(bv.names&&bv.names[el])||((DB.elements||[]).find(e=>e.id===el)||{}).name||'';
@@ -35995,17 +36034,25 @@ function plImportPreview(apply){
   const skip=vals.length-writable.length; const t=writable.reduce((a,x)=>a+x.value_t,0);
   const byM={}; writable.forEach(x=>{ const ym=x.date.slice(0,7); (byM[ym]=byM[ym]||{cur:0,bud:0}).bud+=x.value_t; });
   replaced.forEach(r=>{ if(actual.has(r.element_id+'|'+r.date)) return; const ym=r.date.slice(0,7); if(byM[ym]) byM[ym].cur+=r.value_t; });
+  const pr=_plPlanRecords(inp, b);
   const prev={vid, label:(b.versions.find(v=>v.id===vid)||{}).label||vid, from, to, mode, points:new Set(writable.map(x=>x.element_id)).size, rows:writable.length, t:Math.round(t), replaced:replaced.length, skip,
-    months:Object.keys(byM).sort().map(ym=>({ym, cur:Math.round(byM[ym].cur), bud:Math.round(byM[ym].bud)}))};
+    months:Object.keys(byM).sort().map(ym=>({ym, cur:Math.round(byM[ym].cur), bud:Math.round(byM[ym].bud)})), plan:{on:!!inp.plan, picked:!!(inp.picked&&inp.picked.length), n:pr.n, counts:pr.counts, exists:pr.exists, unknown:pr.unknown, text:_plPlanSummary(pr)}};
   if(!apply){ PL.ui.importPreview=prev; planRender(); return prev; }
   if(writable.length>5000&&!confirm(`${writable.length} daily rows will be written — the Execution change log records each one (budget 15,000 ops). Continue? (Splitting by quarter keeps the log small.)`)) return null;
   const imp={id:'pi_'+Date.now().toString(36), planning_scenario_id:b.scenarioId, planning_name:b.scenarioName, version_id:vid, version_label:prev.label, element_ids:[...new Set(writable.map(x=>x.element_id))], from, to, mode, marked:true, n_rows:0, t:0,
     replaced:replaced.map(r=>({...r})), at:new Date().toISOString(), by:_plWho(), undone_at:null};
   DB.demand_values=(DB.demand_values||[]).filter(r=>!(touched.has(r.element_id+'|'+r.date)&&r.source!=='actual'));
   writable.forEach(x=>{ DB.demand_values.push({element_id:x.element_id, date:x.date, value_t:Math.round(x.value_t*10)/10, source:'forecast', version_id:vid, plan_tag:'budget', import_id:imp.id}); imp.n_rows++; imp.t+=x.value_t; });
+  // The plan behind the budget: copied whole, keeping ids, tagged with this import. Vessel calls and rail movements
+  // arrive as Planned (never as auto-proposals, which a run wipes and re-proposes), noted as the budget plan.
+  imp.plan={n:0, counts:{}};
+  pr.copy.forEach(({t,rec})=>{ const c=JSON.parse(JSON.stringify(rec)); c.import_id=imp.id; c.plan_tag='budget';
+    if(t==='vessel_calls'||t==='rail_movements'){ if(!c.status||c.status==='Proposed'||c.status==='Confirmed') c.status='Planned';
+      const auto=/^Auto-(proposed|generated)/i.test(String(c.notes||'')); c.notes=`Budget plan · ${prev.label}`+(c.notes&&!auto?' · '+c.notes:''); }
+    (DB[t]=DB[t]||[]).push(c); imp.plan.n++; imp.plan.counts[t]=(imp.plan.counts[t]||0)+1; });
   imp.t=Math.round(imp.t); plImports().push(imp); PL.ui.importPreview=null;
   if(typeof _demandChanged==='function') _demandChanged(); autoSave(); planRender();
-  statMsg(`Budget ${prev.label} copied into this scenario: ${_plFmt(imp.n_rows)} days, ${_plFmt(imp.t)} ST (${mode==='fill'?'gaps only':prev.replaced+' forecast rows replaced'}, ${prev.skip} actual days kept)`);
+  statMsg(`Budget ${prev.label} copied into this scenario: ${_plFmt(imp.n_rows)} days, ${_plFmt(imp.t)} ST (${mode==='fill'?'gaps only':prev.replaced+' forecast rows replaced'}, ${prev.skip} actual days kept)`+(imp.plan.n?` + its plan: ${_plPlanSummary(imp.plan)} — run the simulation to see it`:''));
   return imp;
 }
 // An import can be undone only when no later, still-active import touches the same points and days (undo the later one first).
@@ -36020,8 +36067,10 @@ function plUndoImport(id){
   DB.demand_values=DB.demand_values.filter(r=>imp.marked?(r.import_id!==imp.id):!(r.plan_tag==='budget'&&r.version_id===imp.version_id&&els.has(r.element_id)&&r.date>=imp.from&&r.date<=imp.to));
   const removed=before-DB.demand_values.length; const actual=new Set(DB.demand_values.filter(r=>r.source==='actual').map(r=>r.element_id+'|'+r.date));
   (imp.replaced||[]).forEach(r=>{ if(!actual.has(r.element_id+'|'+r.date)) DB.demand_values.push({...r}); });
+  let planGone=0; PL_PLAN_TABLES.forEach(d=>{ if(!DB[d.t]) return; const n=DB[d.t].length; DB[d.t]=DB[d.t].filter(r=>r.import_id!==imp.id); planGone+=n-DB[d.t].length; });
+  if(planGone){ const vids=new Set((DB.vessel_calls||[]).map(v=>v.id)); DB.vessel_campaigns=(DB.vessel_campaigns||[]).filter(c=>vids.has(c.vessel_call_id)); }
   imp.undone_at=new Date().toISOString(); if(typeof _demandChanged==='function') _demandChanged(); autoSave(); planRender();
-  statMsg(`Import undone: ${removed} budget days removed, ${(imp.replaced||[]).length} previous rows restored`);
+  statMsg(`Import undone: ${removed} budget days removed, ${(imp.replaced||[]).length} previous rows restored`+(planGone?`, ${planGone} plan records removed`:''));
 }
 function _plImportCardHTML(s){
   const b=PL.bgt; const y=s.budget_year; const imps=plImports().slice().reverse(); const pv=PL.ui.importPreview; const inp=PL.ui.impIn||{};
@@ -36032,20 +36081,23 @@ function _plImportCardHTML(s){
   const dpopts=bv?Object.keys(bv.byEl).map(el=>({el, name:nameOf(el)})).sort((a,b2)=>a.name.localeCompare(b2.name)).map(o=>`<option value="${o.el}" ${picked.has(o.el)?'selected':''}>${_plEsc(o.name)}</option>`).join(''):'';
   const facs=bv?[...new Set(Object.keys(bv.byEl).map(el=>nameOf(el).split('/')[0]))].sort():[];
   const hist=imps.length?`<table class="pl-tbl" style="margin-top:8px"><tr><th>When</th><th>Version</th><th>Range</th><th>Points</th><th>Days</th><th>ST</th><th></th></tr>${imps.slice(0,12).map(i=>{ const blk=!i.undone_at&&plImportBlockedBy(i);
-    return `<tr style="${i.undone_at?'opacity:.5':''}"><td>${String(i.at).slice(0,16).replace('T',' ')}<br><span class="pl-muted">${_plEsc(i.by||'')}</span></td><td>${_plEsc(i.version_label)}${i.mode==='fill'?' <span class="pl-flag dim">gaps only</span>':''}</td><td>${i.from} → ${i.to}</td><td class="n">${i.element_ids.length}</td><td class="n">${_plFmt(i.n_rows)}</td><td class="n">${_plFmt(i.t)}</td><td>${i.undone_at?'<span class="pl-flag dim">undone</span>':blk?`<span class="pl-muted" title="undo the later overlapping import first">after ${_plEsc(blk.version_label)} ${blk.from}</span>`:`<button class="pl-btn" onclick="plUndoImport('${i.id}')">Undo</button>`}</td></tr>`; }).join('')}</table>`:'';
+    return `<tr style="${i.undone_at?'opacity:.5':''}"><td>${String(i.at).slice(0,16).replace('T',' ')}<br><span class="pl-muted">${_plEsc(i.by||'')}</span></td><td>${_plEsc(i.version_label)}${i.mode==='fill'?' <span class="pl-flag dim">gaps only</span>':''}${i.plan&&i.plan.n?` <span class="pl-flag dim" title="${_plEsc(_plPlanSummary(i.plan))}">+ plan ${i.plan.n}</span>`:''}</td><td>${i.from} → ${i.to}</td><td class="n">${i.element_ids.length}</td><td class="n">${_plFmt(i.n_rows)}</td><td class="n">${_plFmt(i.t)}</td><td>${i.undone_at?'<span class="pl-flag dim">undone</span>':blk?`<span class="pl-muted" title="undo the later overlapping import first">after ${_plEsc(blk.version_label)} ${blk.from}</span>`:`<button class="pl-btn" onclick="plUndoImport('${i.id}')">Undo</button>`}</td></tr>`; }).join('')}</table>`:'';
   const mTbl=pv&&pv.months&&pv.months.length?`<table class="pl-tbl" style="margin-top:6px;max-width:520px"><tr><th>Month</th><th>Forecast now (ST)</th><th>Budget (ST)</th><th>Change</th></tr>${pv.months.map(m=>`<tr><td>${m.ym}</td><td class="n">${_plFmt(m.cur)}</td><td class="n">${_plFmt(m.bud)}</td>${_plDc(m.bud-m.cur)}</tr>`).join('')}<tr><td><b>Total</b></td><td class="n"><b>${_plFmt(pv.months.reduce((a,m)=>a+m.cur,0))}</b></td><td class="n"><b>${_plFmt(pv.months.reduce((a,m)=>a+m.bud,0))}</b></td>${_plDc(pv.months.reduce((a,m)=>a+m.bud-m.cur,0))}</tr></table>`:'';
   return _plCard('pl-import','Push the budget into this scenario','copy any slice of the budget in as forecast (tagged, reversible)', imps.length||null,
     b&&b.versions&&b.versions.length?`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px;align-items:end">
        <label class="pl-muted">Version<br><select class="fi" id="pli-version" style="width:100%" onchange="planRender()">${vopts}</select></label>
        <label class="pl-muted">From<br><input class="fi" type="date" id="pli-from" value="${inp.from||y+'-01-01'}" style="width:100%"></label>
-       <label class="pl-muted">To<br><input class="fi" type="date" id="pli-to" value="${inp.to||y+'-03-31'}" style="width:100%"></label>
+       <label class="pl-muted">To<br><input class="fi" type="date" id="pli-to" value="${inp.to||y+'-12-31'}" style="width:100%"></label>
        <label class="pl-muted">Facility<br><select class="fi" id="pli-fac" style="width:100%"><option value="">all</option>${facs.map(f=>`<option ${inp.fac===f?'selected':''}>${_plEsc(f)}</option>`).join('')}</select></label>
        <label class="pl-muted">Family<br><select class="fi" id="pli-fam" style="width:100%"><option value="">all</option>${['cement','slag','ash'].map(f=>`<option value="${f}" ${inp.fam===f?'selected':''}>${f}</option>`).join('')}</select></label>
        <label class="pl-muted">Days<br><select class="fi" id="pli-mode" style="width:100%"><option value="replace" ${inp.mode!=='fill'?'selected':''}>Replace the forecast</option><option value="fill" ${inp.mode==='fill'?'selected':''}>Only fill days with no forecast</option></select></label>
        <label class="pl-muted">Or pick demand points (none = the filters above)<br><select class="fi" id="pli-dps" multiple size="4" style="width:100%">${dpopts}</select></label>
-       <div style="display:flex;gap:6px"><button class="pl-btn" onclick="plImportPreview(false)">Preview</button><button class="pl-btn pri" onclick="plImportPreview(true)" ${pv?'':'disabled'}>Apply</button></div></div>
-     ${pv?`<div class="pl-muted" style="margin-top:6px">Preview: <b>${_plEsc(pv.label)}</b> ${pv.from} → ${pv.to} · ${pv.points} points · ${_plFmt(pv.rows)} days · <b>${_plFmt(pv.t)}</b> ST · ${pv.mode==='fill'?'only days with no forecast':pv.replaced+' existing forecast rows would be replaced'} · ${pv.skip} actual days kept as they are</div>${mTbl}`:''}
-     <div class="pl-muted" style="margin-top:4px">Copied rows are ordinary forecast rows tagged with the budget version; actual days are never touched; Undo restores exactly what was replaced (the latest overlapping push first).</div>${hist}`
+       <div style="display:flex;gap:6px"><button class="pl-btn" onclick="plImportPreview(false)">Preview</button><button class="pl-btn pri" onclick="plImportPreview(true)" ${pv?'':'disabled'}>Apply</button></div>
+       <label class="pl-muted" style="grid-column:1/-1;display:flex;gap:6px;align-items:flex-start;cursor:pointer"><input type="checkbox" id="pli-plan" ${inp.plan===false?'':'checked'} style="margin-top:2px">
+         <span>Also bring the budget scenario's <b>plan</b> for these dates — its vessel calls and rail movements (as Planned), production campaigns, silo transfers, maintenance events and non-working days — so a run here reproduces its simulation from this scenario's own closing state.</span></label></div>
+     ${pv?`<div class="pl-muted" style="margin-top:6px">Preview: <b>${_plEsc(pv.label)}</b> ${pv.from} → ${pv.to} · ${pv.points} points · ${_plFmt(pv.rows)} days · <b>${_plFmt(pv.t)}</b> ST · ${pv.mode==='fill'?'only days with no forecast':pv.replaced+' existing forecast rows would be replaced'} · ${pv.skip} actual days kept as they are</div>
+     ${pv.plan&&pv.plan.on?`<div class="pl-muted" style="margin-top:3px">Plan: ${pv.plan.picked?'left out — the plan is pushed only with a whole-scenario or facility push, not with picked points':`<b>${_plEsc(pv.plan.text)}</b>${pv.plan.exists?` · ${pv.plan.exists} already here`:''}${pv.plan.unknown?` · <span style="color:var(--amber)">${pv.plan.unknown} skipped — element, link or facility not in this scenario</span>`:''}`}</div>`:''}${mTbl}`:''}
+     <div class="pl-muted" style="margin-top:4px">Copied rows are ordinary forecast rows tagged with the budget version; actual days are never touched; Undo restores exactly what was replaced (the latest overlapping push first) and removes the plan records that came with it.</div>${hist}`
     :`<div class="pl-muted">Connect a Planning scenario with a generated version above.</div>${hist}`);
 }
 
