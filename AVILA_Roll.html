@@ -3092,6 +3092,7 @@ const DB = {
   plan_lines: [],    // immutable uploaded rows — EXT {sold_to, ship_to, plant, material, incoterm, months[12], fy} · INT {family, rmx_plant, months[12]}
   alloc_keys: [],    // { id, kind, scope, targets:[{element_id, dp_name, share}], floor, window, provenance, status, decided, version_id|null }
   norm_rules: [],    // { id, kind, type:'purchase'|'substitution'|'reassign'|'exclude', dp_name, element_id, customer, line_key, from, to, target, decided, apply_to, version_id|null }
+  plan_yields: [],   // Planning: average yield per unit x product from the trend's recorded production (plComputeYields) -> the Push to BI sensitivity cases
   plan_demand: [],   // generated: { version_id, element_id, ym, kind, days:[31], total_t, spread_t, lines:[{line_id,t}] } — materialised into demand_values ONLY in a Planning scenario
   plan_imports: [],  // Execution side: { id, planning_scenario_id, version_id, element_ids, from, to, replaced:[…], at, undone_at }
 
@@ -21995,6 +21996,7 @@ async function pushToBI(){
     await loadLib('xlsx'); // pinned version + SRI — see LIBS
     setMsg('<span style="color:var(--amber)">Building star schema…</span>');
     const tables=_pushBIBuildTables();
+    if(scIsPlanning()) await _plAppendSensitivity(tables, setMsg); // yield-sensitivity runs -> *_cases sheets (Budget dashboard)
     const wb=XLSX.utils.book_new();
     Object.keys(tables).forEach(name=>{
       const rows=tables[name];
@@ -22039,7 +22041,7 @@ function _biRenderDest(){
   const el=document.getElementById('bi-push-dest'); if(!el) return;
   const cfg=exportSlot('bi'), name=exportDirName('bi'), _file=exportFileName('bi');
   el.innerHTML = name
-    ? `Writes <span style="color:var(--text)">${esc(name)}/${_file}</span>, replacing the previous file.${scIsPlanning()?' <span style="color:var(--amber)">Planning scenario → its own workbook, beside the Execution one.</span>':''}`
+    ? `Writes <span style="color:var(--text)">${esc(name)}/${_file}</span>, replacing the previous file.${scIsPlanning()?' <span style="color:var(--amber)">Planning scenario → its own workbook, beside the Execution one'+((DB.plan_yields||[]).length?', with the two yield-sensitivity runs':' (no yields yet: update from the trend to get the sensitivity runs)')+'.</span>':''}`
     : `Downloads as <span style="color:var(--text)">${_file}</span> — `+
       `<span style="color:var(--blue);cursor:pointer;text-decoration:underline" onclick="chooseExportDir('bi')">choose a folder</span> `+
       `to save it in place instead.`;
@@ -22192,6 +22194,8 @@ function _pushBIBuildTables(){
       min_level_t:parseFloat(e.props?.min_level)||null,
       critical_min_t:parseFloat(e.props?.critical_min)||null,
       start_inventory_t:parseFloat(e.props?.start_inventory)||null,
+      critical_floor_pct:parseFloat(e.props?.critical_floor_pct)||null, // silos: the Supply page's critical floor (% of max)
+      car_capacity_t:parseFloat(e.props?.car_capacity_t)||((e.props?.dispatch_type||e.props?.berth_type==='Rail Receiving')?RAIL_CAR_T_DEFAULT:null), // rail: t per car
       product_id:prods[0]||'',
       products:prods.join(','),
       output_product_id:e.props?.output_product_id||'',
@@ -22754,7 +22758,8 @@ function _pushBIBuildTables(){
     {key:'plan_version_id',value:planV?planV.id:''},
     {key:'plan_version_label',value:planV?planV.label:''},
     {key:'plan_source_scenario',value:S.simCfg.plan_source_name||''},
-    {key:'export_version',value:'6'},
+    {key:'export_version',value:'7'},
+    {key:'note_cases',value:'Planning workbook only: <fact>_cases sheets hold the forecast rows of the yield-sensitivity runs (case = yield | yield_avail, see dim_case / dim_yield); the base sheets are the rated-capacity run (case = rated).'},
     {key:'skipped_orphan_demand_rows',value:String(_orphanDemand)},
     {key:'note_forecast_scope',value:'Forecast rows cover only the simulation\'s active facility. Actuals span every facility present in real_* tables.'},
     {key:'note_inventory_breakdown',value:'Forecast inventory is total per silo (product breakdown is not retained after the run). Actual inventory carries product_id.'},
@@ -33393,6 +33398,7 @@ let _dsTopoBaseline = null; // { text, savedAt, fileMod }
 const _MG_KEYS = {
   demand_values:         r=>['dv', r.element_id, r.date, r.source, r.ship_to??''].join('|'),
   plan_demand:           r=>['pd', r.version_id, r.element_id, r.ym].join('|'),
+  plan_yields:           r=>['py', r.element_id, r.product_id].join('|'),
   real_shipments_daily:  r=>['rs', r.date, r.origin, r.product, r.customer_type, r.ship_to??''].join('|'),
   real_production_daily: r=>['rp', r.date, r.facility_id, r.element_id, r.product_id].join('|'),
   real_inventory_daily:  r=>['ri', r.date, r.facility_id, r.silo_id, r.product_id].join('|'),
@@ -34605,7 +34611,7 @@ const AC_FUNCS=[
 const AC_NET='__network';   // matrix row for records that belong to no single facility
 const AC_TABLE_FUNC={
   demand_values:'demand', monthly_demand:'demand', demand_forecasts:'demand', demand_substitutions:'demand', forecast_commitments:'demand',
-  plan_settings:'demand', plan_versions:'demand', plan_lines:'demand', alloc_keys:'demand', norm_rules:'demand', plan_demand:'demand', plan_imports:'demand',
+  plan_settings:'demand', plan_versions:'demand', plan_lines:'demand', alloc_keys:'demand', norm_rules:'demand', plan_demand:'demand', plan_imports:'demand', plan_yields:'demand',
   real_inventory_daily:'inventory', actual_inventory:'inventory',
   production_campaigns:'production', production_schedule:'production', mill_policies:'production', mill_product_focus:'production',
   element_maintenance_events:'production', non_working_days:'production',
@@ -35618,6 +35624,7 @@ function _plSourceCardHTML(s){
       <b>Simulation</b><span>${S.simCfg.start_date} to ${_addDays(S.simCfg.start_date,S.simCfg.horizon-1)} · ${S.simCfg.horizon} days (${S.simCfg.horizonPreset||'custom'})</span>
       <b>Closing state</b><span>${rep?_plEsc(rep.summary)+' <span class="pl-muted">('+String(rep.at||'').slice(0,16).replace('T',' ')+')</span>':'<span class="pl-muted">not copied yet</span>'}</span>
       ${rep&&rep.topology?`<b>Topology</b><span>${_plEsc(rep.topology)}</span>`:''}
+      <b>Yields</b><span>${_plYieldsSummary()}</span>
      </div>
      ${rep&&rep.warnings&&rep.warnings.length?`<div class="pl-muted" style="margin-top:6px">⚠ ${rep.warnings.map(_plEsc).join('<br>⚠ ')}</div>`:''}
      <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
@@ -36600,6 +36607,87 @@ function _plLoadCardHTML(s){
        <button class="pl-btn pri" onclick="plLoadApply()">Load as budget version, simulate & save the master file</button></div>`:''}`);
 }
 // ── From the trend scenario: topology + 31 Dec closing state in one step, with a stale badge ──
+// ═══ Yield sensitivity (Planning) ═══════════════════════════════════════════════════
+// The budget simulation runs the kilns, mills and packers at their configured (rated) t/d. For the Budget dashboard
+// the Push to BI of a Planning scenario adds two more runs: every unit at its AVERAGE YIELD — the mean t/d on the
+// days it made that product, from the trend's recorded production — and that yield times AVAILABILITY — the share
+// of recorded days the unit ran at all. The yields are computed when the budget is updated from the trend
+// (plComputeYields -> plan_yields); a unit x product with fewer than PL_YIELD_MIN_DAYS days of history keeps its rated t/d.
+const PL_YIELD_MIN_DAYS=5;
+function plComputeYields(trendDB, srcName){
+  const rp=(trendDB&&trendDB.real_production_daily)||[]; if(!rp.length) return 0;
+  const byEP={}, dates={}, pos={}; let from='9999-99-99', to='';
+  rp.forEach(r=>{
+    const v=parseFloat(r.volume_t)||0; if(!r.date||!r.element_id) return;
+    if(r.date<from) from=r.date; if(r.date>to) to=r.date;
+    (dates[r.element_id]=dates[r.element_id]||new Set()).add(r.date);
+    if(v<=0) return;
+    (pos[r.element_id]=pos[r.element_id]||new Set()).add(r.date);
+    if(r.product_id){ const a=byEP[r.element_id+'|'+r.product_id]=byEP[r.element_id+'|'+r.product_id]||{}; a[r.date]=v; } // one value per day (a later row for the same day replaces)
+  });
+  const now=new Date().toISOString(); const rows=[];
+  (DB.element_product_capacities||[]).forEach(c=>{
+    if(c.packing_input_id) return; // packer inputs are consumption, not capacity
+    const a=byEP[c.element_id+'|'+c.product_id]||{}; const days=Object.keys(a).length, tt=Object.values(a).reduce((s,v)=>s+v,0);
+    const nd=(dates[c.element_id]||new Set()).size, np=(pos[c.element_id]||new Set()).size;
+    const rated=parseFloat(c.capacity_tpd)||0, y=days?Math.round(tt/days):null, avail=nd?Math.round(np/nd*1000)/1000:null;
+    const useY=y!=null&&days>=PL_YIELD_MIN_DAYS; const caseA=useY?y:rated;
+    rows.push({element_id:c.element_id, product_id:c.product_id, rated_tpd:rated, hist_days:days, hist_t:Math.round(tt), yield_tpd:y,
+      yield_pct:(useY&&rated)?Math.round(1000*y/rated)/10:null, elem_days_recorded:nd, elem_days_running:np, availability:avail,
+      yield_case_tpd:caseA, yield_avail_case_tpd:Math.round(caseA*(avail==null?1:avail)),
+      basis:useY?'history':(y==null?'no history, rated kept':'only '+days+' d of history, rated kept'),
+      src_name:srcName||'', src_from:from, src_to:to, computed_at:now});
+  });
+  DB.plan_yields=rows; return rows.length;
+}
+function _plYieldsSummary(){
+  const y=DB.plan_yields||[]; if(!y.length) return '<span class="pl-muted">not computed yet — Update from the trend computes them (needed for the sensitivity runs in Push to BI)</span>';
+  const h=y.filter(r=>r.basis==='history'); const avg=h.length?Math.round(h.reduce((s,r)=>s+(r.yield_pct||0),0)/h.length):null;
+  return `${h.length} of ${y.length} unit·products from ${_plEsc(y[0].src_name||'the trend')} (${y[0].src_from} to ${y[0].src_to})${avg!=null?' · average yield '+avg+'% of rated':''} <span class="pl-muted">(${String(y[0].computed_at||'').slice(0,16).replace('T',' ')})</span>`;
+}
+// Capacity table for a case: capacity_tpd replaced by the yields' <field> where a yield row exists.
+function _plCaseCaps(field){
+  const y={}; (DB.plan_yields||[]).forEach(r=>{ y[r.element_id+'|'+r.product_id]=r; });
+  return (DB.element_product_capacities||[]).map(c=>{ const m=y[c.element_id+'|'+c.product_id]; return (m&&m[field]!=null)?{...c, capacity_tpd:m[field]}:{...c}; });
+}
+// One full simulation (both passes, like runSimulation) with another capacity table; nothing of it stays in DB or S.
+function _plRunCase(caps){
+  const saveCaps=DB.element_product_capacities, saveV=DB.vessel_calls;
+  DB.element_product_capacities=caps; DB.vessel_calls=JSON.parse(JSON.stringify(saveV||[]));
+  try{
+    _rulesNormalize();
+    const els=getFacElements(), cn=getFacConnections(), h=_simEffectiveHorizon();
+    if(S.simCfg.autoPropose!==false){ const rb=simulate(els,cn,h,false); rb.simHorizon=h; _writeProposedVesselCalls(rb); }
+    else DB.vessel_calls=DB.vessel_calls.filter(v=>v.status!=='Proposed'||!(v.notes||'').startsWith('Auto-proposed'));
+    const r=simulate(els,cn,h,true); r.simHorizon=h; return r;
+  } finally { DB.element_product_capacities=saveCaps; DB.vessel_calls=saveV; if(typeof _demandCacheInvalidate==='function') _demandCacheInvalidate(); }
+}
+const PL_CASES=[
+  {id:'rated',       name:'Rated capacity',               order:1, field:null,                   note:'kilns, mills and packers at their configured t/d (the budget run itself)'},
+  {id:'yield',       name:'Average yield',                order:2, field:'yield_case_tpd',       note:'each unit at its average t/d on the days it made that product (trend history); rated kept where there are fewer than 5 days of history'},
+  {id:'yield_avail', name:'Average yield × availability', order:3, field:'yield_avail_case_tpd', note:'the average yield times the share of recorded days the unit ran at all'}];
+const PL_CASE_SHEETS=['fact_service','fact_inventory','fact_production','fact_stop_events','fact_vessel_call','fact_rail_sim','fact_silo_transfer','fact_unloading'];
+// Planning push: dim_case + dim_yield, and <fact>_cases sheets with the forecast rows of the two yield runs (case = yield | yield_avail).
+// The base sheets stay the rated run. Without yields (budget never updated from the trend) the extra sheets are written empty.
+async function _plAppendSensitivity(tables, setMsg){
+  const base=S.simResults||null; const runId=base?base.runId:'';
+  if(!(DB.plan_yields||[]).length && S.simCfg.plan_source_scenario_id){ // yields missing: read the trend if this browser may (no prompt here)
+    try{ const pk=await scPeekScenario(S.simCfg.plan_source_scenario_id); if(pk) plComputeYields(pk.payload.DB, pk.name); }catch(e){ console.warn('yields', e); }
+  }
+  const elName={}, pName={}; DB.elements.forEach(e=>{ elName[e.id]=e.name; }); DB.products.forEach(p=>{ pName[p.id]=p.name; });
+  tables.dim_case=PL_CASES.map(c=>({case_id:c.id, case_name:c.name, case_order:c.order, note:c.note, scenario_run_id:c.id==='rated'?runId:''}));
+  tables.dim_yield=(DB.plan_yields||[]).map(y=>({element_id:y.element_id, element_name:elName[y.element_id]||'', product_id:y.product_id, product_name:pName[y.product_id]||'', ...y}));
+  PL_CASE_SHEETS.forEach(s=>{ tables[s+'_cases']=[]; });
+  if(!base||!(DB.plan_yields||[]).length) return;
+  for(const c of PL_CASES){
+    if(!c.field) continue;
+    setMsg(`<span style="color:var(--amber)">Running the sensitivity case · ${esc(c.name)}…</span>`); await new Promise(r=>setTimeout(r,40));
+    const r=_plRunCase(_plCaseCaps(c.field)); r.runId=runId+'_'+c.id;
+    S.simResults=r; let t2; try{ t2=_pushBIBuildTables(); } finally { S.simResults=base; }
+    PL_CASE_SHEETS.forEach(s=>{ (t2[s]||[]).forEach(row=>{ if(row.scenario_type!=='forecast') return; tables[s+'_cases'].push({case:c.id, ...row}); }); });
+    const dc=tables.dim_case.find(x=>x.case_id===c.id); if(dc) dc.scenario_run_id=r.runId;
+  }
+}
 async function planUpdateFromTrend(){
   if(!scIsPlanning()){ statMsg('Only in a Planning scenario'); return; }
   const srcId=S.simCfg.plan_source_scenario_id; const pk=await scPeekScenario(srcId,{prompt:true});
@@ -36614,12 +36702,13 @@ async function planUpdateFromTrend(){
   try{ if(SC.activeId) await scWriteSnapshot(SC.activeId, JSON.stringify(scBuildPayload()), 'pre-update-from-trend'); }catch(e){ console.warn('snapshot', e); }
   try{
     let orphans=[]; if(diff.length){ _scApplyTopologyTables(pk.payload); orphans=planRevalidateRefs(); }
+    const ny=plComputeYields(pk.payload.DB, pk.name);
     _plUndoOpeningState();
     const src={DB:pk.payload.DB, simCfg:srcCfg, simResults:r}; const keep=S.simCfg.start_date; S.simCfg.start_date=srcCfg.start_date||keep; let rep; try{ rep=planCopyOpeningState(src, startDate, pk.name); } finally { S.simCfg.start_date=keep; }
     rep.src_mod=pk.fileMod; rep.topology=lines; plSettings().open_report=rep; S.simResults=null; PL._srcStale=false; PL._srcAt=0;
     autoSave(); await scManualSave(); if(typeof renderLocationTree==='function') renderLocationTree(); if(typeof updateNavFacilities==='function') updateNavFacilities();
     planRender(); _demandChanged();
-    statMsg(`Updated from ${pk.name} ✓ — topology: ${lines}; ${rep.summary}${orphans.length?'; '+orphans.length+' stored references could not be re-resolved':''}`);
+    statMsg(`Updated from ${pk.name} ✓ — topology: ${lines}; ${rep.summary}; yields for ${ny} unit·products${orphans.length?'; '+orphans.length+' stored references could not be re-resolved':''}`);
   }catch(e){ statMsg('Update from trend failed — '+e.message); console.warn(e); }
 }
 function plSrcEnsure(){
@@ -36857,7 +36946,7 @@ const _CL_TABLE_LABEL={elements:'topology items', connections:'connections', fac
   demand_values:'demand values', production_campaigns:'production campaigns', vessel_calls:'vessel calls', vessel_campaigns:'vessel campaigns', vessel_sof:'SOF statements',
   rail_movements:'rail movements', rail_loading_plan:'rail loading plan', silo_links:'silo links', silo_transfer_plans:'silo transfers', topo_labels:'canvas labels',
   mill_policies:'mill policies', element_maintenance_events:'maintenance events', demand_substitutions:'demand swaps',
-  plan_versions:'budget versions', plan_lines:'budget lines', alloc_keys:'allocation keys', norm_rules:'normalisation rules', plan_demand:'budget demand', plan_imports:'budget imports', plan_settings:'budget settings', [CL_CFG]:'settings'};
+  plan_versions:'budget versions', plan_lines:'budget lines', alloc_keys:'allocation keys', norm_rules:'normalisation rules', plan_demand:'budget demand', plan_imports:'budget imports', plan_yields:'budget yields', plan_settings:'budget settings', [CL_CFG]:'settings'};
 function _clSummary(n){
   return Object.entries(n||{}).map(([t,[a,m,d]])=>{
     const parts=[]; if(a) parts.push('+'+a); if(m) parts.push('~'+m); if(d) parts.push('−'+d);
