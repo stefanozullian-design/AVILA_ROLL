@@ -10332,13 +10332,19 @@ function _dpFirstProd(dp){
 function _recipeRows(pid){ const seen=new Set(); return DB.recipes.filter(rc=>{ if(rc.product_id!==pid||!(parseFloat(rc.pct)>0)||seen.has(rc.material_id)) return false; seen.add(rc.material_id); return true; }); }
 // Marks a row kept on the Supply page although its element is inactive.
 function _supInactTag(el){ return el?.is_active===false?`<span title="Marked inactive, but the simulation still runs it" style="color:var(--amber);font-size:7px;letter-spacing:.5px;margin-left:4px">INACTIVE</span>`:''; }
-function _supDpnRows(dpts, months, collapsedMonths, tdSty, depth, base, stickyLeft, extra){
+// `sec` — the section (cementNeed, packedNeed, …) the parent product row belongs to. The
+// breakdown rows carry its class too, so folding the section title hides them along with the
+// product row they hang off (before, an expanded breakdown stayed on screen under a folded
+// title — orphan ↳ lines with no parent to toggle them). sup-dpn-row keeps them out of the
+// title's real/forecast roll-up (_supMarkHeaderSource), which reads the product rows.
+function _supDpnRows(dpts, months, collapsedMonths, tdSty, depth, base, stickyLeft, extra, sec){
   if((!dpts||!dpts.length)&&(!extra||!extra.length)) return '';
   const key=_supDpnKey(base);
+  const cls=`supsec-${key} sup-dpn-row${sec?' supsec-'+sec:''}`;
   let hh='';
   (dpts||[]).forEach(dp=>{
     const el=DB.elements.find(e=>e.id===dp.element_id); if(!el) return;
-    hh+=`<tr class="supsec-${key}" style="background:rgba(var(--hi-rgb),.02)">
+    hh+=`<tr class="${cls}" style="background:rgba(var(--hi-rgb),.02)">
       <td style="${stickyLeft('var(--surface)',depth,'border-bottom:1px solid var(--border),')}color:var(--text-dim);font-size:8px;font-style:italic">
         ↳ ${esc(el.name)}${_supInactTag(el)}<button class="sp-fb-btn" onclick="event.stopPropagation();openSpForecastBuilder(${JSON.stringify([el.id]).replaceAll('"','&quot;')},${JSON.stringify(el.name).replaceAll('"','&quot;')})" title="⚙ Forecast Builder">⚙</button>
       </td>`;
@@ -10354,7 +10360,7 @@ function _supDpnRows(dpts, months, collapsedMonths, tdSty, depth, base, stickyLe
     hh+=`</tr>`;
   });
   (extra||[]).forEach(ex=>{
-    hh+=`<tr class="supsec-${key}" style="background:rgba(var(--hi-rgb),.02)">
+    hh+=`<tr class="${cls}" style="background:rgba(var(--hi-rgb),.02)">
       <td title="${ex.title||''}" style="${stickyLeft('var(--surface)',depth,'border-bottom:1px solid var(--border),')}color:${ex.color};font-size:8px;font-style:italic">↳ ${ex.label}</td>`;
     months.forEach(mon=>{
       const isCol=collapsedMonths.has(mon.ym);
@@ -10911,6 +10917,46 @@ function _renderSupplyViewInner(wrap){
     .filter(p=>!pid||p.product_id===pid).map(p=>!!p.isActual));
   const _railReal=(facId,ds)=>(DB.real_rail_daily||[]).some(x=>x.date===ds&&x.facility_id===facId&&x.type==='loading');
 
+  // Data-resilience: vessel_calls / demand_points / transfers can carry product ids from an
+  // OLDER catalog (e.g. 'riz_slg' after the product became 'riz_slg_blk'). Resolve stale ids to
+  // the current catalog by normalized id/name prefix so no phantom product rows appear and their
+  // tonnage lands on the right row. Unresolvable ids pass through unchanged. (Shared by the
+  // terminal blocks and the facility-need helpers below.)
+  const _pnorm=s=>String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+  const _canonCache={};
+  const _prodIdSet=new Set(DB.products.map(p=>p.id));
+  const _canon=pid=>{
+    if(!pid||_prodIdSet.has(pid)) return pid;
+    if(Object.prototype.hasOwnProperty.call(_canonCache,pid)) return _canonCache[pid];
+    const n=_pnorm(pid);
+    const hit=n&&DB.products.find(p=>_pnorm(p.id).startsWith(n)||_pnorm(p.name).startsWith(n));
+    return (_canonCache[pid]=hit?hit.id:pid);
+  };
+  // What a terminal / purchased source asks for on a day — its demand points' own demand plus
+  // anything a swap moves INTO them (the same maths as the PRODUCT REQUIREMENT / PURCHASES
+  // rows) — and whether each contributing number is actual. A collapsed facility line and a
+  // collapsed product-group line show this sum so the real / forecast numbers stay in view;
+  // a purchased source also adds it to the sub-region / region / TOTAL rows above it, since
+  // the tonnes it sells us are its output to the network (it has no mills of its own).
+  // pids: only demand points whose first product is in the set (a product group); default all.
+  const _facDpsMemo=new Map();
+  const _facDps=(facId,pids)=>{
+    const k=facId+'|'+(pids?[...pids].join(','):'*'); let a=_facDpsMemo.get(k);
+    if(!a){
+      const ids=new Set(allEls.filter(e=>e.type==='demand_point'&&(e.assigned_facility_id||e.facility_id)===facId).map(e=>e.id));
+      a=DB.demand_points.filter(dp=>{ if(!ids.has(dp.element_id)) return false;
+        const pid=_canon(_dpFirstProd(dp)); return _supProdAllows(pid)&&(!pids||pids.has(pid)); });
+      _facDpsMemo.set(k,a);
+    }
+    return a;
+  };
+  const _dpsNeed=(dps,ds)=>dps.reduce((s,dp)=>s+(_demandRate(dp.element_id,ds)||0)
+    +((typeof _resolveDemandSwapIn==='function')?_resolveDemandSwapIn(dp.element_id,ds,id=>_demandRate(id,ds)):0),0);
+  const _dpsActs=(dps,ds)=>_dmdActs(dps,ds).concat(_swapInActs(dps,ds));
+  const _pfDay=(pf,ds)=>(pf||[]).reduce((s,f)=>s+_dpsNeed(_facDps(f.id),ds),0);
+  const _pfMon=(pf,mon)=>(pf&&pf.length)?mon.dates.reduce((s,ds)=>s+_pfDay(pf,ds),0):0;
+  const _pfActs=(pf,ds)=>(pf||[]).flatMap(f=>_dpsActs(_facDps(f.id),ds));
+
   // For group totals — sum daily output across all elements
   const grpDailyTotal=(els,ds,dayIdx)=>
     els.reduce((s,el)=>s+resolveProduction(el,ds,dayIdx,maintSetFor(el.id)).capacity_tpd,0);
@@ -10994,6 +11040,9 @@ function _renderSupplyViewInner(wrap){
   // tree as the plants — grouped by sub-region, not by facility type.
   const _termRender=_termFacs.filter(f=>!relevantFacIds.has(f.id))
     .sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+  // Purchased sources under a level (their bought tonnes join that level's row — see _pfDay).
+  const _pfIn=pred=>_termRender.filter(f=>isPurchasedFac(f)&&pred(f.id));
+  const _pfAll=_termRender.filter(isPurchasedFac);
 
   // Build tree (same structure as demand). A level shows when it holds a plant element OR a
   // terminal; its els stay plant elements only, since they feed the header-row sums.
@@ -11009,7 +11058,7 @@ function _renderSupplyViewInner(wrap){
 
     const multiMR=DB.macro_regions.filter(m=>_shownFacIds.some(fid=>_orgOf(fid).co?.macro_region_id===m.id)).length>1;
     const mrPath=multiMR?[mr.id]:[];
-    if(multiMR) tree.push({type:'mr',id:mr.id,name:mr.name,depth:0,els:mrEls,parents:[]});
+    if(multiMR) tree.push({type:'mr',id:mr.id,name:mr.name,depth:0,els:mrEls,pfacs:_pfIn(inMr),parents:[]});
 
     DB.countries.filter(c=>c.macro_region_id===mr.id).forEach(co=>{
       const inCo=fid=>_orgOf(fid).reg?.country_id===co.id;
@@ -11018,13 +11067,13 @@ function _renderSupplyViewInner(wrap){
       const depth=multiMR?1:0;
       const multiCo=DB.countries.filter(c2=>c2.macro_region_id===mr.id&&_shownFacIds.some(fid=>_orgOf(fid).reg?.country_id===c2.id)).length>1;
       const coPath=multiCo?[...mrPath,co.id]:mrPath;
-      if(multiCo) tree.push({type:'co',id:co.id,name:co.name,depth,els:coEls,parents:mrPath});
+      if(multiCo) tree.push({type:'co',id:co.id,name:co.name,depth,els:coEls,pfacs:_pfIn(inCo),parents:mrPath});
 
       DB.regions.filter(r=>r.country_id===co.id).forEach(reg=>{
         const inReg=fid=>_orgOf(fid).sub?.region_id===reg.id;
         if(!_shownFacIds.some(inReg)) return;
         const regEls=coEls.filter(el=>inReg(facForEl(el)));
-        tree.push({type:'reg',id:reg.id,name:reg.name,depth:depth+(multiCo?1:0),els:regEls,parents:coPath});
+        tree.push({type:'reg',id:reg.id,name:reg.name,depth:depth+(multiCo?1:0),els:regEls,pfacs:_pfIn(inReg),parents:coPath});
         const regDepth=depth+(multiCo?1:0)+1;
         const regPath=[...coPath,reg.id];
 
@@ -11032,7 +11081,7 @@ function _renderSupplyViewInner(wrap){
           const inSub=fid=>facMap[fid]?.sub_region_id===sub.id;
           if(!_shownFacIds.some(inSub)) return;
           const subEls=regEls.filter(el=>inSub(facForEl(el)));
-          tree.push({type:'sub',id:sub.id,name:sub.name,depth:regDepth,els:subEls,parents:regPath});
+          tree.push({type:'sub',id:sub.id,name:sub.name,depth:regDepth,els:subEls,pfacs:_pfIn(inSub),parents:regPath});
           const subDepth=regDepth+1;
           const subPath=[...regPath,sub.id];
 
@@ -11065,7 +11114,7 @@ function _renderSupplyViewInner(wrap){
   const _termPlaced=new Set(tree.filter(n=>n.term).map(n=>n.id));
   const _termOrphans=_termRender.filter(f=>!_termPlaced.has(f.id));
   if(_termOrphans.length){
-    tree.push({type:'sub',id:'_orphan_term',name:'Unassigned',depth:0,els:[],parents:[]});
+    tree.push({type:'sub',id:'_orphan_term',name:'Unassigned',depth:0,els:[],pfacs:_termOrphans.filter(isPurchasedFac),parents:[]});
     _termOrphans.forEach(fac=>tree.push({type:'fac',term:true,id:fac.id,name:fac.name,depth:1,ftype:'terminal',els:[],parents:['_orphan_term']}));
   }
 
@@ -11205,16 +11254,16 @@ function _renderSupplyViewInner(wrap){
   h+=`<tr class="sup-tot-hdr" style="background:rgba(var(--blue-rgb),.06)">
     <td style="${stickyLeft('var(--tot-sticky)',0,'border-bottom:1px solid var(--border2),')}color:var(--blue);font-size:10px;font-weight:700">
       <span class="sup-chev">▶</span>TOTAL CAPACITY
-      <span style="font-weight:400;font-size:8px;color:var(--text-dim);margin-left:8px">${dataSource}</span>
+      <span style="font-weight:400;font-size:8px;color:var(--text-dim);margin-left:8px">${dataSource}${_pfAll.length?' + purchases':''}</span>
     </td>`;
   months.forEach(mon=>{
     const isCol=collapsed.has(mon.ym);
-    const mt=grpMonTotal(prodEls,mon);
+    const mt=grpMonTotal(prodEls,mon)+_pfMon(_pfAll,mon);
     h+=`<td style="background:rgba(var(--blue-rgb),.1);border-left:2px solid rgba(var(--blue-rgb),.25);font-size:9px;font-weight:700;color:var(--blue);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border2)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
     if(!isCol) mon.dates.forEach(ds=>{
       const dayIdx=_dIdx(ds);
-      const v=grpDailyTotal(prodEls,ds,dayIdx);
-      h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_prodActs(prodEls,ds))}" style="background:rgba(var(--blue-rgb),.07);font-size:9px;font-weight:700;color:var(--blue);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border2);${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):0}</td>`;
+      const v=grpDailyTotal(prodEls,ds,dayIdx)+_pfDay(_pfAll,ds);
+      h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_prodActs(prodEls,ds).concat(_pfActs(_pfAll,ds)))}" style="background:rgba(var(--blue-rgb),.07);font-size:9px;font-weight:700;color:var(--blue);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border2);${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):0}</td>`;
     });
   });
   h+=`</tr>`;
@@ -11416,13 +11465,22 @@ function _renderSupplyViewInner(wrap){
         <td style="${stickyLeft(typeBgSolid.fac,node.depth,'border-bottom:1px solid var(--border),')}color:var(--amber);font-weight:700;font-size:9px">
           <span class="sup-chev">${isCollapsed?'▶':'▼'}</span>${node.name}
         </td>`;
-      // No numbers on the facility line — summed kiln + mill + packer capacity mixes clinker
-      // with cement and says nothing useful. Cells stay so the row keeps its shading.
+      // Expanded: no numbers on the facility line — summed kiln + mill + packer capacity mixes
+      // clinker with cement and says nothing useful; the sections below carry the detail.
+      // Collapsed: the line is all the user sees of the plant, so it shows the plant's
+      // output — finish-mill cement (kiln clinker at a clinker-only plant, packed tonnes at
+      // a packing-only site) — with the same real / past-no-actual / forecast look as the
+      // rows it stands in for.
+      const _outEls=node.mills.length?node.mills:(node.kilns.length?node.kilns:node.packers);
+      const _outLbl=node.mills.length?'finish-mill output':(node.kilns.length?'kiln output':'packing output');
       months.forEach(mon=>{
         const isCol=collapsed.has(mon.ym);
-        h+=`<td style="background:rgba(var(--amber-rgb),.06);border-left:2px solid rgba(var(--amber-rgb),.2);font-size:9px;font-weight:700;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)"></td>`;
+        const mt=isCollapsed?grpMonTotal(_outEls,mon):0;
+        h+=`<td style="background:rgba(var(--amber-rgb),.06);border-left:2px solid rgba(var(--amber-rgb),.2);font-size:9px;font-weight:700;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
         if(!isCol) mon.dates.forEach(ds=>{
-          h+=`<td class="sup-day-${mon.ym}" style="background:rgba(var(--amber-rgb),.04);font-size:9px;font-weight:700;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}"></td>`;
+          if(!isCollapsed){ h+=`<td class="sup-day-${mon.ym}" style="background:rgba(var(--amber-rgb),.04);font-size:9px;font-weight:700;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}"></td>`; return; }
+          const v=grpDailyTotal(_outEls,ds,_dIdx(ds));
+          h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_prodActs(_outEls,ds))}" title="${_outLbl} · expand the plant for the detail" style="background:rgba(var(--amber-rgb),.04);font-size:9px;font-weight:700;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):0}</td>`;
         });
       });
       h+=`</tr>`;
@@ -11594,7 +11652,7 @@ function _renderSupplyViewInner(wrap){
                 });
               });
               h+=`</tr>`;
-              h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, node.depth+3, _dpnBase, stickyLeft, _dpnExtra.concat(typeof plBgtExtra==='function'?plBgtExtra(_dpnDpts):[]));
+              h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, node.depth+3, _dpnBase, stickyLeft, _dpnExtra.concat(typeof plBgtExtra==='function'?plBgtExtra(_dpnDpts):[]), 'cementNeed');
 
               // ── Swap breakdown child rows (only when a swap touches this product) ──
               const outArr=allDates.map(ds=>swappedOut(prodId,ds));
@@ -11886,7 +11944,7 @@ function _renderSupplyViewInner(wrap){
                     h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_dmdActs(_dpnDpts,ds))} sx-n" style="color:${v>0?pkColor:'rgba(var(--blue-rgb),calc(var(--zero-k)*.3))'};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):0}</td>`; });
                 });
                 h+=`</tr>`;
-                h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, node.depth+3, _dpnBase, stickyLeft);
+                h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, node.depth+3, _dpnBase, stickyLeft, null, 'packedNeed');
               });
             }
           }
@@ -12261,12 +12319,12 @@ function _renderSupplyViewInner(wrap){
         </td>`;
       months.forEach(mon=>{
         const isCol=collapsed.has(mon.ym);
-        const mt=grpMonTotal(node.els,mon);
+        const mt=grpMonTotal(node.els,mon)+_pfMon(node.pfacs,mon);
         h+=`<td style="border-left:2px solid rgba(var(--blue-rgb),.15);background:rgba(var(--hi-rgb),.03);font-size:9px;font-weight:700;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border2)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
         if(!isCol) mon.dates.forEach(ds=>{
           const dayIdx=_dIdx(ds);
-          const v=grpDailyTotal(node.els,ds,dayIdx);
-          h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_prodActs(node.els,ds))}" style="background:rgba(var(--hi-rgb),.03);font-size:9px;font-weight:700;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border2);${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):0}</td>`;
+          const v=grpDailyTotal(node.els,ds,dayIdx)+_pfDay(node.pfacs,ds);
+          h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_prodActs(node.els,ds).concat(_pfActs(node.pfacs,ds)))}" style="background:rgba(var(--hi-rgb),.03);font-size:9px;font-weight:700;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border2);${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):0}</td>`;
         });
       });
       h+=`</tr>`;
@@ -12286,21 +12344,7 @@ function _renderSupplyViewInner(wrap){
       const _allFE=allEls;
       const _isCementPid=pid=>{ const pr=_prodById.get(pid); return pr&&(pr.category==='cement_bulk'||pr.category==='cement_packed'); };
       const _isScmPid=pid=>{ const pr=_prodById.get(pid); return pr&&pr.category==='additive'; };
-      // Data-resilience: vessel_calls / demand_points / transfers can carry product
-      // ids from an OLDER catalog (e.g. 'riz_slg' after the product became
-      // 'riz_slg_blk'). Resolve stale ids to the current catalog by normalized
-      // id/name prefix so no phantom product rows appear and their tonnage lands
-      // on the right row. Unresolvable ids pass through unchanged.
-      const _pnorm=s=>String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
-      const _canonCache={};
-      const _prodIdSet=new Set(DB.products.map(p=>p.id));
-      const _canon=pid=>{
-        if(!pid||_prodIdSet.has(pid)) return pid;
-        if(Object.prototype.hasOwnProperty.call(_canonCache,pid)) return _canonCache[pid];
-        const n=_pnorm(pid);
-        const hit=n&&DB.products.find(p=>_pnorm(p.id).startsWith(n)||_pnorm(p.name).startsWith(n));
-        return (_canonCache[pid]=hit?hit.id:pid);
-      };
+      // Stale product ids (older catalog) resolve through _canon, defined above the org tree.
       // Silos a berth unloads into, and a facility's berths.
       const _downSilosOf=berth=>_allFE.filter(e=>e.type==='bulk_silo'&&
         DB.connections.some(c=>c.from_element_id===berth.id&&c.to_element_id===e.id));
@@ -12325,16 +12369,24 @@ function _renderSupplyViewInner(wrap){
         const _purchMaxDay=parseFloat(fac.max_daily_t)||0;
         const _purchMaxMon=parseFloat(fac.contract_monthly_t)||0;
 
-        // ── Terminal header (amber) — no numbers, same as a plant's facility line ──
+        // ── Terminal header (amber) — no numbers while expanded, same as a plant's facility
+        // line; collapsed it carries what the facility asks for per day (PURCHASES at a
+        // purchased source, PRODUCT REQUIREMENT at a terminal) so the real and forecast
+        // numbers stay in view with the detail folded away.
+        const _facAllDps=_facDps(fac.id);
+        const _facLbl=_isPurch?'purchases':'product requirement';
         h+=`<tr class="sup-grp-hdr" onclick="_supToggleGrp('${fac.id}')" style="cursor:pointer;background:rgba(var(--amber-rgb),.04);border-top:1px solid var(--border2)">
           <td style="${stickyLeft('var(--surface2)',depth,'border-bottom:1px solid var(--border),')}color:var(--amber);font-weight:700;font-size:9px">
             <span class="sup-chev">${_facCol?'▶':'▼'}</span>${esc(fac.name)}
             ${_isPurch?`<span style="color:var(--purple);font-size:7px;letter-spacing:1px;margin-left:6px;font-weight:400">PURCHASED${_purchMaxDay>0?' · max '+_fmtInt(Math.round(_purchMaxDay))+' t/d':''}${_purchMaxMon>0?' · '+_fmtInt(Math.round(_purchMaxMon))+' t/mo':''}</span>`:''}
           </td>`;
         months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-          h+=`<td style="background:rgba(var(--amber-rgb),.06);border-left:2px solid rgba(var(--amber-rgb),.2);font-size:9px;font-weight:700;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)"></td>`;
+          const mt=_facCol?mon.dates.reduce((s,ds)=>s+_dpsNeed(_facAllDps,ds),0):0;
+          h+=`<td style="background:rgba(var(--amber-rgb),.06);border-left:2px solid rgba(var(--amber-rgb),.2);font-size:9px;font-weight:700;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
           if(!isCol) mon.dates.forEach(ds=>{
-            h+=`<td class="sup-day-${mon.ym}" style="background:rgba(var(--amber-rgb),.04);font-size:9px;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}"></td>`; });
+            if(!_facCol){ h+=`<td class="sup-day-${mon.ym}" style="background:rgba(var(--amber-rgb),.04);font-size:9px;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}"></td>`; return; }
+            const v=_dpsNeed(_facAllDps,ds);
+            h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_dpsActs(_facAllDps,ds))}" title="${_facLbl} · expand the facility for the detail" style="background:rgba(var(--amber-rgb),.04);font-size:9px;font-weight:700;color:var(--total);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):0}</td>`; });
         });
         h+=`</tr>`;
 
@@ -12531,11 +12583,30 @@ function _renderSupplyViewInner(wrap){
           const _pColor=pid=>{ if(_thRule('num')==='source') return accent; const nm=_pNameOf(pid); return (typeof spProdColor==='function')?spProdColor(nm,false):accent; };
           const _pChip=pid=>`<span style="display:inline-block;width:7px;height:7px;background:${_pColor(pid)};border-radius:1px;margin-right:4px;vertical-align:-1px"></span>`;
 
+          // Products of this group with local demand, and what each asks for HERE = own demand +
+          // whatever a swap moves INTO this terminal's demand points (forecast days only), so
+          // the ↳ rows add up to it. Hoisted above the group line: collapsed, that line shows
+          // the group's requirement (PURCHASES at a purchased source) with the real / forecast
+          // look of the rows it folds away; expanded it stays blank — the section titles below
+          // carry their own totals.
+          const _reqPids=gr.pids.filter(pid=>_demProdIds.has(pid));
+          const _needHere=(pid,ds)=>totalNeed(pid,ds)+_tSwappedIn(pid,ds);
+          const _reqDay=ds=>_reqPids.reduce((s,pid)=>s+_needHere(pid,ds),0);
+          const _reqActs=ds=>_reqPids.flatMap(pid=>{ const a=_dmdActs(_tDpsOf(pid),ds); if(_tSwappedIn(pid,ds)>0) a.push(..._swapInActs(_tDpsOf(pid),ds)); return a; });
+          const _grpNeedCells=()=>{ let s=''; const col=_isPurch?'var(--purple)':accent;
+            months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
+              const mt=mon.dates.reduce((a,ds)=>a+_reqDay(ds),0);
+              s+=`<td style="border-left:2px solid rgba(${rgba},.2);font-size:9px;font-weight:700;color:${col};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
+              if(!isCol) mon.dates.forEach(ds=>{ const v=_reqDay(ds);
+                s+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_reqActs(ds))}" title="${_isPurch?'purchases':'product requirement'} ${suffix.toLowerCase()} · expand the group for the detail" style="font-size:9px;font-weight:700;color:${v>0?col:`rgba(${rgba},calc(var(--zero-k)*.3))`};text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):0}</td>`; });
+            });
+            return s; };
+
           // Category divider (collapsible: hides this whole block)
           h+=`<tr class="sup-pgrp-hdr" onclick="_supToggleGrp('${gKey}')" style="cursor:pointer;background:rgba(${rgba},.1);border-top:2px solid rgba(${rgba},.55)">
             <td style="${stickyLeft('var(--surface2)',depth+1,'border-bottom:1px solid var(--border),')}color:${accent};font-weight:700;font-size:9px">
               ${gColl?'▶':'▼'} ${gr.label} <span style="font-size:7px;opacity:.6;margin-left:4px">${gr.pids.length} PRODUCT${gr.pids.length>1?'S':''}</span>
-            </td>${_blankCells()}</tr>`;
+            </td>${(gColl&&_reqPids.length)?_grpNeedCells():_blankCells()}</tr>`;
           if(gColl) return;
 
           // 1) ONE inventory chart — every product of the block side-by-side (same
@@ -12580,17 +12651,13 @@ function _renderSupplyViewInner(wrap){
             });
           }
 
-          // 3) PRODUCT REQUIREMENT (BULK|PACKED) — one row per product with local demand.
-          const _reqPids=gr.pids.filter(pid=>_demProdIds.has(pid));
+          // 3) PRODUCT REQUIREMENT (BULK|PACKED) — one row per product with local demand
+          // (_reqPids / _needHere / _reqDay: see the group line above).
           if(_reqPids.length){
             const reqColor=_isPurch?'var(--purple)':'var(--blue)';
             const reqRgb=_isPurch?'var(--purple-rgb)':'var(--blue-rgb)';
             const reqLabel=_isPurch?'PURCHASES':'PRODUCT REQUIREMENT';
             const reqTitle=_isPurch?'What we buy from this source per day — its own demand plus anything swapped in':'Local demand per product';
-            // A product's requirement HERE = own demand + whatever a swap moves INTO this
-            // terminal's demand points (forecast days only), so the ↳ rows add up to it.
-            const _needHere=(pid,ds)=>totalNeed(pid,ds)+_tSwappedIn(pid,ds);
-            const _reqDay=ds=>_reqPids.reduce((s,pid)=>s+_needHere(pid,ds),0);
             h+=`<tr class="sup-sec-hdr" data-seckey="${reqSeckey}" onclick="_supToggleSec('${reqSeckey}')" style="cursor:pointer;background:rgba(${reqRgb},.05);border-top:1px solid rgba(${reqRgb},.3)">
               <td title="${reqTitle}" style="${stickyLeft('var(--surface)',depth+1,'border-bottom:1px solid var(--border),')}color:${reqColor};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow(reqSeckey)}</span> ${reqLabel} ${suffix} <span style="opacity:.35;font-weight:400;font-size:8px;margin-left:3px;cursor:help">ⓘ</span></td>`;
             months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
@@ -12615,7 +12682,7 @@ function _renderSupplyViewInner(wrap){
                   h+=`<td class="sup-day-${mon.ym} ${_srcCls(ds,v,_acts)} sx-n" style="color:${v>0?reqColor:`rgba(${reqRgb},calc(var(--zero-k)*.3))`};${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):0}</td>`; });
               });
               h+=`</tr>`;
-              h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, depth+3, _dpnBase, stickyLeft, typeof plBgtExtra==='function'?plBgtExtra(_dpnDpts):[]);
+              h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, depth+3, _dpnBase, stickyLeft, typeof plBgtExtra==='function'?plBgtExtra(_dpnDpts):[], reqSeckey);
 
               // ── Swap breakdown child rows (only when a swap touches this product) ──
               // Mirrors the plant block so a relocation reads the same at both ends.
@@ -12880,7 +12947,7 @@ function _supMarkHeaderSource(wrap){
     // the section runs to the next section header; breakdown lines (demand points, swaps) sit
     // between its rows with their own classes and are skipped, not treated as the end
     for(let q=r+1;q<trs.length&&!trs[q].classList.contains('sup-sec-hdr')&&/(^|\s)supsec-/.test(trs[q].className);q++)
-      if(trs[q].classList.contains(cls)&&!trs[q].classList.contains('sup-chart-row')&&!trs[q].classList.contains('sup-sub-row')) leaves.push(trs[q]);
+      if(trs[q].classList.contains(cls)&&!trs[q].classList.contains('sup-chart-row')&&!trs[q].classList.contains('sup-sub-row')&&!trs[q].classList.contains('sup-dpn-row')) leaves.push(trs[q]);
     if(!leaves.length) continue;
     for(let i=1;i<hdr.cells.length;i++){
       let real=false, gap=false;
