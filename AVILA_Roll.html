@@ -634,6 +634,8 @@ select.pi{appearance:none;cursor:pointer;background-image:url("data:image/svg+xm
 /* Charts can be folded away for room (Hide Charts, per viewer). */
 body.logi-hide-charts #vp-charts-section,
 body.logi-hide-charts #rp-charts-section{display:none!important;}
+/* Supply page: the inventory bar charts folded away (Inv. bars button, remembered per viewer) */
+body.sup-hide-inv-charts #supply-table-wrap tr.sup-chart-row{display:none!important;}
 .sched-inner{padding:16px;display:flex;flex-direction:column;gap:14px;}
 /* ── Transport Planner ───────────────────────────────────── */
 .tp-header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--border2);}
@@ -1913,6 +1915,11 @@ td.camp-drag-cut>div:first-child{opacity:.3}
         <button type="button" class="sup-drop-btn" id="sup-inv-mode-btn" onclick="_supToggleInvMode()"
           title="Inventory charts show VOLUME in tonnes. Click for days of inventory.">
           <span class="k">Inv. charts</span><span class="v">Volume</span>
+        </button>
+        <!-- Inventory bar charts shown or hidden (page-wide, remembered) -->
+        <button type="button" class="sup-drop-btn" id="sup-inv-hide-btn" onclick="_supToggleInvCharts()"
+          title="The inventory bar charts are shown above each block's silo rows. Click to hide them and give the table more room.">
+          <span class="k">Inv. bars</span><span class="v">Shown</span>
         </button>
         <!-- Campaign suggestions (the amber rows above the table): shown or hidden (remembered) -->
         <button type="button" class="sup-drop-btn" id="sup-sugg-btn" onclick="_supToggleSuggestions()"
@@ -10243,6 +10250,7 @@ function renderSupplyView(){
   const wrap=document.getElementById('supply-table-wrap'); if(!wrap) return;
   fltRender('sup');
   _supSyncInvModeBtn();
+  _supSyncInvHideBtn();
   _renderSupCampaignWarnings();
   _renderSupplyViewInner(wrap);
 }
@@ -10301,6 +10309,36 @@ function _supSyncInvModeBtn(){
     ?`Inventory charts show DAYS of inventory — stock ÷ average demand over the next 14 days, on a 0–${INV_DAYS_CAP} day scale. Click for tonnes.`
     :'Inventory charts show VOLUME in tonnes. Click for days of inventory.';
 }
+// ── Inventory bar charts: SHOWN or HIDDEN ────────────────────────────────────────
+// A per-viewer convenience like the Volume/Days choice: the chart rows are still rendered
+// (they carry the silo colour squares and the Volume/Days choice), a body class folds them
+// away with CSS so the toggle needs no re-render. Remembered in localStorage, never in the
+// scenario.
+const INV_HIDE_KEY='avila_inv_charts_hidden';
+function _supInvHidden(){
+  if(window._supInvHide===undefined){
+    let v=null; try{ v=localStorage.getItem(INV_HIDE_KEY); }catch(e){}
+    window._supInvHide=v==='1';
+  }
+  return window._supInvHide;
+}
+function _supToggleInvCharts(){
+  window._supInvHide=!_supInvHidden();
+  try{ localStorage.setItem(INV_HIDE_KEY,window._supInvHide?'1':'0'); }catch(e){}
+  _supSyncInvHideBtn();
+}
+function _supSyncInvHideBtn(){
+  const hidden=_supInvHidden();
+  document.body.classList.toggle('sup-hide-inv-charts',hidden);
+  const b=document.getElementById('sup-inv-hide-btn'); if(!b) return;
+  const v=b.querySelector('.v'); if(v) v.textContent=hidden?'Hidden':'Shown';
+  b.classList.toggle('set',hidden);   // non-default state reads like an active filter
+  b.title=hidden
+    ?"The inventory bar charts are hidden. Click to show them above each block's silo rows."
+    :"The inventory bar charts are shown above each block's silo rows. Click to hide them and give the table more room.";
+}
+document.addEventListener('DOMContentLoaded',_supSyncInvHideBtn);
+if(document.readyState!=='loading') setTimeout(_supSyncInvHideBtn,0);
 // Compact tonnes for the 6px number on a bar: 38k · 5.0k · 655
 function _tAbbrev(v){ v=Math.round(v); return v>=10000?Math.round(v/1000)+'k':v>=1000?(v/1000).toFixed(1)+'k':String(v); }
 // Number.prototype.toLocaleString builds an Intl formatter on every call (~30 µs); a year view of the
