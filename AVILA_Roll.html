@@ -10178,6 +10178,36 @@ function _downCampaignAt(elId, ds){
 // Days an element sits in a Maintenance Calendar event → Map(date → event id), over the
 // simulation horizon (recurring events expanded). Steps by CALENDAR day (setDate): adding
 // +24h to a midnight lands on 23:00 the day before once the clocks fall back (Nov 1).
+// The simulation's reading of the same events: a 1.5-day event = 1 WHOLE down day + a PARTIAL
+// day at 50 % output; a 0.5-day PM = no whole day, one partial day at 50 %. Returns
+// {full:Set(date), partial:Map(date → fraction of the day DOWN)} over the simulation horizon.
+// _maintDayMap (above) rounds a fraction UP for the Supply grid; this mirrors simulate().
+function _maintSpans(elId){
+  const evts=DB.element_maintenance_events.filter(m=>m.element_id===elId);
+  const full=new Set(), partial=new Map();
+  const start=new Date(S.simCfg.start_date+'T00:00:00');
+  const horizon=S.simCfg.horizon||365;
+  evts.forEach(ev=>{
+    const sd=new Date((ev.start_date||'')+'T00:00:00'); if(isNaN(sd)) return;
+    const durF=parseFloat(ev.duration_days)||1, fullDur=Math.floor(durF), frac=durF-fullDur;
+    const freq=parseInt(ev.frequency_days)||0;
+    const addOccurrence=(occStart)=>{
+      const dt=new Date(occStart);
+      for(let d=0;d<fullDur;d++){ full.add(dt._ymd()); dt.setDate(dt.getDate()+1); }
+      if(frac>1e-9){ const k=dt._ymd(); if(!full.has(k)) partial.set(k, Math.max(frac, partial.get(k)||0)); }
+    };
+    addOccurrence(sd);
+    if(ev.type==='recurring'&&freq>0){
+      const recEnd=ev.recurrence_end_date
+        ?new Date(ev.recurrence_end_date+'T00:00:00')
+        :new Date(start.getFullYear(),start.getMonth(),start.getDate()+horizon);
+      const next=new Date(sd); next.setDate(next.getDate()+freq);
+      while(next<=recEnd){ addOccurrence(next); next.setDate(next.getDate()+freq); }
+    }
+  });
+  partial.forEach((v,k)=>{ if(full.has(k)) partial.delete(k); });
+  return {full, partial};
+}
 function _maintDayMap(elId){
   const evts=DB.element_maintenance_events.filter(m=>m.element_id===elId);
   const days=new Map();
@@ -22316,6 +22346,16 @@ function _pushBIBuildTables(){
 
   // ── FACT: PRODUCTION ───────────────────────────────────
   const fact_production=[];
+  // day_frac = the share of the day the unit was AVAILABLE to run: 1 normally, 0.5 on a half-day
+  // PM (a fractional Maintenance Calendar event or a Down PM Day campaign — the simulation runs the
+  // unit at 50 % that day). t/d on producing days = SUM(tonnes) ÷ SUM(day_frac) over rows with
+  // tonnes > 0, so a half-day PM is not read as a slow full day.
+  const _spansMemo={};
+  const _spans=(elId)=>_spansMemo[elId]||(_spansMemo[elId]=_maintSpans(elId));
+  const _dayFrac=(elId,ds)=>{
+    const sp=_spans(elId); if(sp.partial.has(ds)) return Math.round((1-sp.partial.get(ds))*100)/100;
+    const dc=_downCampaignAt(elId, ds); return (dc&&dc.product_id==='__down_pm__')?0.5:1;
+  };
   // Actuals
   (DB.real_production_daily||[]).forEach(row=>{
     fact_production.push(stamp({
@@ -22323,7 +22363,7 @@ function _pushBIBuildTables(){
       facility_id:row.facility_id||elFac[row.element_id]||'',
       element_id:row.element_id, element_type:elType[row.element_id]||'',
       product_id:row.product_id, tonnes:parseFloat(row.volume_t)||0,
-      status:'', stop_cause:''
+      status:'', stop_cause:'', day_frac:1
     }));
   });
   // Forecast — kilns (actual sim tonnes)
@@ -22333,16 +22373,19 @@ function _pushBIBuildTables(){
       const states=r.elementStates[kid]||[];
       arr.forEach((t,i)=>{
         if(t<=0&&states[i]==='running') return; // noise filter
+        const ds=offsetToDate(i);
         fact_production.push(stamp({
-          scenario_type:'forecast', date:offsetToDate(i),
+          scenario_type:'forecast', date:ds,
           facility_id:elFac[kid]||'', element_id:kid, element_type:'kiln',
           product_id:elPrimary[kid]||'', // the kiln's output clinker when configured
           tonnes:Math.round(t)||0,
-          status:states[i]||'', stop_cause:''
+          status:states[i]||'', stop_cause:'', day_frac:_dayFrac(kid,ds)
         }));
       });
     });
-    // Forecast — mills (estimated tonnes = rated_tpd for the chosen product)
+    // Forecast — mills: tonnes the simulation really made that day (millOutputHistory — the rated
+    // rate less clinker, silo room and rule limits, what the Supply page shows); runs saved
+    // before that history existed fall back to the rated t/d of the chosen product.
     const millCap={}; // millId → {productId → tpd}
     DB.element_product_capacities.forEach(c=>{
       if(elType[c.element_id]!=='finish_mill') return;
@@ -22354,17 +22397,20 @@ function _pushBIBuildTables(){
       const states=r.elementStates[mid]||[];
       arr.forEach((pid,i)=>{
         if(!pid){ return; } // idle day — skip
-        const tpd=millCap[mid]?.[pid]||0;
+        const outArr=r.millOutputHistory?.[mid];
+        const tpd=(outArr&&outArr[i]!=null)?outArr[i]:(millCap[mid]?.[pid]||0);
+        const ds=offsetToDate(i);
         fact_production.push(stamp({
-          scenario_type:'forecast', date:offsetToDate(i),
+          scenario_type:'forecast', date:ds,
           facility_id:elFac[mid]||'', element_id:mid, element_type:'finish_mill',
           product_id:pid, tonnes:Math.round(tpd),
-          status:states[i]||'', stop_cause:''
+          status:states[i]||'', stop_cause:'', day_frac:_dayFrac(mid,ds)
         }));
       });
     });
-    // Forecast — packing plants (one packed product per day, like mills; tonnes = rated
-    // capacity for that product, else the machine's pallets/day × t/pallet)
+    // Forecast — packing plants (one packed product per day, like mills; tonnes = what the
+    // simulation packed that day (packOutputHistory), else the rated capacity for that product,
+    // else the machine's pallets/day × t/pallet)
     const packCap={};
     DB.element_product_capacities.forEach(c=>{
       if(elType[c.element_id]!=='packing_plant') return;
@@ -22378,11 +22424,13 @@ function _pushBIBuildTables(){
       const fallback=(parseFloat(el?.props?.rated_capacity_pallets_day)||0)*(parseFloat(el?.props?.tonnes_per_pallet)||0);
       arr.forEach((pid,i)=>{
         if(!pid) return;
+        const outArr=r.packOutputHistory?.[pk];
+        const ds=offsetToDate(i);
         fact_production.push(stamp({
-          scenario_type:'forecast', date:offsetToDate(i),
+          scenario_type:'forecast', date:ds,
           facility_id:elFac[pk]||'', element_id:pk, element_type:'packing_plant',
-          product_id:pid, tonnes:Math.round(packCap[pk]?.[pid]||fallback||0),
-          status:states[i]||'', stop_cause:''
+          product_id:pid, tonnes:Math.round((outArr&&outArr[i]!=null)?outArr[i]:(packCap[pk]?.[pid]||fallback||0)),
+          status:states[i]||'', stop_cause:'', day_frac:_dayFrac(pk,ds)
         }));
       });
     });
@@ -22394,8 +22442,10 @@ function _pushBIBuildTables(){
   //  actual   — a day the production feed / Daily Data reported 0 t. Reason: a Maintenance
   //             Calendar event, else a Down For Repairs / PM Day / Inventory Control campaign
   //             entered for it, else "No reason given". down_days = 1.
-  //  forecast — PLANNED downtime from today on, simulation's active facility: maintenance and
-  //             downtime campaigns (PM Day = ½ day, it runs at 50%). The simulation's own stops
+  //  forecast — PLANNED downtime from today on, simulation's active facility: Maintenance Calendar
+  //             events (whole days → maint, down_days 1; the fractional day of a 0.5- or 1.5-day
+  //             event → pm, down_days = that fraction — the simulation runs it at the rest) and
+  //             downtime campaigns (Down PM Day = ½ day, it runs at 50%). The simulation's own stops
   //             (silo full / no feed) are left out: past the loaded demand they turn into months
   //             of "down" days that nobody planned. A day that already has actuals is never forecast.
   const _DT_LBL={repair:'Repairs', pm:'PM day', inv:'Inventory control', maint:'Maintenance (calendar)', none:'No reason given'};
@@ -22420,12 +22470,13 @@ function _pushBIBuildTables(){
   });
   if(r){
     _prodEls.filter(el=>r.elementStates?.[el.id]).forEach(el=>{
-      const maint=_maintDayMap(el.id), real=_realDays[el.id]||new Set();
+      const sp=_spans(el.id), real=_realDays[el.id]||new Set();
       for(let i=0;i<horizon;i++){
         const ds=offsetToDate(i);
         if(ds<asOf||real.has(ds)) continue;
         const dc=_downCampaignAt(el.id, ds);
-        if(maint.has(ds)) _dtRow('forecast',ds,el.id,'maint','maintenance',1);
+        if(sp.full.has(ds)) _dtRow('forecast',ds,el.id,'maint','maintenance',1);
+        else if(sp.partial.has(ds)) _dtRow('forecast',ds,el.id,'pm','maintenance',sp.partial.get(ds));
         else if(dc){ const k=DOWNTIME_PRODUCTS[dc.product_id]; _dtRow('forecast',ds,el.id,k,'campaign',k==='pm'?0.5:1); }
       }
     });
@@ -22830,17 +22881,17 @@ function _pushBIBuildTables(){
     {key:'plan_version_id',value:planV?planV.id:''},
     {key:'plan_version_label',value:planV?planV.label:''},
     {key:'plan_source_scenario',value:S.simCfg.plan_source_name||''},
-    {key:'export_version',value:'7'},
+    {key:'export_version',value:'8'},
     {key:'note_cases',value:'Planning workbook only: <fact>_cases sheets hold the forecast rows of the yield-sensitivity runs (case = yield | yield_avail, see dim_case / dim_yield); the base sheets are the rated-capacity run (case = rated).'},
     {key:'skipped_orphan_demand_rows',value:String(_orphanDemand)},
     {key:'note_forecast_scope',value:'Forecast rows cover only the simulation\'s active facility. Actuals span every facility present in real_* tables.'},
     {key:'note_inventory_breakdown',value:'Forecast inventory is total per silo (product breakdown is not retained after the run). Actual inventory carries product_id.'},
-    {key:'note_mill_tonnes',value:'Forecast mill tonnes are estimated as rated_tpd for the chosen product on running days. Kiln tonnes are actual simulation outputs.'},
+    {key:'note_mill_tonnes',value:'Forecast kiln, mill and packing tonnes are the simulation\'s real daily output (for mills: the rated rate less clinker, silo room and rule limits; runs saved before that history existed fall back to rated_tpd). day_frac = share of the day the unit was available to run: 1, or 0.5 on a half-day PM (fractional Maintenance Calendar event or Down PM Day campaign) when it ran at 50 %. t/d on producing days = SUM(tonnes) / SUM(day_frac) over rows with tonnes > 0.'},
     {key:'note_demand_swaps',value:'fact_demand: demand swaps are signed adjustment rows (adjustment = swap_out / swap_in, negative at the source point, positive at the receiving point in its own product). SUM(demand_t) is the effective demand; the planned demand rows have adjustment blank.'},
     {key:'note_dim_date',value:'dim_date is a contiguous day-by-day calendar covering every date referenced by any fact (including rail departure/arrival and forecast demand). Safe to mark as the Power BI date table.'},
     {key:'note_scm_type',value:'dim_product.scm_type splits category=additive into slag/ash. Blank means the product has not been tagged yet in the product editor.'},
     {key:'note_sof',value:'fact_sof_period: the Statement-of-Facts time accounting, one row per period, times on the port clock. counted / laytime_h / demurrage_h follow the default rule (time caused by the vessel never counts; weather counts only once the vessel is on demurrage; everything else counts) unless a period was set Y/N by hand (counts_setting). fact_laytime: one row per vessel call, the whole voyage (all ports together); demurrage_usd is blank until the charter terms are entered on the vessel call.'},
-    {key:'note_downtime',value:'fact_downtime: one row per kiln / finish mill / packing machine and down day. actual = a day reported at 0 t (reason: Maintenance Calendar event, else a Down For Repairs / PM Day / Inventory Control campaign entered for it, else "No reason given"). forecast = PLANNED downtime from as_of_date on, simulation facility only: maintenance and downtime campaigns (PM day counts 0.5); simulation stops are not included. SUM(down_days) = days down.'},
+    {key:'note_downtime',value:'fact_downtime: one row per kiln / finish mill / packing machine and down day. actual = a day reported at 0 t (reason: Maintenance Calendar event, else a Down For Repairs / PM Day / Inventory Control campaign entered for it, else "No reason given"). forecast = PLANNED downtime from as_of_date on, simulation facility only: Maintenance Calendar events (whole days = reason maint, 1 each; the fractional day of a 0.5- or 1.5-day event = reason pm, down_days = that fraction) and downtime campaigns (Down PM Day counts 0.5); simulation stops are not included. SUM(down_days) = days down.'},
     {key:'note_silo_transfer',value:'fact_silo_transfer: one row per silo link, direction and day. actual = tonnes recorded as moved; forecast = tonnes the simulation moved (planned_t = asked, short_t = could not move). facility_id = origin facility, to_facility_id = receiving facility; cross_facility=true rows are inbound supply for the receiver. Their effect is already inside fact_inventory — do not add them to stock.'}
   ];
 
