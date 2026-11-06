@@ -10180,11 +10180,12 @@ function _downCampaignAt(elId, ds){
 // +24h to a midnight lands on 23:00 the day before once the clocks fall back (Nov 1).
 // The simulation's reading of the same events: a 1.5-day event = 1 WHOLE down day + a PARTIAL
 // day at 50 % output; a 0.5-day PM = no whole day, one partial day at 50 %. Returns
-// {full:Set(date), partial:Map(date → fraction of the day DOWN)} over the simulation horizon.
-// _maintDayMap (above) rounds a fraction UP for the Supply grid; this mirrors simulate().
+// {full:Set(date), partial:Map(date → fraction of the day DOWN), ids:Map(date → event id)} over
+// the simulation horizon. _maintDayMap (above) rounds a fraction UP; this mirrors simulate() and
+// is what the Supply grid and Push to BI read.
 function _maintSpans(elId){
   const evts=DB.element_maintenance_events.filter(m=>m.element_id===elId);
-  const full=new Set(), partial=new Map();
+  const full=new Set(), partial=new Map(), ids=new Map();
   const start=new Date(S.simCfg.start_date+'T00:00:00');
   const horizon=S.simCfg.horizon||365;
   evts.forEach(ev=>{
@@ -10193,8 +10194,8 @@ function _maintSpans(elId){
     const freq=parseInt(ev.frequency_days)||0;
     const addOccurrence=(occStart)=>{
       const dt=new Date(occStart);
-      for(let d=0;d<fullDur;d++){ full.add(dt._ymd()); dt.setDate(dt.getDate()+1); }
-      if(frac>1e-9){ const k=dt._ymd(); if(!full.has(k)) partial.set(k, Math.max(frac, partial.get(k)||0)); }
+      for(let d=0;d<fullDur;d++){ const k=dt._ymd(); full.add(k); ids.set(k, ev.id); dt.setDate(dt.getDate()+1); }
+      if(frac>1e-9){ const k=dt._ymd(); if(!full.has(k)){ partial.set(k, Math.max(frac, partial.get(k)||0)); if(!ids.has(k)) ids.set(k, ev.id); } }
     };
     addOccurrence(sd);
     if(ev.type==='recurring'&&freq>0){
@@ -10206,7 +10207,7 @@ function _maintSpans(elId){
     }
   });
   partial.forEach((v,k)=>{ if(full.has(k)) partial.delete(k); });
-  return {full, partial};
+  return {full, partial, ids};
 }
 function _maintDayMap(elId){
   const evts=DB.element_maintenance_events.filter(m=>m.element_id===elId);
@@ -10684,9 +10685,14 @@ function _renderSupplyViewInner(wrap){
   const hasSim=!!(r&&r.millProductHistory);
   const dataSource=hasSim?'Simulated output':'Planned schedule / rated capacity (default)';
 
-  // Map dateString → event_id (for the clickable MAINT badge) — shared with Push to BI.
+  // Map dateString → event_id (for the clickable MAINT badge): the WHOLE down days of the
+  // Maintenance Calendar, read like simulate() does (_maintSpans). The fractional day of a
+  // 0.5- or 1.5-day event is not here: the unit runs it at reduced output, and the cell shows
+  // that output tagged as a PM day (maintPartialFor), the same way a Down PM Day campaign shows.
   const _maintMemo=new Map();   // one Maintenance Calendar expansion per element per render
-  const maintSetFor=(elId)=>{ let m=_maintMemo.get(elId); if(!m){ m=_maintDayMap(elId); _maintMemo.set(elId,m); } return m; };
+  const _maintSpansFor=(elId)=>{ let m=_maintMemo.get(elId); if(!m){ const sp=_maintSpans(elId); const full=new Map(); sp.full.forEach(ds=>full.set(ds, sp.ids.get(ds))); const partial=new Map(); sp.partial.forEach((frac,ds)=>partial.set(ds,{frac, id:sp.ids.get(ds)})); m={full, partial}; _maintMemo.set(elId,m); } return m; };
+  const maintSetFor=(elId)=>_maintSpansFor(elId).full;
+  const maintPartialFor=(elId)=>_maintSpansFor(elId).partial;
 
   // Returns {product_id, capacity_tpd} for element on a given date
   // Uses four-tier resolution: ACTUAL > SIM > SCHEDULE > DEFAULT
@@ -10713,6 +10719,20 @@ function _renderSupplyViewInner(wrap){
         if(dc) return {product_id:null, capacity_tpd:0, isActual:true, downtime:DOWNTIME_PRODUCTS[dc.product_id], products:realProduction};
       }
       return {product_id:firstProd.product_id, capacity_tpd:totalActual, isActual:true, products:realProduction};
+    }
+
+    // Tier 0.4: the fractional day of a Maintenance Calendar event (a 0.5-day PM). The simulation
+    // runs the unit at (1 − fraction) of its rate that day, so show that output — the sim histories
+    // already hold the reduced tonnes; without them scale the tier below — tagged as a PM day, with
+    // the event behind it so the cell opens it like a whole maintenance day does.
+    const pmDay=maintPartialFor(el.id).get(ds);
+    if(pmDay){
+      const base=_resolveSimTiers(el, ds, dayIdx);
+      const have=(el.type==='kiln'&&hasSim&&r.kilnProdHistory?.[el.id]?.[dayIdx]!==undefined)||_simOut(el,dayIdx)!==undefined;
+      const pct=Math.round((1-pmDay.frac)*100);
+      const evName=(DB.element_maintenance_events.find(m=>m.id===pmDay.id)||{}).name||'PM';
+      return {...base, capacity_tpd:have?base.capacity_tpd:base.capacity_tpd*(1-pmDay.frac), downtime:'pm', maintId:pmDay.id,
+              tip:`🗓 PM · ${esc(evName)} (Maintenance Calendar) — ${Math.round(pmDay.frac*24)} h down, runs at ${pct}%`};
     }
 
     // Tier 0.5: Manager campaign — locked, overrides simulation
@@ -10874,7 +10894,7 @@ function _renderSupplyViewInner(wrap){
         const gPos=grips?'position:relative;':'';
         const run=_runByDate[ds];
         const campArgs=run?`'${el.id}','${ds}','${run.start}','${run.end}','${run.product}'`:`'${el.id}','${ds}'`;
-        const clickFn=isMaint?`openMaintenanceEventById('${maintDays.get(ds)}')`:`showCampaignPopup(${campArgs})`;
+        const clickFn=(isMaint||res.maintId)?`openMaintenanceEventById('${isMaint?maintDays.get(ds):res.maintId}')`:`showCampaignPopup(${campArgs})`;
         const dAttr=`data-eq="${el.id}" data-ds="${ds}"`;
 
         if(isKiln){
@@ -10885,7 +10905,7 @@ function _renderSupplyViewInner(wrap){
           const lockBadge=isCamp?'<span style="font-size:7px;color:var(--lime);margin-left:2px" title="Manager campaign">🔒</span>':'';
           const isBlocked=(!isMaint&&!dt&&v<=0&&blockedDays.has(ds));
           const downKind=isMaint?'maint':dt?dt:isBlocked?'blocked':null;
-          const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?(res.isActual?_DOWN_TIP[dt].replace(/ \(manual\) — .*$/,'')+' — actual: no production that day':_DOWN_TIP[dt]+(v>0?` · ${prod?.name?esc(prod.name)+' ':''}${_fmtInt(Math.round(v))} t`:'')):isBlocked?_DOWN_TIP.blocked:isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name||''));
+          const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?(res.isActual?_DOWN_TIP[dt].replace(/ \(manual\) — .*$/,'')+' — actual: no production that day':(res.tip||_DOWN_TIP[dt])+(v>0?` · ${prod?.name?esc(prod.name)+' ':''}${_fmtInt(Math.round(v))} t`:'')):isBlocked?_DOWN_TIP.blocked:isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d`:(prod?.name||''));
           let inner, cAlign='text-align:right;', cPad='padding:4px 6px;';
           if(downKind){ cAlign=''; cPad='padding:3px 0;';
             // a reason on a day with actuals keeps the real-data bottom edge
@@ -10923,7 +10943,7 @@ function _renderSupplyViewInner(wrap){
         if(res.isActual&&downKind) _edges.push('inset 0 -2px 0 var(--real)');   // the reason for a real 0 t day
         const campMark=_edges.length?`box-shadow:${_edges.join(',')};`:'';
         const _ofPlan=(v>0&&res.planned_tpd>v+.5)?` of ${_fmtInt(Math.round(res.planned_tpd))} planned`:'';
-        const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?(res.isActual?_DOWN_TIP[dt].replace(/ \(manual\) — .*$/,'')+' — actual: no production that day':_DOWN_TIP[dt]+(v>0?` · ${prod?.name?esc(prod.name)+' ':''}${_fmtInt(Math.round(v))} t`:'')):isBlocked?_DOWN_TIP.blocked:isStarved?starvedTip:(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d${_ofPlan}`:(prod?.name?`${esc(prod.name)} · ${Math.round(v)} t/d${_ofPlan}`:'Idle')));
+        const cellTitle=isMaint?`Maintenance${prod?.name?' · '+prod.name:''}`:(dt?(res.isActual?_DOWN_TIP[dt].replace(/ \(manual\) — .*$/,'')+' — actual: no production that day':(res.tip||_DOWN_TIP[dt])+(v>0?` · ${prod?.name?esc(prod.name)+' ':''}${_fmtInt(Math.round(v))} t`:'')):isBlocked?_DOWN_TIP.blocked:isStarved?starvedTip:(isCamp?`🔒 Campaign: ${prod?.name||''} @ ${Math.round(v)} t/d${_ofPlan}`:(prod?.name?`${esc(prod.name)} · ${Math.round(v)} t/d${_ofPlan}`:'Idle')));
         const zpos=isRunStart?'position:relative;z-index:2;':gPos;
         // Product name only (no rate) in the middle of each production run — small, without the
         // plant prefix ("BRS_IL(12)/BLK" → "IL(12)/BLK") and clipped to its own day cell; the
