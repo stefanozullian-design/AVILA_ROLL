@@ -18582,6 +18582,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
   // Products from DB.demand_points — with topology fallback:
   //   if no products are configured, or none match any upstream silo,
   //   infer products from the upstream silos found in demandSiloMap.
+  const _swapToIds=new Set((DB.demand_substitutions||[]).map(x=>x.to_element_id).filter(Boolean));
   const demandPoints=elements
     .filter(e=>e.type==='demand_point')
     .map(el=>{
@@ -18615,7 +18616,9 @@ function simulate(elements, connections, horizon, includeProposed=false){
         products
       };
     })
-    .filter(d=>d.dailyRates.some(r=>r>0));
+    // A point with no demand of its own still runs when a swap sends it volume (EXT/DEM/OZG_NUH
+    // lived on 500 t/d relocated from PEV and was dropped here, so its silo never moved).
+    .filter(d=>d.dailyRates.some(r=>r>0)||_swapToIds.has(d.id));
 
   // Rail transfer silo IDs — must be defined before millProductSiloMap
   const railTransferSiloIds=new Set(
