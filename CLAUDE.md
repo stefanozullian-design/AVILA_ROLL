@@ -13,7 +13,9 @@ Access API (`showOpenFilePicker`, `showDirectoryPicker`) to read and write scena
 
 | File | What it is |
 |---|---|
-| `AVILA_Roll.html` | The main app (~37,000 lines, 2.5 MB). `index.html` only redirects here. |
+| `AVILA_Roll.html` | The main app (~37,000 lines, 2.5 MB). **Built from `src/roll/`, never edited by hand.** `index.html` only redirects here. |
+| `src/roll/` | The Roll's source: `head.html`, `style.css`, `body.html`, 32 numbered `NN-*.js` script parts cut at the script's region banners, `tail.html`. Its README maps each part to a feature area. |
+| `tools/build_roll.py` | Concatenates `src/roll/` into `AVILA_Roll.html` (CRLF). `--check` fails when the shipped file is out of step with the parts. |
 | `AVILA_Mills.html` | **Mill Balance**: a stand-alone what-if page that trades finish-mill time between cements. Reads the active Roll scenario, never writes it. Opened from the Roll's Production section in its own tab. |
 | `AVILA_Sales.html` | **Sales Detail / Sales Performance**: a stand-alone page with its own Sales file. Opened from the Roll's Demand section. Shares `localStorage` with the Roll. |
 | `tools/make_mills_data.py` | Builds `AVILA_Mills_data.js` (+ `.json`) from a scenario JSON: only what the Mills page needs. |
@@ -34,9 +36,14 @@ If a task hands you a scenario file to test with, keep it in the scratchpad dire
 
 ## How AVILA_Roll.html is organised
 
-One `<style>` block (lines ~9–1538), the markup (to ~2402), then one `<script>` to the
-end. About 1,400 top-level functions. There is no module system: everything is global.
-Landmarks worth jumping to (line numbers drift; search by name):
+**Edit the parts in `src/roll/`, then run `python tools/build_roll.py`, and commit both the
+parts and the rebuilt page.** The build only concatenates: `head.html`, the stylesheet, the
+markup, then every `NN-*.js` in prefix order inside one `<script>`, then `tail.html`. The
+script parts therefore share one global scope exactly as before, with no imports; load order
+matters only for top-level `const`/`let` that run at load time. About 1,400 top-level
+functions. `src/roll/README.md` says which part holds which feature.
+
+Landmarks worth jumping to (search by name with `grep -n` across `src/roll/`):
 
 - `const DB = {` — the **scenario database**. Every table is listed with a comment
   describing its row shape. Read this first for any data question. Collections cover
@@ -95,13 +102,17 @@ Space Mono and Syne from Google Fonts. Don't add dependencies.
 - **Comments explain the business rule**, in prose, not the syntax. Keep that voice.
   Hard-won semantics (what `day_frac` means, what counts as a stop) are written down next
   to the code; update them when behaviour changes.
-- **Line endings**: `AVILA_Roll.html` and `AVILA_Sales.html` are CRLF; everything else is
-  LF. Preserve each file's existing endings. Never reformat, re-indent or minify: a diff
-  that touches thousands of lines cannot be reviewed.
-- **Edit surgically.** Read only the line ranges you need (`grep -n`, then `sed -n`);
-  never load the whole Roll file into context. Make exact string replacements. After an
+- **Line endings**: the built `AVILA_Roll.html` and `AVILA_Sales.html` are CRLF; the
+  `src/roll/` parts and everything else are LF (the build normalises, so a CRLF checkout
+  of the parts builds the same bytes). Preserve each file's existing endings. Never
+  reformat, re-indent or minify: a diff that touches thousands of lines cannot be reviewed.
+- **Edit surgically.** Work in the `src/roll/` part that owns the feature; read only the
+  line ranges you need (`grep -n`, then `sed -n`). Make exact string replacements. After an
   edit, re-read the surrounding 20 lines to confirm the template literal or `onclick`
-  string you were inside is still closed.
+  string you were inside is still closed. A new region gets its own `NN-name.js` at the
+  right place in load order rather than growing an unrelated part.
+- **Dead code goes, it is not kept "for reference".** Git has the history. A function that
+  nothing references (check the whole file, markup and strings included) is removed.
 - **Mills and Sales mirror the Roll's theme block.** A theme change in the Roll is usually
   wanted in the other two pages as well.
 
@@ -109,13 +120,16 @@ Space Mono and Syne from Google Fonts. Don't add dependencies.
 
 There is no test suite. Do this much, every time, before pushing:
 
-1. `node tools/smoke_load.js` — loads the three pages headless and fails on any uncaught
+1. `python tools/build_roll.py --check` — the shipped Roll must be exactly what the parts
+   build. If you edited a part, run the build first; if you edited `AVILA_Roll.html`
+   directly by mistake, move the change into the part and rebuild.
+2. `node tools/smoke_load.js` — loads the three pages headless and fails on any uncaught
    error. Playwright and Chromium are pre-installed in the cloud environment.
-2. For a **behaviour change** (engine, Supply grid, Push to BI): open the Roll in
+3. For a **behaviour change** (engine, Supply grid, Push to BI): open the Roll in
    Playwright with a scenario the user provided, exercise the changed path, and screenshot
    the result into the scratchpad. Describe what the screenshot shows in the final message.
-3. For a **bug fix**: reproduce the failure first, then show the same check passing.
-4. The Roll has a built-in **golden-scenario self-test** (🧪 button in the top bar:
+4. For a **bug fix**: reproduce the failure first, then show the same check passing.
+5. The Roll has a built-in **golden-scenario self-test** (🧪 button in the top bar:
    `stSaveBaseline()` / `stRunCheck()`). It digests a simulation run and compares it with a
    saved baseline. Ask the user to run it after engine changes; it catches silent drift.
 
