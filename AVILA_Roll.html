@@ -4073,15 +4073,6 @@ const PRODUCT_CAT_COLORS={
   '':          'var(--border2)'   // unassigned — border only
 };
 
-// Small glyph per product category — signals the TYPE of product being produced in a cell.
-const PRODUCT_CAT_ICONS={
-  raw_meal:    '▲',   // raw material
-  clinker:     '◆',   // clinker
-  cement_bulk: '●',   // bulk cement
-  cement_packed:'■',  // packed cement
-  additive:    '✦',   // additive / SCM
-  '':          '·'    // unassigned
-};
 // Returns a tiny colored icon span for a product's category ('' if no product).
 
 // Distinct glyph + colour per SPECIFIC product (e.g. MIA_IL(08) vs MIA_IL(11)), not by category.
@@ -6265,9 +6256,6 @@ function getActiveDemandSwaps(elementId, dateStr){
   return (DB.demand_substitutions||[]).filter(s=>
     s.from_element_id===elementId && dateStr>=s.start_date && dateStr<=s.end_date);
 }
-function getActiveDemandSwap(elementId, dateStr){
-  return getActiveDemandSwaps(elementId, dateStr)[0]||null;
-}
 // Tonnes each active swap takes out of a source point's demand `rate` on a date — the ONE
 // allocation both the source (_resolveDemandSwap) and the destinations (_resolveDemandSwapIn)
 // read, so what the destinations receive always equals what the source gives up. Swaps that
@@ -6450,80 +6438,6 @@ function _mpProdsOf(millId){
   return [...new Set((DB.element_product_capacities||[])
     .filter(c=>c.element_id===millId&&(parseFloat(c.capacity_tpd)||0)>0)
     .map(c=>c.product_id))];
-}
-function _mpPn(id){ return DB.products.find(p=>p.id===id)?.name||id; }
-function _mpMn(id){ return DB.elements.find(e=>e.id===id)?.name||id; }
-// Capacity + forward-14-day demand rate for ONE product's silo(s), for day⇄% conversion.
-function _mpMeta(millId, prodId){
-  const mill=getEl(millId); const facId=mill&&(mill.assigned_facility_id||mill.facility_id);
-  const silos=(DB.elements||[]).filter(e=>e.type==='bulk_silo'
-    && (DB.connections||[]).some(c=>c.from_element_id===millId&&c.to_element_id===e.id)
-    && getSiloProducts(e).includes(prodId));
-  const cap=silos.reduce((s,si)=>s+(parseFloat(si.props?.max_capacity)||0),0);
-  const today=new Date()._ymd(); const dates=[]; const d=new Date(today+'T00:00:00');
-  for(let i=0;i<14;i++){ dates.push(d._ymd()); d.setDate(d.getDate()+1); }
-  const dps=(DB.demand_points||[]).filter(dp=>{ const el=getEl(dp.element_id); const f=el&&(el.assigned_facility_id||el.facility_id);
-    return (!facId||f===facId)&&(dp.products||[]).some(p=>p.product_id===prodId); });
-  let tot=0; dates.forEach(ds=>dps.forEach(dp=>{ tot+=_demandRate(dp.element_id,ds)||0; }));
-  return {cap, rate:tot/14, silos};
-}
-function _mpDefaults(millId, prodId){
-  const m=_mpMeta(millId,prodId); const s0=m.silos[0];
-  const tp=s0&&parseFloat(s0.props?.target_pct); const cf=s0&&parseFloat(s0.props?.critical_floor_pct);
-  // 'maximize' silos (no explicit target_pct) default the target to the stop level
-  // so the prefill is valid (floor < target ≤ stop) and replicates "fill to stop".
-  return { target:(tp>0?tp:98), crit:(cf>0?cf:10), stop:98, restart:0, look:14, minrun:0 };
-}
-function _mpRefreshMeta(){
-  const mill=document.getElementById('mp-mill')?.value;
-  const prod=document.getElementById('mp-prod')?.value;
-  window._mpMetaCur=_mpMeta(mill,prod);
-}
-function _mpRepopulateProducts(){
-  const mill=document.getElementById('mp-mill')?.value; const sel=document.getElementById('mp-prod'); if(!sel) return;
-  const prods=_mpProdsOf(mill); const cur=sel.value;
-  sel.innerHTML=prods.map(p=>`<option value="${p}"${p===cur?' selected':''}>${_mpPn(p)}</option>`).join('');
-  if(!prods.includes(cur)) sel.value=prods[0]||'';
-}
-function _mpMillChanged(){ _mpRepopulateProducts(); _mpProdChanged(); }
-function _mpProdChanged(){
-  const mill=document.getElementById('mp-mill')?.value, prod=document.getElementById('mp-prod')?.value;
-  const d=_mpDefaults(mill,prod);
-  ['target','crit','stop','restart','look','minrun'].forEach(k=>{ const el=document.getElementById('mp-'+k); if(el&&d[k]!=null) el.value=d[k]; });
-  _mpRefreshMeta(); ['target','crit','stop'].forEach(k=>_mpSync(k,'range')); _mpUpdate();
-}
-function _mpSync(k, src){
-  const meta=window._mpMetaCur||{cap:0,rate:0};
-  const rng=document.getElementById('mp-'+k), dbox=document.getElementById('mp-'+k+'-d');
-  if(src==='days' && meta.rate>0 && meta.cap>0){
-    const days=parseFloat(dbox.value)||0; let pct=days*meta.rate/meta.cap*100;
-    rng.value=Math.round(Math.max(0,Math.min(100,pct)));
-  }
-  const pct=parseFloat(rng.value)||0;
-  const days=(meta.rate>0&&meta.cap>0)?(pct/100*meta.cap/meta.rate):0;
-  if(dbox && src!=='days') dbox.value=(meta.rate>0)?days.toFixed(1):'';
-  const rv=document.getElementById('mp-rv-'+k); if(rv) rv.textContent=Math.round(pct)+'%'+(meta.rate>0?' · '+days.toFixed(1)+'d':'');
-  _mpUpdate();
-}
-function _mpUpdate(){
-  const v=id=>parseFloat(document.getElementById('mp-'+id)?.value)||0;
-  const crit=v('crit'),target=v('target'),stop=v('stop');
-  const r1=document.getElementById('mp-rv-restart'); if(r1) r1.textContent=v('restart')<=0?'restart ASAP':'cover ≤ '+v('restart')+'d';
-  const r2=document.getElementById('mp-rv-look'); if(r2) r2.textContent='next '+Math.round(v('look'))+'d';
-  const r3=document.getElementById('mp-rv-minrun'); if(r3) r3.textContent=v('minrun')<=0?'any day':'≥ '+Math.round(v('minrun'))+'d';
-  const ok=crit<target&&target<=stop;
-  const w=document.getElementById('mp-warn'); if(w) w.style.display=ok?'none':'block';
-  const sb=document.getElementById('mp-save'); if(sb) sb.disabled=!ok;
-}
-function _mpParamSummary(p){
-  const pr=p.params||{}; const bits=[];
-  if(pr.target_pct!=null) bits.push('tgt '+Math.round(pr.target_pct)+'%');
-  if(pr.critical_floor_pct!=null) bits.push('floor '+Math.round(pr.critical_floor_pct)+'%');
-  if(pr.stop_pct!=null) bits.push('stop '+Math.round(pr.stop_pct)+'%');
-  if(pr.restart_cover_days) bits.push('restart ≤'+pr.restart_cover_days+'d');
-  if(pr.min_run_days) bits.push('minrun '+Math.round(pr.min_run_days)+'d');
-  if(pr.lookahead_days!=null) bits.push('look '+Math.round(pr.lookahead_days)+'d');
-  return bits.join(' · ');
 }
 // The Mill Policies screen was retired on 2026-10-25: policies are written rules now (Simulation
 // Rules › Production, type mill_operation) and saved policies were converted into them.
@@ -10169,7 +10083,6 @@ function _midLabelIdx(keys, vis){
   close(keys.length-1);
   return out;
 }
-const _DOWN_LABEL = {maint:'MAINT', blocked:'FULL', repair:'REPAIRS', pm:'PM DAY', inv:'INV CTRL'};
 const _DOWN_TIP = {
   blocked:'⛔ Blocked — receiving silo full, so the element had to stop',
   repair:'🔧 Down For Repairs (manual) — no production',
@@ -14877,16 +14790,6 @@ function _demElProdIds(el){
   if(dp?.products?.length) return dp.products.map(p=>p.product_id).filter(Boolean);
   return el.props?.product_id ? [el.props.product_id] : [];
 }
-// True if the demand point carries any product of the given category (Supply/Product → Category)
-function _demElMatchesCat(el, cat){
-  if(!cat) return true;
-  return _demElProdIds(el).some(pid=>(DB.products.find(p=>p.id===pid)?.category||'')===cat);
-}
-// True if the demand point carries any product of the given family (Cement/SCM/Clinker/Raw Meal)
-function _demElMatchesFam(el, fam){
-  if(!fam) return true;
-  return _demElProdIds(el).some(pid=>getProductFamily(pid)===fam);
-}
 // INT / EXT — embedded in the product name (falls back to the demand-point name)
 function _demElType(el){
   const names=_demElProdIds(el).map(pid=>DB.products.find(p=>p.id===pid)?.name||'');
@@ -16699,77 +16602,6 @@ function rpRenderExceptions(){
   +`</div>`;
 }
 
-// ── Arrival dialog ─────────────────────────────────────────────────
-// `prodId` (optional) scopes the dialog to one product — passed by the per-product
-// TRANSF/ARRIVAL rows so a cell edits that product's movement, not another one arriving
-// the same day. Null/omitted (the total row) keeps the previous all-products behaviour.
-function rpOpenArrivalDialog(destFacId,dayNum,arrDateStr,prodId){
-  if(!S.simCfg.start_date) return;
-  const d=parseInt(dayNum);
-  const wantProd=prodId||null;
-
-  // Find all existing movements arriving on this day for this destination (any status)
-  const matches=DB.rail_movements.map((rm,i)=>({rm,i})).filter(({rm})=>{
-    if(rm.to_facility_id!==destFacId) return false;
-    if(wantProd!==null&&(rm.product_id||'')!==wantProd) return false;
-    let depDay=null;
-    if(rm.departure_date)
-      depDay=Math.round((new Date(rm.departure_date)-new Date(S.simCfg.start_date+'T00:00:00'))/864e5)+1;
-    else if(rm.switch_day) depDay=rm.switch_day;
-    if(depDay===null) return false;
-    return (depDay+(parseInt(rm.transit_days)||1))===d;
-  });
-
-  if(matches.length>0){
-    // Open the most actionable one: In Transit > Confirmed > Planned > Proposed > Finished
-    const _sp=['In Transit','Unloading','Confirmed','Planned','Proposed','Finished'];
-    matches.sort((a,b)=>_sp.indexOf(a.rm.status||'Planned')-_sp.indexOf(b.rm.status||'Planned'));
-    _editRail(matches[0].i);
-    return;
-  }
-
-  // No existing movement — open comprehensive Add dialog pre-filled with destination context
-  const origins=rpGetOriginsForDest(destFacId);
-  if(!origins.length){alert('No rail origin connected to this destination in the topology.');return;}
-  const {dp,destCfg,berth}=origins[0];
-  const transit=parseInt(destCfg?.transit_days)||1;
-  const carCap=parseFloat(dp.props?.car_capacity_t)||50;
-  const acceptedProds=destCfg?.accepted_products||[];
-  const carsPerDay=(parseFloat(dp.props?.std_loading_cars_shift||dp.props?.std_loading_cars_day)||10)
-                   *(parseFloat(dp.props?.shifts_per_day)||1);
-
-  showModalContent(railHTML());
-
-  // Pre-fill fields from topology context
-  const depDateStr=rpDayDate(Math.max(1,d-transit));
-  document.getElementById('rl-to').value=destFacId;
-  document.getElementById('rl-date').value=depDateStr;
-  document.getElementById('rl-transit').value=transit;
-  document.getElementById('rl-cap').value=carCap;
-  document.getElementById('rl-wagons').value=12;
-  // Pre-select the product: the row that was clicked wins, else the first accepted product.
-  const _prodSel=document.getElementById('rl-prod');
-  if(wantProd&&_prodSel&&[..._prodSel.options].some(o=>o.value===wantProd)) _prodSel.value=wantProd;
-  else if(acceptedProds.length) _prodSel.value=acceptedProds[0];
-  calcRailTotal();
-
-  // Override save button to also patch simulation-routing fields (dispatch_id, berth, switch_day)
-  const saveBtn=document.querySelector('#modal-content .btn-pri');
-  if(saveBtn) saveBtn.onclick=function(){
-    saveRail();
-    const rm=DB.rail_movements[DB.rail_movements.length-1];
-    if(rm&&rm.to_facility_id===destFacId){
-      rm.from_dispatch_id=dp.id;
-      if(berth) rm.to_berth_id=berth.id;
-      const sw=dateToDayOffset(rm.departure_date,S.simCfg.start_date)+1;
-      rm.switch_day=sw;
-      const loadDays=Math.max(1,Math.ceil((rm.wagon_count||0)/carsPerDay));
-      rm.load_start_day=Math.max(1,sw-loadDays);
-      rm._carsPerDay=carsPerDay;
-    }
-  };
-}
-
 
 
 
@@ -17536,280 +17368,20 @@ function _dmdIsActual(elId,ds){ return _dmdActIdx().has(elId+'|'+ds)||_dedupReal
 // Invalidate cache whenever demand_values changes
 function _demandCacheInvalidate(){ _demandRate._cache={}; _nwdSet._c=null; _dmdActIdx._c=null; if(typeof _demGridVal==='function') _demGridVal._cache=null; if(typeof SP!=='undefined') SP._demIdx=null; }
 
-// ── Monthly demand total for an element (for dashboard summaries) ──
 
 
 // ═══════════════════════════════════════════════════════
 // SIMULATION ENGINE
 // ═══════════════════════════════════════════════════════
 
-// ── DEMAND-PULL RAIL PLANNER ─────────────────────────────
-// Called after Pass 1. Uses Pass 1 terminal inventory history to
-// plan exactly when shipments must leave BRS to keep terminals above
-// their critical floor. Writes Proposed entries to DB.rail_movements.
-// Pass 2 will pre-load those into transitQueue so terminals receive
-// planned arrivals.
-// Scans forward for the first day when EOD inventory would hit the critical
-// floor, then works backward through switch days to find the latest valid
-// dispatch that makes the train arrive in time. Repeats until no stockouts
-// remain in the projection. Respects Planned/Confirmed as hard constraints.
-// Rail v2 is operator-driven — drop any legacy auto-generated rail proposals so the board
-// only contains operator pushes. (Idempotent.)
+// ── RAIL ─────────────────────────────────────────────────
+// The rail schedule is operator-driven: DB.rail_loading_plan (loading) plus operator pushes in
+// DB.rail_movements. Rail v1 used to auto-propose dispatches from a demand-pull projection; the
+// rows it wrote are retired here so the board only contains operator pushes. (Idempotent.)
 function _railClearAutoProposed(){
   const before=DB.rail_movements.length;
   DB.rail_movements=DB.rail_movements.filter(m=>m.notes!=='Auto-generated by simulation');
   if(DB.rail_movements.length!==before) autoSave();
-}
-
-// DEPRECATED (rail v1) — no longer called. Kept for reference / quick revert. The rail
-// schedule is now driven by DB.rail_loading_plan (loading) + operator pushes in DB.rail_movements.
-function _planRailShipments(rBase){
-  // Remove only AUTO-GENERATED Proposed rail movements. User-created Proposed ones
-  // (notes !== 'Auto-generated by simulation') are kept so the planner treats them as
-  // covering their switch day, preventing duplicate auto-proposals.
-  DB.rail_movements=DB.rail_movements.filter(m=>
-    m.status!=='Proposed'||m.notes!=='Auto-generated by simulation'
-  );
-
-  const simStart=new Date(S.simCfg.start_date+'T00:00:00');
-  const horizon=rBase.simHorizon||S.simCfg.horizon;
-  const allEls=getFacElements();
-  // Default target percentages by inventory_objective — same as siloTarget() inside simulate()
-  const _objTargetPct={maximize:1.00, meet_demand:0.75, minimize:0.50};
-
-  // For each rail dispatch point, plan shipments for each destination
-  allEls.filter(e=>e.type==='dispatch_point'&&e.props.dispatch_type==='Rail').forEach(dp=>{
-    const carCapT=parseFloat(dp.props.car_capacity_t)||RAIL_CAR_T_DEFAULT;
-    const stdCarsDay=(parseFloat(dp.props.std_loading_cars_shift||dp.props.std_loading_cars_day)||10)
-                    *(parseFloat(dp.props.shifts_per_day)||1);
-    const switchDays=dp.props.switch_days||[]; // Mon=0..Sun=6
-    const dests=dp.props.destinations||[];
-
-    // Working-day predicate for this dispatch point (hoisted; used both to seed the shared
-    // loading budget below and inside the per-destination scheduler).
-    const _isWorkingDay=_mkRailWorkDayFn(dp);
-
-    // ── Shared per-dp loading budget ──────────────────────────────────────────
-    // The siding loads at most stdCarsDay cars/day TOTAL, across ALL destinations. Track
-    // cars already committed to loading on each day so newly-proposed movements (for any
-    // destination) only consume the REMAINING daily capacity. Seeded from movements that
-    // are already locked (Planned/Confirmed/In Transit) or user-created Proposed — i.e.
-    // everything except the auto-Proposed entries this pass just cleared and will regenerate.
-    const loadUsedByDay={};
-    const _destIdSet=new Set(dests.map(x=>x.facility_id));
-    DB.rail_movements
-      .filter(rm=>_railMoveFromDp(rm,dp,_destIdSet)
-        &&rm.switch_day&&rm.load_start_day
-        &&(['Planned','Confirmed','In Transit'].includes(rm.status||'')||
-           (rm.status==='Proposed'&&rm.notes!=='Auto-generated by simulation')))
-      .forEach(rm=>{
-        let rem=parseInt(rm.wagon_count)||0;
-        // Window is INCLUSIVE of the switch day: cars loaded the morning of the switch
-        // (before the railroad arrives) ship on that same switch — see _railWindow note.
-        for(let d=rm.load_start_day;d<=rm.switch_day&&rem>0;d++){
-          if(!_isWorkingDay(d)) continue;
-          const free=stdCarsDay-(loadUsedByDay[d]||0);
-          if(free<=0) continue;
-          const put=Math.min(free,rem);
-          loadUsedByDay[d]=(loadUsedByDay[d]||0)+put; rem-=put;
-        }
-      });
-
-    // Find all switch day indices in the horizon
-    const allSwitchDayNums=[];
-    for(let d=1;d<=horizon;d++){
-      const dt=new Date(simStart.getTime()+(d-1)*864e5);
-      const dow=(dt.getDay()+6)%7;
-      if(switchDays.includes(dow)) allSwitchDayNums.push(d);
-    }
-    if(!allSwitchDayNums.length) return;
-
-    // Pre-build set of switch days already locked by Planned/Confirmed OR user-created Proposed
-    const coveredSwitchDays=new Set(
-      DB.rail_movements
-        .filter(rm=>rm.to_facility_id&&rm.switch_day&&
-          (['Planned','Confirmed'].includes(rm.status||'')||
-           (rm.status==='Proposed'&&rm.notes!=='Auto-generated by simulation')))
-        .map(rm=>rm.switch_day)
-    );
-
-    dests.forEach(dest=>{
-      const facId=dest.facility_id;
-      const transitDays=parseInt(dest.transit_days)||1;
-      const acceptedProds=dest.accepted_products||[];
-
-      // Find terminal berth — canvas elements first, then all DB.elements for cross-facility terminals
-      const berthEl=allEls.find(e=>e.type==='berth'&&
-          (e.assigned_facility_id||e.facility_id)===facId)
-        ||DB.elements.find(e=>e.type==='berth'&&
-          (e.props?.berth_type||'').includes('Rail')&&
-          (e.assigned_facility_id||e.facility_id)===facId);
-      if(!berthEl) return;
-      // Silos connected to this berth — search all DB.connections/DB.elements for cross-facility
-      const termSilos=DB.connections.filter(c=>c.from_element_id===berthEl.id)
-        .map(c=>DB.elements.find(e=>e.id===c.to_element_id&&e.type==='bulk_silo')).filter(Boolean);
-      const termSilo=termSilos.find(s=>getSiloProducts(s).some(p=>acceptedProds.includes(p)))||termSilos[0];
-      if(!termSilo) return;
-
-      const siloMax=parseFloat(termSilo.props?.max_capacity)||0; if(!siloMax) return;
-      const critFloor=(parseFloat(termSilo.props?.critical_floor_pct)||10)/100*siloMax;
-      // Target respects inventory_objective: maximize→100%, meet_demand→75%, minimize→50%
-      // target_pct prop overrides the objective default if explicitly set
-      const _obj=termSilo.props?.inventory_objective||'maximize';
-      const _targetPctDefault=_objTargetPct[_obj]??1.00;
-      const _targetPctProp=termSilo.props?.target_pct;
-      const targetPct=(_targetPctProp!=null&&_targetPctProp!==''&&parseFloat(_targetPctProp)>0)
-        ?parseFloat(_targetPctProp)/100
-        :_targetPctDefault;
-      const targetInv=targetPct*siloMax;
-
-      // Inventory history from Pass 1 (EOD array, 0-indexed by day-1)
-      const invHist=rBase.inventoryHistory[termSilo.id]||[];
-      const getBOD=d=>d<=1
-        ?(parseFloat(termSilo.props?.start_inventory)||0)
-        :(invHist[d-2]??invHist[invHist.length-1]??0);
-
-      // Daily demand at destination — search all DB.elements for cross-facility terminals
-      const termDemEls=DB.elements.filter(e=>e.type==='demand_point'&&
-        (e.assigned_facility_id||e.facility_id)===facId);
-      const getDemand=d=>{
-        const dt=new Date(simStart.getTime()+(d-1)*864e5);
-        return termDemEls.reduce((s,el)=>s+_demandRate(el.id,dt._ymd()),0);
-      };
-
-      // Arrivals array pre-seeded from Planned/Confirmed/In Transit movements
-      const plannedArrivals=new Array(horizon+2).fill(0);
-      DB.rail_movements
-        .filter(rm=>rm.to_facility_id===facId&&['Planned','Confirmed','In Transit'].includes(rm.status||''))
-        .forEach(rm=>{
-          const depDay=dateToDayOffset(rm.departure_date,S.simCfg.start_date)+1;
-          const arrDay=depDay+(parseInt(rm.transit_days)||transitDays);
-          if(arrDay>=1&&arrDay<=horizon+10)
-            plannedArrivals[Math.min(arrDay,horizon+1)]+=(rm.total_capacity_t||0);
-        });
-
-      // Forward projection: projInvFwd[d] = BOD inventory on day d
-      const projInvFwd=new Array(horizon+2).fill(0);
-      projInvFwd[1]=getBOD(1);
-      const rebuildFrom=from=>{
-        for(let d=from;d<=horizon;d++){
-          projInvFwd[d+1]=Math.max(0, projInvFwd[d]+(plannedArrivals[d]||0)-getDemand(d));
-        }
-      };
-      rebuildFrom(1);
-
-      // ── Stockout-scan scheduler ────────────────────────────────────────────
-      // Repeatedly finds the first day EOD inventory would hit the critical
-      // floor, then schedules the latest switch-day dispatch that makes the
-      // train arrive in time. Re-scans after each scheduled shipment.
-      const usedSwitchDays=new Set(coveredSwitchDays); // start with locked days
-      let scanFrom=1;
-      let guard=allSwitchDayNums.length+10; // safety cap
-
-      while(guard-->0){
-        // Find first EOD day where inventory hits or crosses the floor
-        let critDay=null;
-        for(let d=scanFrom;d<=horizon;d++){
-          const eod=projInvFwd[d]+(plannedArrivals[d]||0)-getDemand(d);
-          if(eod<=critFloor){critDay=d;break;}
-        }
-        if(critDay===null) break; // no more projected stockouts — done
-
-        // Train must arrive on or before critDay so the EOD stays above floor
-        const latestDeparture=critDay-transitDays;
-
-        // Find the latest unused switch day that still allows arrival in time
-        let switchDay=null, switchIdx=-1;
-        for(let si=allSwitchDayNums.length-1;si>=0;si--){
-          const s=allSwitchDayNums[si];
-          if(s<=latestDeparture&&!usedSwitchDays.has(s)){switchDay=s;switchIdx=si;break;}
-        }
-
-        if(!switchDay){
-          // No valid switch day available — cannot prevent this stockout.
-          // Advance past it and continue scanning for later ones.
-          scanFrom=critDay+1;
-          continue;
-        }
-
-        // Fill silo as much as possible, capped by loading rate × available window.
-        const arrivalDay=Math.min(switchDay+transitDays, horizon+1);
-        const projAtArrival=Math.max(0, projInvFwd[arrivalDay]+(plannedArrivals[arrivalDay]||0));
-        // Skip if the terminal will already be at/above its TARGET level on arrival day —
-        // we ship only enough to restore the target ("the amount needed to prevent the
-        // stockout"), not to fill the silo to the brim. targetInv respects the silo's
-        // inventory_objective (maximize=100% / meet_demand=75% / minimize=50%, or target_pct).
-        if(projAtArrival>=targetInv){ usedSwitchDays.add(switchDay); scanFrom=critDay+1; continue; }
-        // Loading-capacity cap: count only this dp's REMAINING free car-slots on working
-        // days in the window since the previous switch day. Capacity is shared across ALL
-        // destinations via loadUsedByDay, so overlapping windows can never over-load the
-        // siding beyond stdCarsDay cars/day.
-        // The loading window for this switch is [prevSwitch+1, switchDay] INCLUSIVE — cars
-        // loaded on the switch day itself ship on that day's train (railroad collects every
-        // car accumulated since the day after the previous switch, switch day included).
-        const prevSw=switchIdx>0?allSwitchDayNums[switchIdx-1]:0;
-        const rangeStart=Math.max(1, prevSw+1);
-        let availCap=0;
-        for(let d=rangeStart; d<=switchDay; d++) if(_isWorkingDay(d)) availCap+=Math.max(0, stdCarsDay-(loadUsedByDay[d]||0));
-        const maxCarsLoadable=Math.floor(availCap);
-        // Size to restore the target level (not silo max), but never overflow the silo.
-        const carsToTarget=Math.ceil(Math.max(0,targetInv-projAtArrival)/carCapT);
-        const carsToMax=Math.floor((siloMax-projAtArrival)/carCapT);
-        const maxCarsSilo=Math.min(carsToTarget,carsToMax);
-        const carsNeeded=Math.min(maxCarsSilo, maxCarsLoadable);
-        // No remaining loading capacity (or no silo room) for this switch day — skip it.
-        if(carsNeeded<1){ usedSwitchDays.add(switchDay); scanFrom=critDay+1; continue; }
-
-        // Place cars backward from the switch day onto working days that still have free
-        // capacity in the shared budget. loadStart = earliest day actually used.
-        const _placement={};
-        let _rem=carsNeeded, loadStart=switchDay;
-        for(let d=switchDay; d>=rangeStart && _rem>0; d--){
-          if(!_isWorkingDay(d)) continue;
-          const free=stdCarsDay-(loadUsedByDay[d]||0);
-          if(free<=0) continue;
-          const put=Math.min(free,_rem);
-          _placement[d]=put; _rem-=put; loadStart=d;
-        }
-        if(_rem>0||loadStart<1){ usedSwitchDays.add(switchDay); scanFrom=critDay+1; continue; }
-
-        // Commit the movement and update the projection + shared loading budget
-        const tonnesArriving=carsNeeded*carCapT;
-        plannedArrivals[arrivalDay]=(plannedArrivals[arrivalDay]||0)+tonnesArriving;
-        rebuildFrom(arrivalDay);
-        usedSwitchDays.add(switchDay);
-        Object.entries(_placement).forEach(([d,c])=>{ loadUsedByDay[+d]=(loadUsedByDay[+d]||0)+c; });
-
-        const departDate=new Date(simStart.getTime()+(switchDay-1)*864e5);
-        const departStr=departDate._ymd();
-        const toFac=DB.facilities.find(f=>f.id===facId);
-
-        DB.rail_movements.push({
-          id:`rm_prop_${dp.id}_sw${switchDay}_${facId}`,
-          from_facility_id:_railDpFacId(dp),
-          to_facility_id:facId,
-          from_dispatch_id:dp.id,
-          to_berth_id:berthEl.id,
-          to_silo_id:termSilo.id,
-          reference:`SIM-${departStr}-${toFac?.name||facId}`,
-          departure_date:departStr,
-          wagon_count:carsNeeded,
-          wagon_capacity_t:carCapT,
-          total_capacity_t:Math.round(tonnesArriving),
-          product_id:acceptedProds[0]||'',
-          transit_days:transitDays,
-          load_start_day:loadStart,
-          switch_day:switchDay,
-          notes:'Auto-generated by simulation',
-          status:'Proposed'
-        });
-
-        scanFrom=1; // restart full scan — projection has changed
-      }
-    });
-  });
-
-  autoSave();
 }
 
 // Day-by-day silo projection for the vessel auto-proposer, mirroring simDayBerths: ONE vessel docked
@@ -18450,7 +18022,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
     .filter(rm=>{
       const st=rm.status||'Planned';
       // Inbound: train arriving at this facility — Planned/Confirmed/In Transit always;
-      // Proposed only in Pass 2 (Pass 1 excludes Proposed so _planRailShipments sees baseline).
+      // Proposed only in Pass 2 (Pass 1 excludes Proposed so the baseline is seen without them).
       if(rm.to_facility_id===S.facility_id){
         return st==='Proposed'?includeProposed:['Planned','Confirmed','In Transit'].includes(st);
       }
@@ -24221,8 +23793,6 @@ let _clkSimResults=null; // cache last results for redraw on scale change
 
 
 
-let _clkMaximized=false;
-
 
 // ── Right-panel legend helper ──────────────────────────────────────
 function _drawLegendPanel(panelId, groups){
@@ -25229,8 +24799,6 @@ const SOF_SCHEMA=(()=>{
 function _sofT(s){ if(!s||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(s)) return NaN; return new Date(String(s).slice(0,16)).getTime(); }
 function _sofIso(ms){ if(!isFinite(ms)) return ''; const d=new Date(ms), p=n=>String(n).padStart(2,'0');
   return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; }
-function _sofFmt(s){ const t=_sofT(s); if(!isFinite(t)) return '—'; const d=new Date(t);
-  return `${String(d.getDate()).padStart(2,'0')}-${d.toLocaleString('en',{month:'short'})} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; }
 function _sofH(h){ if(h==null||!isFinite(h)) return '—'; const m=Math.round(h*60); return `${Math.floor(m/60)}:${String(m%60).padStart(2,'0')}`; }
 function _sofNum(v){ const n=parseFloat(v); return isFinite(n)?n:null; }
 function _sofMoney(x){ return x==null||!isFinite(x)?'—':'$'+Math.round(x).toLocaleString(); }
@@ -26093,12 +25661,6 @@ function simCfgHTML(){
       </div>
     </div></div>
     <div class="modal-sec-title">Simulation Settings</div>
-    <div class="fr s1"><div class="ff"><div class="fl">Simulation Mode</div>
-      <select class="fi" id="sc-mode">
-        <option value="planning" ${S.simCfg.mode==='planning'?'selected':''}>Planning Mode</option>
-        <option value="execution" ${S.simCfg.mode==='execution'?'selected':''}>Execution Mode</option>
-        <option value="scenario" ${S.simCfg.mode==='scenario'?'selected':''}>Scenario Mode</option>
-      </select></div></div>
     <div class="fr s1"><div class="ff"><div class="fl">Scenario Role</div>
       <select class="fi" id="sc-role">
         <option value="" ${S.simCfg.role!=='planning'?'selected':''}>Execution — live operations (default)</option>
@@ -26711,15 +26273,6 @@ async function _ruleInterpret(i){
   catch(e){ rule.structured=null; rule._interpret_error=e.message; statMsg('⚠ Interpretation failed: '+e.message); }
   autoSave(); _rulesRefresh();
 }
-// Kept for callers of the old batch interpreter: interprets every draft without an interpretation.
-async function _interpretPendingRules(){
-  _rulesNormalize();
-  const pending=(DB.simulation_rules||[]).filter(r=>r.status==='draft'&&!r.structured);
-  let n=0;
-  for(const rule of pending){ try{ await _ruleInterpretOne(rule); n++; }catch(e){ rule._interpret_error=e.message; } }
-  if(n) autoSave();
-  return {ok:true, count:n, total:pending.length};
-}
 
 // ── Preview: the simulation with and without this rule ──
 // Runs simulate() twice on the current canvas (the rule as draft, then as active) and compares
@@ -27023,7 +26576,6 @@ function saveSimCfg(){
     if(p) S.simCfg.horizon=p.days;
   }
   S.simCfg.start_date=start;
-  S.simCfg.mode=document.getElementById('sc-mode')?.value||'planning';
   { const role=document.getElementById('sc-role'); if(role){ if(role.value==='planning') S.simCfg.role='planning'; else delete S.simCfg.role; } }
   S.simCfg.conflict_resolution=document.getElementById('sc-conflict')?.value||'rolling_avg';
   if(typeof scUpdatePill==='function') scUpdatePill();
@@ -27059,10 +26611,6 @@ const SP = {
   _spine:  null,          // cached date spine; cleared when date range changes
 };
 
-// ── REQUIRED COLUMNS ─────────────────────────────────
-// Supports both old format (SalesConsolidated) and new format (RealShip)
-const SP_REQUIRED_COLS_OLD = ['Customer Type','Sales Manager','Ship-To Name','Ship-To','Material','Name Inv Roll','Date','Volume','ORIGIN','product'];
-const SP_REQUIRED_COLS_NEW = ['Abrev','Customer Type','Date','Demand Point','Ship-To Name','Ship-To','Volume*'];
 // Minimum overlap: if neither matches fully, report what's missing
 
 // ── PRODUCT COLOR PALETTE ────────────────────────────
@@ -28131,8 +27679,6 @@ if(!SP.fcCustSel)   SP.fcCustSel={};
 if(!SP.fcCustomVal) SP.fcCustomVal={};  // kept for compat
 if(!SP.fcCustCustom)SP.fcCustCustom={};
 if(!SP.fcShowInp)   SP.fcShowInp={};
-
-const SP_FC_METHODS=['Hist','10d','15d','30d'];
 
 
 
@@ -30802,7 +30348,6 @@ function _xlTestSet(k,v){
   xlmapRender();
 }
 function _xlRunTest(){ const o=document.getElementById('xl-test-out'); if(o) o.innerHTML=_xlTestOutHTML(); }
-function _xlSampleTest(){ _xlUi.open.test=true; xlmapRender(); }
 
 function _xlTestOutHTML(){
   if(!XLMAP) xlmapLoad();
@@ -31610,20 +31155,6 @@ function onRealDataFacilityChange(facId){
 function onRealDataDateChange(dateStr){
   S.realDataSelectedDate=dateStr;
   renderRealDataSections();
-}
-
-// Helper: Get products configured for an element from element_product_capacities
-function getRealDataElementProducts(elementId, categoryFilter=null){
-  const caps=DB.element_product_capacities.filter(c=>c.element_id===elementId);
-  const products=caps.map(c=>DB.products.find(p=>p.id===c.product_id)).filter(Boolean);
-
-  if(categoryFilter){
-    return products.filter(p=>{
-      if(Array.isArray(categoryFilter)) return categoryFilter.includes(p.category);
-      return p.category===categoryFilter;
-    });
-  }
-  return products;
 }
 
 // ── Daily Data form UI (rebuilt 9/21) ─────────────────────────────────────────────────────
