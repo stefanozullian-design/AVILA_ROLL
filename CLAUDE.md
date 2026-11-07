@@ -4,8 +4,9 @@ Supply-and-operations planning (S&OP) tool for a cement network: plants, termina
 kilns, finish mills, silos, packers, demand points, vessels and rail. It simulates
 production, inventory and dispatch day by day and reports against real data.
 
-Everything is plain HTML + CSS + JavaScript in single files. **No build step, no
-framework, no server, no package manager, no tests folder.** The pages are opened from
+Everything is plain HTML + CSS + JavaScript, shipped as single files. **No framework, no
+server, no package manager, no tests folder.** The only build is a concatenation
+(`tools/build_roll.py`) that assembles the Roll from `src/roll/`. The pages are opened from
 a folder (OneDrive / SharePoint) in **Chrome or Edge**: they rely on the File System
 Access API (`showOpenFilePicker`, `showDirectoryPicker`) to read and write scenario files.
 
@@ -23,9 +24,6 @@ Access API (`showOpenFilePicker`, `showDirectoryPicker`) to read and write scena
 | `tools/smoke_load.js` | Headless Playwright load of the three pages. Run before every push (see *Verifying a change*). |
 | `MAPPING_SUMMARY.md` | Historical note on the demand-point / product restructuring. Reference only. |
 | `.github/workflows/claude.yml` | Claude Code GitHub Action (`@claude` on issues and PRs). |
-
-The stray file named `Claude Code` at the root is an 80-byte fragment of that workflow,
-not code. Leave it alone unless the user asks.
 
 ## The repository is public. Never commit plant data.
 
