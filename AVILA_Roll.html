@@ -10301,7 +10301,7 @@ function _supApplySecStyle(){
   // Filtered out by the Process filter = the header goes too. Same class hooks the
   // render already emits, so no section-rendering code has to know about this.
   css+=(window._flt?.procHidden||[]).map(k=>
-    `.supsec-${k},.sup-sec-hdr[data-seckey="${k}"]{display:none!important}`).join('');
+    `.supsec-${k},.sup-sec-hdr[data-seckey="${k}"],[data-swapof="${k}"]{display:none!important}`).join('');
   st.textContent=css;
 }
 function _supToggleSec(key){
@@ -10500,9 +10500,14 @@ function _supSwapSection(srcDpts, allDates, months, collapsedMonths, tdSty, dept
   if(!lines.length) return '';
   const val=(l,ds)=>l.v.has(ds)?l.v.get(ds):qOf(l.s,ds);
   const tot=ds=>lines.reduce((a,l)=>a+val(l,ds),0);
-  const col='var(--amber)', cls=`supsec-${sec} sup-dpn-row`;
+  // Its own section, at the same level as the requirement title it follows (user 11/09):
+  // a sup-sec-hdr with its own fold key (sec+'Swap'); data-swapof lets the Process filter
+  // hide it together with that requirement section.
+  const col='var(--amber)', key=sec+'Swap', cls=`supsec-${key} sup-dpn-row`;
   const row=(label,tip,fn,bold,d)=>{
-    let rr=`<tr class="${cls}" style="background:rgba(var(--amber-rgb),${bold?'.07':'.03'})"><td title="${esc(tip)}" style="${stickyLeft('var(--surface)',d,'border-bottom:1px solid var(--border),')}color:${col};font-size:${bold?9:8}px;${bold?'font-weight:700':'font-style:italic'}">${label}</td>`;
+    let rr=bold
+      ? `<tr class="sup-sec-hdr" data-seckey="${key}" data-swapof="${sec}" onclick="_supToggleSec('${key}')" style="cursor:pointer;background:rgba(var(--amber-rgb),.05);border-top:2px solid rgba(var(--amber-rgb),.3)"><td title="${esc(tip)}" style="${stickyLeft('var(--surface)',d,'border-bottom:1px solid var(--border),')}color:${col};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow(key)}</span> ${label}</td>`
+      : `<tr class="${cls}" data-swapof="${sec}" style="background:rgba(var(--amber-rgb),.03)"><td title="${esc(tip)}" style="${stickyLeft('var(--surface)',d,'border-bottom:1px solid var(--border),')}color:${col};font-size:8px;font-style:italic">${label}</td>`;
     months.forEach(mon=>{
       const mt=mon.dates.reduce((a,ds)=>a+fn(ds),0);
       rr+=`<td style="border-left:2px solid rgba(var(--amber-rgb),.15);font-size:${bold?9:8}px;${bold?'font-weight:700;':''}color:${col};text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
@@ -11854,7 +11859,7 @@ function _renderSupplyViewInner(wrap){
               }
             });
             // ⇄ SWAPPED CEMENT — total moved out of this facility's demand points, one line per swap.
-            h+=_supSwapSection([...productsSet].flatMap(_dpsOf).filter(dp=>_demElIds.has(dp.element_id)), allDates, months, collapsed, tdSty, node.depth+2, stickyLeft, 'cementNeed', 'SWAPPED CEMENT');
+            h+=_supSwapSection([...productsSet].flatMap(_dpsOf).filter(dp=>_demElIds.has(dp.element_id)), allDates, months, collapsed, tdSty, node.depth+1, stickyLeft, 'cementNeed', 'SWAPPED CEMENT');
           }
         }
 
@@ -12887,7 +12892,7 @@ function _renderSupplyViewInner(wrap){
                 h+=_swapChild('↳ ⇄ swapped in ← '+(_tInSources(pid)||'other demand'),'var(--cyan)','rgba(var(--cyan-rgb),.06)',ds=>_siArr[_ix[ds]]||0,_tInActs);
               }
             });
-            h+=_supSwapSection(_reqPids.flatMap(_tDpsOf), allDates, months, collapsed, tdSty, depth+2, stickyLeft, reqSeckey, gr.key==='packed'?'SWAPPED PACKED':'SWAPPED CEMENT');
+            h+=_supSwapSection(_reqPids.flatMap(_tDpsOf), allDates, months, collapsed, tdSty, depth+1, stickyLeft, reqSeckey, gr.key==='packed'?'SWAPPED PACKED':'SWAPPED CEMENT');
           }
 
           // 3b) PACKING PLANT PRODUCTION — terminals can pack too (e.g. PEVPACK01).
