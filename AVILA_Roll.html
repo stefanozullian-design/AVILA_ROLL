@@ -10477,6 +10477,51 @@ function _supDpnRows(dpts, months, collapsedMonths, tdSty, depth, base, stickyLe
   });
   return hh;
 }
+// ── ⇄ SWAPPED block under a Supply requirement section ────────────────────────────
+// Demand that a swap moves OUT of this facility's demand points to another point. The product
+// lines above are already net of it, so this block shows where that volume went: one total
+// line, then one line per swap (source material · source point → destination point). Values
+// come from the same _demandSwapAlloc the simulation uses (forecast days only; several swaps
+// on one point share its demand). Rows carry sup-dpn-row so the section title's real/forecast
+// roll-up keeps reading the product lines only.
+function _supSwapSection(srcDpts, allDates, months, collapsedMonths, tdSty, depth, stickyLeft, sec, title){
+  const ids=new Set((srcDpts||[]).map(dp=>dp.element_id));
+  const swaps=(DB.demand_substitutions||[]).filter(s=>ids.has(s.from_element_id));
+  if(!swaps.length) return '';
+  const nm=id=>DB.elements.find(e=>e.id===id)?.name||DB.demand_points.find(d=>d.element_id===id)?.element_name||id;
+  const pnm=pid=>DB.products.find(p=>p.id===pid)?.name||pid||'?';
+  const qOf=(s,ds)=>{
+    if(!(ds>=s.start_date&&ds<=s.end_date)) return 0;
+    const leg=_demandSwapAlloc(s.from_element_id,_demandRate(s.from_element_id,ds)||0,ds).find(a=>a.swap===s);
+    return leg?leg.qty:0;
+  };
+  const lines=swaps.map(s=>{ const v=new Map(); allDates.forEach(ds=>v.set(ds,qOf(s,ds))); return {s,v}; })
+    .filter(l=>[...l.v.values()].some(x=>x>0));
+  if(!lines.length) return '';
+  const val=(l,ds)=>l.v.has(ds)?l.v.get(ds):qOf(l.s,ds);
+  const tot=ds=>lines.reduce((a,l)=>a+val(l,ds),0);
+  const col='var(--amber)', cls=`supsec-${sec} sup-dpn-row`;
+  const row=(label,tip,fn,bold,d)=>{
+    let rr=`<tr class="${cls}" style="background:rgba(var(--amber-rgb),${bold?'.07':'.03'})"><td title="${esc(tip)}" style="${stickyLeft('var(--surface)',d,'border-bottom:1px solid var(--border),')}color:${col};font-size:${bold?9:8}px;${bold?'font-weight:700':'font-style:italic'}">${label}</td>`;
+    months.forEach(mon=>{
+      const mt=mon.dates.reduce((a,ds)=>a+fn(ds),0);
+      rr+=`<td style="border-left:2px solid rgba(var(--amber-rgb),.15);font-size:${bold?9:8}px;${bold?'font-weight:700;':''}color:${col};text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
+      if(!collapsedMonths.has(mon.ym)) mon.dates.forEach(ds=>{ const v=fn(ds);
+        rr+=`<td class="sup-day-${mon.ym}" style="font-size:${bold?9:8}px;${bold?'font-weight:700;':''}color:${col};text-align:right;padding:3px 4px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):''}</td>`; });
+    });
+    return rr+`</tr>`;
+  };
+  let hh=row(`⇄ ${esc(title||'SWAPPED CEMENT')}`,'Demand at this facility moved to another demand point by a swap — already taken off the product lines above',tot,true,depth);
+  lines.forEach(l=>{
+    const s=l.s, to=s.to_element_id;
+    const amt=s.mode==='percent'?`${parseFloat(s.amount)||0}%`:`${_fmtInt(parseFloat(s.amount)||0)} t/d`;
+    const toLbl=to?nm(to):pnm(s.to_product_id);
+    // Short label (material → destination point); source point, amount and dates in the tooltip.
+    const lbl=`↳ ${esc(pnm(_dpPrimaryProduct(s.from_element_id)))} → ${esc(toLbl)}`;
+    hh+=row(lbl,`${nm(s.from_element_id)} → ${toLbl} · ${amt} · ${s.start_date} – ${s.end_date}`,ds=>val(l,ds),false,depth+1);
+  });
+  return hh;
+}
 
 // ── PACKING helpers ──────────────────────────────────────────────────────
 // Packing machines reuse element_product_capacities, one row per PACKING LINE with extra
@@ -11073,8 +11118,11 @@ function _renderSupplyViewInner(wrap){
     }
     return a;
   };
-  const _dpsNeed=(dps,ds)=>dps.reduce((s,dp)=>s+(_demandRate(dp.element_id,ds)||0)
-    +((typeof _resolveDemandSwapIn==='function')?_resolveDemandSwapIn(dp.element_id,ds,id=>_demandRate(id,ds)):0),0);
+  // Net of swaps, like the requirement lines: own − swapped out + swapped in.
+  const _dpsNeed=(dps,ds)=>dps.reduce((s,dp)=>{ const t=_demandRate(dp.element_id,ds)||0;
+      const sw=(t>0&&typeof _resolveDemandSwap==='function')?_resolveDemandSwap(dp.element_id,t,ds):null;
+      return s+Math.max(0,t-(sw?Math.min(sw.qty,t):0)); },0)
+    +dps.reduce((s,dp)=>s+((typeof _resolveDemandSwapIn==='function')?_resolveDemandSwapIn(dp.element_id,ds,id=>_demandRate(id,ds)):0),0);
   const _dpsActs=(dps,ds)=>_dmdActs(dps,ds).concat(_swapInActs(dps,ds));
   const _pfDay=(pf,ds)=>(pf||[]).reduce((s,f)=>s+_dpsNeed(_facDps(f.id),ds),0);
   const _pfMon=(pf,mon)=>(pf&&pf.length)?mon.dates.reduce((s,ds)=>s+_pfDay(pf,ds),0):0;
@@ -11727,10 +11775,11 @@ function _renderSupplyViewInner(wrap){
           // Drop products the Family/Category/Product filters exclude.
           [...productsSet].forEach(pid=>{ if(!_supProdAllows(pid)) productsSet.delete(pid); });
 
-          // A product's requirement HERE = its own need (+ rail loading) + whatever a swap moves
-          // INTO this facility's demand points, so the ↳ own / ↳ swapped in rows add up to it.
+          // A product's requirement HERE = its own need (+ rail loading) − what a swap moves OUT
+          // of this facility's demand points + whatever a swap moves INTO them (user 11/09: the
+          // total is net of swaps; the moved volume is listed in the ⇄ SWAPPED CEMENT block).
           // Swaps only run on forecast days — actual days are just the actuals.
-          const needHere=(prodId, ds)=>totalNeed(prodId,ds)+swappedIn(prodId,ds);
+          const needHere=(prodId, ds)=>Math.max(0,totalNeed(prodId,ds)-swappedOut(prodId,ds))+swappedIn(prodId,ds);
 
           if(productsSet.size>0){
             // Section header row
@@ -11782,8 +11831,10 @@ function _renderSupplyViewInner(wrap){
               // product leaves just its line with the daily totals; own / swapped lines fold with the demand points.
               const outArr=allDates.map(ds=>swappedOut(prodId,ds));
               const inArr=allDates.map(ds=>swappedIn(prodId,ds));
-              const hasOut=outArr.some(v=>v>0), hasIn=inArr.some(v=>v>0);
-              if(hasOut||hasIn){
+              const hasIn=inArr.some(v=>v>0);
+              // Swapped-out volume is listed in the ⇄ SWAPPED CEMENT block below; the own /
+              // swapped-in split is only needed when something comes IN.
+              if(hasIn){
                 const idxOf={}; allDates.forEach((ds,i)=>idxOf[ds]=i);
                 const swapChild=(label,color,bg,valFn,actsFn)=>{
                   let rr=`<tr class="supsec-cementNeed supsec-${_supDpnKey(_dpnBase)} sup-sub-row" style="background:${bg}"><td style="${stickyLeft('var(--surface)',node.depth+3,'border-bottom:1px solid var(--border),')}color:${color};font-size:8px;font-style:italic">${label}</td>`;
@@ -11798,11 +11849,12 @@ function _renderSupplyViewInner(wrap){
                 const ownFn=ds=>{ const i=idxOf[ds]; return Math.max(0,totalNeed(prodId,ds)-(outArr[i]||0)); };
                 const ownActs=ds=>_dmdActs(_dpnDpts,ds), inActs=ds=>_swapInActs(_dpnDpts,ds);
                 h+=swapChild('↳ '+prodName+' · own','var(--green)','rgba(76,175,80,.03)',ownFn,ownActs);
-                if(hasOut) h+=swapChild('↳ ⇄ swapped out → '+(_outTargets(prodId)||'substitute'),'var(--amber)','rgba(var(--amber-rgb),.05)',ds=>outArr[idxOf[ds]]||0,ownActs);
                 // (no "= to produce" row: the product line above already is own + swapped in)
-                if(hasIn) h+=swapChild('↳ ⇄ swapped in ← '+(_inSources(prodId)||'other demand'),'var(--cyan)','rgba(var(--cyan-rgb),.06)',ds=>inArr[idxOf[ds]]||0,inActs);
+                h+=swapChild('↳ ⇄ swapped in ← '+(_inSources(prodId)||'other demand'),'var(--cyan)','rgba(var(--cyan-rgb),.06)',ds=>inArr[idxOf[ds]]||0,inActs);
               }
             });
+            // ⇄ SWAPPED CEMENT — total moved out of this facility's demand points, one line per swap.
+            h+=_supSwapSection([...productsSet].flatMap(_dpsOf).filter(dp=>_demElIds.has(dp.element_id)), allDates, months, collapsed, tdSty, node.depth+2, stickyLeft, 'cementNeed', 'SWAPPED CEMENT');
           }
         }
 
@@ -12715,7 +12767,9 @@ function _renderSupplyViewInner(wrap){
           // look of the rows it folds away; expanded it stays blank — the section titles below
           // carry their own totals.
           const _reqPids=gr.pids.filter(pid=>_demProdIds.has(pid));
-          const _needHere=(pid,ds)=>totalNeed(pid,ds)+_tSwappedIn(pid,ds);
+          // Net of swaps (user 11/09): own − swapped out + swapped in; the moved volume is
+          // listed in the ⇄ SWAPPED block under the requirement section.
+          const _needHere=(pid,ds)=>Math.max(0,totalNeed(pid,ds)-_tSwappedOut(pid,ds))+_tSwappedIn(pid,ds);
           const _reqDay=ds=>_reqPids.reduce((s,pid)=>s+_needHere(pid,ds),0);
           const _reqActs=ds=>_reqPids.flatMap(pid=>{ const a=_dmdActs(_tDpsOf(pid),ds); if(_tSwappedIn(pid,ds)>0) a.push(..._swapInActs(_tDpsOf(pid),ds)); return a; });
           const _grpNeedCells=()=>{ let s=''; const col=_isPurch?'var(--purple)':accent;
@@ -12813,8 +12867,8 @@ function _renderSupplyViewInner(wrap){
               // Mirrors the plant block so a relocation reads the same at both ends.
               const _soArr=allDates.map(ds=>_tSwappedOut(pid,ds));
               const _siArr=allDates.map(ds=>_tSwappedIn(pid,ds));
-              const _hasSO=_soArr.some(v=>v>0), _hasSI=_siArr.some(v=>v>0);
-              if(_hasSO||_hasSI){
+              const _hasSI=_siArr.some(v=>v>0);
+              if(_hasSI){
                 const _ix={}; allDates.forEach((ds,i)=>_ix[ds]=i);
                 const _swapChild=(label,color,bg,valFn,actsFn)=>{
                   let rr=`<tr class="supsec-${reqSeckey} supsec-${_supDpnKey(_dpnBase)} sup-sub-row" style="background:${bg}"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${color};font-size:8px;font-style:italic">${label}</td>`;
@@ -12829,11 +12883,11 @@ function _renderSupplyViewInner(wrap){
                 const _ownFn=ds=>Math.max(0,totalNeed(pid,ds)-(_soArr[_ix[ds]]||0));
                 const _tOwnActs=ds=>_dmdActs(_dpnDpts,ds), _tInActs=ds=>_swapInActs(_dpnDpts,ds);
                 h+=_swapChild('↳ '+_pNameOf(pid)+' · own','var(--green)','rgba(76,175,80,.03)',_ownFn,_tOwnActs);
-                if(_hasSO) h+=_swapChild('↳ ⇄ swapped out → '+(_tOutTargets(pid)||'substitute'),'var(--amber)','rgba(var(--amber-rgb),.05)',ds=>_soArr[_ix[ds]]||0,_tOwnActs);
                 // (no "= required here" row: the product line above already is own + swapped in)
-                if(_hasSI) h+=_swapChild('↳ ⇄ swapped in ← '+(_tInSources(pid)||'other demand'),'var(--cyan)','rgba(var(--cyan-rgb),.06)',ds=>_siArr[_ix[ds]]||0,_tInActs);
+                h+=_swapChild('↳ ⇄ swapped in ← '+(_tInSources(pid)||'other demand'),'var(--cyan)','rgba(var(--cyan-rgb),.06)',ds=>_siArr[_ix[ds]]||0,_tInActs);
               }
             });
+            h+=_supSwapSection(_reqPids.flatMap(_tDpsOf), allDates, months, collapsed, tdSty, depth+2, stickyLeft, reqSeckey, gr.key==='packed'?'SWAPPED PACKED':'SWAPPED CEMENT');
           }
 
           // 3b) PACKING PLANT PRODUCTION — terminals can pack too (e.g. PEVPACK01).
