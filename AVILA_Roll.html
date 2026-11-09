@@ -9893,6 +9893,11 @@ function _demandChanged(resim=true){
   _demandCacheInvalidate();
   if(S.view==='supply'){ if(typeof renderSupplyView==='function') renderSupplyView(); }
   else if(S.view==='salesperf'){ if(typeof renderSalesPerfView==='function') renderSalesPerfView(); }
+  else if(S.view==='schedules'){
+    // Logistics: the Rail / Vessel Demand rows (their double-click opens the Forecast Builder too).
+    if(S.activeSchedTab==='rail'&&typeof rpRender==='function') rpRender();
+    else if(S.activeSchedTab==='vessels'&&typeof vpRender==='function') vpRender();
+  }
   else if(typeof renderDemandView==='function') renderDemandView();
   if(resim && typeof scheduleSimulation==='function') scheduleSimulation();
 }
@@ -13809,6 +13814,18 @@ function fbpOpen(elId, startDate){
 }
 // The Forecast Builder now opens the compact popup; the full modal is "Advanced".
 function openDemandBuilder(elId, startDate){ return fbpOpen(elId, startDate); }
+// Logistics (Rail / Vessel) Demand cells: double-click opens the same Forecast Builder the
+// Demand and Supply pages use, seeded on the cell's date. A row summing several demand points
+// opens on the first (by name) — the popup's Demand Point picker switches to the others.
+// Applying writes DB.demand_values and _demandChanged() redraws whichever page is showing.
+function _logiFbpAttr(els, ds){
+  if(!els||!els.length||!ds) return '';
+  const first=els.slice().sort((a,b)=>(a.name||'').localeCompare(b.name||''))[0];
+  const nm=s=>String(s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+  const tip=els.length===1?`Double-click to open the Forecast Builder for ${nm(first.name||first.id)} starting ${ds}`
+    :`Double-click to open the Forecast Builder (${els.length} demand points — pick one in the popup) starting ${ds}`;
+  return ` ondblclick="event.stopPropagation();openDemandBuilder('${first.id}','${ds}')" title="${tip}"`;
+}
 
 function _fbBuildRows(elIdOverride){
   const elId=elIdOverride||document.getElementById('fb-el-id')?.value||null;
@@ -16343,7 +16360,7 @@ function rpRender(){
         // real when every demand point with tonnes that day has its actual (sales) figure
         const real=vs.some(x=>x>0)&&els.every((el,i)=>!(vs[i]>0)||_dmdIsActual(el.id,ds));
         const tSty=_tpTdSty(d);
-        return `<td class="${_srcC(ds,v,real)}" style="color:var(--simulated);${tSty}">${v>0?Number(v).toLocaleString():'—'}</td>`;
+        return `<td class="${_srcC(ds,v,real)}"${_logiFbpAttr(els,ds)} style="color:var(--simulated);${els.length?'cursor:cell;':''}${tSty}">${v>0?Number(v).toLocaleString():'—'}</td>`;
       }).join('');
     }).join('');
 
@@ -17149,7 +17166,7 @@ function vpRender(){
           const demCells=months.map(mon=>{const isCol=window._vpColapsed.has(mon.ym);
             const monT=mon.days.reduce((s,d)=>s+_pidDem.reduce((q,el)=>q+rpDemandEff(el.id,d),0),0);
             const mTd=`<td class="logi-mcol" style="${_mTdSty}">${monT>0?Number(Math.round(monT)).toLocaleString():'—'}</td>`;
-            return mTd+(isCol?[]:mon.days).map(d=>{ const v=_pidDem.reduce((q,el)=>q+rpDemandEff(el.id,d),0); return `<td style="color:var(--simulated);${_tpTdSty(d)}">${v>0?Number(Math.round(v)).toLocaleString():'—'}</td>`; }).join('');
+            return mTd+(isCol?[]:mon.days).map(d=>{ const v=_pidDem.reduce((q,el)=>q+rpDemandEff(el.id,d),0); return `<td${_logiFbpAttr(_pidDem,rpDayDate(d))} style="color:var(--simulated);cursor:cell;${_tpTdSty(d)}">${v>0?Number(Math.round(v)).toLocaleString():'—'}</td>`; }).join('');
           }).join('');
           destRows.push(`${_tr('rp-leaf rp-d tp-row-dem',gP)}${_lbl(2,`<span class="rp-glyph">↓</span>Demand${_meta('t')}`,{hue:HUE_DEM})}${demCells}</tr>`);
         }
