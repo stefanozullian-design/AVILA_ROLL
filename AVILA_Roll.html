@@ -10477,17 +10477,19 @@ function _supDpnRows(dpts, months, collapsedMonths, tdSty, depth, base, stickyLe
   });
   return hh;
 }
-// ── ⇄ SWAPPED block under a Supply requirement section ────────────────────────────
-// Demand that a swap moves OUT of this facility's demand points to another point. The product
-// lines above are already net of it, so this block shows where that volume went: one total
-// line, then one line per swap (source material · source point → destination point). Values
-// come from the same _demandSwapAlloc the simulation uses (forecast days only; several swaps
-// on one point share its demand). Rows carry sup-dpn-row so the section title's real/forecast
-// roll-up keeps reading the product lines only.
-function _supSwapSection(srcDpts, allDates, months, collapsedMonths, tdSty, depth, stickyLeft, sec, title){
-  const ids=new Set((srcDpts||[]).map(dp=>dp.element_id));
-  const swaps=(DB.demand_substitutions||[]).filter(s=>ids.has(s.from_element_id));
-  if(!swaps.length) return '';
+// ── ⇄ DEMAND MOVED OUT / IN sections under a Supply requirement section ────────────────
+// A demand swap moves part of one demand point's demand to another point (user 11/09: "account
+// it like that" wherever cement goes from one place to another). The product lines above are
+// already net of it: own − moved out + moved in. These two sections, at the same level as the
+// requirement title, show the volume each way — a total, then one line per swap:
+//   DEMAND MOVED OUT  (this facility's points → destination point)
+//   DEMAND MOVED IN   (this facility's points ← source point)
+// Values come from the same _demandSwapAlloc the simulation uses (forecast days only; several
+// swaps on one point share its demand). Each title has its own fold key (<sec>MoveOut /
+// <sec>MoveIn); data-swapof lets the Process filter hide them with the requirement section.
+// Rows carry sup-dpn-row so title roll-ups keep reading the product lines only.
+function _supSwapSection(dpts, allDates, months, collapsedMonths, tdSty, depth, stickyLeft, sec){
+  const ids=new Set((dpts||[]).map(dp=>dp.element_id));
   const nm=id=>DB.elements.find(e=>e.id===id)?.name||DB.demand_points.find(d=>d.element_id===id)?.element_name||id;
   const pnm=pid=>DB.products.find(p=>p.id===pid)?.name||pid||'?';
   const qOf=(s,ds)=>{
@@ -10495,37 +10497,45 @@ function _supSwapSection(srcDpts, allDates, months, collapsedMonths, tdSty, dept
     const leg=_demandSwapAlloc(s.from_element_id,_demandRate(s.from_element_id,ds)||0,ds).find(a=>a.swap===s);
     return leg?leg.qty:0;
   };
-  const lines=swaps.map(s=>{ const v=new Map(); allDates.forEach(ds=>v.set(ds,qOf(s,ds))); return {s,v}; })
-    .filter(l=>[...l.v.values()].some(x=>x>0));
-  if(!lines.length) return '';
-  const val=(l,ds)=>l.v.has(ds)?l.v.get(ds):qOf(l.s,ds);
-  const tot=ds=>lines.reduce((a,l)=>a+val(l,ds),0);
-  // Its own section, at the same level as the requirement title it follows (user 11/09):
-  // a sup-sec-hdr with its own fold key (sec+'Swap'); data-swapof lets the Process filter
-  // hide it together with that requirement section.
-  const col='var(--amber)', key=sec+'Swap', cls=`supsec-${key} sup-dpn-row`;
-  const row=(label,tip,fn,bold,d)=>{
-    let rr=bold
-      ? `<tr class="sup-sec-hdr" data-seckey="${key}" data-swapof="${sec}" onclick="_supToggleSec('${key}')" style="cursor:pointer;background:rgba(var(--amber-rgb),.05);border-top:2px solid rgba(var(--amber-rgb),.3)"><td title="${esc(tip)}" style="${stickyLeft('var(--surface)',d,'border-bottom:1px solid var(--border),')}color:${col};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow(key)}</span> ${label}</td>`
-      : `<tr class="${cls}" data-swapof="${sec}" style="background:rgba(var(--amber-rgb),.03)"><td title="${esc(tip)}" style="${stickyLeft('var(--surface)',d,'border-bottom:1px solid var(--border),')}color:${col};font-size:8px;font-style:italic">${label}</td>`;
-    months.forEach(mon=>{
-      const mt=mon.dates.reduce((a,ds)=>a+fn(ds),0);
-      rr+=`<td style="border-left:2px solid rgba(var(--amber-rgb),.15);font-size:${bold?9:8}px;${bold?'font-weight:700;':''}color:${col};text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
-      if(!collapsedMonths.has(mon.ym)) mon.dates.forEach(ds=>{ const v=fn(ds);
-        rr+=`<td class="sup-day-${mon.ym}" style="font-size:${bold?9:8}px;${bold?'font-weight:700;':''}color:${col};text-align:right;padding:3px 4px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):''}</td>`; });
+  const block=(dir)=>{
+    const out=dir==='out';
+    const swaps=(DB.demand_substitutions||[]).filter(s=>ids.has(out?s.from_element_id:s.to_element_id));
+    const lines=swaps.map(s=>{ const v=new Map(); allDates.forEach(ds=>v.set(ds,qOf(s,ds))); return {s,v}; })
+      .filter(l=>[...l.v.values()].some(x=>x>0));
+    if(!lines.length) return '';
+    const val=(l,ds)=>l.v.has(ds)?l.v.get(ds):qOf(l.s,ds);
+    const tot=ds=>lines.reduce((a,l)=>a+val(l,ds),0);
+    const col=out?'var(--amber)':'var(--cyan)', rgb=out?'var(--amber-rgb)':'var(--cyan-rgb)';
+    const key=sec+(out?'MoveOut':'MoveIn'), cls=`supsec-${key} sup-dpn-row`;
+    const row=(label,tip,fn,bold,d)=>{
+      let rr=bold
+        ? `<tr class="sup-sec-hdr" data-seckey="${key}" data-swapof="${sec}" onclick="_supToggleSec('${key}')" style="cursor:pointer;background:rgba(${rgb},.05);border-top:2px solid rgba(${rgb},.3)"><td title="${esc(tip)}" style="${stickyLeft('var(--surface)',d,'border-bottom:1px solid var(--border),')}color:${col};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow(key)}</span> ${label}</td>`
+        : `<tr class="${cls}" data-swapof="${sec}" style="background:rgba(${rgb},.03)"><td title="${esc(tip)}" style="${stickyLeft('var(--surface)',d,'border-bottom:1px solid var(--border),')}color:${col};font-size:8px;font-style:italic">${label}</td>`;
+      months.forEach(mon=>{
+        const mt=mon.dates.reduce((a,ds)=>a+fn(ds),0);
+        rr+=`<td style="border-left:2px solid rgba(${rgb},.15);font-size:${bold?9:8}px;${bold?'font-weight:700;':''}color:${col};text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
+        if(!collapsedMonths.has(mon.ym)) mon.dates.forEach(ds=>{ const v=fn(ds);
+          rr+=`<td class="sup-day-${mon.ym}" style="font-size:${bold?9:8}px;${bold?'font-weight:700;':''}color:${col};text-align:right;padding:3px 4px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):''}</td>`; });
+      });
+      return rr+`</tr>`;
+    };
+    let hh=row(out?'⇄ DEMAND MOVED OUT':'⇄ DEMAND MOVED IN',
+      out?'Demand at this facility now served at another demand point (demand swap) — already taken off the product lines above'
+         :'Demand from another demand point now served here (demand swap) — already included in the product lines above',
+      tot,true,depth);
+    lines.forEach(l=>{
+      const s=l.s;
+      const amt=s.mode==='percent'?`${parseFloat(s.amount)||0}%`:`${_fmtInt(parseFloat(s.amount)||0)} t/d`;
+      const toLbl=s.to_element_id?nm(s.to_element_id):pnm(s.to_product_id);
+      const fromLbl=nm(s.from_element_id);
+      // Short label (material here, then the other end); amount and dates in the tooltip.
+      const lbl=out?`↳ ${esc(pnm(_dpPrimaryProduct(s.from_element_id)))} → ${esc(toLbl)}`
+                   :`↳ ${esc(pnm(s.to_element_id?_dpPrimaryProduct(s.to_element_id):s.to_product_id))} ← ${esc(fromLbl)}`;
+      hh+=row(lbl,`${fromLbl} → ${toLbl} · ${amt} · ${s.start_date} – ${s.end_date}`,ds=>val(l,ds),false,depth+1);
     });
-    return rr+`</tr>`;
+    return hh;
   };
-  let hh=row(`⇄ ${esc(title||'SWAPPED CEMENT')}`,'Demand at this facility moved to another demand point by a swap — already taken off the product lines above',tot,true,depth);
-  lines.forEach(l=>{
-    const s=l.s, to=s.to_element_id;
-    const amt=s.mode==='percent'?`${parseFloat(s.amount)||0}%`:`${_fmtInt(parseFloat(s.amount)||0)} t/d`;
-    const toLbl=to?nm(to):pnm(s.to_product_id);
-    // Short label (material → destination point); source point, amount and dates in the tooltip.
-    const lbl=`↳ ${esc(pnm(_dpPrimaryProduct(s.from_element_id)))} → ${esc(toLbl)}`;
-    hh+=row(lbl,`${nm(s.from_element_id)} → ${toLbl} · ${amt} · ${s.start_date} – ${s.end_date}`,ds=>val(l,ds),false,depth+1);
-  });
-  return hh;
+  return block('out')+block('in');
 }
 
 // ── PACKING helpers ──────────────────────────────────────────────────────
@@ -11755,7 +11765,6 @@ function _renderSupplyViewInner(wrap){
           //   over this facility's prodId demand points via _resolveDemandSwapIn,
           //   so it lands exactly where the destination point is — no redistribution,
           //   no injection at the producer.
-          const _dpDisp=id=>DB.elements.find(e=>e.id===id)?.name||DB.demand_points.find(d=>d.element_id===id)?.element_name||id;
           const swappedIn=(prodId, ds)=>{
             let q=0;
             _dpsOf(prodId).forEach(dp=>{
@@ -11763,14 +11772,6 @@ function _renderSupplyViewInner(wrap){
             });
             return q;
           };
-          const _outTargets=(prodId)=>{ const n=new Set();
-            _dpsOf(prodId).forEach(dp=>{
-              (DB.demand_substitutions||[]).filter(s=>s.from_element_id===dp.element_id).forEach(s=>n.add(s.to_element_id?_dpDisp(s.to_element_id):(_prodById.get(s.to_product_id)?.name||s.to_product_id))); });
-            return [...n].join(', '); };
-          const _inSources=(prodId)=>{ const n=new Set();
-            _dpsOf(prodId).forEach(dp=>{
-              (DB.demand_substitutions||[]).filter(s=>s.to_element_id===dp.element_id).forEach(s=>n.add(_dpDisp(s.from_element_id))); });
-            return [...n].join(', '); };
           // Surface a substitute product here even if it has no direct demand at
           // this facility — when one of this facility's demand points switched to
           // it (swappedIn>0) — so the "swapped in" breakdown has a row to hang on.
@@ -11782,7 +11783,7 @@ function _renderSupplyViewInner(wrap){
 
           // A product's requirement HERE = its own need (+ rail loading) − what a swap moves OUT
           // of this facility's demand points + whatever a swap moves INTO them (user 11/09: the
-          // total is net of swaps; the moved volume is listed in the ⇄ SWAPPED CEMENT block).
+          // total is net of swaps; the moved volume is listed in the ⇄ DEMAND MOVED OUT / IN sections).
           // Swaps only run on forecast days — actual days are just the actuals.
           const needHere=(prodId, ds)=>Math.max(0,totalNeed(prodId,ds)-swappedOut(prodId,ds))+swappedIn(prodId,ds);
 
@@ -11831,35 +11832,9 @@ function _renderSupplyViewInner(wrap){
               h+=`</tr>`;
               h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, node.depth+3, _dpnBase, stickyLeft, _dpnExtra.concat(typeof plBgtExtra==='function'?plBgtExtra(_dpnDpts):[]), 'cementNeed');
 
-              // ── Swap breakdown child rows (only when a swap touches this product) ──
-              // They carry the product's ▶ fold key too (here and in the terminal block): collapsing the
-              // product leaves just its line with the daily totals; own / swapped lines fold with the demand points.
-              const outArr=allDates.map(ds=>swappedOut(prodId,ds));
-              const inArr=allDates.map(ds=>swappedIn(prodId,ds));
-              const hasIn=inArr.some(v=>v>0);
-              // Swapped-out volume is listed in the ⇄ SWAPPED CEMENT block below; the own /
-              // swapped-in split is only needed when something comes IN.
-              if(hasIn){
-                const idxOf={}; allDates.forEach((ds,i)=>idxOf[ds]=i);
-                const swapChild=(label,color,bg,valFn,actsFn)=>{
-                  let rr=`<tr class="supsec-cementNeed supsec-${_supDpnKey(_dpnBase)} sup-sub-row" style="background:${bg}"><td style="${stickyLeft('var(--surface)',node.depth+3,'border-bottom:1px solid var(--border),')}color:${color};font-size:8px;font-style:italic">${label}</td>`;
-                  months.forEach(mon=>{
-                    const isCol=collapsed.has(mon.ym);
-                    const mt=mon.dates.reduce((s,ds)=>s+valFn(ds),0);
-                    rr+=`<td style="border-left:2px solid rgba(var(--hi-rgb),.05);font-size:8px;color:${color};text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
-                    if(!isCol) mon.dates.forEach(ds=>{ const v=valFn(ds); rr+=`<td class="sup-day-${mon.ym} ${actsFn?_srcCls(ds,v,actsFn(ds)):''}" style="font-size:8px;color:${color};text-align:right;padding:3px 4px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):''}</td>`; });
-                  });
-                  return rr+`</tr>`;
-                };
-                const ownFn=ds=>{ const i=idxOf[ds]; return Math.max(0,totalNeed(prodId,ds)-(outArr[i]||0)); };
-                const ownActs=ds=>_dmdActs(_dpnDpts,ds), inActs=ds=>_swapInActs(_dpnDpts,ds);
-                h+=swapChild('↳ '+prodName+' · own','var(--green)','rgba(76,175,80,.03)',ownFn,ownActs);
-                // (no "= to produce" row: the product line above already is own + swapped in)
-                h+=swapChild('↳ ⇄ swapped in ← '+(_inSources(prodId)||'other demand'),'var(--cyan)','rgba(var(--cyan-rgb),.06)',ds=>inArr[idxOf[ds]]||0,inActs);
-              }
             });
-            // ⇄ SWAPPED CEMENT — total moved out of this facility's demand points, one line per swap.
-            h+=_supSwapSection([...productsSet].flatMap(_dpsOf).filter(dp=>_demElIds.has(dp.element_id)), allDates, months, collapsed, tdSty, node.depth+1, stickyLeft, 'cementNeed', 'SWAPPED CEMENT');
+            // ⇄ DEMAND MOVED OUT / IN — swaps leaving and reaching this facility's demand points.
+            h+=_supSwapSection([...productsSet].flatMap(_dpsOf).filter(dp=>_demElIds.has(dp.element_id)), allDates, months, collapsed, tdSty, node.depth+1, stickyLeft, 'cementNeed');
           }
         }
 
@@ -12684,19 +12659,6 @@ function _renderSupplyViewInner(wrap){
         },0);
         const _tSwappedIn=(pid,ds)=>_tDpsOf(pid).reduce((q,dp)=>
           q+((typeof _resolveDemandSwapIn==='function')?_resolveDemandSwapIn(dp.element_id,ds,(id)=>_demandRate(id,ds)):0),0);
-        const _tDpName=id=>DB.elements.find(e=>e.id===id)?.name
-          ||DB.demand_points.find(d=>d.element_id===id)?.element_name||id;
-        const _tOutTargets=pid=>{ const n=new Set();
-          _tDpsOf(pid).forEach(dp=>(DB.demand_substitutions||[])
-            .filter(sb=>sb.from_element_id===dp.element_id)
-            .forEach(sb=>n.add(sb.to_element_id?_tDpName(sb.to_element_id)
-              :(_prodById.get(sb.to_product_id)?.name||sb.to_product_id))));
-          return [...n].join(', '); };
-        const _tInSources=pid=>{ const n=new Set();
-          const ids=new Set(_tDpsOf(pid).map(dp=>dp.element_id));
-          (DB.demand_substitutions||[]).filter(sb=>ids.has(sb.to_element_id))
-            .forEach(sb=>n.add(_tDpName(sb.from_element_id)));
-          return [...n].join(', '); };
 
         // ── CATEGORY-FIRST LAYOUT ──────────────────────────────────────────
         // Products are grouped by how they are STORED, not one block each:
@@ -12773,7 +12735,7 @@ function _renderSupplyViewInner(wrap){
           // carry their own totals.
           const _reqPids=gr.pids.filter(pid=>_demProdIds.has(pid));
           // Net of swaps (user 11/09): own − swapped out + swapped in; the moved volume is
-          // listed in the ⇄ SWAPPED block under the requirement section.
+          // listed in the ⇄ DEMAND MOVED OUT / IN sections under the requirement section.
           const _needHere=(pid,ds)=>Math.max(0,totalNeed(pid,ds)-_tSwappedOut(pid,ds))+_tSwappedIn(pid,ds);
           const _reqDay=ds=>_reqPids.reduce((s,pid)=>s+_needHere(pid,ds),0);
           const _reqActs=ds=>_reqPids.flatMap(pid=>{ const a=_dmdActs(_tDpsOf(pid),ds); if(_tSwappedIn(pid,ds)>0) a.push(..._swapInActs(_tDpsOf(pid),ds)); return a; });
@@ -12868,31 +12830,8 @@ function _renderSupplyViewInner(wrap){
               h+=`</tr>`;
               h+=_supDpnRows(_dpnDpts, months, collapsed, tdSty, depth+3, _dpnBase, stickyLeft, typeof plBgtExtra==='function'?plBgtExtra(_dpnDpts):[], reqSeckey);
 
-              // ── Swap breakdown child rows (only when a swap touches this product) ──
-              // Mirrors the plant block so a relocation reads the same at both ends.
-              const _soArr=allDates.map(ds=>_tSwappedOut(pid,ds));
-              const _siArr=allDates.map(ds=>_tSwappedIn(pid,ds));
-              const _hasSI=_siArr.some(v=>v>0);
-              if(_hasSI){
-                const _ix={}; allDates.forEach((ds,i)=>_ix[ds]=i);
-                const _swapChild=(label,color,bg,valFn,actsFn)=>{
-                  let rr=`<tr class="supsec-${reqSeckey} supsec-${_supDpnKey(_dpnBase)} sup-sub-row" style="background:${bg}"><td style="${stickyLeft('var(--surface)',depth+3,'border-bottom:1px solid var(--border),')}color:${color};font-size:8px;font-style:italic">${label}</td>`;
-                  months.forEach(mon=>{ const isCol=collapsed.has(mon.ym);
-                    const mt=mon.dates.reduce((a,ds)=>a+valFn(ds),0);
-                    rr+=`<td style="border-left:2px solid rgba(var(--hi-rgb),.05);font-size:8px;color:${color};text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
-                    if(!isCol) mon.dates.forEach(ds=>{ const v=valFn(ds);
-                      rr+=`<td class="sup-day-${mon.ym} ${actsFn?_srcCls(ds,v,actsFn(ds)):''}" style="font-size:8px;color:${color};text-align:right;padding:3px 4px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):''}</td>`; });
-                  });
-                  return rr+`</tr>`;
-                };
-                const _ownFn=ds=>Math.max(0,totalNeed(pid,ds)-(_soArr[_ix[ds]]||0));
-                const _tOwnActs=ds=>_dmdActs(_dpnDpts,ds), _tInActs=ds=>_swapInActs(_dpnDpts,ds);
-                h+=_swapChild('↳ '+_pNameOf(pid)+' · own','var(--green)','rgba(76,175,80,.03)',_ownFn,_tOwnActs);
-                // (no "= required here" row: the product line above already is own + swapped in)
-                h+=_swapChild('↳ ⇄ swapped in ← '+(_tInSources(pid)||'other demand'),'var(--cyan)','rgba(var(--cyan-rgb),.06)',ds=>_siArr[_ix[ds]]||0,_tInActs);
-              }
             });
-            h+=_supSwapSection(_reqPids.flatMap(_tDpsOf), allDates, months, collapsed, tdSty, depth+1, stickyLeft, reqSeckey, gr.key==='packed'?'SWAPPED PACKED':'SWAPPED CEMENT');
+            h+=_supSwapSection(_reqPids.flatMap(_tDpsOf), allDates, months, collapsed, tdSty, depth+1, stickyLeft, reqSeckey);
           }
 
           // 3b) PACKING PLANT PRODUCTION — terminals can pack too (e.g. PEVPACK01).
