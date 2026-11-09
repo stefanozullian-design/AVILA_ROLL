@@ -394,6 +394,30 @@ input.ac-ro:focus{outline:1px dashed var(--amber)!important;}
 #view-container{flex:1;overflow:hidden;position:relative;}
 .view-panel{display:none;width:100%;height:100%;}
 .view-panel.active{display:flex;flex-direction:column;}
+/* ── OUTAGE TRACKER (Supply → Outage Tracker) ── */
+.ot-hdr{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:10px;font-family:var(--mono);font-size:10px;color:var(--text)}
+.ot-title{letter-spacing:2px;text-transform:uppercase}
+.ot-sel{background:var(--surface2);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:10px;padding:3px 6px}
+.ot-meta{color:var(--text-dim);font-size:9px;font-family:var(--mono)}
+.ot-card{background:var(--surface);border:1px solid var(--border);padding:8px 10px;margin-bottom:12px}
+.ot-sec{font-family:var(--mono);font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--text-dim);margin:2px 0 6px}
+.ot-tbl{border-collapse:collapse;font-family:var(--mono);font-size:9px;color:var(--text)}
+.ot-tbl th,.ot-tbl td{padding:3px 7px;border-bottom:1px solid var(--border);text-align:right;white-space:nowrap}
+.ot-tbl th{color:var(--text-dim);font-weight:400;background:var(--surface2);position:sticky;top:0;z-index:2}
+.ot-tbl td.ot-l,.ot-tbl th.ot-l{text-align:left;position:sticky;left:0;background:var(--surface);z-index:1}
+.ot-tbl th.ot-l{z-index:3;background:var(--surface2)}
+.ot-tbl tr.ot-g td{font-weight:700;border-top:1px solid var(--border2)}
+.ot-tbl tr.ot-gh td{color:var(--text-dim);letter-spacing:1px;text-transform:uppercase;border-top:1px solid var(--border2);background:var(--surface2)}
+.ot-tbl tr.ot-pl td{border-bottom:none}
+.ot-tbl tr.ot-ac td{border-bottom:none}
+.ot-tbl .ot-tag{color:var(--text-dim);font-weight:400;margin-left:6px}
+.ot-tbl .ot-neg{color:var(--red)} .ot-tbl .ot-pos{color:var(--green)}
+.ot-tbl .ot-dim{color:var(--text-dim)}
+.ot-tbl .ot-today{box-shadow:inset 1px 0 0 var(--amber),inset -1px 0 0 var(--amber)}
+.ot-tbl .ot-out{background:rgba(var(--red-rgb),.05)}
+.ot-tbl .ot-sum{border-left:1px solid var(--border2)}
+.ot-wrap{overflow:auto;max-height:calc(100vh - 360px);border:1px solid var(--border)}
+.ot-chev{cursor:pointer;user-select:none}
 
 /* ── LOCATION VIEW ── */
 #location-view{overflow-y:auto;background:var(--bg);}
@@ -2233,6 +2257,11 @@ td.camp-drag-cut>div:first-child{opacity:.3}
     </div>
 
     <!-- ELEMENTS MANAGEMENT VIEW -->
+    <!-- SUPPLY → OUTAGE TRACKER — plan frozen at the outage start vs actuals (renderOutageView) -->
+    <div id="outage-view" class="view-panel" style="overflow:auto;background:var(--bg)">
+      <div id="ot-inner" style="padding:12px 16px"></div>
+    </div>
+
     <div id="elements-view" class="view-panel" style="flex-direction:column;overflow:hidden;background:var(--bg)">
       <!-- Header bar -->
       <div style="height:48px;background:var(--surface);border-bottom:1px solid var(--border);padding:0 14px;display:flex;align-items:center;gap:10px;flex-shrink:0">
@@ -3163,6 +3192,7 @@ const DB = {
   real_silo_transfers_daily: [], // { date:'YYYY-MM-DD', link_id, from_silo_id, to_silo_id, product_id, volume_t, source:'actual', created_at, updated_at } — tonnes actually moved along a silo link that day (wins over the plan)
   real_rail_daily:       [], // { date:'YYYY-MM-DD', facility_id, product_id, type:'loading'|'delivered', cars:N, source:'actual', created_at, updated_at }
   real_shipping_daily:   [], // { date:'YYYY-MM-DD', facility_id, product_id, volume_t, source:'actual', created_at, updated_at }
+  outage_baselines:      [], // { id:'ob_<eventId>', event_id, element_id, from, to, after, frozen_at, sim_start, dates:[ds], prod:{elId:[t]}, inv:{siloId:[t eod]}, dem:{dpElId:[t]}, dem_fac:{dpElId:facId}, rail:{dispatchId:[cars]}, unl:{berthId:[t]} } — Outage Tracker: the plan as frozen at the outage start
   real_unloading_daily:  [], // { date:'YYYY-MM-DD', facility_id, berth_id, product_id, mode:'ship'|'rail'|'truck', value, unit:'t'|'cars', cars?:N (rail: entered car count for display; value stays tonnes for the sim), source:'actual', created_at, updated_at }
   // Access control (see ACCESS CONTROL): people who may sign in to this scenario, and pending requests.
   access_users:          [], // { id:email, email, name, admin, active, perm:{facilityId|'__network':{func:'edit'}}, pw:{salt,iter,hash}, must_change, created_at, created_by, pw_changed_at }
@@ -17501,6 +17531,241 @@ function removeMaintEventFromCalendar(id){
   autoSave(); renderMaintenanceCalendar(); updateStatusBar();
 }
 
+// ═══════════════════════════════════════════════════════
+// OUTAGE TRACKER (Supply → Outage Tracker) — plan vs actual through a plant outage
+// ═══════════════════════════════════════════════════════
+// The simulation overwrites its own plan with actuals as they come in (real production replaces
+// planned output, real silo levels re-anchor inventory, real rail/unloading override the plan),
+// so "the plan" can't be read back later from S.simResults. "Freeze plan" copies the CURRENT
+// simulation's numbers for the outage window into DB.outage_baselines (saved with the scenario),
+// and the tracker compares that frozen baseline with the actuals the app already holds:
+//   production — _dedupRealProd (production feed / Daily Data)        vs kiln / mill / packer output
+//   sales      — demand points' actual days (_dmdIsActual→_demandRate) vs demandFill.reqDaily
+//   inventory  — real_inventory_daily (latest entry per silo·day·prod) vs inventoryHistory (end of day)
+//   rail       — real_rail_daily 'loading' cars per facility           vs railHistory carsLoaded
+//   unloading  — real_unloading_daily tonnes per berth                 vs berthUnloadHistory
+// A day counts as actual only when it has its own record (feeds lag and arrive with gaps — the
+// production feed can be days behind), except sales: one import covers every demand point, so a
+// day any point has actuals is reported for all of them (a point with no row = 0 shipped).
+// "To date" sums only days that have an actual, so plan and actual always cover the same days.
+const OT={evId:null, after:14};
+function _otOpenSet(){ if(_otOpenSet._s) return _otOpenSet._s; try{ _otOpenSet._s=new Set(JSON.parse(localStorage.getItem('avila_ot_open')||'[]')); }catch(e){ _otOpenSet._s=new Set(); } return _otOpenSet._s; }
+function _otToggle(k){ const s=_otOpenSet(); s.has(k)?s.delete(k):s.add(k); try{ localStorage.setItem('avila_ot_open',JSON.stringify([...s])); }catch(e){} renderOutageView(); }
+function _otAdd(ds,n){ const d=new Date(ds+'T12:00:00'); d.setDate(d.getDate()+n); return d._ymd(); } // noon anchor: DST-safe
+function _otEnd(m){ return m.end_date||_otAdd(m.start_date, Math.max(1,Math.ceil(parseFloat(m.duration_days)||1))-1); }
+function _otDates(a,b){ const out=[]; for(let ds=a; ds<=b&&out.length<400; ds=_otAdd(ds,1)) out.push(ds); return out; }
+function _otFacOf(el){ return el?(el.assigned_facility_id||el.facility_id||''):''; }
+function _otFacName(id){ return (DB.facilities||[]).find(f=>f.id===id)?.name||id||'—'; }
+function _otEvents(){ return (DB.element_maintenance_events||[]).filter(m=>m&&m.start_date).slice().sort((a,b)=>b.start_date.localeCompare(a.start_date)); }
+function _otBaseline(evId){ return (DB.outage_baselines||[]).find(b=>b.event_id===evId)||null; }
+// Default: the outage running today (one with a baseline first), else the latest with a baseline,
+// else the next one coming, else the most recent.
+function _otPickDefault(){
+  const evs=_otEvents(), today=new Date()._ymd();
+  const live=evs.filter(m=>m.start_date<=today&&_otEnd(m)>=today);
+  const up=evs.filter(m=>m.start_date>today);
+  return (live.find(m=>_otBaseline(m.id))||live[0]||evs.find(m=>_otBaseline(m.id))||up[up.length-1]||evs[0]||{}).id||null;
+}
+function otPick(id){ OT.evId=id||null; renderOutageView(); }
+
+function otFreeze(){
+  const m=(DB.element_maintenance_events||[]).find(x=>x.id===OT.evId);
+  if(!m){ statMsg('Pick an outage first'); return; }
+  const r=S.simResults, st=S.simCfg?.start_date;
+  if(!r||!r.inventoryHistory||!st){ statMsg('Run the simulation first — the baseline is copied from its results'); return; }
+  const old=_otBaseline(m.id);
+  if(old&&!confirm(`Replace the baseline frozen on ${String(old.frozen_at||'').slice(0,16).replace('T',' ')} with the plan as it stands now?\n\nThe old baseline is lost.`)) return;
+  const after=Math.max(0,Math.min(90,parseInt(document.getElementById('ot-after')?.value,10)||0));
+  // 3 lead-in days before the outage, so the opening position (the last stock readings before
+  // the kiln/mill stops) is in the table; shading marks the outage days themselves.
+  const from=_otAdd(m.start_date,-3), to=_otAdd(_otEnd(m),after), dates=_otDates(from,to);
+  const idx=dates.map(ds=>dateToDayOffset(ds,st));
+  const num=v=>{ v=parseFloat(v); return isFinite(v)?Math.round(v*10)/10:0; };
+  const pick=arr=>idx.map(i=>arr&&i>=0?num(arr[i]):0);
+  const els=DB.elements||[];
+  const prod={}, inv={}, dem={}, demFac={}, rail={}, unl={};
+  els.forEach(e=>{
+    if(e.type==='kiln') prod[e.id]=pick(r.kilnProdHistory?.[e.id]);
+    else if(e.type==='finish_mill') prod[e.id]=pick(r.millOutputHistory?.[e.id]);
+    else if(e.type==='packing_plant') prod[e.id]=pick(r.packOutputHistory?.[e.id]);
+    else if((e.type==='bulk_silo'||e.type==='packed_silo')&&r.inventoryHistory[e.id]) inv[e.id]=pick(r.inventoryHistory[e.id]);
+  });
+  Object.entries(r.demandFill||{}).forEach(([id,df])=>{ const a=pick(df.reqDaily); if(a.some(v=>v)){ dem[id]=a; demFac[id]=df.facilityId||_otFacOf(getEl(id)); } });
+  Object.entries(r.railHistory||{}).forEach(([id,h])=>{ rail[id]=idx.map(i=>{ const x=i>=0?h?.[i]?.carsLoadedByProduct:null; return x?Object.values(x).reduce((s,v)=>s+(+v||0),0):0; }); });
+  Object.entries(r.berthUnloadHistory||{}).forEach(([id,h])=>{ unl[id]=pick(h); });
+  if(!DB.outage_baselines) DB.outage_baselines=[];
+  DB.outage_baselines=DB.outage_baselines.filter(b=>b.event_id!==m.id);
+  DB.outage_baselines.push({id:'ob_'+m.id, event_id:m.id, element_id:m.element_id, from, to, after,
+    frozen_at:new Date().toISOString(), sim_start:st, dates, prod, inv, dem, dem_fac:demFac, rail, unl});
+  autoSave();
+  statMsg(`Baseline frozen — ${m.name||m.element_name}: ${from} → ${to}`);
+  renderOutageView();
+}
+
+// Rows for one baseline: [{key,title,unit,kind:'flow'|'stock',items:[{key,label,plan[],act[],part[]}],total?}]
+function _otModel(b){
+  const today=new Date()._ymd(), D=b.dates, n=D.length;
+  const nm=id=>getEl(id)?.name||id;
+  const notYet=a=>a.map((v,i)=>D[i]>today?null:v);
+  const sumA=arrs=>D.map((_,i)=>arrs.reduce((s,a)=>s+(a[i]||0),0));
+  const total=items=>{
+    const plan=sumA(items.map(x=>x.plan)), part=D.map(()=>false);
+    const act=D.map((_,i)=>{ const v=items.map(x=>x.act[i]); if(v.every(x=>x==null)) return null; if(v.some(x=>x==null)) part[i]=true; return v.reduce((s,x)=>s+(x||0),0); });
+    return {plan,act,part};
+  };
+  const groups=[];
+  // ── Production at the outage facility ──
+  const facP=_otFacOf(getEl(b.element_id));
+  const prodIds=t=>Object.keys(b.prod||{}).filter(id=>{ const e=getEl(id); return e&&e.type===t&&_otFacOf(e)===facP; }).sort((x,y)=>nm(x).localeCompare(nm(y)));
+  const realProd=(id,ds)=>{ const rr=_dedupRealProd(id,ds); return rr.length?rr.reduce((s,r)=>s+(parseFloat(r.volume_t)||0),0):null; };
+  [['kiln','Clinker — kilns'],['finish_mill','Cement — finish mills'],['packing_plant','Packing']].forEach(([t,title])=>{
+    const items=prodIds(t).map(id=>({key:id,label:nm(id),plan:b.prod[id],act:notYet(D.map(ds=>realProd(id,ds)))}));
+    if(items.length) groups.push({key:'p:'+t,title:`${title} · ${_otFacName(facP)}`,unit:'t',kind:'flow',items,total:total(items)});
+  });
+  // ── Sales — per facility (sum of its demand points). The sales feed covers every demand point,
+  //    so a day any point has actuals is a reported day for all of them (missing = 0). ──
+  { const dps=Object.keys(b.dem||{});
+    const raw={}, rep=D.map(()=>false);
+    dps.forEach(id=>{ raw[id]=notYet(D.map(ds=>_dmdIsActual(id,ds)?(_demandRate(id,ds)||0):null)); raw[id].forEach((v,i)=>{ if(v!=null) rep[i]=true; }); });
+    const byFac={}; dps.forEach(id=>{ const f=b.dem_fac?.[id]||''; (byFac[f]=byFac[f]||[]).push(id); });
+    const items=Object.entries(byFac).map(([f,ids])=>{ const acts=ids.map(id=>raw[id].map((v,i)=>v==null&&rep[i]?0:v));
+      return {key:'s:'+f,label:_otFacName(f),plan:sumA(ids.map(id=>b.dem[id])),act:D.map((_,i)=>acts.every(a=>a[i]==null)?null:acts.reduce((s,a)=>s+(a[i]||0),0))}; })
+      .sort((x,y)=>x.label.localeCompare(y.label));
+    if(items.length) groups.push({key:'sales',title:'Sales — shipments by facility',unit:'t',kind:'flow',items,total:total(items)});
+  }
+  // ── Rail — cars loaded per origin facility ──
+  { const byFac={}; Object.keys(b.rail||{}).forEach(id=>{ const f=_otFacOf(getEl(id)); (byFac[f]=byFac[f]||[]).push(id); });
+    const loads=new Map(); (DB.real_rail_daily||[]).forEach(x=>{ if(x.type!=='loading'||x.date<b.from||x.date>b.to) return; const k=x.facility_id+'|'+x.date; loads.set(k,(loads.get(k)||0)+(parseFloat(x.cars)||0)); });
+    const items=Object.entries(byFac).map(([f,ids])=>({key:'r:'+f,label:_otFacName(f),plan:sumA(ids.map(id=>b.rail[id])),act:notYet(D.map(ds=>loads.has(f+'|'+ds)?loads.get(f+'|'+ds):null))}))
+      .filter(x=>x.plan.some(v=>v)||x.act.some(v=>v!=null));
+    if(items.length) groups.push({key:'rail',title:'Rail — cars loaded',unit:'cars',kind:'flow',items,total:total(items)});
+  }
+  // ── Unloading at terminals (rail + ship), per berth ──
+  { const u=new Map(); (DB.real_unloading_daily||[]).forEach(x=>{ if(x.date<b.from||x.date>b.to) return; const k=x.berth_id+'|'+x.date; u.set(k,(u.get(k)||0)+(parseFloat(x.value)||0)); });
+    const items=Object.keys(b.unl||{}).map(id=>({key:'u:'+id,label:nm(id),plan:b.unl[id],act:notYet(D.map(ds=>u.has(id+'|'+ds)?u.get(id+'|'+ds):null))}))
+      .filter(x=>x.plan.some(v=>v)||x.act.some(v=>v!=null)).sort((x,y)=>x.label.localeCompare(y.label));
+    if(items.length) groups.push({key:'unl',title:'Unloading at terminals (rail + ship)',unit:'t',kind:'flow',items,total:total(items)});
+  }
+  // ── Inventory (end of day) — per facility, one line per SILO (not per product: a silo nobody
+  //    reads, like the weathered clinker pile, would make a product sum compare 3 silos of plan
+  //    with 2 of actual). Actual = that day's reading (latest entry per silo·product). ──
+  { const latest=new Map();
+    (DB.real_inventory_daily||[]).forEach(x=>{ if(x.date<b.from||x.date>b.to) return; const k=x.silo_id+'|'+x.date+'|'+(x.product_id||''); const p=latest.get(k); if(!p||String(x.updated_at||'')>=String(p.updated_at||'')) latest.set(k,x); });
+    const read=new Map(); latest.forEach(x=>{ const k=x.silo_id+'|'+x.date; read.set(k,(read.get(k)||0)+(parseFloat(x.eod_volume_t)||0)); });
+    const pName=pid=>(DB.products||[]).find(p=>p.id===pid)?.name||pid||'—';
+    const byFac={};
+    Object.keys(b.inv||{}).forEach(id=>{ const e=getEl(id); if(!e) return;
+      const has=b.inv[id].some(v=>v)||D.some(ds=>read.has(id+'|'+ds)); if(!has) return;
+      const f=_otFacOf(e); (byFac[f]=byFac[f]||[]).push(id); });
+    const facs=Object.keys(byFac).sort((x,y)=>(x===facP?-1:y===facP?1:_otFacName(x).localeCompare(_otFacName(y))));
+    facs.forEach(f=>{
+      const items=byFac[f].map(id=>{ const e=getEl(id), p=(getSiloProducts(e)||[])[0]||'';
+        return {key:'i:'+id,label:`${pName(p)} · ${e.name||id}`,plan:b.inv[id],act:D.map(ds=>read.has(id+'|'+ds)?read.get(id+'|'+ds):null),part:D.map(()=>false)};
+      }).sort((x,y)=>x.label.localeCompare(y.label));
+      if(items.length) groups.push({key:'inv:'+f,title:`Inventory — ${_otFacName(f)} (end of day)`,unit:'t',kind:'stock',items});
+    });
+  }
+  return {groups,today,D,n};
+}
+
+// "To date" for a line: flows sum the days that have an actual; stock = the latest actual day.
+function _otToDate(x,kind,D,today){
+  if(kind==='stock'){ for(let i=D.length-1;i>=0;i--) if(x.act[i]!=null&&D[i]<=today) return {plan:x.plan[i],act:x.act[i],date:D[i],days:1}; return null; }
+  let p=0,a=0,d=0; D.forEach((ds,i)=>{ if(x.act[i]!=null&&ds<=today){ p+=x.plan[i]||0; a+=x.act[i]; d++; } });
+  return d?{plan:p,act:a,days:d}:null;
+}
+
+function renderOutageView(){
+  const host=document.getElementById('ot-inner'); if(!host) return;
+  const evs=_otEvents();
+  if(!evs.length){ host.innerHTML=`<div class="ot-card ot-meta">No maintenance events yet — add the outage in Supply → Maintenance Calendar, then come back here.</div>`; return; }
+  if(!OT.evId||!evs.some(m=>m.id===OT.evId)) OT.evId=_otPickDefault();
+  const m=evs.find(x=>x.id===OT.evId), b=_otBaseline(m.id), today=new Date()._ymd(), end=_otEnd(m);
+  const f0=v=>v==null?'—':_fmtInt(Math.round(v));
+  const fd=v=>{ if(v==null) return '—'; const r=Math.round(v); return r===0?'0':(r>0?'+':'−')+_fmtInt(Math.abs(r)); };
+  const dc=v=>v==null?'':Math.round(v)<0?'ot-neg':Math.round(v)>0?'ot-pos':'';
+  const pct=(a,p)=>p?`${a>=p?'+':'−'}${Math.abs(Math.round((a-p)/p*100))}%`:'—';
+  const outDays=Math.round((new Date(end+'T12:00:00')-new Date(m.start_date+'T12:00:00'))/864e5)+1;
+  const dayNo=today>=m.start_date&&today<=end?Math.round((new Date(today+'T12:00:00')-new Date(m.start_date+'T12:00:00'))/864e5)+1:null;
+  const opts=evs.map(x=>`<option value="${x.id}"${x.id===m.id?' selected':''}>${esc(x.name||x.element_name)} · ${esc(x.element_name||'')} · ${x.start_date} → ${_otEnd(x)}${_otBaseline(x.id)?' ●':''}</option>`).join('');
+  let h=`<div class="ot-hdr"><span class="ot-title">Outage Tracker</span>
+    <select class="ot-sel" onchange="otPick(this.value)" title="Outages from the Maintenance Calendar — ● = baseline frozen">${opts}</select>
+    <span class="ot-meta">${esc(_otFacName(_otFacOf(getEl(m.element_id))))} · ${outDays} days${dayNo?` · <b style="color:var(--amber)">today is day ${dayNo} of ${outDays}</b>`:today<m.start_date?' · not started':' · finished'}</span></div>`;
+  const freezeCtl=`<span class="ot-meta">show</span> <input id="ot-after" type="number" min="0" max="90" value="${b?b.after:OT.after}" class="ot-sel" style="width:46px"> <span class="ot-meta">days after the outage</span>
+    <button class="tb-btn amber" onclick="otFreeze()" title="Copy the plan as it stands now (the current simulation) as this outage's baseline">${b?'↻ Re-freeze plan':'❄ Freeze plan'}</button>`;
+  if(!b){
+    h+=`<div class="ot-card"><div class="ot-sec">No baseline yet</div>
+      <div class="ot-meta" style="line-height:1.6;margin-bottom:8px">Freezing copies the plan as it stands now — production, sales, inventories, rail and unloading from the current simulation — for 3 days before ${m.start_date} → the outage end + the days below.
+      Actuals are then compared against this frozen plan as they come in, even after you re-plan. Run the simulation first if you changed anything.</div>${freezeCtl}</div>`;
+    host.innerHTML=h; return;
+  }
+  const M=_otModel(b), D=M.D;
+  h+=`<div class="ot-card" style="display:flex;flex-wrap:wrap;align-items:center;gap:8px">
+    <span class="ot-meta">Baseline frozen <b style="color:var(--text)">${String(b.frozen_at).slice(0,16).replace('T',' ')}</b> · window ${b.from} → ${b.to}</span>
+    <span style="flex:1"></span>${freezeCtl}
+    <button class="tb-btn sec" onclick="otCopy()" title="Copy the daily table (every line, tab-separated) — paste into Excel or an e-mail">⧉ Copy table</button></div>`;
+  // ── Summary: flows to date + inventory at the latest actual day ──
+  let s=`<table class="ot-tbl"><thead><tr><th class="ot-l">To date</th><th>Days with actuals</th><th>Plan</th><th>Actual</th><th>Δ</th><th>Δ %</th><th class="ot-sum">Plan — whole window</th></tr></thead><tbody>`;
+  M.groups.filter(g=>g.kind==='flow').forEach(g=>{ const t=_otToDate(g.total,'flow',D,today), w=g.total.plan.reduce((q,v)=>q+v,0);
+    s+=`<tr><td class="ot-l">${esc(g.title)} <span class="ot-tag">${g.unit}</span></td><td>${t?t.days:0}</td><td>${t?f0(t.plan):'—'}</td><td>${t?f0(t.act):'—'}</td><td class="${t?dc(t.act-t.plan):''}">${t?fd(t.act-t.plan):'—'}</td><td class="${t?dc(t.act-t.plan):''}">${t?pct(t.act,t.plan):'—'}</td><td class="ot-sum">${f0(w)}</td></tr>`; });
+  s+=`</tbody></table>`;
+  let iv=`<table class="ot-tbl"><thead><tr><th class="ot-l">Inventory · latest actual day</th><th>Date</th><th>Plan</th><th>Actual</th><th>Δ</th><th class="ot-sum">Plan at ${D[D.length-1]}</th></tr></thead><tbody>`;
+  M.groups.filter(g=>g.kind==='stock').forEach(g=>{
+    iv+=`<tr class="ot-gh"><td class="ot-l" colspan="6">${esc(g.title)}</td></tr>`;
+    g.items.forEach(x=>{ const t=_otToDate(x,'stock',D,today), i=t?D.indexOf(t.date):-1;
+      iv+=`<tr><td class="ot-l">${esc(x.label)}</td><td>${t?t.date.slice(5):'—'}</td><td>${t?f0(t.plan):'—'}</td><td${i>=0&&x.part[i]?' title="Not every silo has a reading that day"':''}>${t?f0(t.act)+(x.part[i]?'*':''):'—'}</td><td class="${t?dc(t.act-t.plan):''}">${t?fd(t.act-t.plan):'—'}</td><td class="ot-sum">${f0(x.plan[x.plan.length-1])}</td></tr>`; });
+  });
+  iv+=`</tbody></table>`;
+  h+=`<div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-start">
+    <div class="ot-card" style="margin:0"><div class="ot-sec">Plan vs actual — to date</div>${s}
+      <div class="ot-meta" style="margin-top:6px;max-width:560px;line-height:1.5">To date compares only the days that have an actual (· in the daily table = not in yet), so plan and actual always cover the same days.</div></div>
+    <div class="ot-card" style="margin:0"><div class="ot-sec">Inventory</div>${iv}</div></div>`;
+  // ── Daily table ──
+  const open=_otOpenSet();
+  const wd=['Su','Mo','Tu','We','Th','Fr','Sa'];
+  const cellCls=(ds)=>`${ds===today?'ot-today ':''}${ds>=m.start_date&&ds<=end?'ot-out':''}`;
+  let t=`<table class="ot-tbl"><thead><tr><th class="ot-l" style="min-width:240px">Line</th><th class="ot-sum">To date</th><th>Window</th>${D.map(ds=>`<th class="${cellCls(ds)}">${wd[new Date(ds+'T12:00:00').getDay()]} ${ds.slice(5).replace('-','/')}</th>`).join('')}</tr></thead><tbody>`;
+  const lines=(x,kind,label,cls,chev)=>{
+    const td=_otToDate(x,kind,D,today);
+    const win=kind==='stock'?x.plan[x.plan.length-1]:x.plan.reduce((q,v)=>q+v,0);
+    const pl=`<tr class="ot-pl ${cls}"><td class="ot-l">${chev||''}${label}<span class="ot-tag">plan</span></td><td class="ot-sum">${td?f0(td.plan):'—'}</td><td>${f0(win)}</td>${x.plan.map((v,i)=>`<td class="${cellCls(D[i])}">${f0(v)}</td>`).join('')}</tr>`;
+    const ac=`<tr class="ot-ac ${cls}"><td class="ot-l" style="text-align:right"><span class="ot-tag">actual</span></td><td class="ot-sum">${td?f0(td.act):'—'}</td><td></td>${x.act.map((v,i)=>`<td class="${cellCls(D[i])}${v!=null?' cell-real':''}"${x.part&&x.part[i]?' title="Partial — not every line has an actual that day"':''}>${v==null?'<span class="ot-dim">·</span>':f0(v)+(x.part&&x.part[i]?'*':'')}</td>`).join('')}</tr>`;
+    const dl=`<tr class="${cls}"><td class="ot-l" style="text-align:right"><span class="ot-tag">Δ</span></td><td class="ot-sum ${td?dc(td.act-td.plan):''}">${td?fd(td.act-td.plan):'—'}</td><td></td>${x.act.map((v,i)=>`<td class="${cellCls(D[i])} ${v==null?'':dc(v-x.plan[i])}">${v==null?'':fd(v-x.plan[i])}</td>`).join('')}</tr>`;
+    return pl+ac+dl;
+  };
+  M.groups.forEach(g=>{
+    const isOpen=open.has(g.key);
+    const chev=`<span class="ot-chev" onclick="_otToggle('${g.key}')">${isOpen?'▼':'▶'}</span> `;
+    if(g.total){
+      t+=lines(g.total,g.kind,`${chev}<b>${esc(g.title)}</b> <span class="ot-tag">${g.unit}</span>`,'ot-g','');
+      if(isOpen) g.items.forEach(x=>{ t+=lines(x,g.kind,`<span style="padding-left:18px">${esc(x.label)}</span>`,'',''); });
+    } else {
+      t+=`<tr class="ot-gh"><td class="ot-l">${chev}${esc(g.title)}</td><td class="ot-sum" colspan="${D.length+2}" style="text-align:left">${isOpen?'':`<span class="ot-dim">${g.items.length} silo${g.items.length===1?'':'s'} — click ▶ to show</span>`}</td></tr>`;
+      if(isOpen) g.items.forEach(x=>{ t+=lines(x,g.kind,`<span style="padding-left:18px">${esc(x.label)}</span>`,'',''); });
+    }
+  });
+  t+=`</tbody></table>`;
+  h+=`<div class="ot-card" style="margin-top:12px"><div class="ot-sec">Daily — plan · actual · Δ <span class="ot-meta" style="text-transform:none;letter-spacing:0">(shaded = outage days, amber = today, · = actual not in yet)</span></div><div class="ot-wrap">${t}</div></div>`;
+  host.innerHTML=h;
+}
+
+// Copy every line of the daily table (all groups expanded) as tab-separated text.
+function otCopy(){
+  const b=_otBaseline(OT.evId); if(!b) return;
+  const M=_otModel(b), D=M.D, today=M.today, r=v=>v==null?'':Math.round(v);
+  const out=[['Group','Line','Series','To date','Window',...D].join('\t')];
+  M.groups.forEach(g=>{
+    const rows=(g.total?[{label:'TOTAL',...g.total}]:[]).concat(g.items);
+    rows.forEach(x=>{ const td=_otToDate(x,g.kind,D,today), win=g.kind==='stock'?x.plan[x.plan.length-1]:x.plan.reduce((q,v)=>q+v,0);
+      out.push([g.title,x.label,'Plan',td?r(td.plan):'',r(win),...x.plan.map(r)].join('\t'));
+      out.push([g.title,x.label,'Actual',td?r(td.act):'','',...x.act.map(r)].join('\t'));
+      out.push([g.title,x.label,'Delta',td?r(td.act-td.plan):'','',...x.act.map((v,i)=>v==null?'':r(v-x.plan[i]))].join('\t')); });
+  });
+  const txt=out.join('\n');
+  (navigator.clipboard?navigator.clipboard.writeText(txt):Promise.reject()).then(()=>statMsg('Outage table copied — paste into Excel'),()=>{
+    const ta=document.createElement('textarea'); ta.value=txt; document.body.appendChild(ta); ta.select(); try{ document.execCommand('copy'); statMsg('Outage table copied'); }catch(e){} ta.remove(); });
+}
+
 // ── DEMAND SINGLE SOURCE OF TRUTH ───────────────────────
 // All code that needs "what is the demand for element X on date D"
 // must call this function. It reads DB.demand_values first (the grid),
@@ -31423,6 +31688,7 @@ function switchTopSection(section){
       {label:'Products',view:'catalog'},
       {label:'Elements',view:'elements'},
       {label:'Maintenance Calendar',view:'maintenance'},
+      {label:'Outage Tracker',view:'outage'},
       {label:'Mill Balance',view:'millbal',link:'AVILA_Mills.html',win:'avila_mills'}
     ],
     logistics:[
@@ -31523,6 +31789,7 @@ function switchView(view){
   if(view==='demand') renderDemandView();
   if(view==='salesperf') renderSalesPerfView();
   if(view==='supply') renderSupplyView();
+  if(view==='outage') renderOutageView();
   if(view==='schedules'){_logiFilterBarSync();renderVesselTable();renderRailTable();renderSiloXferRegister();renderMaintenanceCalendar();}
   // Show view window bar on result views
   const vwViews=['dashboard','datatable','analysis'];
@@ -35359,6 +35626,7 @@ const AC_GUARDS=[
   ['editTransport','logistics', ()=>undefined],
   ['openMaintModal','production', a=>_acFacOfEl(a[0])],
   ['editMaintEvent','production', a=>{ const m=(DB.element_maintenance_events||[]).find(x=>x.id===a[0]); return m?_acFacOfEl(m.element_id):undefined; }],
+  ['otFreeze','production', ()=>{ const m=(DB.element_maintenance_events||[]).find(x=>x.id===OT.evId); return m?_acFacOfEl(m.element_id):undefined; }],
   ['openMillPolicyManager','production', ()=>undefined],
   ['openNonWorkingDaysPanel','production', ()=>AC_NET],
   ['openDemandSwapManager','demand', a=>a[0]?_acFacOfEl(a[0]):undefined],
