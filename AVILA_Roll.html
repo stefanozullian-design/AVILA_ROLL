@@ -33959,7 +33959,7 @@ function _clIndex(log){
 function _clLabel(table, row, key){
   if(table===CL_CFG) return 'setting '+String(key).replace(/^f\|/,'');
   if(row && row.name) return row.name;
-  if(table==='connections' && row) return (row.from||'?')+' → '+(row.to||'?');
+  if(table==='connections' && row){ const nm=id=>{ const e=(typeof DB!=='undefined'&&DB.elements||[]).find(x=>x.id===id); return e?e.name:(id||'?'); }; return nm(row.from_element_id||row.from)+' → '+nm(row.to_element_id||row.to); }
   return String(key).replace(/^id\|/,'');
 }
 function _clCfgRows(cfg){ const m=new Map(); if(cfg && typeof cfg==='object') for(const k of Object.keys(cfg)) m.set('f|'+k, cfg[k]); return m; }
@@ -33996,7 +33996,10 @@ function _clAppend(log, diff){
   const ops=log.ops.slice();
   for(const op of diff.ops){ const l=last.get(op[0]); if(l && l[1]===op[1] && l[2]===op[2]) continue; ops.push(op); }
   const saves=log.saves.slice();
-  saves.push({id:Math.random().toString(36).slice(2,10), at:new Date().toISOString(), dev:diff.dev.id, name:diff.dev.name||'', by:diff.dev.email||null, n:diff.counts, lbl:diff.labels});
+  const sv={id:Math.random().toString(36).slice(2,10), at:new Date().toISOString(), dev:diff.dev.id, name:diff.dev.name||'', by:diff.dev.email||null, n:diff.counts, lbl:diff.labels};
+  // ⇄ Merge scenarios: say where the rows came from (one-shot note set by smApply).
+  const mn=window._clMergeNote; if(mn){ sv.merge={from:mn.from, fromFile:mn.fromFile||null}; sv.lbl=['⇄ merged from "'+mn.from+'"'].concat(sv.lbl||[]).slice(0,15); window._clMergeNote=null; }
+  saves.push(sv);
   return {v:1, ops, saves};
 }
 
@@ -34868,7 +34871,14 @@ async function scPickSaveFile(suggestedName){
   }
 }
 
-async function scCreateFromCurrent(suggestedName){
+// ⧉ Duplicate leaves a marker save in the copy's change log, so ⇄ Merge scenarios knows when the
+// two split off (changes before that are shared history, not candidates).
+function _clMarkFork(log, src){
+  log=_clNorm(log); const dev=_clDevice();
+  return {v:1, ops:log.ops, saves:log.saves.concat([{id:Math.random().toString(36).slice(2,10), at:new Date().toISOString(), dev:dev.id, name:dev.name||'', by:dev.email||null, n:{},
+    lbl:['⧉ duplicated from "'+src.name+'"'], fork:{name:src.name, fileName:src.fileName||null}}])};
+}
+async function scCreateFromCurrent(suggestedName, opts){
   if(!window.showSaveFilePicker){ statMsg('This browser cannot save files directly — use ↓ Export JSON. (Chrome/Edge required.)'); return; }
   const handle=await scPickSaveFile(suggestedName);
   if(!handle) return;
@@ -34881,6 +34891,7 @@ async function scCreateFromCurrent(suggestedName){
   SC.meta[id]={ id, name, color:scPickColor(), fileName:handle.name, lastSaved:null, lastOpened:new Date().toISOString() };
   SC.handles[id]=handle; await scSaveHandle(id,handle);
   SC.activeId=id; scSaveMeta();
+  if(opts && opts.forkOf) window._scLog=_clMarkFork(window._scLog, opts.forkOf);
   await scWriteActive(id); // write current in-memory state into the new file now
   scCloseDropdown(); scCloseStartup(); scUpdatePill(); scRenderDropdown();
   statMsg('Scenario "'+name+'" created');
@@ -34890,7 +34901,7 @@ async function scCreateFromCurrent(suggestedName){
 // favour of the filename — and, being a blocking modal, it consumed the user
 // activation the file picker needs, so typing into it made the picker fail silently.
 async function scNew(){ await scCreateFromCurrent('New scenario'); }
-async function scDuplicate(){ const m=scActive(); if(!m){ statMsg('No active scenario to duplicate'); return; } await scCreateFromCurrent(m.name+' copy'); }
+async function scDuplicate(){ const m=scActive(); if(!m){ statMsg('No active scenario to duplicate'); return; } await scCreateFromCurrent(m.name+' copy', {forkOf:m}); }
 async function scOpenFile(){
   if(!window.showOpenFilePicker){ statMsg('This browser cannot open files directly — use ↑ Import JSON. (Chrome/Edge required.)'); return; }
   let handle;
@@ -35027,6 +35038,7 @@ function scRenderDropdown(){
   h+=`<div class="sc-dd-foot">
     <div class="sc-item" onclick="scNew()" title="Captures the current model into a new .json — you name it in the save dialog"><span style="color:var(--green)">＋</span> New scenario…</div>
     <div class="sc-item" onclick="scDuplicate()">⧉ Duplicate current</div>
+    <div class="sc-item" onclick="smOpen()" title="Bring changes from one scenario into another — all of them, or only yours">⇄ Merge scenarios…</div>
     <div class="sc-item" onclick="scOpenFile()">📂 Open from file…</div>
   </div>`;
   dd.innerHTML=h;
@@ -35044,6 +35056,393 @@ function scRowMenu(ev,id){
   setTimeout(()=>document.addEventListener('click',function _c(){ menu.remove(); document.removeEventListener('click',_c); },{once:true}),0);
 }
 function _scEsc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+// ═══════════════════════════════════════════════════════════════════════
+// MERGE SCENARIOS — bring changes from one scenario (From) into another (To).
+// The user picks the direction, then "only my changes" (rows the change log says
+// this person edited in From) or "everything different", reviews the list row by
+// row and applies. Rules:
+//   • From is never changed.
+//   • The time the two scenarios split off is read from their change logs: the
+//     "Duplicated from" marker ⧉ Duplicate leaves, else the newest save both logs
+//     share. Changes before that are common history, not candidates.
+//   • A row changed in BOTH scenarios since the split is a conflict; it defaults to
+//     keeping To's value. A row only To changed defaults to To's value too.
+//   • A row is deleted in To only when From's log RECORDED its deletion (absence
+//     alone never deletes — same rule as the sync engine).
+//   • Real data (actuals) and people / access rows are left out unless asked.
+//   • Applying opens To and writes it through the normal save, so the change log,
+//     History, permissions and the topology seal all apply as for a hand edit.
+//     A snapshot of To is taken first (when a history folder is linked).
+// ═══════════════════════════════════════════════════════════════════════
+const SM_SKIP_TABLES=new Set(['access_users','access_requests','change_requests']);
+const SM_SKIP_CFG=new Set(['role']);
+const SM_AREAS=[
+  {id:'topology',   label:'Topology & setup'},
+  {id:'demand',     label:'Demand'},
+  {id:'production', label:'Production plan'},
+  {id:'logistics',  label:'Logistics (rail · vessels · transfers)'},
+  {id:'inventory',  label:'Inventory counts (real)'},
+  {id:'real',       label:'Real values'},
+];
+const SM_REAL_AREAS=new Set(['real','inventory']);
+let _SM=null;
+
+function _smArea(table, row){ return table===CL_CFG ? 'topology' : _acFunc(table, row); }
+function _smTableLabel(t){ return t===CL_CFG ? 'simulation settings' : (_CL_TABLE_LABEL[t]||t.replace(/_/g,' ')); }
+
+// Who is "me": this browser, plus every browser that saved under my signed-in email.
+function _smMyDevices(...logs){
+  const dev=_clDevice(), mine=new Set([dev.id]);
+  if(dev.email) for(const l of logs) for(const s of _clNorm(l).saves) if(s && s.by===dev.email && s.dev) mine.add(s.dev);
+  return mine;
+}
+// When did the two scenarios split? {at:ms, how:'duplicated'|'shared'} or null.
+function _smForkPoint(fromP, toP, fromMeta, toMeta){
+  const lf=_clNorm(fromP.changeLog), lt=_clNorm(toP.changeLog);
+  let best=null;
+  const hit=(s, other)=>s && s.fork && other && (s.fork.fileName===other.fileName || s.fork.name===other.name);
+  for(const s of lf.saves) if(hit(s,toMeta))   { const t=Date.parse(s.at); if(!best||t>best.at) best={at:t, how:'duplicated'}; }
+  for(const s of lt.saves) if(hit(s,fromMeta)) { const t=Date.parse(s.at); if(!best||t>best.at) best={at:t, how:'duplicated'}; }
+  if(best) return best;
+  const ids=new Set(lt.saves.map(s=>s&&s.id));
+  for(const s of lf.saves) if(s && ids.has(s.id) && !s.fork){ const t=Date.parse(s.at); if(!best||t>best.at) best={at:t, how:'shared'}; }
+  return best;
+}
+// fullKey → {any, mine, at, dev} over ops at/after sinceMs.
+function _smOpIndex(log, sinceMs, mine){
+  const idx=new Map();
+  for(const op of _clNorm(log).ops){
+    if(op[3]<sinceMs) continue;
+    let e=idx.get(op[0]); if(!e){ e={any:false, mine:false, at:0, dev:null}; idx.set(op[0], e); }
+    e.any=true; if(mine && mine.has(op[4])) e.mine=true;
+    if(op[3]>=e.at){ e.at=op[3]; e.dev=op[4]; }
+  }
+  return idx;
+}
+function _smWhoMap(...logs){ const m=new Map(); for(const l of logs) for(const s of _clNorm(l).saves) if(s && s.dev) m.set(s.dev, _clWho(s.dev, s.name)); return m; }
+
+// The candidate list. opts: {mode:'mine'|'all', sinceMs, includeReal}
+function _smCompute(fromP, toP, opts){
+  const mine=_smMyDevices(fromP.changeLog, toP.changeLog);
+  const fIdx=_smOpIndex(fromP.changeLog, opts.sinceMs, mine), tIdx=_smOpIndex(toP.changeLog, opts.sinceMs, null);
+  const items=[]; let skippedReal=0, onlyTo=0;
+  const consider=(table, key, f, t)=>{
+    const sf=f===undefined?null:_mgStr(f), st=t===undefined?null:_mgStr(t);
+    if(sf===st) return;
+    const area=_smArea(table, f||t);
+    const fk=table+'\u0001'+key, fi=fIdx.get(fk), ti=tIdx.get(fk);
+    const fromCh=!!(fi&&fi.any), toCh=!!(ti&&ti.any);
+    if(opts.mode==='mine' && !(fi&&fi.mine)) return;
+    if(SM_REAL_AREAS.has(area) && !opts.includeReal){ skippedReal++; return; }
+    const kind = f===undefined ? 'del' : t===undefined ? 'add' : 'mod';
+    // A deletion is offered only when From's log recorded it.
+    if(kind==='del' && !fromCh){ onlyTo++; return; }
+    const status = fromCh&&toCh ? 'conflict' : toCh ? 'to' : fromCh ? 'from' : 'unknown';
+    items.push({i:items.length, table, key, area, kind, status, from:f, to:t,
+      at:fi?fi.at:null, dev:fi?fi.dev:null, toAt:ti?ti.at:null, toDev:ti?ti.dev:null,
+      on: status==='from' || (status==='unknown' && kind!=='del')});
+  };
+  const fDB=fromP.DB||{}, tDB=toP.DB||{};
+  for(const table of Object.keys(fDB)){
+    if(SM_SKIP_TABLES.has(table) || SC_TRANSIENT.has(table) || /^simulation_/.test(table)) continue;
+    const fa=fDB[table]; if(!Array.isArray(fa)) continue;          // a table From never loaded is not a deletion
+    const ta=Array.isArray(tDB[table])?tDB[table]:[];
+    const fm=new Map(); for(const r of fa) fm.set(_mgRowKey(table,r), r);
+    const tm=new Map(); for(const r of ta) tm.set(_mgRowKey(table,r), r);
+    for(const [k,f] of fm) consider(table, k, f, tm.get(k));
+    for(const [k,t] of tm) if(!fm.has(k)) consider(table, k, undefined, t);
+  }
+  const fc=_clCfgRows(fromP.simCfg), tc=_clCfgRows(toP.simCfg);
+  for(const [k,v] of fc){ if(!SM_SKIP_CFG.has(k.slice(2))) consider(CL_CFG, k, v, tc.get(k)); }
+  return {items, skippedReal, onlyTo};
+}
+
+// Rows a selected row points at (element, facility, product…) that To lacks — brought along.
+const SM_REF_TABLES=['elements','facilities','products','sub_regions','regions','countries','macro_regions'];
+function _smDeps(sel, fromP, toDB){
+  const byId=new Map();
+  for(const t of SM_REF_TABLES) for(const r of ((fromP.DB||{})[t]||[])) if(r && r.id!=null && !byId.has(String(r.id))) byId.set(String(r.id), {t, r});
+  const have=new Set(); for(const t of SM_REF_TABLES) for(const r of (toDB[t]||[])) if(r && r.id!=null) have.add(String(r.id));
+  for(const it of sel) if(it.table!==CL_CFG && it.from && it.from.id!=null && SM_REF_TABLES.includes(it.table)) have.add(String(it.from.id));
+  const out=[], queue=sel.filter(it=>it.table!==CL_CFG && it.from).map(it=>it.from);
+  const refs=row=>{ const v=[]; for(const [k,x] of Object.entries(row||{})){ if(k==='id') continue; if((/_id$/.test(k)||k==='from'||k==='to') && (typeof x==='string'||typeof x==='number')) v.push(String(x)); } return v; };
+  while(queue.length){
+    const row=queue.shift();
+    for(const id of refs(row)){
+      if(have.has(id)) continue;
+      const hit=byId.get(id); if(!hit) continue;
+      have.add(id); out.push({table:hit.t, key:_mgRowKey(hit.t, hit.r), row:hit.r}); queue.push(hit.r);
+    }
+  }
+  return out;
+}
+
+// ── Reading the two scenarios ──
+async function _smReadScenario(id){
+  if(id===SC.activeId){
+    clearTimeout(SC._writeTimer);
+    if(SC.handles[id]) await scWriteActive(id);                    // flush, so From/To include the latest edits
+    return JSON.parse(JSON.stringify(scBuildPayload()));
+  }
+  const h=SC.handles[id] || await scLoadHandle(id);
+  if(!h) throw new Error('"'+(SC.meta[id]||{}).name+'" has no file in this browser — open it once from 📂 Open from file…');
+  SC.handles[id]=h;
+  let f;
+  try{ f=await h.getFile(); }
+  catch(e){
+    let ok=false; try{ ok=(await h.requestPermission({mode:'readwrite'}))==='granted'; }catch(_){}
+    if(!ok) throw new Error('No permission to read "'+(SC.meta[id]||{}).name+'"');
+    f=await h.getFile();
+  }
+  const txt=new TextDecoder().decode(await f.arrayBuffer());
+  const p=JSON.parse(txt);
+  if(!p || !p.DB || _scIsSalesPayload(p)) throw new Error('"'+(SC.meta[id]||{}).name+'" is not an Avila Roll scenario file');
+  return p;
+}
+
+// ── Dialog ──
+function smOpen(){
+  scCloseDropdown();
+  const ids=Object.keys(SC.meta);
+  if(ids.length<2){ statMsg('Merging needs two scenarios — create or open another one first.'); return; }
+  const fromId=SC.activeId&&SC.meta[SC.activeId]?SC.activeId:ids[0];
+  const toId=ids.find(i=>i!==fromId);
+  _SM={fromId, toId, mode:'mine', includeReal:false, sinceMs:null, sinceAuto:true, res:null, open:new Set(), busy:false};
+  showModalContent(`
+    <div class="modal-hdr"><span class="modal-title">⇄ Merge scenarios</span><span class="modal-close" onclick="closeModal()">✕</span></div>
+    <div id="sm-setup" style="padding:12px 16px;border-bottom:1px solid var(--border2);font-family:var(--mono);font-size:10px;display:flex;flex-direction:column;gap:9px"></div>
+    <div class="modal-body" id="sm-body" style="min-height:120px;max-height:56vh;overflow:auto;padding:8px 16px"></div>
+    <div class="modal-footer" style="justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+      <span id="sm-foot" style="font-family:var(--mono);font-size:10px;color:var(--text-dim);flex:1;min-width:160px"></span>
+      <button class="btn-sec" onclick="closeModal()">Cancel</button>
+      <button class="btn-pri" id="sm-apply" onclick="smApply()" disabled>Apply</button>
+    </div>`);
+  document.getElementById('modal-content').classList.add('ac-wide');
+  smRenderSetup(); smRenderBody();
+}
+function _smDateVal(ms){ if(ms==null) return ''; const d=new Date(ms); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+function smRenderSetup(){
+  const el=document.getElementById('sm-setup'); if(!el||!_SM) return;
+  const ids=Object.keys(SC.meta).sort((a,b)=>(SC.meta[a].name||'').localeCompare(SC.meta[b].name||''));
+  const opt=(sel, except)=>ids.filter(i=>i!==except).map(i=>`<option value="${i}"${i===sel?' selected':''}>${_scEsc(SC.meta[i].name)}${i===SC.activeId?' (open)':''}</option>`).join('');
+  const sel='font-family:var(--mono);font-size:10px;padding:4px 6px;background:var(--surface2);color:var(--text);border:1px solid var(--border2);border-radius:3px';
+  const fork=_SM.res&&_SM.res.fork;
+  const forkTxt=!_SM.res?'' : fork
+    ? `split off ${new Date(fork.at).toLocaleString('en',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})} (${fork.how==='duplicated'?'duplicated':'last save both share'})`
+    : 'no shared history found — looking back 60 days';
+  el.innerHTML=`
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <span style="color:var(--text-dim);min-width:40px">FROM</span><select id="sm-from" style="${sel}" onchange="smSetup('from',this.value)">${opt(_SM.fromId,null)}</select>
+      <button class="btn-sec" style="padding:3px 8px" title="Swap direction" onclick="smSetup('swap')">⇄</button>
+      <span style="color:var(--text-dim)">TO</span><select id="sm-to" style="${sel}" onchange="smSetup('to',this.value)">${opt(_SM.toId,_SM.fromId)}</select>
+      <span style="color:var(--text-dim)">— From is never changed; To receives what you tick below.</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+      <label><input type="radio" name="sm-mode" ${_SM.mode==='mine'?'checked':''} onchange="smSetup('mode','mine')"> Only my changes</label>
+      <label><input type="radio" name="sm-mode" ${_SM.mode==='all'?'checked':''} onchange="smSetup('mode','all')"> Everything different</label>
+      <span style="color:var(--text-dim)">since</span><input type="date" id="sm-since" value="${_smDateVal(_SM.sinceMs)}" style="${sel}" onchange="smSetup('since',this.value)">
+      <span style="color:var(--text-dim)">${_scEsc(forkTxt)}</span>
+      <label title="Production, shipments, rail, unloading, transfers, inventory counts and actual demand"><input type="checkbox" ${_SM.includeReal?'checked':''} onchange="smSetup('real',this.checked)"> Include real data</label>
+    </div>`;
+}
+function smSetup(what, v){
+  if(!_SM||_SM.busy) return;
+  if(what==='from'){ _SM.fromId=v; if(_SM.toId===v) _SM.toId=Object.keys(SC.meta).find(i=>i!==v); _SM.sinceAuto=true; }
+  else if(what==='to'){ _SM.toId=v; _SM.sinceAuto=true; }
+  else if(what==='swap'){ const f=_SM.fromId; _SM.fromId=_SM.toId; _SM.toId=f; _SM.sinceAuto=true; }
+  else if(what==='mode') _SM.mode=v;
+  else if(what==='real') _SM.includeReal=!!v;
+  else if(what==='since'){ if(v){ const [y,m,d]=v.split('-').map(Number); _SM.sinceMs=new Date(y,m-1,d).getTime(); _SM.sinceAuto=false; } else _SM.sinceAuto=true; }
+  const reread = what==='from'||what==='to'||what==='swap';
+  smCompare(reread);
+}
+// Read both files (when needed), find the split, list the candidates.
+async function smCompare(reread){
+  if(!_SM) return;
+  _SM.busy=true;
+  const body=document.getElementById('sm-body'); if(body) body.innerHTML=`<div style="padding:24px;text-align:center;color:var(--text-dim);font-family:var(--mono);font-size:10px">Reading both scenarios…</div>`;
+  try{
+    if(reread || !_SM.fromP || !_SM.toP || _SM.fromP._id!==_SM.fromId || _SM.toP._id!==_SM.toId){
+      _SM.fromP=await _smReadScenario(_SM.fromId); _SM.fromP._id=_SM.fromId;
+      _SM.toP=await _smReadScenario(_SM.toId);     _SM.toP._id=_SM.toId;
+    }
+    const fork=_smForkPoint(_SM.fromP, _SM.toP, SC.meta[_SM.fromId], SC.meta[_SM.toId]);
+    if(_SM.sinceAuto){ const d=new Date(); d.setDate(d.getDate()-60); d.setHours(0,0,0,0); _SM.sinceMs=fork?fork.at:d.getTime(); }
+    const r=_smCompute(_SM.fromP, _SM.toP, {mode:_SM.mode, sinceMs:_SM.sinceMs, includeReal:_SM.includeReal});
+    r.fork=fork; _SM.res=r; _SM.err=null;
+  }catch(e){ console.warn('merge compare', e); _SM.res=null; _SM.err=e.message||String(e); }
+  _SM.busy=false;
+  smRenderSetup(); smRenderBody();
+}
+
+// Names for rows that only carry ids.
+function _smNameMap(){
+  const m=new Map();
+  for(const p of [_SM.toP, _SM.fromP]) for(const t of ['elements','facilities','products']) for(const r of ((p&&p.DB||{})[t]||[])) if(r&&r.id!=null&&r.name&&!m.has(String(r.id))) m.set(String(r.id), r.name);
+  return m;
+}
+function _smRowLabel(it, names){
+  if(it.table===CL_CFG) return it.key.replace(/^f\|/,'');
+  const r=it.from||it.to||{};
+  const nm=id=>id==null?null:(names.get(String(id))||String(id));
+  if(it.table==='connections') return (nm(r.from_element_id||r.from)||'?')+' → '+(nm(r.to_element_id||r.to)||'?');
+  let s=r.name || r.reference || nm(r.element_id) || nm(r.facility_id) || nm(r.product_id) || it.key.replace(/^id\|/,'');
+  const when=r.date||r.start_date||r.ym||r.eta||r.pull_date||'';
+  if(when && s!==when) s+=' · '+when;
+  if(it.table==='demand_values' && r.source) s+=' · '+r.source;
+  return s;
+}
+function _smShort(v){ if(v==null) return '—'; if(typeof v==='object') return '{…}'; const s=String(v); return s.length>28?s.slice(0,26)+'…':s; }
+function _smDetail(it){
+  if(it.table===CL_CFG) return _smShort(it.to)+' → '+_smShort(it.from);
+  if(it.kind==='add') return 'new in From';
+  if(it.kind==='del') return 'deleted in From';
+  const a=it.to||{}, b=it.from||{};
+  const ks=[...new Set([...Object.keys(a),...Object.keys(b)])].filter(k=>_mgStr(a[k])!==_mgStr(b[k]));
+  if(ks.length && ks.every(k=>k==='x'||k==='y')) return 'moved on the canvas';
+  const show=ks.filter(k=>k!=='x'&&k!=='y').slice(0,4).map(k=>`${k}: ${_smShort(a[k])} → ${_smShort(b[k])}`);
+  return show.join('; ')+(ks.length>4?'; …':'');
+}
+const SM_ROW_CAP=200;
+function smRenderBody(){
+  const body=document.getElementById('sm-body'), foot=document.getElementById('sm-foot'), btn=document.getElementById('sm-apply');
+  if(!body||!_SM) return;
+  if(_SM.err){ body.innerHTML=`<div style="padding:18px;color:var(--red);font-family:var(--mono);font-size:10px">⚠ ${_scEsc(_SM.err)}</div>`; if(foot) foot.textContent=''; if(btn) btn.disabled=true; return; }
+  if(!_SM.res){ if(!_SM.busy) smCompare(true); return; }
+  const {items, skippedReal}=_SM.res, names=_smNameMap(), who=_smWhoMap(_SM.fromP.changeLog, _SM.toP.changeLog);
+  const toName=_scEsc(SC.meta[_SM.toId].name), fromName=_scEsc(SC.meta[_SM.fromId].name);
+  if(!items.length){
+    body.innerHTML=`<div style="padding:24px;text-align:center;color:var(--text-dim);font-family:var(--mono);font-size:10px;line-height:1.6">
+      Nothing to bring over: ${_SM.mode==='mine'?'no change of yours in <b>'+fromName+'</b> since that date differs from':'<b>'+fromName+'</b> matches'} <b>${toName}</b>.
+      ${skippedReal?`<br>${skippedReal} real-data row(s) differ — tick <b>Include real data</b> to see them.`:''}
+      ${_SM.mode==='mine'?'<br>Try <b>Everything different</b>, or an earlier <b>since</b> date.':''}</div>`;
+    if(foot) foot.textContent=''; if(btn){ btn.disabled=true; btn.textContent='Apply'; } return;
+  }
+  const byArea=new Map();
+  for(const it of items){ if(!byArea.has(it.area)) byArea.set(it.area, new Map()); const tm=byArea.get(it.area); if(!tm.has(it.table)) tm.set(it.table, []); tm.get(it.table).push(it); }
+  const box=(list, onclick)=>{ const n=list.filter(x=>x.on).length; return `<input type="checkbox" ${n===list.length?'checked':''} ${n&&n<list.length?'data-mixed="1"':''} onclick="event.stopPropagation();${onclick}">`; };
+  const badge={add:['+','var(--green)'], mod:['~','var(--amber)'], del:['−','var(--red)']};
+  const stat={conflict:`<span style="color:var(--amber)" title="Changed in both scenarios since they split — ticked takes From's value, unticked keeps To's">⚠ conflict</span>`,
+              to:`<span style="color:var(--text-dim)" title="Only To changed this row since the split — From still has the older value">To is newer</span>`, from:'', unknown:''};
+  let h='';
+  for(const a of SM_AREAS){
+    const tm=byArea.get(a.id); if(!tm) continue;
+    const all=[...tm.values()].flat();
+    const nConf=all.filter(x=>x.status==='conflict').length;
+    h+=`<div style="margin:6px 0 2px;padding:6px 4px;border-bottom:1px solid var(--border2);font-family:var(--mono);font-size:11px;display:flex;gap:8px;align-items:center">
+      ${box(all, `smToggle('area','${a.id}',this.checked)`)}<b style="flex:1">${_scEsc(a.label)}</b>
+      <span style="color:var(--text-dim);font-size:10px">${all.filter(x=>x.on).length} / ${all.length} ticked${nConf?` · <span style="color:var(--amber)">${nConf} conflict${nConf>1?'s':''}</span>`:''}</span></div>`;
+    for(const [t,list] of tm){
+      const open=_SM.open.has(t);
+      const c={add:0,mod:0,del:0}; list.forEach(x=>c[x.kind]++);
+      h+=`<div style="padding:4px 4px 4px 22px;font-family:var(--mono);font-size:10px;display:flex;gap:8px;align-items:center;cursor:pointer" onclick="smToggleOpen('${t}')">
+        ${box(list, `smToggle('table','${t}',this.checked)`)}<span style="width:10px;color:var(--text-dim)">${open?'▾':'▸'}</span>
+        <span style="flex:1">${_scEsc(_smTableLabel(t))}</span>
+        <span style="color:var(--text-dim)">${c.add?'+'+c.add+' ':''}${c.mod?'~'+c.mod+' ':''}${c.del?'−'+c.del:''}</span></div>`;
+      if(!open) continue;
+      for(const it of list.slice(0,SM_ROW_CAP)){
+        const [sym,col]=badge[it.kind];
+        const by=it.dev?(who.get(it.dev)||_clWho(it.dev,'')):'';
+        const at=it.at?new Date(it.at).toLocaleString('en',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}):'';
+        h+=`<label style="display:flex;gap:8px;align-items:baseline;padding:3px 4px 3px 52px;font-family:var(--mono);font-size:10px;border-bottom:1px dotted var(--border2);cursor:pointer">
+          <input type="checkbox" ${it.on?'checked':''} onchange="smToggle('row',${it.i},this.checked)">
+          <span style="color:${col};width:10px">${sym}</span>
+          <span style="min-width:200px;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${_scEsc(_smRowLabel(it,names))}">${_scEsc(_smRowLabel(it,names))}</span>
+          <span style="flex:1;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${_scEsc(_smDetail(it))}">${_scEsc(_smDetail(it))}</span>
+          ${stat[it.status]}
+          <span style="color:var(--text-dim);white-space:nowrap">${_scEsc(by)}${at?' · '+at:''}</span></label>`;
+      }
+      if(list.length>SM_ROW_CAP) h+=`<div style="padding:3px 4px 6px 52px;font-family:var(--mono);font-size:9px;color:var(--text-dim)">+${list.length-SM_ROW_CAP} more rows — they follow the table's tick box.</div>`;
+    }
+  }
+  if(skippedReal) h+=`<div style="padding:10px 4px;font-family:var(--mono);font-size:9px;color:var(--text-dim)">${skippedReal} real-data row(s) left out — tick <b>Include real data</b> to review them.</div>`;
+  body.innerHTML=h;
+  body.querySelectorAll('input[data-mixed]').forEach(x=>{ x.indeterminate=true; });
+  smRenderFoot();
+}
+function smRenderFoot(){
+  const foot=document.getElementById('sm-foot'), btn=document.getElementById('sm-apply'); if(!foot||!_SM||!_SM.res) return;
+  const sel=_SM.res.items.filter(x=>x.on);
+  const deps=_smDeps(sel, _SM.fromP, _SM.toP.DB||{});
+  const conf=_SM.res.items.filter(x=>x.status==='conflict'), confKept=conf.filter(x=>!x.on).length;
+  foot.innerHTML=`<b style="color:var(--text)">${sel.length}</b> row${sel.length!==1?'s':''} ticked`+
+    (deps.length?` · +${deps.length} needed row${deps.length>1?'s':''} they refer to (added automatically)`:'')+
+    (conf.length?` · ${confKept} of ${conf.length} conflict${conf.length>1?'s':''} keep To's value`:'');
+  if(btn){ btn.disabled=!sel.length; btn.textContent=`Apply to "${SC.meta[_SM.toId].name}"`; }
+}
+function smToggleOpen(t){ if(!_SM) return; _SM.open.has(t)?_SM.open.delete(t):_SM.open.add(t); smRenderBody(); }
+function smToggle(level, id, on){
+  if(!_SM||!_SM.res) return;
+  for(const it of _SM.res.items){
+    if((level==='area'&&it.area===id) || (level==='table'&&it.table===id) || (level==='row'&&it.i===id)) it.on=!!on;
+  }
+  if(level==='row') smRenderFoot(); else smRenderBody();
+}
+
+// Apply the ticked rows onto a DB object (+ simCfg). Pure apart from mutating `db`/`cfg`.
+function _smApplyRows(db, cfg, sel, deps){
+  const byT=new Map();
+  for(const it of sel) { if(!byT.has(it.table)) byT.set(it.table, []); byT.get(it.table).push({key:it.key, row:it.from}); }
+  for(const d of deps){ if(!byT.has(d.table)) byT.set(d.table, []); byT.get(d.table).push({key:d.key, row:d.row}); }
+  let n=0;
+  for(const [t,list] of byT){
+    if(t===CL_CFG){ for(const c of list){ const f=c.key.replace(/^f\|/,''); if(c.row===undefined) delete cfg[f]; else cfg[f]=JSON.parse(JSON.stringify(c.row)); n++; } continue; }
+    const arr=Array.isArray(db[t])?db[t].slice():[];
+    const idx=new Map(); arr.forEach((r,i)=>idx.set(_mgRowKey(t,r), i));
+    const del=new Set();
+    for(const c of list){
+      const i=idx.get(c.key);
+      if(c.row===undefined){ if(i!==undefined) del.add(i); }
+      else if(i!==undefined) arr[i]=JSON.parse(JSON.stringify(c.row));
+      else { idx.set(c.key, arr.length); arr.push(JSON.parse(JSON.stringify(c.row))); }
+      n++;
+    }
+    db[t]=del.size?arr.filter((_,i)=>!del.has(i)):arr;
+  }
+  return n;
+}
+async function smApply(){
+  if(!_SM||!_SM.res||_SM.busy) return;
+  const sel=_SM.res.items.filter(x=>x.on); if(!sel.length) return;
+  const fromM=SC.meta[_SM.fromId], toM=SC.meta[_SM.toId], toId=_SM.toId, fromP=_SM.fromP;
+  const conf=sel.filter(x=>x.status==='conflict').length;
+  if(!confirm(`Bring ${sel.length} row${sel.length>1?'s':''} from "${fromM.name}" into "${toM.name}"?`+
+    (conf?`\n\n${conf} of them change rows that were also changed in "${toM.name}" — From's value will replace them.`:'')+
+    (toId!==SC.activeId?`\n\n"${toM.name}" will be opened (your current scenario is saved first).`:'')+
+    `\n\nUndo: 🕒 Version History of "${toM.name}".`)) return;
+  _SM.busy=true;
+  const btn=document.getElementById('sm-apply'); if(btn){ btn.disabled=true; btn.textContent='Applying…'; }
+  try{
+    if(toId!==SC.activeId){
+      await scSwitch(toId);
+      if(SC.activeId!==toId) throw new Error('could not open "'+toM.name+'"');
+    }
+    try{ await scMaybeSnapshot(toId, JSON.stringify(scBuildPayload()), {forced:true}); }catch(e){}   // restore point (if a history folder is linked)
+    const deps=_smDeps(sel, fromP, DB);
+    const db={}; for(const t of new Set([...sel.map(x=>x.table), ...deps.map(d=>d.table)])) if(t!==CL_CFG) db[t]=DB[t];
+    const cfg=Object.assign({}, S.simCfg);
+    const n=_smApplyRows(db, cfg, sel, deps);
+    Object.keys(db).forEach(t=>{ DB[t]=db[t]; });
+    if(sel.some(x=>x.table===CL_CFG)){ Object.keys(S.simCfg).forEach(k=>{ if(!(k in cfg)) delete S.simCfg[k]; }); Object.assign(S.simCfg, cfg); }
+    if(fromP.counter) S.elCounter=Math.max(Number(S.elCounter)||0, Number(fromP.counter)||0);
+    if(typeof syncElCounter==='function') syncElCounter();
+    window._clMergeNote={from:fromM.name, fromFile:fromM.fileName, rows:n};
+    _mgApplyPayloadToApp({DB:{}});   // re-render (caches, trees, status bar)
+    if(typeof _demandChanged==='function' && db.demand_values) _demandChanged(false);
+    autoSave();
+    clearTimeout(SC._writeTimer);
+    const ok=await scWriteActive(toId);
+    window._clMergeNote=null;
+    closeModal(); _SM=null;
+    if(typeof scheduleSimulation==='function') scheduleSimulation(300);
+    statMsg(ok ? `⇄ Merged ${n} row${n!==1?'s':''} from "${fromM.name}" into "${toM.name}" ✓` : `⚠ Merged into "${toM.name}" on screen, but saving its file failed — see the red banner`);
+  }catch(e){
+    console.warn('merge apply', e); window._clMergeNote=null;
+    if(_SM){ _SM.busy=false; if(btn){ btn.disabled=false; btn.textContent='Apply'; } }
+    alert('Merge failed — '+(e.message||e)+'\n\nCheck "'+toM.name+'" (🕒 Version History has the copy from before the merge, if a history folder is linked).');
+  }
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // ACCESS CONTROL — sign-in + a facility × function permission matrix.
