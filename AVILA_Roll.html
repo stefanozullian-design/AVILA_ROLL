@@ -10509,17 +10509,17 @@ function _supSwapSection(dpts, allDates, months, collapsedMonths, tdSty, depth, 
     const tot=ds=>lines.reduce((a,l)=>a+val(l,ds),0);
     const col=out?'var(--amber)':'var(--cyan)', rgb=out?'var(--amber-rgb)':'var(--cyan-rgb)';
     const key=sec+(out?'MoveOut':'MoveIn'), cls=`supsec-${key} sup-dpn-row`;
-    const row=(label,tip,fn,bold,d,sub)=>{
+    const row=(label,tip,fn,bold,d,sub,grp)=>{
       let rr=sub
-        ? `<tr class="${cls}" data-swapof="${sec}" style="background:rgba(${rgb},.06)"><td title="${esc(tip)}" style="${stickyLeft('var(--surface)',d,'border-bottom:1px solid var(--border),')}color:${col};font-size:8px;font-weight:700;letter-spacing:.4px">${label}</td>`
+        ? `<tr class="${cls} sup-sec-hdr" data-seckey="${sub}" data-swapof="${sec}" onclick="_supToggleSec('${sub}')" style="cursor:pointer;background:rgba(${rgb},.08)"><td title="${esc(tip)}" style="${stickyLeft('var(--surface)',d,'border-bottom:1px solid var(--border),')}color:${col};font-size:9px;font-weight:800;letter-spacing:.4px"><span class="sup-arrow">${_supSecArrow(sub)}</span> ${label}</td>`
         : bold
         ? `<tr class="sup-sec-hdr" data-seckey="${key}" data-swapof="${sec}" onclick="_supToggleSec('${key}')" style="cursor:pointer;background:rgba(${rgb},.05);border-top:2px solid rgba(${rgb},.3)"><td title="${esc(tip)}" style="${stickyLeft('var(--surface)',d,'border-bottom:1px solid var(--border),')}color:${col};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow(key)}</span> ${label}</td>`
-        : `<tr class="${cls}" data-swapof="${sec}" style="background:rgba(${rgb},.03)"><td title="${esc(tip)}" style="${stickyLeft('var(--surface)',d,'border-bottom:1px solid var(--border),')}color:${col};font-size:8px;font-style:italic">${label}</td>`;
+        : `<tr class="${cls}${grp?' supsec-'+grp:''}" data-swapof="${sec}" style="background:rgba(${rgb},.03)"><td title="${esc(tip)}" style="${stickyLeft('var(--surface)',d,'border-bottom:1px solid var(--border),')}color:${col};font-size:8px;font-style:italic">${label}</td>`;
       months.forEach(mon=>{
         const mt=mon.dates.reduce((a,ds)=>a+fn(ds),0);
-        rr+=`<td style="border-left:2px solid rgba(${rgb},.15);font-size:${bold?9:8}px;${bold||sub?'font-weight:700;':''}color:${col};text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
+        rr+=`<td style="border-left:2px solid rgba(${rgb},.15);font-size:${bold||sub?9:8}px;${bold?'font-weight:700;':sub?'font-weight:800;':''}color:${col};text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
         if(!collapsedMonths.has(mon.ym)) mon.dates.forEach(ds=>{ const v=fn(ds);
-          rr+=`<td class="sup-day-${mon.ym}" style="font-size:${bold?9:8}px;${bold||sub?'font-weight:700;':''}color:${col};text-align:right;padding:3px 4px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):''}</td>`; });
+          rr+=`<td class="sup-day-${mon.ym}" style="font-size:${bold||sub?9:8}px;${bold?'font-weight:700;':sub?'font-weight:800;':''}color:${col};text-align:right;padding:3px 4px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):''}</td>`; });
       });
       return rr+`</tr>`;
     };
@@ -10542,14 +10542,15 @@ function _supSwapSection(dpts, allDates, months, collapsedMonths, tdSty, depth, 
     lines.sort((a,b)=>order.indexOf(a.ch)-order.indexOf(b.ch)||String(a.here).localeCompare(String(b.here))||String(a.other).localeCompare(String(b.other)));
     for(const ch of order){
       const grp=lines.filter(l=>l.ch===ch); if(!grp.length) continue;
+      const gkey=key+'_'+(ch||'OTH');   // fold key of this group
       hh+=row(`${out?'→':'←'} ${esc(chLbl[ch||' '])} · ${grp.length} swap${grp.length>1?'s':''}`,
         `${chLbl[ch||' ']} demand points of this facility — demand ${out?'moved out of':'moved into'} them`,
-        ds=>grp.reduce((a,l)=>a+val(l,ds),0),false,depth+1,true);
+        ds=>grp.reduce((a,l)=>a+val(l,ds),0),false,depth+1,gkey);
       grp.forEach(l=>{
         const s=l.s;
         const amt=s.mode==='percent'?`${parseFloat(s.amount)||0}%`:`${_fmtInt(parseFloat(s.amount)||0)} t/d`;
         const lbl=`↳ ${esc(l.here)} ${out?'→':'←'} ${esc(l.other)}`;
-        hh+=row(lbl,`${out?l.here:l.other} → ${out?l.other:l.here} · ${pnm(_dpPrimaryProduct(s.from_element_id))} · ${amt} · ${s.start_date} – ${s.end_date}`,ds=>val(l,ds),false,depth+2);
+        hh+=row(lbl,`${out?l.here:l.other} → ${out?l.other:l.here} · ${pnm(_dpPrimaryProduct(s.from_element_id))} · ${amt} · ${s.start_date} – ${s.end_date}`,ds=>val(l,ds),false,depth+2,null,gkey);
       });
     }
     return hh;
