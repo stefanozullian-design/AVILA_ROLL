@@ -10488,6 +10488,8 @@ function _supDpnRows(dpts, months, collapsedMonths, tdSty, depth, base, stickyLe
 // swaps on one point share its demand). Each title has its own fold key (<sec>MoveOut /
 // <sec>MoveIn); data-swapof lets the Process filter hide them with the requirement section.
 // Rows carry sup-dpn-row so title roll-ups keep reading the product lines only.
+// Demand channel from a demand point's name: last segment …/EXT, …/INT, …/IND, …/POURS ('' otherwise).
+function _supDpChannel(name){ const last=String(name||'').split('/').pop().trim().toUpperCase(); return ['EXT','INT','IND','POURS'].includes(last)?last:''; }
 function _supSwapSection(dpts, allDates, months, collapsedMonths, tdSty, depth, stickyLeft, sec){
   const ids=new Set((dpts||[]).map(dp=>dp.element_id));
   const nm=id=>DB.elements.find(e=>e.id===id)?.name||DB.demand_points.find(d=>d.element_id===id)?.element_name||id;
@@ -10507,15 +10509,17 @@ function _supSwapSection(dpts, allDates, months, collapsedMonths, tdSty, depth, 
     const tot=ds=>lines.reduce((a,l)=>a+val(l,ds),0);
     const col=out?'var(--amber)':'var(--cyan)', rgb=out?'var(--amber-rgb)':'var(--cyan-rgb)';
     const key=sec+(out?'MoveOut':'MoveIn'), cls=`supsec-${key} sup-dpn-row`;
-    const row=(label,tip,fn,bold,d)=>{
-      let rr=bold
+    const row=(label,tip,fn,bold,d,sub)=>{
+      let rr=sub
+        ? `<tr class="${cls}" data-swapof="${sec}" style="background:rgba(${rgb},.06)"><td title="${esc(tip)}" style="${stickyLeft('var(--surface)',d,'border-bottom:1px solid var(--border),')}color:${col};font-size:8px;font-weight:700;letter-spacing:.4px">${label}</td>`
+        : bold
         ? `<tr class="sup-sec-hdr" data-seckey="${key}" data-swapof="${sec}" onclick="_supToggleSec('${key}')" style="cursor:pointer;background:rgba(${rgb},.05);border-top:2px solid rgba(${rgb},.3)"><td title="${esc(tip)}" style="${stickyLeft('var(--surface)',d,'border-bottom:1px solid var(--border),')}color:${col};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow(key)}</span> ${label}</td>`
         : `<tr class="${cls}" data-swapof="${sec}" style="background:rgba(${rgb},.03)"><td title="${esc(tip)}" style="${stickyLeft('var(--surface)',d,'border-bottom:1px solid var(--border),')}color:${col};font-size:8px;font-style:italic">${label}</td>`;
       months.forEach(mon=>{
         const mt=mon.dates.reduce((a,ds)=>a+fn(ds),0);
-        rr+=`<td style="border-left:2px solid rgba(${rgb},.15);font-size:${bold?9:8}px;${bold?'font-weight:700;':''}color:${col};text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
+        rr+=`<td style="border-left:2px solid rgba(${rgb},.15);font-size:${bold?9:8}px;${bold||sub?'font-weight:700;':''}color:${col};text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
         if(!collapsedMonths.has(mon.ym)) mon.dates.forEach(ds=>{ const v=fn(ds);
-          rr+=`<td class="sup-day-${mon.ym}" style="font-size:${bold?9:8}px;${bold?'font-weight:700;':''}color:${col};text-align:right;padding:3px 4px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):''}</td>`; });
+          rr+=`<td class="sup-day-${mon.ym}" style="font-size:${bold?9:8}px;${bold||sub?'font-weight:700;':''}color:${col};text-align:right;padding:3px 4px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):''}</td>`; });
       });
       return rr+`</tr>`;
     };
@@ -10523,16 +10527,31 @@ function _supSwapSection(dpts, allDates, months, collapsedMonths, tdSty, depth, 
       out?'Demand at this facility now served at another demand point (demand swap) — already taken off the product lines above'
          :'Demand from another demand point now served here (demand swap) — already included in the product lines above',
       tot,true,depth);
+    // Full demand-point names at both ends (user 11/10: "MIA_IL(11)/BLK/EXT → EXT/TIT_MIA/BLK/EXT"),
+    // grouped by the channel of THIS facility's point (last name segment: EXT / INT / IND / POURS)
+    // with a subtotal each, so external and internal demand moving out / in read apart.
+    // OUT lines: this point → destination. IN lines: this point ← source.
     lines.forEach(l=>{
       const s=l.s;
-      const amt=s.mode==='percent'?`${parseFloat(s.amount)||0}%`:`${_fmtInt(parseFloat(s.amount)||0)} t/d`;
-      const toLbl=s.to_element_id?nm(s.to_element_id):pnm(s.to_product_id);
-      const fromLbl=nm(s.from_element_id);
-      // Short label (material here, then the other end); amount and dates in the tooltip.
-      const lbl=out?`↳ ${esc(pnm(_dpPrimaryProduct(s.from_element_id)))} → ${esc(toLbl)}`
-                   :`↳ ${esc(pnm(s.to_element_id?_dpPrimaryProduct(s.to_element_id):s.to_product_id))} ← ${esc(fromLbl)}`;
-      hh+=row(lbl,`${fromLbl} → ${toLbl} · ${amt} · ${s.start_date} – ${s.end_date}`,ds=>val(l,ds),false,depth+1);
+      l.here=nm(out?s.from_element_id:s.to_element_id);
+      l.other=out?(s.to_element_id?nm(s.to_element_id):pnm(s.to_product_id)):nm(s.from_element_id);
+      l.ch=_supDpChannel(l.here);
     });
+    const order=['EXT','INT','IND','POURS',''];
+    const chLbl={EXT:'EXT — external',INT:'INT — internal',IND:'IND — industrial',POURS:'POURS',' ':'other'};
+    lines.sort((a,b)=>order.indexOf(a.ch)-order.indexOf(b.ch)||String(a.here).localeCompare(String(b.here))||String(a.other).localeCompare(String(b.other)));
+    for(const ch of order){
+      const grp=lines.filter(l=>l.ch===ch); if(!grp.length) continue;
+      hh+=row(`${out?'→':'←'} ${esc(chLbl[ch||' '])} · ${grp.length} swap${grp.length>1?'s':''}`,
+        `${chLbl[ch||' ']} demand points of this facility — demand ${out?'moved out of':'moved into'} them`,
+        ds=>grp.reduce((a,l)=>a+val(l,ds),0),false,depth+1,true);
+      grp.forEach(l=>{
+        const s=l.s;
+        const amt=s.mode==='percent'?`${parseFloat(s.amount)||0}%`:`${_fmtInt(parseFloat(s.amount)||0)} t/d`;
+        const lbl=`↳ ${esc(l.here)} ${out?'→':'←'} ${esc(l.other)}`;
+        hh+=row(lbl,`${out?l.here:l.other} → ${out?l.other:l.here} · ${pnm(_dpPrimaryProduct(s.from_element_id))} · ${amt} · ${s.start_date} – ${s.end_date}`,ds=>val(l,ds),false,depth+2);
+      });
+    }
     return hh;
   };
   return block('out')+block('in');
