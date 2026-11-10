@@ -11197,7 +11197,9 @@ function _renderSupplyViewInner(wrap){
     if(e.type==='bulk_silo'||e.type==='packed_silo') return (r?.inventoryHistory?.[e.id]||[]).some(v=>v>0);
     return (r?.kilnProdHistory?.[e.id]||r?.millOutputHistory?.[e.id]||r?.packOutputHistory?.[e.id]||[]).some(v=>v>0);
   };
-  if(!window._supShowInactive) allEls=allEls.filter(e=>e.is_active!==false||_supCarries(e));
+  // User 11/10: an inactive element never shows unless "Show inactive" is ticked. Exception kept:
+  // a demand point with ACTUAL shipments in the sim window (real tonnes left the plant), tagged INACTIVE.
+  if(!window._supShowInactive) allEls=allEls.filter(e=>e.is_active!==false||(e.type==='demand_point'&&_supCarries(e)));
   // Terminal-type facilities ALWAYS render via the terminal (category-first) path,
   // even when they own production elements (e.g. a packing plant at PEV). Without
   // this exclusion a terminal packer routes the whole facility into the plant tree,
@@ -17813,6 +17815,9 @@ function _demandRate(elId, dateStr){
     return ov?(parseFloat(ov.value_t)||0):0;
   }
 
+  // An INACTIVE demand point asks for no forecast demand (user 11/10: inactive points must not
+  // show on Supply). Its actual shipments still count — they happened. el is kept by reference
+  // in the cache entry, so ticking Active on / off takes effect without a cache reset.
   // Fallback to FORECAST data
   const valMap_cache=(_demandRate._cache=_demandRate._cache||{});
   if(!valMap_cache[elId]){
@@ -17821,10 +17826,12 @@ function _demandRate(elId, dateStr){
     valMap_cache[elId]={
       hasValues:vals.length>0,
       map:Object.fromEntries(vals.map(v=>[v.date,parseFloat(v.value_t)||0])),
-      fallback:parseFloat(el?.props?.daily_tonnage)||0
+      fallback:parseFloat(el?.props?.daily_tonnage)||0,
+      el
     };
   }
-  const {hasValues,map,fallback}=valMap_cache[elId];
+  const {hasValues,map,fallback,el:_el}=valMap_cache[elId];
+  if(_el && _el.is_active===false) return _dmdActIdx().has(elId+'|'+dateStr)?(map[dateStr]||0):0;
   if(hasValues) return map[dateStr]||0;
   // No fallback - demand must be explicitly defined in demand_values
   return 0;
