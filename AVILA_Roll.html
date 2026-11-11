@@ -19565,9 +19565,11 @@ function simulate(elements, connections, horizon, includeProposed=false){
 
   function simDayRailFillTargets(day){
     // ── PRE-STEP 4: RAIL FILL TRIGGER (loading-plan driven) ─────────────
-    // Rail v2: keep each rail silo stocked to support today's LOADING PLAN, so the mill
-    // prioritizes routing product into the rail silo. Target ≈ a few days of the planned
-    // loading rate, capped by silo capacity. railFillTarget[railSiloId] = {tonnes, prodId}.
+    // Just in time (user 11/11): the rail silo gets exactly what TODAY's cars take — cars to load
+    // × car capacity — and the loading empties it; everything else the mills make goes to the
+    // regular silos, which demand then draws down. Cars = real loading rows of the day if any,
+    // else the plan on a working day (capped by the loading rate), 0 on a non-working day.
+    // railFillTarget[railSiloId] = {tonnes, prodId}.
     railFillTarget={};
     {
       const _ffDate=new Date(simStartDate.getTime()+(day-1)*864e5)._ymd();
@@ -19575,17 +19577,21 @@ function simulate(elements, connections, horizon, includeProposed=false){
         const carCap=parseFloat(dp.props.car_capacity_t)||RAIL_CAR_T_DEFAULT;
         const _dpFac=dp.assigned_facility_id||dp.facility_id;
         const _realRows=(DB.real_rail_daily||[]).filter(rr=>rr.type==='loading'&&rr.date===_ffDate&&rr.facility_id===_dpFac);
+        if(!_realRows.length && state[dp.id]?.status==='maintenance') return;
+        const _dow=(new Date(_ffDate+'T12:00:00').getDay()+6)%7, _wd=dp.props.working_days||'weekdays';
+        const _isWorking=_wd==='7_days'||(_wd==='mon_sat'&&_dow<=5)||(_wd==='weekdays'&&_dow<=4);
+        const _stdRate=_railCarsPerDay(dp);
         Object.keys(railProdSilo[dp.id]||{}).forEach(pid=>{
           // Cars loaded for real that day replace the plan (as in simDayRailDispatch), so the
           // mills keep the rail silo stocked on real-loading days too.
           const rate=_realRows.length
             ? _realRows.filter(rr=>rr.product_id===pid||!rr.product_id).reduce((a,rr)=>a+(parseFloat(rr.cars)||0),0)
-            : railPlanRate(dp.id,pid,_ffDate);
+            : (_isWorking&&_stdRate>0?Math.min(railPlanRate(dp.id,pid,_ffDate),_stdRate):0);
           if(rate<=0) return;
           const siloId=railProdSilo[dp.id][pid]; if(!siloId) return;
           const siloMax=state[siloId]?.maxCap||parseFloat(elMap[siloId]?.props?.max_capacity)||0;
           const dailyTonnes=rate*carCap;
-          const target=siloMax>0?Math.min(siloMax,dailyTonnes*3):dailyTonnes*3;
+          const target=siloMax>0?Math.min(siloMax,dailyTonnes):dailyTonnes;
           const ex=railFillTarget[siloId];
           if(!ex||target>ex.tonnes) railFillTarget[siloId]={tonnes:target,prodId:pid};
         });
@@ -19773,10 +19779,12 @@ function simulate(elements, connections, horizon, includeProposed=false){
             _runStep(prodId); r.millProductHistory[mill.id].push(prodId);
             // Day-split: fill RAIL first, remainder to regular silo
             const hourlyRate=ratedTPD*rampFactor/24;
-            const railSpace=Math.max(0,(state[railSilo.id]?.maxCap||0)-(state[railSilo.id]?.inventory||0));
-            const hoursForRail=Math.min(24,railSpace/Math.max(0.001,hourlyRate));
-            const tonnesToRail=hourlyRate*hoursForRail;
-            const tonnesToReg=hourlyRate*Math.max(0,24-hoursForRail-3);
+            // Rail silo gets today's loading need only (just in time), the rest of the day's
+            // output goes to the most urgent regular silo.
+            const _railHave=(state[railSilo.id]?.inventory||0)+(siloInflow[railSilo.id]||0);
+            const railSpace=Math.max(0,(state[railSilo.id]?.maxCap||0)-_railHave);
+            const tonnesToRail=Math.min(hourlyRate*24,Math.max(0,target.tonnes-_railHave),railSpace);
+            const tonnesToReg=hourlyRate*24-tonnesToRail;
             siloInflow[railSilo.id]=(siloInflow[railSilo.id]||0)+tonnesToRail;
             if(!siloSourceTracker[railSilo.id]) siloSourceTracker[railSilo.id]=new Set();
             siloSourceTracker[railSilo.id].add(mill.id);
@@ -20352,7 +20360,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
           const rate=railPlanRate(el.id,pid,_dateStr); if(rate<=0) return;
           const siloId=railProdSilo[el.id][pid]; const siloSt=state[siloId]; if(!siloSt) return;
           const avail=(siloSt.inventory+(siloInflow[siloId]||0))-(siloOutflow[siloId]||0);
-          const siloCars=Math.max(0,Math.floor(avail/carCap));
+          const siloCars=Math.max(0,Math.floor(avail/carCap+1e-6));   // just-in-time fill = exactly cars × carCap
           const cars=Math.min(rate,capRem,siloCars);
           if(cars>0){
             s.yardByProduct[pid]=(s.yardByProduct[pid]||0)+cars;
