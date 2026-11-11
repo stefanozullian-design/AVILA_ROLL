@@ -19573,8 +19573,15 @@ function simulate(elements, connections, horizon, includeProposed=false){
       const _ffDate=new Date(simStartDate.getTime()+(day-1)*864e5)._ymd();
       elements.filter(e=>e.type==='dispatch_point'&&e.props.dispatch_type==='Rail').forEach(dp=>{
         const carCap=parseFloat(dp.props.car_capacity_t)||RAIL_CAR_T_DEFAULT;
+        const _dpFac=dp.assigned_facility_id||dp.facility_id;
+        const _realRows=(DB.real_rail_daily||[]).filter(rr=>rr.type==='loading'&&rr.date===_ffDate&&rr.facility_id===_dpFac);
         Object.keys(railProdSilo[dp.id]||{}).forEach(pid=>{
-          const rate=railPlanRate(dp.id,pid,_ffDate); if(rate<=0) return;
+          // Cars loaded for real that day replace the plan (as in simDayRailDispatch), so the
+          // mills keep the rail silo stocked on real-loading days too.
+          const rate=_realRows.length
+            ? _realRows.filter(rr=>rr.product_id===pid||!rr.product_id).reduce((a,rr)=>a+(parseFloat(rr.cars)||0),0)
+            : railPlanRate(dp.id,pid,_ffDate);
+          if(rate<=0) return;
           const siloId=railProdSilo[dp.id][pid]; if(!siloId) return;
           const siloMax=state[siloId]?.maxCap||parseFloat(elMap[siloId]?.props?.max_capacity)||0;
           const dailyTonnes=rate*carCap;
@@ -19655,6 +19662,9 @@ function simulate(elements, connections, horizon, includeProposed=false){
               &&!railTransferSiloIds.has(e.id)&&(e.assigned_facility_id||e.facility_id)===_mf);
           }
           r.millOutputHistory[mill.id][day-1]+=vol;
+          // Loading planned / loaded from this product's rail silo: top it up first (user 11/11 —
+          // either mill feeds the rail silo, the local-demand silo gets the rest).
+          const volReg=vol-_millFeedRailFirst(mill,rp.product_id,vol);
           let bestSilo=null, bestU=-1;
           prodSilos.forEach(si=>{
             if(state[si.id]?.inventory>=(state[si.id]?.maxCap||0)*0.98) return;
@@ -19667,11 +19677,11 @@ function simulate(elements, connections, horizon, includeProposed=false){
             const _room=si=>(state[si.id]?.maxCap||0)-(state[si.id]?.inventory||0)-(siloInflow[si.id]||0);
             bestSilo=prodSilos.reduce((a,b)=>_room(b)>_room(a)?b:a);
           }
-          if(bestSilo){
-            siloInflow[bestSilo.id]=(siloInflow[bestSilo.id]||0)+vol;
+          if(bestSilo&&volReg>0){
+            siloInflow[bestSilo.id]=(siloInflow[bestSilo.id]||0)+volReg;
             if(!siloSourceTracker[bestSilo.id]) siloSourceTracker[bestSilo.id]=new Set();
             siloSourceTracker[bestSilo.id].add(mill.id);
-            state[bestSilo.id].composition[rp.product_id]=(state[bestSilo.id].composition[rp.product_id]||0)+vol;
+            state[bestSilo.id].composition[rp.product_id]=(state[bestSilo.id].composition[rp.product_id]||0)+volReg;
           }
           // Draw clinker for this ACTUAL production. Was missing here (unlike the rail /
           // campaign / urgency paths), so on real-data days clinker was consumed by the mill
@@ -20084,9 +20094,11 @@ function simulate(elements, connections, horizon, includeProposed=false){
       r.millOutputHistory[mill.id][day-1]+=actualRate;
       totProd+=actualRate;
 
-      // ── NORMAL ROUTING (non-RAIL) ─────────────────────
-      // Record cement silo inflow
-      siloInflow[chosen.bestSilo.id]=(siloInflow[chosen.bestSilo.id]||0)+actualRate;
+      // ── NORMAL ROUTING ────────────────────────────────
+      // Rail silo of this product first when loading is planned (the rail-fill override above
+      // can be skipped), the rest to the chosen silo.
+      const _toReg=actualRate-_millFeedRailFirst(mill,chosen.prodId,actualRate);
+      siloInflow[chosen.bestSilo.id]=(siloInflow[chosen.bestSilo.id]||0)+_toReg;
       if(!siloSourceTracker[chosen.bestSilo.id]) siloSourceTracker[chosen.bestSilo.id]=new Set();
       siloSourceTracker[chosen.bestSilo.id].add(mill.id);
 
@@ -20102,7 +20114,7 @@ function simulate(elements, connections, horizon, includeProposed=false){
 
       // Update cement silo composition
       const csCem=state[chosen.bestSilo.id];
-      csCem.composition[chosen.prodId]=(csCem.composition[chosen.prodId]||0)+actualRate;
+      csCem.composition[chosen.prodId]=(csCem.composition[chosen.prodId]||0)+_toReg;
     });
   }
 
