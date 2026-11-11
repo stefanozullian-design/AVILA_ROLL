@@ -19584,6 +19584,29 @@ function simulate(elements, connections, horizon, includeProposed=false){
     }
   }
 
+  // A mill making product pid hands tonnes to the RAIL silos it feeds that have a loading-plan
+  // fill target for pid, up to the target (net of stock + today's inflow) and the free space.
+  // Returns the tonnes given. Rail silos are not in millProductSiloMap, so without this a mill
+  // on a production campaign never refilled them: the rail-fill override is skipped on campaign
+  // days, the rail silo ran dry and planned cars loaded nothing (BRS 11/12–11/30, user 11/11).
+  function _millFeedRailFirst(mill, pid, tonnes){
+    let given=0;
+    for(const [railSiloId,target] of Object.entries(railFillTarget||{})){
+      if(given>=tonnes) break;
+      if(target.prodId!==pid||!(dn[mill.id]||[]).includes(railSiloId)||!state[railSiloId]) continue;
+      const have=(state[railSiloId].inventory||0)+(siloInflow[railSiloId]||0);
+      const space=Math.max(0,(state[railSiloId].maxCap||0)-have);
+      const give=Math.min(tonnes-given, Math.max(0,target.tonnes-have), space);
+      if(give<1) continue;
+      siloInflow[railSiloId]=(siloInflow[railSiloId]||0)+give;
+      if(!siloSourceTracker[railSiloId]) siloSourceTracker[railSiloId]=new Set();
+      siloSourceTracker[railSiloId].add(mill.id);
+      state[railSiloId].composition[pid]=(state[railSiloId].composition[pid]||0)+give;
+      given+=give;
+    }
+    return given;
+  }
+
   function simDayFinishMills(day){
     // ── STEP 4: FINISH MILLS ──────────────────────────
     // Each mill produces exactly one product per day.
@@ -19825,7 +19848,8 @@ function simulate(elements, connections, horizon, includeProposed=false){
             s.currentProduct=campProdId; s.runDays++;
             _runStep(campProdId); r.millProductHistory[mill.id].push(campProdId);
             const recvSilosC=(millProductSiloMap[mill.id]||{})[campProdId]||[];
-            let remainC=tpd;
+            // Planned rail loading of this product: top the rail silo up first.
+            let remainC=tpd-_millFeedRailFirst(mill,campProdId,tpd);
             recvSilosC.forEach(si=>{
               if(remainC<=0) return;
               const space=Math.max(0,(state[si.id]?.maxCap||0)-(state[si.id]?.inventory||0)-(siloInflow[si.id]||0));
