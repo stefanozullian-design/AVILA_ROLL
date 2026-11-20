@@ -2962,13 +2962,14 @@ function _rollCheckHandoff(){
   if(!h || scIsPlanning()) return;
   const here=h.scenarioId===_rollScId();
   const dps=new Set(h.values.map(v=>v.element_id)).size;
+  const nMv=Array.isArray(h.swaps)?h.swaps.length:0;
   const b=document.createElement('div'); b.id='fc-handoff-banner';
   b.style.cssText='position:fixed;top:56px;left:50%;transform:translateX(-50%);z-index:9500;display:flex;align-items:center;gap:10px;'+
     'padding:9px 14px;background:var(--bn-info-bg);color:var(--bn-info-fg);border:1px solid var(--blue);border-radius:6px;'+
     'font-family:var(--mono);font-size:10px;box-shadow:0 8px 26px rgba(0,0,0,.45);max-width:760px';
   b.innerHTML=here
-    ? `<span>📈 <b>Sales Detail</b> pushed a forecast for <b>${esc(h.scenarioName||'this scenario')}</b>: ${dps} demand point${dps===1?'':'s'}, ${esc(h.from||'')} → ${esc(h.to||'')}. `+
-      `Applying replaces the forecast (not the actuals) of those points on those days.</span>`+
+    ? `<span>📈 <b>Sales Detail</b> pushed a forecast for <b>${esc(h.scenarioName||'this scenario')}</b>: ${dps} demand point${dps===1?'':'s'}, ${esc(h.from||'')} → ${esc(h.to||'')}${Array.isArray(h.swaps)?` + ${nMv} pickup move${nMv===1?'':'s'}`:''}. `+
+      `Applying replaces the forecast (not the actuals) of those points on those days${Array.isArray(h.swaps)?', and replaces every Sales pickup-move swap (manual swaps untouched)':''}.</span>`+
       `<button class="tb-btn" style="padding:4px 10px" onclick="_rollApplyHandoff()">Apply</button>`+
       `<button class="tb-btn sec" style="padding:4px 10px" onclick="_rollDismissHandoff()">Discard</button>`
     : `<span>📈 <b>Sales Detail</b> pushed a forecast for scenario <b>${esc(h.scenarioName||h.scenarioId)}</b> — open that scenario here to apply it.</span>`+
@@ -2989,10 +2990,27 @@ function _rollApplyHandoff(){
   let n=0;
   vals.forEach(v=>{ const k=v.element_id+'|'+v.date; if(actual.has(k)) return; const t=Math.round((+v.value_t||0)*10)/10;
     if(t>0){ DB.demand_values.push({element_id:v.element_id,date:v.date,value_t:t,source:'forecast'}); n++; } });
+  // Sales pickup moves arrive as swaps tagged source:'sales'. The push carries the FULL
+  // list, so every earlier Sales swap is replaced; manual swaps are never touched.
+  let nSw=0, nBad=0;
+  if(Array.isArray(h.swaps)){
+    const isD=d=>/^\d{4}-\d{2}-\d{2}$/.test(d||'');
+    DB.demand_substitutions=(DB.demand_substitutions||[]).filter(s=>s.source!=='sales');
+    h.swaps.forEach(w=>{
+      if(!w||!known.has(w.from_element_id)||!known.has(w.to_element_id)||w.from_element_id===w.to_element_id
+         ||!isD(w.start_date)||!isD(w.end_date)||w.start_date>w.end_date){ nBad++; return; }
+      const daily={}; Object.entries(w.daily||{}).forEach(([d,t])=>{ const v=Math.round((+t||0)*10)/10; if(isD(d)&&v>0) daily[d]=v; });
+      if(!Object.keys(daily).length){ nBad++; return; }
+      DB.demand_substitutions.push({ id:String(w.id||('swap_sales_'+Date.now()+'_'+nSw)), source:'sales', sales_move_id:w.sales_move_id||null,
+        from_element_id:w.from_element_id, to_element_id:w.to_element_id, to_product_id:_dpPrimaryProduct(w.to_element_id)||'',
+        mode:'daily', daily, amount:Math.round(+w.amount||0), start_date:w.start_date, end_date:w.end_date, notes:String(w.notes||'') });
+      nSw++;
+    });
+  }
   try{ localStorage.removeItem(FC_HANDOFF_KEY); }catch(e){}
   document.getElementById('fc-handoff-banner')?.remove();
   _demandChanged(); autoSave();
-  statMsg(`Sales forecast applied — ${n} day values on ${new Set(vals.map(v=>v.element_id)).size} demand points`);
+  statMsg(`Sales forecast applied — ${n} day values on ${new Set(vals.map(v=>v.element_id)).size} demand points${Array.isArray(h.swaps)?` · ${nSw} pickup move${nSw===1?'':'s'}${nBad?` (${nBad} skipped: unknown demand point or bad dates)`:''}`:''}`);
 }
 window.addEventListener('storage',e=>{
   if(e.key===FC_HANDOFF_KEY) _rollCheckHandoff();
@@ -6312,7 +6330,7 @@ function _demandSwapAlloc(fromElId, rate, dateStr){
   if(_dmdIsActual(fromElId, dateStr)) return [];
   const list=getActiveDemandSwaps(fromElId, dateStr)
     .filter(s=>!(s.to_element_id&&_dmdIsActual(s.to_element_id, dateStr))).map(s=>({swap:s,
-    qty:Math.max(0, s.mode==='percent' ? rate*(parseFloat(s.amount)||0)/100 : (parseFloat(s.amount)||0))
+    qty:Math.max(0, s.mode==='daily' ? (+(s.daily&&s.daily[dateStr])||0) : s.mode==='percent' ? rate*(parseFloat(s.amount)||0)/100 : (parseFloat(s.amount)||0))
   })).filter(x=>x.qty>0);
   const total=list.reduce((a,x)=>a+x.qty,0);
   if(total>rate){
@@ -6384,9 +6402,9 @@ function openDemandSwapManager(seedFromEl, seedDate, editId){
   const swaps=(DB.demand_substitutions||[]).slice().sort((a,b)=>(a.start_date||'').localeCompare(b.start_date||''));
   const rows=swaps.length?swaps.map(s=>`
     <tr style="border-bottom:1px solid var(--border)${s.id===editId?';background:rgba(var(--amber-rgb),.08)':''}">
-      <td style="padding:6px 8px;color:var(--green)">${dpName(s.from_element_id)}${dpMat(s.from_element_id)?`<div style="color:var(--text-dim);font-size:8px">material: ${dpMat(s.from_element_id)}</div>`:''}</td>
+      <td style="padding:6px 8px;color:var(--green)">${s.source==='sales'?`<div style="color:var(--blue);font-size:8px" title="Pickup move managed in Sales Detail">🚚 ${esc(s.notes||'Sales pickup move')}</div>`:''}${dpName(s.from_element_id)}${dpMat(s.from_element_id)?`<div style="color:var(--text-dim);font-size:8px">material: ${dpMat(s.from_element_id)}</div>`:''}</td>
       <td style="padding:6px 8px;color:var(--amber)"><i style="font-style:normal">⇄</i> ${s.to_element_id?dpName(s.to_element_id):pn(s.to_product_id)}${s.to_element_id&&dpMat(s.to_element_id)?`<div style="color:var(--text-dim);font-size:8px">material: ${dpMat(s.to_element_id)}</div>`:''}</td>
-      <td style="padding:6px 8px;text-align:right;color:var(--text)">${s.mode==='percent'?(s.amount+'%'):(Number(s.amount).toLocaleString()+' t/d')}</td>
+      <td style="padding:6px 8px;text-align:right;color:var(--text)">${s.mode==='daily'?`<span title="Moved volume follows the customer's Sales forecast day by day">Sales fcst<div style="color:var(--text-dim);font-size:8px">avg ${Math.round(+s.amount||0).toLocaleString()} t/d</div></span>`:s.mode==='percent'?(s.amount+'%'):(Number(s.amount).toLocaleString()+' t/d')}</td>
       <td style="padding:6px 8px;color:var(--text-dim);font-size:8px">${s.start_date} → ${s.end_date}</td>
       <td style="padding:6px 8px;text-align:right;white-space:nowrap"><button class="tb-btn sec" style="padding:2px 7px;margin-right:4px" onclick="_editDemandSwap('${s.id}')" title="Edit this swap">✎</button><button class="tb-btn sec" style="padding:2px 7px" onclick="_deleteDemandSwap('${s.id}')" title="Delete this swap">✕</button></td>
     </tr>`).join(''):`<tr><td colspan="5" style="padding:12px;text-align:center;color:var(--text-dim)">No demand swaps yet.</td></tr>`;
@@ -6455,6 +6473,7 @@ function _saveDemandSwap(){
 function _editDemandSwap(id){
   const s=(DB.demand_substitutions||[]).find(x=>x.id===id);
   if(!s){ openDemandSwapManager(); return; }
+  if(s.source==='sales'){ statMsg('This swap is a pickup move managed in Sales Detail — edit it there and push again','var(--amber)'); return; }
   openDemandSwapManager(s.from_element_id, s.start_date, id);
 }
 function _deleteDemandSwap(id){
@@ -10548,7 +10567,7 @@ function _supSwapSection(dpts, allDates, months, collapsedMonths, tdSty, depth, 
         ds=>grp.reduce((a,l)=>a+val(l,ds),0),false,depth+1,gkey);
       grp.forEach(l=>{
         const s=l.s;
-        const amt=s.mode==='percent'?`${parseFloat(s.amount)||0}%`:`${_fmtInt(parseFloat(s.amount)||0)} t/d`;
+        const amt=s.mode==='daily'?`Sales forecast · avg ${_fmtInt(parseFloat(s.amount)||0)} t/d${s.notes?' · '+s.notes:''}`:s.mode==='percent'?`${parseFloat(s.amount)||0}%`:`${_fmtInt(parseFloat(s.amount)||0)} t/d`;
         const lbl=`↳ ${esc(l.here)} ${out?'→':'←'} ${esc(l.other)}`;
         hh+=row(lbl,`${out?l.here:l.other} → ${out?l.other:l.here} · ${pnm(_dpPrimaryProduct(s.from_element_id))} · ${amt} · ${s.start_date} – ${s.end_date}`,ds=>val(l,ds),false,depth+2,null,gkey);
       });

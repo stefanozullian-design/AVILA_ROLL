@@ -353,6 +353,10 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
 .sp-row-l5 td.td-lbl{color:var(--text-dim);padding-left:76px;font-size:7px;}
 .sp-fb-btn{background:none;border:1px solid var(--amber);color:var(--amber);font-size:6px;padding:1px 4px;cursor:pointer;margin-left:6px;font-family:var(--mono);border-radius:2px;opacity:.55;vertical-align:middle;}
 .sp-fb-btn:hover{opacity:1;background:rgba(var(--amber-rgb),.12);}
+.sp-mv-btn{background:none;border:1px solid transparent;font-size:8px;padding:0 3px;cursor:pointer;margin-left:5px;border-radius:2px;opacity:.18;vertical-align:middle;line-height:12px;color:var(--blue);font-family:var(--mono);}
+tr:hover .sp-mv-btn{opacity:.6;}
+.sp-mv-btn:hover{opacity:1;border-color:var(--blue);}
+.sp-mv-btn.on{opacity:1;border-color:var(--blue);background:rgba(var(--blue-rgb,80,140,255),.12);}
 .sp-row-sel td{background:rgba(var(--blue-rgb),.06)!important;}
 .sp-row-sel td.td-lbl{color:var(--blue)!important;background:rgba(var(--blue-rgb),.1)!important;}
 .sp-toggle{font-size:8px;margin-right:5px;cursor:pointer;user-select:none;}
@@ -528,6 +532,7 @@ html[data-theme="daylight"] #logo:not([data-logo]) .logo-dark{display:none}
     <div class="th-menu" id="th-menu" style="display:none"></div>
   </div>
   <div class="sp-link" id="sp-link" title="The Avila Roll scenario this sales detail belongs to"><span class="k">SCENARIO</span><select id="sp-link-sel" onchange="spSetLink(this.value)"></select><span class="i" id="sp-link-info"></span></div>
+  <button class="tb-btn sec" id="btn-pickup-moves" onclick="pmOpen()" style="margin-left:8px" title="Pickup moves — send a customer to pick up at another origin for a while (pushed to Roll as demand swaps)">🚚 Pickup Moves</button>
   <button class="tb-btn amber" id="btn-push-forecast" onclick="pushForecastToMain()" style="margin-left:8px" title="Send this forecast (demand points in view) to the linked Avila Roll scenario — Roll asks you to confirm">↑ Push Forecast to Roll</button>
   <div id="stat-msg"></div>
   <button class="tb-btn sec" id="sc-save-btn" onclick="scManualSave()" title="Save this scenario to its file now" style="padding:5px 9px">💾 Save</button>
@@ -1960,15 +1965,18 @@ function pushForecastToMain(){
   const values=[];
   pushedEls.forEach(el=>dates.forEach(ds=>values.push({element_id:el, date:ds, value_t:Math.round((sums.get(el+'|'+ds)||0)*10)/10})));
   const nDp=pushedEls.size;
-  if(!values.length){ statMsg('Nothing to push — no forecast days for matched demand points in view'); return; }
+  const mv=pmHandoffSwaps(cat), nMv=mv.swaps.length;
+  if(!values.length&&!nMv&&!(DB.pickup_moves||[]).length){ statMsg('Nothing to push — no forecast days for matched demand points in view'); return; }
   const msg=`Push the forecast of ${nDp} demand point${nDp===1?'':'s'} (as filtered on screen) into Avila Roll scenario "${cat.name}"?\n\n`+
     `${fltFmt(dates[0])} → ${fltFmt(dates[dates.length-1])} · ${values.length} day values`+
     (skipped?`\n${skipped} row group${skipped===1?'':'s'} not matched to a demand point of this scenario will be left out.`:'')+
+    `\n\n🚚 ${nMv} pickup move${nMv===1?'':'s'} (all of them, whatever the filters) — they replace every Sales pickup move in Roll.`+
+    (mv.skipped?`\n${mv.skipped} move${mv.skipped===1?'':'s'} left out: demand point not in this scenario.`:'')+
     `\n\nAvila Roll asks you to confirm before anything changes there.`;
   if(!confirm(msg)) return;
   try{
     localStorage.setItem(FC_HANDOFF_KEY, JSON.stringify({scenarioId:cat.id, scenarioName:cat.name, pushed_at:new Date().toISOString(),
-      from:dates[0], to:dates[dates.length-1], values}));
+      from:dates[0], to:dates[dates.length-1], values, swaps:mv.swaps}));
     statMsg(`Forecast sent to Avila Roll (“${cat.name}”) — confirm it there`);
   }catch(e){ statMsg('Push failed — data too large'); console.error('pushForecastToMain error',e); }
 }
@@ -3672,7 +3680,7 @@ function spRenderTable(skipThead=false){
     const rowAttrs=`onclick="spRowClick('${key}')" style="cursor:pointer"`;
     h+=`<tr class="${cls}" data-sp-key="${key}" data-sp-depth="${depth}" ${rowAttrs}>
       <td class="td-lbl" style="border-right:2px solid var(--border2);padding-left:${indent}px${depth>=2?';font-size:7px':''}">
-        ${toggle}${strong?'<strong>':''}${esc(node.name)}${strong?'</strong>':''}${fbBtn(node.dpElIds,node.name)}
+        ${toggle}${strong?'<strong>':''}${esc(node.name)}${strong?'</strong>':''}${fbBtn(node.dpElIds,node.name)}${pmRowBtn(node)}
       </td>${renderCells(node)}</tr>`;
     if(hasKids&&!col) node.childList.forEach(renderNode);
   };
@@ -5376,6 +5384,8 @@ function scApplyPayload(p){
   SC._suspend=true;
   try{
     if(p.DB){ Object.keys(p.DB).forEach(t=>{ DB[t]=p.DB[t]; }); }
+    DB.pickup_moves=Array.isArray(p.DB?.pickup_moves)?p.DB.pickup_moves:[]; SP._mvIdx=null;
+    try{ localStorage.setItem('avila_sales_pickup_moves', JSON.stringify(DB.pickup_moves)); }catch(e){}
     if(p.SP){
       if(Array.isArray(p.SP.fcRules)) SP.fcRules=p.SP.fcRules;
       if(p.SP.fcCommits){ SP.fcCommits=p.SP.fcCommits; SP._commitsLoaded=true; }
@@ -5862,6 +5872,218 @@ async function scInit(){
   const pref=localStorage.getItem('avila_sales_sc_autoopen');
   if(pref && SC.meta[pref]){ SC.activeId=pref; if(await scLoadScenario(pref,{guard:true})) return; }
   scOpenStartup(false);
+}
+</script>
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+// PICKUP MOVES — send one customer's forecast pickup to another origin for a window
+// ═══════════════════════════════════════════════════════════════════════════
+// A move says: Sold-To X (optionally only Ship-To Y), which normally picks up on demand point
+// FROM, picks up on demand point TO between two dates. The tonnes moved each day = the
+// customer's own forecast on FROM that day (× pct). The Sales forecast itself is unchanged
+// (the customer's total stays the same); the move travels to Avila Roll with the forecast push
+// as a demand swap tagged source:'sales' (mode 'daily'), which Roll shows as DEMAND MOVED OUT/IN.
+// Forecast-only: Roll ignores a swap on any day that has actuals at either end.
+//   DB.pickup_moves: [{ id, sold_to, sold_to_name, ship_to_name|null, from_element_id,
+//                       to_element_id, pct, start_date, end_date, reason, created_at }]
+const PM_LS_KEY='avila_sales_pickup_moves';
+function pmLoad(){ if(Array.isArray(DB.pickup_moves)) return; try{ const a=JSON.parse(localStorage.getItem(PM_LS_KEY)||'[]'); DB.pickup_moves=Array.isArray(a)?a:[]; }catch(e){ DB.pickup_moves=[]; } }
+function pmSave(){ try{ localStorage.setItem(PM_LS_KEY, JSON.stringify(DB.pickup_moves||[])); }catch(e){} SP._mvIdx=null; if(typeof scScheduleWrite==='function') scScheduleWrite(); }
+pmLoad();
+
+// Forecast leaves over ALL shipments (not the on-screen filters), with the forecast rules applied —
+// a move must not change size because of what the table happens to be filtered to. Built by
+// temporarily swapping SP._tree and re-running spFcRecompute, then restoring the screen's state.
+function pmFullModel(){
+  const ver=(SP._fcVer||0)+'|'+(DB.real_shipments_meta?.loaded_at||'')+'|'+(DB.real_shipments_daily||[]).length+'|'+(DB.elements||[]).length+'|'+spLastReal();
+  if(SP._mvModel&&SP._mvModel.ver===ver) return SP._mvModel;
+  const keep={t:SP._tree,r:SP._leafRule,p:SP._leafPeriodRate,o:SP._leafPeriodTot,c:SP._perCounts,d:SP._dayPeriod};
+  let model;
+  try{
+    SP._tree=spBuildTree(DB.real_shipments_daily||[], ['soldTo','shipTo','demandPoint']);
+    spFcRecompute();
+    model={ver, leaves:Object.values(SP._tree.leaves||{}), lpr:SP._leafPeriodRate||{}, dayPer:SP._dayPeriod||{}};
+  } finally {
+    SP._tree=keep.t; SP._leafRule=keep.r; SP._leafPeriodRate=keep.p; SP._leafPeriodTot=keep.o; SP._perCounts=keep.c; SP._dayPeriod=keep.d;
+  }
+  SP._mvModel=model; SP._mvIdx=null;
+  return model;
+}
+// Same day value as spLeafFcDay, read from the full model's rates.
+function pmLeafFcDay(M, lf, ds){
+  const dw=spDow(ds); if(dw===0) return 0;
+  const per=M.dayPer[ds]||null;
+  if(per){ const rr=M.lpr[lf.id]?.[per];
+    if(rr){ if(rr.auto){ const mr=SP._auto?.leafMonthRate?.[lf.id]?.[_spYm(ds)]; if(mr) return dw===6?mr.sat:mr.wk; }
+      return dw===6?rr.sat:rr.wk; } }
+  return dw===6?(lf.satRate||0):(lf.wkRate||0);
+}
+const pmLfSoldTo=lf=>String(lf.attrs?.soldTo??'—');
+function pmMoveLeaves(M, m){
+  return M.leaves.filter(lf=>lf.dpKey===m.from_element_id && pmLfSoldTo(lf)===String(m.sold_to) && (!m.ship_to_name || lf.shipTo===m.ship_to_name));
+}
+// Forecast days of a move: max(start, last real + 1) → end, noon-anchored calendar steps.
+function pmMoveDates(m){
+  const lr=spLastReal(); const out=[];
+  for(let d=new Date(m.start_date+'T12:00:00'); ; d.setDate(d.getDate()+1)){ const ds=_fltD(d); if(ds>m.end_date) break; if(ds>lr) out.push(ds); if(out.length>800) break; }
+  return out;
+}
+// {date: tonnes} the move takes off FROM and puts on TO.
+function pmMoveDaily(m, M){
+  M=M||pmFullModel(); const lvs=pmMoveLeaves(M,m), k=(+m.pct||0)/100, daily={};
+  pmMoveDates(m).forEach(ds=>{ let t=0; lvs.forEach(lf=>{ t+=pmLeafFcDay(M,lf,ds)||0; }); t=Math.round(t*k*10)/10; if(t>0) daily[ds]=t; });
+  return daily;
+}
+function pmMoveStats(m, M){
+  const daily=pmMoveDaily(m,M), v=Object.values(daily), tot=v.reduce((a,x)=>a+x,0);
+  return {daily, total:tot, days:v.length, avg:v.length?tot/v.length:0};
+}
+function pmDpName(id){ const d=(RC.cat?.dps||[]).find(x=>x.element_id===id); return d?d.name:(DB.elements||[]).find(e=>e.id===id)?.name||id||'—'; }
+function pmCustLabel(m){ return (m.sold_to_name||m.sold_to)+(m.ship_to_name?' / '+m.ship_to_name:''); }
+
+// leafId → moves covering it (for the 🚚 marker on table rows)
+function pmLeafIdx(){
+  const moves=DB.pickup_moves||[]; if(!moves.length) return new Map();
+  const M=pmFullModel();
+  if(SP._mvIdx&&SP._mvIdx.ver===M.ver) return SP._mvIdx.map;
+  const idx=new Map(); moves.forEach(m=>pmMoveLeaves(M,m).forEach(lf=>{ (idx.get(lf.id)||idx.set(lf.id,[]).get(lf.id)).push(m); }));
+  SP._mvIdx={ver:M.ver,map:idx}; return idx;
+}
+// The 🚚 button on a table row: only on rows that name a Sold-To (or below one).
+function pmRowBtn(node){
+  if(!node||!node.path) return '';
+  const so=node.path.find(p=>p.dim==='soldTo'); if(!so) return '';
+  const st=node.path.find(p=>p.dim==='shipTo');
+  const idx=pmLeafIdx(); const hits=new Set();
+  (node.leaves||[]).forEach(lf=>(idx.get(lf.id)||[]).forEach(m=>hits.add(m)));
+  const dpKeys=[...new Set((node.leaves||[]).map(lf=>lf.dpKey))];
+  const seed={soldTo:so.value, shipTo:st?st.value:null, from:dpKeys.length===1?dpKeys[0]:null};
+  const arg=JSON.stringify(seed).replaceAll('"','&quot;');
+  const tip=hits.size?[...hits].map(m=>`🚚 ${pmCustLabel(m)}: ${pmDpName(m.from_element_id)} → ${pmDpName(m.to_element_id)} · ${m.start_date} – ${m.end_date}${+m.pct!==100?' · '+m.pct+'%':''}`).join('\n')+'\n(click to manage)'
+    :'Pickup move — send this customer to pick up at another origin for a while';
+  return `<button class="sp-mv-btn${hits.size?' on':''}" onclick="event.stopPropagation();pmOpen(${arg})" title="${spEsc(tip)}">🚚${hits.size>1?hits.size:''}</button>`;
+}
+
+// ── Manager ──
+function pmOpen(seed, editId){
+  if(!RC.cat){ statMsg('Pick the Avila Roll scenario at the top first — moves need its demand points','var(--amber)'); return; }
+  const M=pmFullModel();
+  const ed=editId?(DB.pickup_moves||[]).find(m=>m.id===editId):null;
+  const today=spLastReal();
+  const addD=(ds,n)=>{ const d=new Date(ds+'T12:00:00'); d.setDate(d.getDate()+n); return _fltD(d); };
+  SP._mvForm = ed ? {editId:ed.id, sold_to:String(ed.sold_to), ship_to_name:ed.ship_to_name||'', from:ed.from_element_id, to:ed.to_element_id, pct:ed.pct, start:ed.start_date, end:ed.end_date, reason:ed.reason||''}
+    : {editId:null, sold_to:seed?.soldTo!=null?String(seed.soldTo):'', ship_to_name:seed?.shipTo||'', from:seed?.from||'', to:'', pct:100, start:addD(today,1), end:addD(today,42), reason:''};
+  pmRender();
+}
+function pmSet(k,v){ const F=SP._mvForm; if(!F) return; F[k]=v;
+  if(k==='sold_to'){ F.ship_to_name=''; F.from=''; }
+  if(k==='ship_to_name'){ F.from=''; }
+  pmRender(); }
+function pmRender(){
+  const F=SP._mvForm, M=pmFullModel(), cat=RC.cat;
+  const known=new Set((cat.dps||[]).map(d=>d.element_id));
+  const fmt=v=>Math.round(v).toLocaleString();
+  // Customers: every Sold-To with a forecast leaf on a demand point of this scenario
+  const custs=new Map(); M.leaves.forEach(lf=>{ if(!known.has(lf.dpKey)) return; const so=pmLfSoldTo(lf); if(so==='—') return;
+    let c=custs.get(so); if(!c){ c={so, name:'', rate:0, shipTos:new Set()}; custs.set(so,c); }
+    c.rate+=lf.wkRate||0; c.shipTos.add(lf.shipTo); });
+  // Sold-To display name from the rows (the leaf only carries the key)
+  (DB.real_shipments_daily||[]).forEach(r=>{ const c=custs.get(spSoldToKey(r)); if(c&&!c.name) c.name=spSoldToName(r); });
+  const custList=[...custs.values()].sort((a,b)=>(a.name||a.so).localeCompare(b.name||b.so));
+  const cur=custs.get(F.sold_to);
+  // From: the DPs this customer (ship-to) has a forecast leaf on, with its weekday rate
+  const fromMap=new Map();
+  if(cur) M.leaves.forEach(lf=>{ if(pmLfSoldTo(lf)!==F.sold_to||!known.has(lf.dpKey)) return; if(F.ship_to_name&&lf.shipTo!==F.ship_to_name) return;
+    fromMap.set(lf.dpKey,(fromMap.get(lf.dpKey)||0)+(lf.wkRate||0)); });
+  if(F.from&&!fromMap.has(F.from)&&known.has(F.from)) fromMap.set(F.from,0);
+  if(!F.from&&fromMap.size) F.from=[...fromMap.entries()].sort((a,b)=>b[1]-a[1])[0][0];
+  // To: every other DP of the scenario; same channel (INT/EXT) first
+  const chan=n=>String(n||'').split('/').map(s=>s.trim()).filter(Boolean).pop()||'';
+  const fromChan=chan(pmDpName(F.from));
+  const toList=(cat.dps||[]).filter(d=>d.element_id!==F.from).sort((a,b)=>((chan(a.name)===fromChan?0:1)-(chan(b.name)===fromChan?0:1))||a.name.localeCompare(b.name));
+  if(F.to&&!toList.some(d=>d.element_id===F.to)) F.to='';
+  const fac=id=>RC.facById?.get?.(id)?.name||RC.facById?.[id]?.name||'';
+  const opt=(v,l,sel)=>`<option value="${spEsc(v)}"${sel?' selected':''}>${spEsc(l)}</option>`;
+  const draft={sold_to:F.sold_to, ship_to_name:F.ship_to_name||null, from_element_id:F.from, to_element_id:F.to, pct:+F.pct||0, start_date:F.start, end_date:F.end};
+  const ok=F.sold_to&&F.from&&F.to&&F.from!==F.to&&F.start&&F.end&&F.start<=F.end&&(+F.pct>0&&+F.pct<=100);
+  const st=ok?pmMoveStats(draft,M):null;
+  const moves=(DB.pickup_moves||[]).slice().sort((a,b)=>(a.start_date||'').localeCompare(b.start_date||''));
+  const lr=spLastReal();
+  const rows=moves.length?moves.map(m=>{ const s=pmMoveStats(m,M); const past=m.end_date<=lr;
+    const bad=!known.has(m.from_element_id)||!known.has(m.to_element_id);
+    return `<tr style="border-bottom:1px solid var(--border)${m.id===F.editId?';background:rgba(var(--amber-rgb),.08)':''}${past?';opacity:.55':''}">
+      <td style="padding:5px 7px"><b>${spEsc(pmCustLabel(m))}</b>${m.reason?`<div style="color:var(--text-dim);font-size:8px">${spEsc(m.reason)}</div>`:''}</td>
+      <td style="padding:5px 7px;color:var(--green)">${spEsc(pmDpName(m.from_element_id))}</td>
+      <td style="padding:5px 7px;color:var(--amber)">→ ${spEsc(pmDpName(m.to_element_id))}${bad?`<div style="color:var(--red);font-size:8px">not in this Roll scenario — won't be pushed</div>`:''}</td>
+      <td style="padding:5px 7px;white-space:nowrap;color:var(--text-dim)">${fltFmt(m.start_date)} → ${fltFmt(m.end_date)}${+m.pct!==100?` · ${m.pct}%`:''}</td>
+      <td style="padding:5px 7px;text-align:right;white-space:nowrap">${past?'<span style="color:var(--text-dim)">ended</span>':`${fmt(s.total)} t<div style="color:var(--text-dim);font-size:8px">avg ${fmt(s.avg)} t/d · ${s.days} d</div>`}</td>
+      <td style="padding:5px 7px;text-align:right;white-space:nowrap"><button class="tb-btn sec" style="padding:2px 7px;margin-right:4px" onclick="pmOpen(null,'${m.id}')" title="Edit">✎</button><button class="tb-btn sec" style="padding:2px 7px" onclick="pmDelete('${m.id}')" title="Delete">✕</button></td></tr>`; }).join('')
+    :`<tr><td colspan="6" style="padding:12px;text-align:center;color:var(--text-dim)">No pickup moves yet.</td></tr>`;
+  const lbl='display:block;color:var(--text-dim);font-size:8px;text-transform:uppercase;letter-spacing:1px;margin:8px 0 3px';
+  const inp='width:100%;box-sizing:border-box;background:var(--bg3,var(--bg2));color:var(--text);border:1px solid var(--border2);border-radius:3px;padding:4px 6px;font-family:var(--mono);font-size:9px';
+  showModalContent(`
+    <div class="modal-hdr"><span class="modal-title">🚚 Pickup Moves</span><span class="modal-close" onclick="closeModal()">✕</span></div>
+    <div class="modal-body" style="font-family:var(--mono);font-size:9px;max-height:70vh;overflow:auto">
+      <div style="color:var(--text-dim);margin-bottom:10px;line-height:1.5">Send a customer to pick up at <b>another origin</b> for a while. Each day, the customer's own forecast on the <b>from</b> demand point moves to the <b>to</b> demand point (its material is the to point's product). The Sales forecast stays as it is; <b>↑ Push Forecast to Roll</b> sends every move as a demand swap, shown in Roll as DEMAND MOVED OUT / IN. Days with actuals are never moved.</div>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:12px">
+        <thead><tr style="color:var(--text-dim);font-size:8px;text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid var(--border2)">
+          <th style="text-align:left;padding:5px 7px">Customer</th><th style="text-align:left;padding:5px 7px">From</th><th style="text-align:left;padding:5px 7px">To</th><th style="text-align:left;padding:5px 7px">Dates</th><th style="text-align:right;padding:5px 7px">Moved (forecast)</th><th></th></tr></thead>
+        <tbody>${rows}</tbody></table>
+      <div style="border-top:1px solid var(--border2);padding-top:6px;font-weight:700;color:var(--blue)">${F.editId?'Edit move':'New move'}</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:0 14px">
+        <div><label style="${lbl}">Sold-To</label><select style="${inp}" onchange="pmSet('sold_to',this.value)">${opt('','— pick a customer —',!F.sold_to)}${custList.map(c=>opt(c.so,`${c.name||c.so} (${c.so}) · ${fmt(c.rate)} t/d`,c.so===F.sold_to)).join('')}</select></div>
+        <div><label style="${lbl}">Ship-To</label><select style="${inp}" onchange="pmSet('ship_to_name',this.value)" ${cur?'':'disabled'}>${opt('','(all ship-tos of this Sold-To)',!F.ship_to_name)}${cur?[...cur.shipTos].sort().map(s=>opt(s,s,s===F.ship_to_name)).join(''):''}</select></div>
+        <div><label style="${lbl}">From demand point (picks up here today)</label><select style="${inp}" onchange="pmSet('from',this.value)" ${fromMap.size?'':'disabled'}>${[...fromMap.entries()].sort((a,b)=>b[1]-a[1]).map(([id,r])=>opt(id,`${pmDpName(id)} · ${fmt(r)} t/d`,id===F.from)).join('')||opt('','— pick a customer first —',true)}</select></div>
+        <div><label style="${lbl}">To demand point (picks up here instead)</label><select style="${inp}" onchange="pmSet('to',this.value)">${opt('','— pick the new origin —',!F.to)}${toList.map(d=>opt(d.element_id,d.name+(fac(d.facility_id)?' · '+fac(d.facility_id):''),d.element_id===F.to)).join('')}</select></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 70px;gap:0 8px">
+          <div><label style="${lbl}">From date</label><input type="date" style="${inp}" value="${F.start}" onchange="pmSet('start',this.value)"></div>
+          <div><label style="${lbl}">To date</label><input type="date" style="${inp}" value="${F.end}" onchange="pmSet('end',this.value)"></div>
+          <div><label style="${lbl}">% moved</label><input type="number" min="1" max="100" style="${inp}" value="${F.pct}" onchange="pmSet('pct',this.value)"></div></div>
+        <div><label style="${lbl}">Reason</label><input type="text" style="${inp}" value="${spEsc(F.reason)}" placeholder="e.g. PEV out of MED" onchange="SP._mvForm.reason=this.value"></div>
+      </div>
+      <div style="margin-top:10px;padding:7px 9px;border:1px solid var(--border2);border-radius:4px;background:rgba(var(--blue-rgb,80,140,255),.06)">${
+        st?`Moves <b>${fmt(st.total)} t</b> over ${st.days} forecast day${st.days===1?'':'s'} (avg <b>${fmt(st.avg)} t/d</b>) from <b>${spEsc(pmDpName(F.from))}</b> to <b>${spEsc(pmDpName(F.to))}</b>${F.start<=lr?` <span style="color:var(--text-dim)">— days up to ${fltFmt(lr)} already have actuals and are not moved</span>`:''}.`
+          :'<span style="color:var(--text-dim)">Pick a customer, both demand points, dates and a % between 1 and 100 to see what moves.</span>'}</div>
+    </div>
+    <div class="modal-footer">
+      ${F.editId?`<button class="btn-sec" onclick="pmOpen()">+ New instead</button>`:''}
+      <button class="btn-sec" onclick="closeModal()">Close</button>
+      <button class="btn-pri" ${ok?'':'disabled'} onclick="pmSaveForm()">${F.editId?'Save changes':'Add move'}</button>
+    </div>`);
+  const box=document.querySelector('#sc-modal-overlay .sc-mc-box'); if(box) box.style.width='min(940px,94vw)';
+}
+function pmSaveForm(){
+  const F=SP._mvForm; if(!F) return;
+  if(!(F.sold_to&&F.from&&F.to&&F.from!==F.to&&F.start&&F.end&&F.start<=F.end&&+F.pct>0&&+F.pct<=100)){ statMsg('Move is incomplete','var(--amber)'); return; }
+  let name=''; (DB.real_shipments_daily||[]).some(r=>{ if(spSoldToKey(r)===F.sold_to){ name=spSoldToName(r); return true; } return false; });
+  const rec={sold_to:F.sold_to, sold_to_name:name||F.sold_to, ship_to_name:F.ship_to_name||null, from_element_id:F.from, to_element_id:F.to,
+    pct:Math.round(+F.pct*10)/10, start_date:F.start, end_date:F.end, reason:(F.reason||'').trim()};
+  if(!Array.isArray(DB.pickup_moves)) DB.pickup_moves=[];
+  const ex=F.editId&&DB.pickup_moves.find(m=>m.id===F.editId);
+  if(ex) Object.assign(ex,rec); else DB.pickup_moves.push({id:'pm_'+Date.now().toString(36), ...rec, created_at:new Date().toISOString()});
+  pmSave(); statMsg(`Pickup move saved — push the forecast to send it to Roll`,'green');
+  pmOpen(); renderSalesPerfView();
+}
+function pmDelete(id){
+  const m=(DB.pickup_moves||[]).find(x=>x.id===id); if(!m) return;
+  if(!confirm(`Delete the pickup move for ${pmCustLabel(m)} (${pmDpName(m.from_element_id)} → ${pmDpName(m.to_element_id)})?\n\nIt leaves Roll on the next forecast push.`)) return;
+  DB.pickup_moves=DB.pickup_moves.filter(x=>x.id!==id);
+  pmSave(); pmOpen(); renderSalesPerfView();
+}
+// Swaps for the forecast handoff: EVERY move (whatever the screen is filtered to), so Roll can
+// replace its whole set of Sales swaps. Moves with nothing left to move are left out.
+function pmHandoffSwaps(cat){
+  const known=new Set((cat.dps||[]).map(d=>d.element_id)), M=pmFullModel();
+  const swaps=[]; let skipped=0;
+  (DB.pickup_moves||[]).forEach(m=>{
+    if(!known.has(m.from_element_id)||!known.has(m.to_element_id)){ skipped++; return; }
+    const s=pmMoveStats(m,M); if(!s.days) return;
+    const ds=Object.keys(s.daily).sort();
+    swaps.push({id:'swap_sales_'+m.id, source:'sales', sales_move_id:m.id, from_element_id:m.from_element_id, to_element_id:m.to_element_id,
+      mode:'daily', daily:s.daily, amount:Math.round(s.avg), start_date:ds[0], end_date:ds[ds.length-1],
+      notes:`Sales: ${pmCustLabel(m)}${m.reason?' — '+m.reason:''}`});
+  });
+  return {swaps, skipped};
 }
 </script>
 </body>
