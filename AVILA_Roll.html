@@ -18159,6 +18159,37 @@ function _projectShipSilo(vessels, startInv, siloMax, outflow, horizon, projInv,
   projInv[horizon+1]=inv;
 }
 
+// ── Proposer anchoring helpers ──────────────────────────
+// The proposer used to replay the whole horizon from start_inventory with its own toy
+// model; 12+ months of drift vs the real engine (berth sharing between products, actual
+// unload interruptions) made far-future proposals arrive days after the real curve was
+// already empty. Anchor instead to the engine's Pass-1 curve at TODAY: the past is
+// history — only project forward from the real simulated level.
+// hist is the engine's EOD array, 0-indexed by day-1 (BOD(d) = hist[d-2]).
+function _propAnchorToday(r,siloId,siloStart,siloMax,outflow,horizon){
+  const todayD=Math.max(1,Math.min(horizon,typeof todayDayOffset==='function'?todayDayOffset():1));
+  const hist=r?.inventoryHistory?.[siloId];
+  const bod=(todayD<=1||!hist)?siloStart:(hist[todayD-2]??siloStart);
+  const out=outflow.slice();
+  for(let d=1;d<todayD;d++) out[d]=0;
+  return {todayD, startInv:Math.max(0,Math.min(siloMax,bod)), outflow:out};
+}
+// Locked vessels as the anchored projection sees them: drop sailed-and-finished ones
+// (their cargo is already inside the anchor inventory), keep future ones, and keep only
+// the REMAINING cargo of a vessel that is mid-discharge today.
+function _propVesselsFromToday(vs,todayD){
+  const out=[];
+  vs.forEach(v=>{
+    if(v.arr>=todayD){out.push(v);return;}
+    const ud=v.perDay>0?Math.ceil(v.qty/v.perDay):0;
+    if(v.arr+ud>todayD){
+      const rem=Math.max(0,v.qty-(todayD-v.arr)*v.perDay);
+      if(rem>0) out.push({arr:todayD,qty:rem,perDay:v.perDay});
+    }
+  });
+  return out;
+}
+
 function _writeProposedVesselCalls(r){
   // Remove only AUTO-GENERATED Proposed vessel calls (notes starts with 'Auto-proposed').
   // User-created Proposed vessels (e.g. placeholders/estimates) are preserved so the
@@ -18238,7 +18269,12 @@ function _writeProposedVesselCalls(r){
       }
       const totDemSp=dailyOutflow.reduce((s,v)=>s+v,0);
       if(totDemSp<=0) return;
-      const critFloorSp=minCoverDays*(totDemSp/horizon);
+      // "N days of cover" measured in the NEXT N days of actual demand from day d — the
+      // old horizon-average floor under-protected seasonal peaks (a two-year average made
+      // "10 days" worth only ~6 January weekdays at PEV).
+      const cumSp=new Array(horizon+1).fill(0);
+      for(let d=1;d<=horizon;d++) cumSp[d]=cumSp[d-1]+dailyOutflow[d];
+      const floorAtSp=d=>cumSp[Math.min(d+minCoverDays,horizon)]-cumSp[Math.min(Math.max(d,0),horizon)];
 
       const lockedCalls=DB.vessel_calls.filter(v=>
         allocBerths.some(ab=>v.berth_element_id===ab.berth.id||
@@ -18257,22 +18293,26 @@ function _writeProposedVesselCalls(r){
       const proposedCalls=[];
       const projInvSp=new Array(horizon+2).fill(0);
       const intakeSp=new Array(horizon+2).fill(0);
-      const startInvSp=Math.max(0,Math.min(siloMax,siloStart));
-      const rebuildFromSp=()=>_projectShipSilo([...lockedVsSp,...propVsSp],startInvSp,siloMax,dailyOutflow,horizon,projInvSp,intakeSp);
+      const anchorSp=_propAnchorToday(r,targetSilo.id,siloStart,siloMax,dailyOutflow,horizon);
+      const lockedTodaySp=_propVesselsFromToday(lockedVsSp,anchorSp.todayD);
+      const rebuildFromSp=()=>_projectShipSilo([...lockedTodaySp,...propVsSp],anchorSp.startInv,siloMax,anchorSp.outflow,horizon,projInvSp,intakeSp);
       rebuildFromSp();
 
-      let scanFromSp=1, guardSp=horizon+10;
+      let scanFromSp=anchorSp.todayD, guardSp=horizon+10;
       while(guardSp-->0){
         let critDay=null;
         for(let d=scanFromSp;d<=horizon;d++){
           const eod=projInvSp[d+1];
-          if(eod<=critFloorSp){critDay=d;break;}
+          if(eod<=floorAtSp(d)){critDay=d;break;}
         }
         if(!critDay) break;
+        if(floorAtSp(critDay)<=0){scanFromSp=critDay+1;continue;} // no demand ahead — nothing to cover
 
-        const idealArrival=critDay;
+        // Arrive the day the silo reaches its cover volume — or the earliest day a ship
+        // ordered today could make it, whichever is later.
+        const idealArrival=Math.max(critDay, anchorSp.todayD+leadDays);
         const orderDay=idealArrival-leadDays;
-        if(orderDay<1||idealArrival>horizon){scanFromSp=critDay+1;continue;}
+        if(idealArrival>horizon){scanFromSp=critDay+1;continue;}
 
         const projAtArrival=projInvSp[idealArrival];
         if(projAtArrival>=targetInvSp*0.95){scanFromSp=critDay+1;continue;}
@@ -18321,7 +18361,7 @@ function _writeProposedVesselCalls(r){
           status:'Proposed'
         });
 
-        scanFromSp=1;
+        scanFromSp=anchorSp.todayD;
       }
       return; // done with this supply source — skip individual berth loop
     }
@@ -18364,7 +18404,11 @@ function _writeProposedVesselCalls(r){
       }
       const totalDemand=dailyOutflow.reduce((s,v)=>s+v,0);
       if(totalDemand<=0) return;
-      const critFloor=minCoverDays*(totalDemand/horizon);
+      // "N days of cover" measured in the NEXT N days of actual demand from day d — not
+      // the horizon average, which under-protects seasonal peaks.
+      const cumDem=new Array(horizon+1).fill(0);
+      for(let d=1;d<=horizon;d++) cumDem[d]=cumDem[d-1]+dailyOutflow[d];
+      const floorAt=d=>cumDem[Math.min(d+minCoverDays,horizon)]-cumDem[Math.min(Math.max(d,0),horizon)];
 
       const lockedCalls=DB.vessel_calls.filter(v=>
         v.berth_element_id===berth.id&&v.product_id===productId&&
@@ -18382,29 +18426,34 @@ function _writeProposedVesselCalls(r){
       const propVs=[];
       const proposedCalls=[];
 
-      // Forward projection: projInv[d] = BOD inventory on day d; intake[d] = tonnes unloaded on day d
+      // Forward projection: projInv[d] = BOD inventory on day d; intake[d] = tonnes unloaded on day d.
+      // Anchored to the engine's Pass-1 curve at TODAY (see _propAnchorToday).
       const projInv=new Array(horizon+2).fill(0);
       const intake=new Array(horizon+2).fill(0);
-      const startInvB=Math.max(0,Math.min(siloMax,siloStart));
-      const rebuildFrom=()=>_projectShipSilo([...lockedVs,...propVs],startInvB,siloMax,dailyOutflow,horizon,projInv,intake);
+      const anchor=_propAnchorToday(r,targetSilo.id,siloStart,siloMax,dailyOutflow,horizon);
+      const lockedToday=_propVesselsFromToday(lockedVs,anchor.todayD);
+      const rebuildFrom=()=>_projectShipSilo([...lockedToday,...propVs],anchor.startInv,siloMax,anchor.outflow,horizon,projInv,intake);
       rebuildFrom();
 
       const facName=DB.facilities.find(f=>f.id===(berth.assigned_facility_id||berth.facility_id||S.facility_id))?.name||'';
       const vesselFacId=berth.assigned_facility_id||berth.facility_id||S.facility_id;
-      let scanFrom=1, guard=horizon+10;
+      let scanFrom=anchor.todayD, guard=horizon+10;
 
       while(guard-->0){
-        // Find first day where EOD inventory hits the critical floor
+        // Find first day where EOD inventory hits the cover floor (next-N-days demand)
         let critDay=null;
         for(let d=scanFrom;d<=horizon;d++){
           const eod=projInv[d+1];
-          if(eod<=critFloor){critDay=d;break;}
+          if(eod<=floorAt(d)){critDay=d;break;}
         }
         if(!critDay) break;
+        if(floorAt(critDay)<=0){scanFrom=critDay+1;continue;} // no demand ahead — nothing to cover
 
-        const idealArrival=critDay;
+        // Arrive the day the silo reaches its cover volume — or the earliest day a ship
+        // ordered today could make it, whichever is later.
+        const idealArrival=Math.max(critDay, anchor.todayD+leadDays);
         const orderDay=idealArrival-leadDays;
-        if(orderDay<1||idealArrival>horizon){scanFrom=critDay+1;continue;}
+        if(idealArrival>horizon){scanFrom=critDay+1;continue;}
 
         // Skip if silo will already be near or above target at arrival
         const projAtArrival=projInv[idealArrival];
@@ -18440,7 +18489,7 @@ function _writeProposedVesselCalls(r){
           status:'Proposed'
         });
 
-        scanFrom=1; // restart scan — projection updated
+        scanFrom=anchor.todayD; // restart scan — projection updated
       }
     });
   });
