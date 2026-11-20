@@ -5765,13 +5765,23 @@ function renderProps(id){
       h+=`<div class="pg"><div class="pg-title">Berth Allocation — Split Cargo</div>
         <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-bottom:8px">
           This supply source connects to ${connectedBerths.length} berths. Specify how many tonnes go to each port per vessel call. Leave blank to use separate full vessels per berth.
+          <b>Call #</b> sets the port sequence of the split vessel — 1 = the first port it hits.
         </div>`;
+      // Current call sequence (props.berth_call_order); berths not in it keep panel order, last.
+      const _ord=Array.isArray(el.props.berth_call_order)?el.props.berth_call_order:[];
+      const _seqIds=[...connectedBerths].sort((a,b)=>{
+        const ia=_ord.indexOf(a.id), ib=_ord.indexOf(b.id);
+        return (ia<0?99:ia)-(ib<0?99:ib);
+      }).map(b=>b.id);
       let allocSum=0;
       connectedBerths.forEach(b=>{
         const qty=allocs[b.id]||0;
         allocSum+=qty;
+        const seq=_seqIds.indexOf(b.id)+1;
+        const seqOpts=connectedBerths.map((_,i)=>`<option value="${i+1}"${i+1===seq?' selected':''}>${i+1}</option>`).join('');
         h+=`<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
           <div style="font-family:var(--mono);font-size:9px;color:var(--amber);flex:1">${b.name}</div>
+          <select class="pi" id="ss-order-${b.id}" title="Call # — port sequence of the split vessel (1 = first port)" style="width:46px">${seqOpts}</select>
           <input class="pi" type="number" id="ss-alloc-${b.id}" value="${qty||''}" placeholder="tonnes"
             style="width:100px" oninput="_ssUpdateAllocTotal('${id}')">
           <div style="font-family:var(--mono);font-size:8px;color:var(--text-dim);min-width:40px" id="ss-alloc-pct-${b.id}">
@@ -5904,7 +5914,13 @@ function saveProps(id){
         if(v>0) allocs[b.id]=v;
       });
       el.props.berth_allocations=Object.keys(allocs).length?allocs:null;
-    } else if(el.props.berth_allocations) el.props.berth_allocations=null;   // one berth left: an old split no longer applies (the panel is hidden, so it could not be cleared)
+      // Port call sequence: berth ids sorted by the chosen Call # (ties keep panel order).
+      if(Object.keys(allocs).length>1){
+        el.props.berth_call_order=connectedBerths
+          .map((b,i)=>({id:b.id,n:parseInt(document.getElementById(`ss-order-${b.id}`)?.value)||(i+1),i}))
+          .sort((a,b)=>a.n-b.n||a.i-b.i).map(x=>x.id);
+      } else el.props.berth_call_order=null;
+    } else if(el.props.berth_allocations||el.props.berth_call_order){ el.props.berth_allocations=null; el.props.berth_call_order=null; }   // one berth left: an old split no longer applies (the panel is hidden, so it could not be cleared)
   }
   autoSave(); statMsg('Properties saved');
 }
@@ -18149,9 +18165,16 @@ function _projectShipSilo(vessels, startInv, siloMax, outflow, horizon, projInv,
     }
     let take=0;
     if(cur&&rem>0){
-      const fullDaily=Math.min(cur.perDay, rem), space=Math.max(0,siloMax-inv+outflow[d]);
-      take=space>=fullDaily?fullDaily:(fullDaily>siloMax?space:0);
-      rem-=take;
+      if(cur.fills===false){
+        // Berth blocker — another product's vessel (or another leg) holds the berth and
+        // discharges into ITS silo at its own rate; nothing lands here, and our vessels
+        // queue behind it at anchorage (FIFO).
+        rem-=Math.min(cur.perDay,rem);
+      }else{
+        const fullDaily=Math.min(cur.perDay, rem), space=Math.max(0,siloMax-inv+outflow[d]);
+        take=space>=fullDaily?fullDaily:(fullDaily>siloMax?space:0);
+        rem-=take;
+      }
     }
     intake[d]=take;
     inv=Math.max(0,Math.min(siloMax,inv+take-outflow[d]));
@@ -18184,8 +18207,29 @@ function _propVesselsFromToday(vs,todayD){
     const ud=v.perDay>0?Math.ceil(v.qty/v.perDay):0;
     if(v.arr+ud>todayD){
       const rem=Math.max(0,v.qty-(todayD-v.arr)*v.perDay);
-      if(rem>0) out.push({arr:todayD,qty:rem,perDay:v.perDay});
+      if(rem>0) out.push({...v,arr:todayD,qty:rem});
     }
+  });
+  return out;
+}
+// Every OTHER product's berth time at this berth, as blocker vessels (fills:false) for
+// _projectShipSilo: confirmed calls and split-vessel legs of any product occupy the one
+// berth FIFO and delay our discharge — the engine models this, so the proposer must too.
+// Target-product calls are left out (they are already in the projection as lockedVs).
+function _propBerthBlockers(berthId,productId,fallbackRate){
+  const out=[];
+  (DB.vessel_calls||[]).forEach(v=>{
+    if(v.product_id===productId) return;
+    const legs=(v.legs&&v.legs.length)?v.legs
+      :[{berth_element_id:v.berth_element_id,arrival_date:v.arrival_date,quantity_t:v.quantity_t,unload_rate_tph:v.unload_rate_tph}];
+    legs.forEach(l=>{
+      if(l.berth_element_id!==berthId||!l.arrival_date) return;
+      const qty=parseFloat(l.quantity_t)||0; if(qty<=0) return;
+      const arr=dateToDayOffset(l.arrival_date,S.simCfg.start_date)+1;
+      const rate=parseFloat(l.unload_rate_tph)||0;
+      const perDay=rate>0?rate*24:(fallbackRate>0?fallbackRate*24:qty/3);
+      out.push({arr:Math.max(1,arr), qty, perDay, fills:false});
+    });
   });
   return out;
 }
@@ -18225,6 +18269,14 @@ function _writeProposedVesselCalls(r){
     const allocBerths=Object.entries(berthAllocs||{})
       .map(([berthId,qty])=>({berth:elMap[berthId],qty:parseFloat(qty)||0}))
       .filter(x=>x.berth&&x.qty>0&&downBerths.includes(x.berth));
+    // Port call sequence: the user orders the berths on the supply source's split panel
+    // (props.berth_call_order, an ordered list of berth ids — 1 = first port). Berths not
+    // in the list keep their stored order and go last.
+    const _callOrder=Array.isArray(ss.props.berth_call_order)?ss.props.berth_call_order:[];
+    if(_callOrder.length) allocBerths.sort((a,b)=>{
+      const ia=_callOrder.indexOf(a.berth.id), ib=_callOrder.indexOf(b.berth.id);
+      return (ia<0?99:ia)-(ib<0?99:ib);
+    });
 
     // A split over two or more connected berths → propose split vessels
     // Otherwise → propose independent full vessels per berth (original behaviour)
@@ -18238,6 +18290,11 @@ function _writeProposedVesselCalls(r){
       const primaryQty=primary.qty;
       const berthRate=parseFloat(primaryBerth.props.max_unload_rate_tph)||0;
       const unloadDays=berthRate>0?Math.ceil(primaryQty/(berthRate*24)):3;
+      // Each leg discharges at ITS OWN berth's rate; the legs called before the primary
+      // one delay it, so the first port must be hit that many days earlier.
+      const legDays=ab=>{const lr=parseFloat(ab.berth.props.max_unload_rate_tph)||0;return lr>0?Math.ceil(ab.qty/(lr*24)):3;};
+      const primaryIdx=allocBerths.indexOf(primary);
+      const primaryOffset=allocBerths.slice(0,primaryIdx).reduce((s,ab)=>s+legDays(ab),0);
 
       const downSilos=(dn[primaryBerth.id]||[]).map(id=>elMap[id]).filter(e=>e&&e.type==='bulk_silo');
       const targetSilo=downSilos.find(s=>(s.props.products||[]).includes(productId))||downSilos[0];
@@ -18295,7 +18352,8 @@ function _writeProposedVesselCalls(r){
       const intakeSp=new Array(horizon+2).fill(0);
       const anchorSp=_propAnchorToday(r,targetSilo.id,siloStart,siloMax,dailyOutflow,horizon);
       const lockedTodaySp=_propVesselsFromToday(lockedVsSp,anchorSp.todayD);
-      const rebuildFromSp=()=>_projectShipSilo([...lockedTodaySp,...propVsSp],anchorSp.startInv,siloMax,anchorSp.outflow,horizon,projInvSp,intakeSp);
+      const blockersSp=_propVesselsFromToday(_propBerthBlockers(primaryBerth.id,productId,berthRate),anchorSp.todayD);
+      const rebuildFromSp=()=>_projectShipSilo([...blockersSp,...lockedTodaySp,...propVsSp],anchorSp.startInv,siloMax,anchorSp.outflow,horizon,projInvSp,intakeSp);
       rebuildFromSp();
 
       let scanFromSp=anchorSp.todayD, guardSp=horizon+10;
@@ -18308,10 +18366,11 @@ function _writeProposedVesselCalls(r){
         if(!critDay) break;
         if(floorAtSp(critDay)<=0){scanFromSp=critDay+1;continue;} // no demand ahead — nothing to cover
 
-        // Arrive the day the silo reaches its cover volume — or the earliest day a ship
-        // ordered today could make it, whichever is later.
-        const idealArrival=Math.max(critDay, anchorSp.todayD+leadDays);
-        const orderDay=idealArrival-leadDays;
+        // The PRIMARY leg must land the day its silo reaches the cover volume — or the
+        // earliest it can (order today, sail the lead time to the FIRST port, discharge
+        // the legs called before it), whichever is later.
+        const idealArrival=Math.max(critDay, anchorSp.todayD+leadDays+primaryOffset);
+        const orderDay=idealArrival-primaryOffset-leadDays;
         if(idealArrival>horizon){scanFromSp=critDay+1;continue;}
 
         const projAtArrival=projInvSp[idealArrival];
@@ -18323,15 +18382,17 @@ function _writeProposedVesselCalls(r){
         });
         if(alreadyCovered){scanFromSp=critDay+1;continue;}
 
-        const arrivalStr=new Date(simStart.getTime()+(idealArrival-1)*864e5)._ymd();
+        // Vessel-level dates: the ship reaches the FIRST port primaryOffset days before
+        // the primary leg; each later leg starts after the previous leg's own unload days.
+        const arrivalStr=new Date(simStart.getTime()+(idealArrival-1-primaryOffset)*864e5)._ymd();
         const orderStr=new Date(simStart.getTime()+(orderDay-1)*864e5)._ymd();
         proposedCalls.push({arrivalDay:idealArrival});
         propVsSp.push({arr:idealArrival, qty:primaryQty, perDay:berthRate>0?berthRate*24:primaryQty/Math.max(1,unloadDays)});
         rebuildFromSp();
 
-        let legOffset=0;
+        let legOffset=-primaryOffset;
         const legs=allocBerths.map((ab,li)=>{
-          if(li>0) legOffset+=berthRate>0?Math.ceil(allocBerths[li-1].qty/(berthRate*24)):unloadDays;
+          if(li>0) legOffset+=legDays(allocBerths[li-1]);
           const legArrival=new Date(simStart.getTime()+(idealArrival-1+legOffset)*864e5)._ymd();
           const legBerth=ab.berth;
           return {
@@ -18432,7 +18493,8 @@ function _writeProposedVesselCalls(r){
       const intake=new Array(horizon+2).fill(0);
       const anchor=_propAnchorToday(r,targetSilo.id,siloStart,siloMax,dailyOutflow,horizon);
       const lockedToday=_propVesselsFromToday(lockedVs,anchor.todayD);
-      const rebuildFrom=()=>_projectShipSilo([...lockedToday,...propVs],anchor.startInv,siloMax,anchor.outflow,horizon,projInv,intake);
+      const blockers=_propVesselsFromToday(_propBerthBlockers(berth.id,productId,berthRate),anchor.todayD);
+      const rebuildFrom=()=>_projectShipSilo([...blockers,...lockedToday,...propVs],anchor.startInv,siloMax,anchor.outflow,horizon,projInv,intake);
       rebuildFrom();
 
       const facName=DB.facilities.find(f=>f.id===(berth.assigned_facility_id||berth.facility_id||S.facility_id))?.name||'';
