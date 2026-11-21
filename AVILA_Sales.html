@@ -261,6 +261,8 @@ body.c0-drag,body.c0-drag *{cursor:col-resize!important;user-select:none!importa
 /* ── Real vs forecast on the performance table: the Supply page's look rules (Daylight, or a
    custom palette in 'Real vs forecast' mode) — actual days on --real-faint, forecast on --fc-faint. */
 html:is([data-theme="daylight"]:not([data-look="off"]),[data-look="on"]) #sp-table td.cell-real{color:var(--real)!important;background-color:var(--real-faint)!important;}
+/* non-working day (Roll list) keeps its red tint in every look */
+html #sp-table td.sp-nwd.sp-nwd.sp-nwd.sp-nwd{background-color:rgba(var(--red-rgb),.10)!important;}
 html:is([data-theme="daylight"]:not([data-look="off"]),[data-look="on"]) #sp-table td.cell-fc{color:var(--fc-num)!important;background-color:var(--fc-faint)!important;font-style:var(--fc-fs,normal);}
 html:is([data-theme="daylight"]:not([data-look="off"]),[data-look="on"]) #sp-table td:is(.cell-real,.cell-fc).cell-z{background-color:transparent!important;}
 html:is([data-theme="daylight"]:not([data-look="off"]),[data-look="on"]) .sp-tbl-leg-swatch.leg-real{background:var(--real-faint)!important;color:var(--real)!important;border-color:var(--border2)!important;}
@@ -2356,6 +2358,18 @@ function spAlloc25(weights,total){
 
 const _dowCache={};
 function spDow(ds){ let v=_dowCache[ds]; if(v===undefined){ v=new Date(ds+'T00:00:00').getDay(); _dowCache[ds]=v; } return v; }
+// Day-column look, same as Roll: a weekend is framed by a red edge left of Saturday and right of
+// Sunday with a faint red tint; a non-working day (Roll's global list, from the catalog) is tinted
+// red with its reason as tooltip. Returns {edge, thBg, tdBg, nwd} — today's own edge is added by the caller.
+function spNwdMap(){ const c=RC.cat; if(!c) return null; if(SP._nwdFor!==c){ SP._nwdFor=c; SP._nwdMap=new Map((c.nwd||[]).map(n=>[n.date,n.reason||'Non-working day'])); } return SP._nwdMap; }
+function spDayLook(ds){
+  const dw=spDow(ds), nwd=spNwdMap()?.get(ds)||null;
+  const edge=dw===6?'border-left:2px solid rgba(var(--red-rgb),.4);':dw===0?'border-right:2px solid rgba(var(--red-rgb),.4);':'';
+  const wk=dw===6||dw===0;
+  return { edge, nwd,
+    thBg: nwd?'rgba(var(--red-rgb),.16)':wk?'var(--wkend-th)':'',
+    tdBg: nwd?'rgba(var(--red-rgb),.08)':wk?'var(--wkend-td,rgba(var(--red-rgb),.04))':'' };
+}
 function spEsc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>c==='&'?'&amp;':c==='<'?'&lt;':c==='>'?'&gt;':'&quot;'); }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -3550,10 +3564,11 @@ function spRenderTable(skipThead=false){
       const sumTh=(lbl,heavy)=>`<th onclick="spSortByMonth('${mo.ym}')" title="Sort rows by ${mo.label} total" style="background:${sortActive?'rgba(var(--blue-rgb),.14)':bg};color:${sortActive?'var(--blue)':'inherit'};font-size:6px;text-align:center;${heavy?'font-weight:700;':''}border-left:${heavy?'2px solid':'1px solid'} var(--border2);padding:2px 4px;cursor:pointer;white-space:nowrap">${lbl}${sortArrow}</th>`;
       const dayTh=ds=>{
         const isToday=ds===today;
-        const bg2=ds<=lastReal?_tc('rgba(0,255,157,.03)'):isToday?_tc('rgba(255,61,90,.06)'):'';
-        const bd=isToday?'border-left:2px solid rgba(var(--red-rgb),.4)':'border-left:1px solid var(--border)';
+        const lk=spDayLook(ds);
+        const bg2=lk.thBg||(ds<=lastReal?_tc('rgba(0,255,157,.03)'):isToday?_tc('rgba(255,61,90,.06)'):'');
+        const bd=isToday?'border-left:2px solid rgba(var(--red-rgb),.4);'+(lk.edge.startsWith('border-right')?lk.edge:''):(lk.edge||'border-left:1px solid var(--border);');
         const dow=['S','M','T','W','T','F','S'][spDow(ds)];
-        return `<th style="${bg2?'background:'+bg2+';':''}${bd};font-size:5px;padding:2px 1px;text-align:center;min-width:20px" title="${ds}">${ds.slice(8)}<br><span style="opacity:.5">${dow}</span></th>`;
+        return `<th style="${bg2?'background:'+bg2+';':''}${bd}${lk.nwd?'color:var(--red);':''}font-size:5px;padding:2px 1px;text-align:center;min-width:20px" title="${ds}${lk.nwd?' — non-working day: '+spEsc(lk.nwd):''}">${ds.slice(8)}<br><span style="opacity:.5">${lk.nwd?'⊘':dow}</span></th>`;
       };
       const monTh=(lbl,tcol,span)=>`<th colspan="${span}" style="background:${bg};color:${tcol};font-size:7px;text-align:center;cursor:pointer;letter-spacing:.5px;border-left:1px solid var(--border2);padding:3px 4px" onclick="spToggleMonth('${mo.ym}')">${col?'▸':'▾'} ${lbl}</th>`;
       if(mo.ym===lastYm){
@@ -3607,8 +3622,10 @@ function spRenderTable(skipThead=false){
     const dayTd=ds=>{
       const isToday=ds===today, isAct=ds<=lastReal;
       const val=isAct?(actMap[ds]||0):getFc(ds);
-      const bd=isToday?'border-left:2px solid rgba(var(--red-rgb),.4)':'border-left:1px solid var(--border)';
-      return {val, html:`<td class="${isAct?'cell-real':'cell-fc'}${val?'':' cell-z'}" style="${isAct?'background:rgba(var(--green-rgb),.04);':FUT+';'}${bd};text-align:right;padding:1px 2px;font-size:7px">${val?Math.round(val).toLocaleString():''}</td>`};
+      const lk=spDayLook(ds);
+      const bd=isToday?'border-left:2px solid rgba(var(--red-rgb),.4);'+(lk.edge.startsWith('border-right')?lk.edge:''):(lk.edge||'border-left:1px solid var(--border);');
+      const bgc=lk.nwd?lk.tdBg:isAct?'rgba(var(--green-rgb),.04)':lk.tdBg;
+      return {val, html:`<td class="${isAct?'cell-real':'cell-fc'}${val?'':' cell-z'}${lk.nwd?' sp-nwd':''}" style="${bgc?'background:'+bgc+';':''}${isAct?'':FUT+';'}${bd}text-align:right;padding:1px 2px;font-size:7px">${val?Math.round(val).toLocaleString():''}</td>`};
     };
     const sumTd=(v,heavy,fut,bgBase)=>`<td class="${fut?'cell-fc':'cell-real'}${v?'':' cell-z'}" style="text-align:right;padding:1px 4px;font-size:7px;${heavy?'font-weight:700;':''}${fut?FUT+';':''}${bgBase?'background:'+bgBase+';':''}border-left:${heavy?'2px solid':'1px solid'} var(--border2)">${v?Math.round(v).toLocaleString():'—'}</td>`;
     // Full-year total column (mirrors the thead Σ YYYY): accumulate each month's
