@@ -2120,7 +2120,7 @@ function spRenderChart(){
     let cnt=0,sum=0; const d=new Date(guideRef+'T00:00:00'); let g=0;
     while(cnt<n&&g<70){
       const dow=d.getDay();
-      if(dow>=1&&dow<=5){ sum+=guideMap[d.toISOString().split('T')[0]]||0; cnt++; }
+      const gds=d.toISOString().split('T')[0]; if(dow>=1&&dow<=5&&!spIsNwd(gds)){ sum+=guideMap[gds]||0; cnt++; }
       d.setDate(d.getDate()-1); g++;
     }
     return cnt?sum/cnt:0;
@@ -2741,12 +2741,12 @@ function spAutoBuild(key){
     const ym=_spYm(r.date), id=leafIdOf(r), v=r.volume||0;
     (leafMonth[id]=leafMonth[id]||{})[ym]=(leafMonth[id][ym]||0)+v;
     allMonth[ym]=(allMonth[ym]||0)+v;
-    const dw=spDow(r.date); if(dw>=1&&dw<=5) wkVol+=v; else if(dw===6) satVol+=v;
+    const dw=spIsNwd(r.date)?0:spDow(r.date); if(dw>=1&&dw<=5) wkVol+=v; else if(dw===6) satVol+=v;
   });
   // Book-level Saturday factor = avg Saturday daily ÷ avg weekday daily over the data span.
   const dmin=DB.real_shipments_meta?.date_min, dmax=DB.real_shipments_meta?.date_max;
   let spanWk=0,spanSat=0;
-  if(dmin&&dmax){ for(let d=new Date(dmin+'T00:00:00'), e=new Date(dmax+'T00:00:00'); d<=e; d.setDate(d.getDate()+1)){ const dw=d.getDay(); if(dw>=1&&dw<=5)spanWk++; else if(dw===6)spanSat++; } }
+  if(dmin&&dmax){ for(let d=new Date(dmin+'T00:00:00'), e=new Date(dmax+'T00:00:00'); d<=e; d.setDate(d.getDate()+1)){ const dw=spIsNwd(_fltD(d))?0:d.getDay(); if(dw>=1&&dw<=5)spanWk++; else if(dw===6)spanSat++; } }
   const satShare=(spanWk&&spanSat&&wkVol>0)?Math.max(0,Math.min(1,(satVol/spanSat)/(wkVol/spanWk))):SP_AUTO.GLOBAL_SAT;
 
   const futureYms=[]; for(let k=0;k<=15;k++) futureYms.push(_spMonthAdd(lastYm,k));
@@ -3067,8 +3067,8 @@ function spBuildRepModel(scope){
     if(r.date&&r.date>=lf._ad){ lf._ad=r.date; lf.rep=(r.sales_manager||'—'); lf.soldTo=spSoldToKey(r); lf.soldToName=spSoldToName(r);
       lf.attrs={rep:lf.rep,origin:(r.origin||'—'),custType:(r.customer_type||'—'),soldTo:lf.soldTo,shipTo,demandPoint:dpEl?dpEl.name:(r.product||'Unknown DP')}; }
   });
-  const wkD=[],satD=[]; { const d=new Date(refDate+'T00:00:00'); let g=0; while((wkD.length<30||satD.length<4)&&g<70){ const dow=d.getDay(),ds=d.toISOString().split('T')[0]; if(dow>=1&&dow<=5&&wkD.length<30) wkD.push(ds); else if(dow===6&&satD.length<4) satD.push(ds); d.setDate(d.getDate()-1); g++; } }
-  const wkAllR=[]; { const d=new Date(refDate+'T00:00:00'); for(let g=0; g<170; g++){ const dow=d.getDay(); if(dow>=1&&dow<=5) wkAllR.push(d.toISOString().split('T')[0]); d.setDate(d.getDate()-1); } wkAllR.reverse(); }
+  const wkD=[],satD=[]; { const d=new Date(refDate+'T00:00:00'); let g=0; while((wkD.length<30||satD.length<4)&&g<70){ const dow=d.getDay(),ds=d.toISOString().split('T')[0]; if(spIsNwd(ds)){} else if(dow>=1&&dow<=5&&wkD.length<30) wkD.push(ds); else if(dow===6&&satD.length<4) satD.push(ds); d.setDate(d.getDate()-1); g++; } }
+  const wkAllR=[]; { const d=new Date(refDate+'T00:00:00'); for(let g=0; g<170; g++){ const dow=d.getDay(), ds=d.toISOString().split('T')[0]; if(dow>=1&&dow<=5&&!spIsNwd(ds)) wkAllR.push(ds); d.setDate(d.getDate()-1); } wkAllR.reverse(); }
   const avgOver=(dm,n)=>{ const m=Math.min(n,wkD.length); if(!m) return 0; let s=0; for(let i=0;i<m;i++) s+=dm[wkD[i]]||0; return s/m; };
   // Same ADAPTIVE default as the main table, so rep-progress totals match it.
   Object.values(leaves).forEach(lf=>{ const dm=lf.dayMap; lf.wk5=avgOver(dm,5); lf.wk10=avgOver(dm,10); lf.wk15=avgOver(dm,15); lf.wk30=avgOver(dm,30);
@@ -3407,13 +3407,14 @@ function spBuildTree(rows, groupBy){
     const d=new Date(refDate+'T00:00:00'); let g=0;
     while((wkD.length<30||satD.length<4)&&g<70){
       const dow=d.getDay(), ds=d.toISOString().split('T')[0];
-      if(dow>=1&&dow<=5&&wkD.length<30) wkD.push(ds);
+      if(spIsNwd(ds)){}   // Roll non-working day: not part of the history average
+      else if(dow>=1&&dow<=5&&wkD.length<30) wkD.push(ds);
       else if(dow===6&&satD.length<4) satD.push(ds);
       d.setDate(d.getDate()-1); g++;
     }
     // Full weekday spine oldest→newest ending at the last real day (for the engine)
     const wkAll=[]; { const d2=new Date(refDate+'T00:00:00');
-      for(let g2=0; g2<170; g2++){ const dow=d2.getDay(); if(dow>=1&&dow<=5) wkAll.push(d2.toISOString().split('T')[0]); d2.setDate(d2.getDate()-1); }
+      for(let g2=0; g2<170; g2++){ const dow=d2.getDay(), ds2=d2.toISOString().split('T')[0]; if(dow>=1&&dow<=5&&!spIsNwd(ds2)) wkAll.push(ds2); d2.setDate(d2.getDate()-1); }
       wkAll.reverse(); }
     SP._wkSpine=wkAll;
     const avgOver=(dm,n)=>{ const m=Math.min(n,wkD.length); if(!m) return 0; let s=0; for(let i=0;i<m;i++) s+=dm[wkD[i]]||0; return s/m; };
