@@ -299,6 +299,14 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
 .sp-upload-btn{padding:4px 12px;background:transparent;color:var(--blue);border:1px solid var(--blue);font-family:var(--mono);font-size:9px;cursor:pointer;transition:all .15s;}
 .sp-upload-btn:hover{background:rgba(var(--blue-rgb),.08);}
 body.sp-hide-chart #sp-chart-card{display:none!important;}
+/* pickup move: Gantt-style bar over the moved days of the origin row */
+#sp-table td.sp-mvcell{position:relative;}
+.sp-mvbar{position:absolute;left:0;right:0;top:50%;height:12px;margin-top:-6px;background:rgba(var(--blue-rgb,77,166,255),.22);border-top:1px solid rgba(var(--blue-rgb,77,166,255),.7);border-bottom:1px solid rgba(var(--blue-rgb,77,166,255),.7);pointer-events:none;z-index:1;}
+.sp-mvbar.s{left:2px;border-left:1px solid rgba(var(--blue-rgb,77,166,255),.7);border-radius:3px 0 0 3px;}
+.sp-mvbar.e{right:2px;border-right:1px solid rgba(var(--blue-rgb,77,166,255),.7);border-radius:0 3px 3px 0;}
+.sp-mvbar.s.e{border-radius:3px;}
+.sp-mvlbl{position:absolute;left:5px;top:50%;transform:translateY(-50%);white-space:nowrap;font-size:7px;font-weight:700;color:var(--blue);pointer-events:none;z-index:2;text-align:left;}
+.sp-mvval{position:relative;z-index:3;}
 .sp-kpi-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;}
 /* Table text-size control — one zoom factor scales the performance table and the
    forecasting-progress grid proportionally (keeps the header/data hierarchy). */
@@ -2003,6 +2011,7 @@ function pushForecastToMain(){
   const sums=new Map(); let skipped=0;
   const dates=[]; for(let d=new Date(lastReal+'T12:00:00'); ; ){ d.setDate(d.getDate()+1); const ds=_fltD(d); if(ds>to) break; dates.push(ds); }
   leaves.forEach(lf=>{
+    if(lf._mvVirtual) return;   // pickup-move destination row: the move goes to Roll as a swap
     const el=lf.dpKey; if(!known.has(el)){ skipped++; return; }
     dates.forEach(ds=>{ const v=spLeafFcDay(lf,ds)||0; if(v>0){ const k=el+'|'+ds; sums.set(k,(sums.get(k)||0)+v); } });
   });
@@ -2192,7 +2201,7 @@ function spRenderChart(){
   // Forecast by date (after the last real day) for the current scope
   const fcByDate={};
   if(scope.leaves && scope.leaves.length){
-    labels.forEach(ds=>{ if(ds>lastReal){ let v=_spFcAdd(0,scope.leaves,ds); v=spQ25z(v); if(v) fcByDate[ds]=v; } }); // row-level truck-load rounding (matches the table)
+    labels.forEach(ds=>{ if(ds>lastReal){ let v=spFcAddNet(0,scope.leaves,ds); v=spQ25z(v); if(v) fcByDate[ds]=v; } }); // row-level truck-load rounding (matches the table)
   }
 
   const actData=labels.map(d=> d<=lastReal ? Math.round(actByDate[d]||0) : null);
@@ -2329,7 +2338,7 @@ function spActualPeriod(scope, from, to, withForecast){
     const end=new Date(to+'T00:00:00');
     for(; d<=end; d.setDate(d.getDate()+1)){
       const ds=d.toISOString().split('T')[0];
-      tot=_spFcAdd(tot,scope.leaves,ds);
+      tot=spFcAddNet(tot,scope.leaves,ds);
     }
   }
   return Math.round(tot);
@@ -2892,8 +2901,10 @@ function spLastReal(){
 // Build the tree (+ forecast caches) if missing; true if it was rebuilt.
 function spEnsureTree(){
   if(SP._tree) return false;
-  SP._tree=spBuildTree(SP.filteredRows, spGetGroupBy());
+  const pseudo=(typeof pmPseudoRows==='function')?pmPseudoRows():[];
+  SP._tree=spBuildTree(pseudo.length?SP.filteredRows.concat(pseudo):SP.filteredRows, spGetGroupBy());
   spFcRecompute();
+  if(typeof pmMarkTree==='function') pmMarkTree(SP._tree);
   return true;
 }
 
@@ -2904,6 +2915,7 @@ function spFcCloseEdit(){
 }
 function spFcEdit(nodeKey,pid,el){
   const node=SP._tree?.index?.[nodeKey]; if(!node) return;
+  if(node.leaves.length&&node.leaves.every(lf=>lf._mvVirtual)){ statMsg('This row is a pickup move into this origin — change it in ⟳ Pickup Moves','var(--amber)'); return; }
   spFcCloseEdit();
   const cur=spNodeFcRate(node,pid);
   const own=spFcRuleAt(node.path,pid);
@@ -3608,7 +3620,7 @@ function spRenderTable(skipThead=false){
       let t=0; const ds=monthDates[ym]||[];
       for(let i=0;i<ds.length;i++){ const d=ds[i];
         if(d<=lastReal) t+=node.actMap[d]||0;
-        else t=_spFcAdd(t,node.leaves,d);
+        else t=spFcAddNet(t,node.leaves,d);
       }
       return t;
     };
@@ -3616,6 +3628,7 @@ function spRenderTable(skipThead=false){
     const sortLevel=nodes=>{
       if(sortYm) nodes.sort((a,b)=>dir*(nodeMonthTot(a,sortYm)-nodeMonthTot(b,sortYm)));
       else nodes.sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+      if(nodes.some(n=>n._pin)){ const pin=nodes.filter(n=>n._pin), rest=nodes.filter(n=>!n._pin); nodes.splice(0,nodes.length,...pin,...rest); }
       nodes.forEach(n=>{ if(n.childList.length) sortLevel(n.childList); });
     };
     sortLevel(roots);
@@ -3688,15 +3701,31 @@ function spRenderTable(skipThead=false){
     const leaves=node.leaves; const fcCache={};
     const getFc=(ds)=>{
       let v=fcCache[ds]; if(v!==undefined) return v;
-      v=_spFcAdd(0,leaves,ds);
+      v=spFcAddNet(0,leaves,ds);
       v=spQ25z(v); // round the ROW's daily forecast to a truck-load — matches the row's rounded rate
       return fcCache[ds]=v;
     };
     const actMap=node.actMap;
     let cells='';
+    // Pickup move bar: on a row whose every leaf is moved, the moved days read "→ destination".
+    const mvBar=ds=>{
+      if(!node._mvBar||ds<=lastReal) return null;
+      const to=new Set(); let pct=0;
+      node.leaves.forEach(lf=>(lf._mvOut||[]).forEach(x=>{ if(x.dates.has(ds)){ to.add(x.toName); pct=Math.max(pct,x.pct); } }));
+      return to.size?{lbl:'→ '+[...to].join(', ')+(pct<100?' · '+pct+'%':''), pct}:null;
+    };
+    const _dAdd=(ds,n)=>{ const d=new Date(ds+'T12:00:00'); d.setDate(d.getDate()+n); return _fltD(d); };
     const dayTd=ds=>{
       const isToday=ds===today, isAct=ds<=lastReal;
       const val=isAct?(actMap[ds]||0):getFc(ds);
+      const bar=isAct?null:mvBar(ds);
+      if(bar){
+        const prev=_dAdd(ds,-1), next=_dAdd(ds,1);
+        const st=!mvBar(prev)||ds.slice(8)==='01'||prev<=lastReal, en=!mvBar(next)||next.slice(5,7)!==ds.slice(5,7);
+        const lk=spDayLook(ds);
+        const bd=isToday?'border-left:2px solid rgba(var(--red-rgb),.4);'+(lk.edge.startsWith('border-right')?lk.edge:''):(lk.edge||'border-left:1px solid var(--border);');
+        return {val, html:`<td class="cell-fc sp-mvcell${val?'':' cell-z'}${lk.nwd?' sp-nwd':''}" title="${spEsc('Pickup move '+bar.lbl+' — volume shown at the destination')}" style="${lk.tdBg?'background:'+lk.tdBg+';':''}${FUT};${bd}text-align:right;padding:1px 2px;font-size:7px"><div class="sp-mvbar${st?' s':''}${en?' e':''}"></div>${st?`<span class="sp-mvlbl">${spEsc(bar.lbl)}</span>`:''}<span class="sp-mvval">${val?Math.round(val).toLocaleString():''}</span></td>`};
+      }
       const lk=spDayLook(ds);
       const bd=isToday?'border-left:2px solid rgba(var(--red-rgb),.4);'+(lk.edge.startsWith('border-right')?lk.edge:''):(lk.edge||'border-left:1px solid var(--border);');
       const bgc=lk.nwd?lk.tdBg:isAct?'rgba(var(--green-rgb),.04)':lk.tdBg;
@@ -3721,7 +3750,7 @@ function spRenderTable(skipThead=false){
         else { actD.forEach(ds=>{ const c=dayTd(ds); mtd+=c.val; cells+=c.html; }); cells+=sumTd(mtd,true,false,_tc('rgba(0,255,157,.03)')); }
         yearTot+=mtd;
         fcPeriods.forEach((p,i)=>{
-          const rate=spNodeFcRate(node,p.id);
+          const rate=spNodeFcRateNet(node,p.id);
           const own=spFcRuleAt(node.path,p.id);
           cells+=`<td class="cell-fc${rate?'':' cell-z'}" onclick="event.stopPropagation();spFcEdit('${node.key}','${p.id}',this)" title="${p.label} avg t/day — click to apply a rule" style="${i===0?fcBL+';':''}${i===fcPeriods.length-1?fcBR+';':''}cursor:pointer;text-align:right;padding:1px 5px;font-size:7px;color:${FCC};${own?'font-weight:700;background:rgba(var(--fuchsia-rgb),.16)':'background:rgba(var(--fuchsia-rgb),.05)'}"><span style="display:flex;align-items:center;justify-content:space-between;gap:4px">${spFcDot(node,p.id)}<span>${rate?rate.toLocaleString():'—'}${own?'✎':''}</span></span></td>`;
         });
@@ -3767,7 +3796,7 @@ function spRenderTable(skipThead=false){
     const key=node.key, hasKids=node.childList.length>0, col=!!SP.collapsed[key], depth=node.depth;
     const cls=depth===0?'sp-row-l0':depth===1?'sp-row-l1':'sp-row-l2';
     const indent=6+depth*16;
-    const strong=depth<=1;
+    const strong=depth<=1||!!node._pin;
     const toggle=hasKids?`<span class="sp-toggle">${col?'▸':'▾'}</span>`:'';
     const rowAttrs=`onclick="spRowClick('${key}')" style="cursor:pointer"`;
     h+=`<tr class="${cls}" data-sp-key="${key}" data-sp-depth="${depth}" ${rowAttrs}>
@@ -6031,6 +6060,67 @@ function pmMoveStats(m, M){
   const daily=pmMoveDaily(m,M), v=Object.values(daily), tot=v.reduce((a,x)=>a+x,0);
   return {daily, total:tot, days:v.length, avg:v.length?tot/v.length:0};
 }
+// ── Net view of the moves on the Sales page ──
+// SP._mv = { out: leafId → [{m,pct,dates:Set,toName}], inDaily: destLeafId → {date:t}, inMoves: destLeafId → Set(m) }.
+// Destination customers enter the tree as pseudo rows (date 0000-00-00, 0 t) so they group like any row.
+function pmPseudoRows(){
+  const moves=DB.pickup_moves||[]; SP._mv=null; if(!moves.length||!(DB.real_shipments_daily||[]).length) return [];
+  const M=pmFullModel(), out=new Map(), inDaily=new Map(), inMoves=new Map(), rows=[], seen=new Set();
+  moves.forEach(m=>{
+    const dates=pmMoveDates(m), dset=new Set(dates), k=(+m.pct||0)/100, toName=pmDpName(m.to_element_id);
+    if(!dates.length||!(k>0)) return;
+    pmMoveLeaves(M,m).forEach(lf=>{
+      (out.get(lf.id)||out.set(lf.id,[]).get(lf.id)).push({m, pct:+m.pct||0, dates:dset, toName});
+      const vid=m.to_element_id+'|'+lf.shipTo, dm=inDaily.get(vid)||{};
+      dates.forEach(ds=>{ const t=(pmLeafFcDay(M,lf,ds)||0)*k; if(t>0) dm[ds]=(dm[ds]||0)+t; });
+      inDaily.set(vid,dm); (inMoves.get(vid)||inMoves.set(vid,new Set()).get(vid)).add(m);
+      if(seen.has(vid)) return; seen.add(vid);
+      const a=lf.attrs||{};
+      const r={date:'0000-00-00', origin:(toName.split('/')[0]||'—'), product:toName, customer_type:a.custType||'—', ship_to:null,
+        ship_to_name:lf.shipTo, sales_manager:a.rep||'—', volume:0, loads:0, sold_to:m.sold_to, sold_to_name:m.sold_to_name, __pm:true};
+      if(spPassesBaseFilters(r)) rows.push(r);
+    });
+  });
+  SP._mv={out,inDaily,inMoves};
+  return rows;
+}
+function pmMarkTree(tree){
+  const mv=SP._mv; if(!mv||!tree) return;
+  Object.values(tree.leaves||{}).forEach(lf=>{
+    if(mv.out.has(lf.id)) lf._mvOut=mv.out.get(lf.id);
+    if(mv.inDaily.has(lf.id)){ lf._mvIn=true; lf._mvMoves=[...mv.inMoves.get(lf.id)]; if(!lf.histVol) lf._mvVirtual=true; }
+  });
+  const walk=n=>{ n._pin=n.path.some(p=>p.dim==='soldTo'||p.dim==='shipTo')&&n.leaves.some(lf=>lf._mvIn);
+    n._mvBar=n.leaves.length>0&&n.leaves.every(lf=>lf._mvOut); n.childList.forEach(walk); };
+  (tree.roots||[]).forEach(walk);
+}
+// Σ net forecast of leaves on a day: own forecast minus the moved share, plus what was moved in.
+function spFcAddNet(acc, leaves, ds){
+  const mv=SP._mv; if(!mv) return _spFcAdd(acc,leaves,ds);
+  const n=leaves.length; if(!n) return acc;
+  const dw=spDow(ds), off=dw===0||spIsNwd(ds), per=off?null:spPeriodOf(ds);
+  for(let i=0;i<n;i++){ const lf=leaves[i]; let v=off?0:_spLeafFcAt(lf,ds,dw,per);
+    if(lf._mvOut){ let p=0; for(const x of lf._mvOut) if(x.dates.has(ds)) p+=x.pct; if(p) v*=Math.max(0,1-p/100); }
+    if(lf._mvIn) v+=mv.inDaily.get(lf.id)?.[ds]||0;
+    acc+=v; }
+  return acc;
+}
+// Row's weekday rate for a period, net of the moves (moved weekdays averaged over the period's weekdays).
+function spNodeFcRateNet(node,pid){
+  if(!SP._mv) return spNodeFcRate(node,pid);
+  const mvl=node.leaves.filter(lf=>lf._mvOut||lf._mvIn); if(!mvl.length) return spNodeFcRate(node,pid);
+  const lpr=SP._leafPeriodRate||{}; let raw=0;
+  for(let i=0;i<node.leaves.length;i++){ const rr=lpr[node.leaves[i].id]?.[pid]; raw+=rr?rr.wk:(node.leaves[i].wkRate||0); }
+  const per=spFcPeriods().find(p=>p.id===pid); if(!per) return spQ25(raw);
+  let nWk=0, delta=0;
+  for(let d=new Date(per.from+'T12:00:00'); ; d.setDate(d.getDate()+1)){
+    const ds=_fltD(d); if(ds>per.to) break; const dw=d.getDay(); if(dw<1||dw>5||spIsNwd(ds)) continue; nWk++;
+    const pp=spPeriodOf(ds);
+    mvl.forEach(lf=>{ const g=_spLeafFcAt(lf,ds,dw,pp); delta+=spFcAddNet(0,[lf],ds)-g; });
+  }
+  const r=raw+(nWk?delta/nWk:0);
+  return r<0.5?0:spQ25(r);
+}
 function pmDpName(id){ const d=(RC.cat?.dps||[]).find(x=>x.element_id===id); return d?d.name:(DB.elements||[]).find(e=>e.id===id)?.name||id||'—'; }
 function pmCustLabel(m){ return (m.sold_to_name||m.sold_to)+(m.ship_to_name?' / '+m.ship_to_name:''); }
 
@@ -6050,7 +6140,7 @@ function pmRowBtn(node){
   const so=node.path.find(p=>p.dim==='soldTo'); if(!so) return '';
   const st=node.path.find(p=>p.dim==='shipTo');
   const idx=pmLeafIdx(); const hits=new Set();
-  (node.leaves||[]).forEach(lf=>(idx.get(lf.id)||[]).forEach(m=>hits.add(m)));
+  (node.leaves||[]).forEach(lf=>{ (idx.get(lf.id)||[]).forEach(m=>hits.add(m)); (lf._mvMoves||[]).forEach(m=>hits.add(m)); });
   const dpKeys=[...new Set((node.leaves||[]).map(lf=>lf.dpKey))];
   const seed={soldTo:so.value, shipTo:st?st.value:null, from:dpKeys.length===1?dpKeys[0]:null};
   const arg=JSON.stringify(seed).replaceAll('"','&quot;');
