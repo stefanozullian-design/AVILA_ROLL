@@ -2362,6 +2362,8 @@ function spDow(ds){ let v=_dowCache[ds]; if(v===undefined){ v=new Date(ds+'T00:0
 // Sunday with a faint red tint; a non-working day (Roll's global list, from the catalog) is tinted
 // red with its reason as tooltip. Returns {edge, thBg, tdBg, nwd} — today's own edge is added by the caller.
 function spNwdMap(){ const c=RC.cat; if(!c) return null; if(SP._nwdFor!==c){ SP._nwdFor=c; SP._nwdMap=new Map((c.nwd||[]).map(n=>[n.date,n.reason||'Non-working day'])); } return SP._nwdMap; }
+// A Roll non-working day forecasts nothing (like a Sunday) and is left out of period day counts.
+function spIsNwd(ds){ const m=spNwdMap(); return !!(m&&m.size&&m.has(ds)); }
 function spDayLook(ds){
   const dw=spDow(ds), nwd=spNwdMap()?.get(ds)||null;
   const edge=dw===6?'border-left:2px solid rgba(var(--red-rgb),.4);':dw===0?'border-right:2px solid rgba(var(--red-rgb),.4);':'';
@@ -2542,7 +2544,7 @@ function spFcRecompute(){
     const arr=[];
     for(let d=new Date(p.from+'T00:00:00'); d.toISOString().split('T')[0]<=p.to; d.setDate(d.getDate()+1)) arr.push(d.toISOString().split('T')[0]);
     perDates[p.id]=arr;
-    let nWk=0,nSat=0; arr.forEach(ds=>{ const dw=spDow(ds); if(dw>=1&&dw<=5) nWk++; else if(dw===6) nSat++; });
+    let nWk=0,nSat=0; arr.forEach(ds=>{ const dw=spIsNwd(ds)?0:spDow(ds); if(dw>=1&&dw<=5) nWk++; else if(dw===6) nSat++; });
     perCounts[p.id]={nWk,nSat};
   });
   SP._perCounts=perCounts;
@@ -2601,7 +2603,7 @@ function spFcRecompute(){
 // ── Daily forecast value for one leaf (dates after the last real day) ──
 function spLeafFcDay(lf, ds){
   const dw=spDow(ds);
-  if(dw===0) return 0;
+  if(dw===0||spIsNwd(ds)) return 0;
   return _spLeafFcAt(lf, ds, dw, spPeriodOf(ds));
 }
 // The leaf-dependent part of spLeafFcDay, for a day whose weekday (dw, not Sunday) and forecast
@@ -2622,7 +2624,7 @@ function _spLeafFcAt(lf, ds, dw, per){
 function _spFcAdd(acc, leaves, ds){
   const n=leaves.length; if(!n) return acc;
   const dw=spDow(ds);
-  if(dw===0){ for(let i=0;i<n;i++) acc+=0; return acc; }
+  if(dw===0||spIsNwd(ds)){ for(let i=0;i<n;i++) acc+=0; return acc; }
   const per=spPeriodOf(ds);
   for(let i=0;i<n;i++) acc+=_spLeafFcAt(leaves[i],ds,dw,per);
   return acc;
@@ -3057,7 +3059,7 @@ function spBuildRepModel(scope){
   const year=+spLastReal().slice(0,4), lastReal=spLastReal();
   const perCounts={},perDates={},perMonth={};
   periods.forEach(p=>{ const arr=[],mm={}; for(let d=new Date(p.from+'T00:00:00'); d.toISOString().split('T')[0]<=p.to; d.setDate(d.getDate()+1)){ const ds=d.toISOString().split('T')[0]; arr.push(ds); const mo=+ds.slice(5,7), dw=spDow(ds); if(dw!==0){ (mm[mo]=mm[mo]||{nWk:0,nSat:0}); if(dw===6) mm[mo].nSat++; else mm[mo].nWk++; } }
-    perDates[p.id]=arr; perMonth[p.id]=mm; let nWk=0,nSat=0; arr.forEach(ds=>{ const dw=spDow(ds); if(dw>=1&&dw<=5)nWk++; else if(dw===6)nSat++; }); perCounts[p.id]={nWk,nSat}; });
+    perDates[p.id]=arr; perMonth[p.id]=mm; let nWk=0,nSat=0; arr.forEach(ds=>{ const dw=spIsNwd(ds)?0:spDow(ds); if(dw>=1&&dw<=5)nWk++; else if(dw===6)nSat++; }); perCounts[p.id]={nWk,nSat}; });
   spFcLoadRules();
   const rules=(SP.fcRules||[]).slice().sort((a,b)=>a.path.length-b.path.length);
   if(rules.some(r=>r.type==='auto')) spAutoEnsure();
@@ -5928,7 +5930,7 @@ function pmFullModel(){
 }
 // Same day value as spLeafFcDay, read from the full model's rates.
 function pmLeafFcDay(M, lf, ds){
-  const dw=spDow(ds); if(dw===0) return 0;
+  const dw=spDow(ds); if(dw===0||spIsNwd(ds)) return 0;
   const per=M.dayPer[ds]||null;
   if(per){ const rr=M.lpr[lf.id]?.[per];
     if(rr){ if(rr.auto){ const mr=SP._auto?.leafMonthRate?.[lf.id]?.[_spYm(ds)]; if(mr) return dw===6?mr.sat:mr.wk; }
