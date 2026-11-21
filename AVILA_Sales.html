@@ -298,6 +298,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
 .sp-apply:hover{box-shadow:0 0 10px var(--green);}
 .sp-upload-btn{padding:4px 12px;background:transparent;color:var(--blue);border:1px solid var(--blue);font-family:var(--mono);font-size:9px;cursor:pointer;transition:all .15s;}
 .sp-upload-btn:hover{background:rgba(var(--blue-rgb),.08);}
+body.sp-hide-chart #sp-chart-card{display:none!important;}
 .sp-kpi-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;}
 /* Table text-size control — one zoom factor scales the performance table and the
    forecasting-progress grid proportionally (keeps the header/data hierarchy). */
@@ -621,8 +622,8 @@ html[data-theme="daylight"] #logo:not([data-logo]) .logo-dark{display:none}
             <div class="sp-kpi" title="Average of the last 30 working days (weekends and Roll non-working days left out)"><div class="sp-kpi-lbl">30WD Average</div><div class="sp-kpi-val" id="sp-kpi-wd30">—</div><div class="sp-kpi-sub">t/day · last 30 working days</div></div>
           </div>
 
-          <!-- CHART CARD -->
-          <div class="sp-card">
+          <!-- CHART CARD (Chart button in the filter bar hides it, remembered per viewer) -->
+          <div class="sp-card" id="sp-chart-card">
             <div class="sp-card-hdr">
               <div style="display:flex;align-items:center;gap:10px">
                 <span class="sp-card-title">Daily Shipments — Volume (MT)</span>
@@ -1552,6 +1553,16 @@ function _spRenderPickDock(w,opts,cur,allLbl,fn,title){
   const q=pan.querySelector('input[type=search]'); if(q&&q.value) _spDockSearch(q);
 }
 function _spDockSearch(inp){ const q=inp.value.trim().toUpperCase(); inp.parentElement.querySelectorAll('.sup-cb').forEach(b=>{ b.style.display=!q||b.classList.contains('all')||b.textContent.toUpperCase().includes(q)?'':'none'; }); }
+// Daily-shipments chart shown / hidden — like Roll's Inv. bars button (remembered per viewer).
+const SP_CHART_HIDE_KEY='avila_sales_chart_hidden';
+function spChartHidden(){ try{ return localStorage.getItem(SP_CHART_HIDE_KEY)==='1'; }catch(e){ return false; } }
+function spToggleChart(){ const h=!spChartHidden(); try{ localStorage.setItem(SP_CHART_HIDE_KEY,h?'1':'0'); }catch(e){} spSyncChartBtn(); if(!h) spRenderChart(); }
+function spSyncChartBtn(){
+  const h=spChartHidden(); document.body.classList.toggle('sp-hide-chart',h);
+  const b=document.getElementById('sp-chart-hide-btn'); if(!b) return;
+  const v=b.querySelector('.v'); if(v) v.textContent=h?'Hidden':'Shown'; b.classList.toggle('set',h);
+  b.title=h?'The daily shipments chart is hidden. Click to show it.':'Click to hide the daily shipments chart and give the table more room.';
+}
 function spRenderTypeDock(){
   const pan=document.getElementById('flt-sp-pan-type'); if(!pan) return;
   const cur=SP.tab==='INT'?'INT':'EXT';
@@ -1824,7 +1835,9 @@ function fltMount(p){
   host.innerHTML=dock('tf','Time frame','min-width:0')+`<div class="tb-div"></div>`+
     dock('sub','Sub-region')+dock('fac','Facility')+dock('prod','Product','min-width:540px')+
     (p==='sp'?`<div class="tb-div"></div>`+dock('type','Type')+dock('rep','Rep')+dock('cust','Customer','min-width:340px'):'')+
-    `<button type="button" class="tb-btn sec" style="font-size:9px;padding:3px 10px" onclick="fltClearAll('${p}')">✕ Clear all</button>`;
+    `<button type="button" class="tb-btn sec" style="font-size:9px;padding:3px 10px" onclick="fltClearAll('${p}')">✕ Clear all</button>`+
+    (p==='sp'?`<div class="tb-div"></div><button type="button" class="sup-drop-btn" id="sp-chart-hide-btn" onclick="spToggleChart()"><span class="k">Chart</span><span class="v">Shown</span></button>`:'');
+  if(p==='sp') setTimeout(spSyncChartBtn,0);
 }
 function fltRender(p){ fltMount(p); fltNormalize(); _fltRenderTfPanel(p); _fltRenderSubPanel(p); _fltRenderFacPanel(p); _fltRenderProdPanel(p); _fltRenderSummary(p); }
 function fltPill(label,on,onclick,opt){
