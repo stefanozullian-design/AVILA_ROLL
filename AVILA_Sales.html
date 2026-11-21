@@ -574,14 +574,12 @@ html[data-theme="daylight"] #logo:not([data-logo]) .logo-dark{display:none}
           <input type="date" id="sp-date-from" style="display:none">
           <input type="date" id="sp-date-to" style="display:none">
           <div id="sp-origin-chips" style="display:none"></div>
-          <div style="width:1px;height:20px;background:var(--border2)"></div>
-          <span style="display:inline-flex;align-items:center;gap:8px"><div class="sp-filter-label">Rep</div>
+          <span style="display:none"><div class="sp-filter-label">Rep</div>
           <select class="sp-fi" id="sp-rep-sel" style="width:170px;height:26px"
             onchange="spDispatch({rep:this.value})">
             <option value="ALL">All Reps</option>
           </select></span>
-          <div style="width:1px;height:20px;background:var(--border2)"></div>
-          <span style="display:inline-flex;align-items:center;gap:8px"><div class="sp-filter-label">Customer</div>
+          <span style="display:none"><div class="sp-filter-label">Customer</div>
           <select class="sp-fi" id="sp-cust-sel" style="width:200px;height:26px"
             onchange="spDispatch({customer:decodeURIComponent(this.value)})">
             <option value="ALL">All Customers</option>
@@ -1533,7 +1531,27 @@ function spRenderOriginChips(){
 }
 
 // ── REP DROPDOWN ──────────────────────────────────────
+// Rep / Customer docks — same chip + pill panel as Roll's filters; one pick at a time.
+function spPickRep(i){ const v=SP._repOptions[i]; if(v==null) return; fltCloseDock(); spDispatch({rep:v}); }
+function spPickCust(i){ const v=SP._custOptions[i]; if(v==null) return; fltCloseDock(); spDispatch({customer:v}); }
+function _spDockBtn(w,txt,on){ const b=document.getElementById('flt-sp-btn-'+w); if(!b) return; b.classList.toggle('set',!!on); const v=b.querySelector('.v'); if(v) v.textContent=txt; }
+function _spRenderPickDock(w,opts,cur,allLbl,fn,title){
+  const pan=document.getElementById('flt-sp-pan-'+w); if(!pan) return;
+  const n=opts.filter(o=>o!=='ALL').length;
+  _spDockBtn(w, cur&&cur!=='ALL'?cur:'All '+n, cur&&cur!=='ALL');
+  let list=pan.querySelector('.sup-chips');
+  if(!list){
+    pan.innerHTML=`<div class="sup-pan-hd"><span>${title}</span></div>`+
+      (w==='cust'?`<input type="search" placeholder="Search…" oninput="_spDockSearch(this)" style="width:100%;box-sizing:border-box;margin-bottom:8px;background:var(--bg3,var(--bg2));color:var(--text);border:1px solid var(--border2);border-radius:3px;padding:4px 6px;font-family:var(--mono);font-size:9px">`:'')+
+      `<div class="sup-grp"><div class="sup-chips" style="max-height:340px;overflow:auto"></div></div>`;
+    list=pan.querySelector('.sup-chips');
+  }
+  list.innerHTML=opts.map((o,i)=>fltPill(o==='ALL'?allLbl:o,(cur||'ALL')===o,`${fn}(${i})`,o==='ALL'?{all:true}:{})).join('');
+  const q=pan.querySelector('input[type=search]'); if(q&&q.value) _spDockSearch(q);
+}
+function _spDockSearch(inp){ const q=inp.value.trim().toUpperCase(); inp.parentElement.querySelectorAll('.sup-cb').forEach(b=>{ b.style.display=!q||b.classList.contains('all')||b.textContent.toUpperCase().includes(q)?'':'none'; }); }
 function spRenderRepDropdown(){
+  _spRenderPickDock('rep',SP._repOptions||['ALL'],SP.f.rep,'All reps','spPickRep','Sales rep · narrows the Customer list');
   const sel = document.getElementById('sp-rep-sel'); if(!sel) return;
   sel.innerHTML = SP._repOptions.map(r=>{
     const disp = r==='ALL'?'All Reps':r;
@@ -1543,6 +1561,7 @@ function spRenderRepDropdown(){
 
 // ── CUSTOMER DROPDOWN ─────────────────────────────────
 function spRenderCustDropdown(){
+  _spRenderPickDock('cust',SP._custOptions||['ALL'],SP.f.customer,'All customers','spPickCust','Customer · one at a time');
   const sel = document.getElementById('sp-cust-sel'); if(!sel) return;
   sel.innerHTML = SP._custOptions.map(c=>{
     const disp = c==='ALL'?'All Customers':c;
@@ -1792,6 +1811,7 @@ function fltMount(p){
     `<div class="sup-panel" id="flt-${p}-pan-${w}"${panSty?` style="${panSty}"`:''} onclick="event.stopPropagation()"></div></div>`;
   host.innerHTML=dock('tf','Time frame','min-width:0')+`<div class="tb-div"></div>`+
     dock('sub','Sub-region')+dock('fac','Facility')+dock('prod','Product','min-width:540px')+
+    (p==='sp'?`<div class="tb-div"></div>`+dock('rep','Rep')+dock('cust','Customer','min-width:340px'):'')+
     `<button type="button" class="tb-btn sec" style="font-size:9px;padding:3px 10px" onclick="fltClearAll('${p}')">✕ Clear all</button>`;
 }
 function fltRender(p){ fltMount(p); fltNormalize(); _fltRenderTfPanel(p); _fltRenderSubPanel(p); _fltRenderFacPanel(p); _fltRenderProdPanel(p); _fltRenderSummary(p); }
