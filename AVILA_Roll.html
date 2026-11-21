@@ -9410,7 +9410,15 @@ function renderDemandView(){
     const rec=demandMap[`${elId}|${ds}`];
     return rec?.source||'forecast';
   };
-  const grpTotal=(els,ds)=>els.reduce((s,el)=>s+getVal(el.id,ds),0);
+  // Demand swaps (manual + Sales pickup moves): rows and totals show the NET demand of a point —
+  // its forecast minus what is moved out, plus what is swapped in. Only points named by a swap differ.
+  const _swIds=new Set(); (DB.demand_substitutions||[]).forEach(s=>{ _swIds.add(s.from_element_id); _swIds.add(s.to_element_id); });
+  const swOut=(elId,ds)=>{ const t=getVal(elId,ds); const sw=_resolveDemandSwap(elId,t,ds); return sw?Math.min(sw.qty,t):0; };
+  const swIn=(elId,ds)=>_resolveDemandSwapIn(elId,ds,id=>getVal(id,ds));
+  const _netMemo=new Map();
+  const netVal=(elId,ds)=>{ if(!_swIds.has(elId)) return getVal(elId,ds); const k=elId+'|'+ds; let v=_netMemo.get(k);
+    if(v===undefined){ v=getVal(elId,ds)-swOut(elId,ds)+swIn(elId,ds); _netMemo.set(k,v); } return v; };
+  const grpTotal=(els,ds)=>els.reduce((s,el)=>s+netVal(el.id,ds),0);
   const grpMonTotal=(els,mon)=>mon.dates.reduce((s,ds)=>s+grpTotal(els,ds),0);
 
   // Build org hierarchy relevant to the current canvas elements
@@ -9574,17 +9582,19 @@ function renderDemandView(){
             </td>`;
           months.forEach(mon=>{
             const isCol=collapsed.has(mon.ym);
-            const monTotal=mon.dates.reduce((s,ds)=>s+getVal(el.id,ds),0);
+            const monTotal=mon.dates.reduce((s,ds)=>s+netVal(el.id,ds),0);
             h+=`<td style="background:rgba(76,175,80,.08);border-left:2px solid rgba(76,175,80,.25);font-size:9px;color:var(--green);text-align:right;padding:4px 6px;border-bottom:1px solid var(--border);font-weight:600">${monTotal>0?Math.round(monTotal).toLocaleString():''}</td>`;
             if(!isCol) mon.dates.forEach(ds=>{
-              const v=getVal(el.id,ds);
+              const v=getVal(el.id,ds), nv=netVal(el.id,ds);
               const src=getSource(el.id,ds);
               const isNwd=nwdSet.has(ds);
               const isActual=src==='actual';
               const cellBg=isNwd?'rgba(var(--red-rgb),.08)':isActual?'rgba(var(--green-rgb),.06)':'transparent';
               const cellColor=isNwd?'rgba(var(--red-rgb),.4)':isActual?'var(--real)':'var(--simulated)';
               h+=`<td class="dem-day-${mon.ym}" ondblclick="openDemandBuilder('${el.id}','${ds}')" title="Double-click to open the Forecast Builder for ${el.name.replace(/"/g,'&quot;')} starting ${ds}" style="cursor:cell;padding:1px 2px;border-bottom:1px solid var(--border);border-right:1px solid rgba(var(--hi-rgb),.03);${tdSty(ds)}">
-                ${isActual
+                ${(!isActual&&Math.abs(nv-v)>0.05)
+                  ? `<div style="width:50px;font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;color:var(--simulated);border-bottom:1px dotted var(--cyan);cursor:help" title="Net after demand swaps: forecast ${Math.round(v*10)/10} − moved out ${Math.round(swOut(el.id,ds)*10)/10} + swapped in ${Math.round(swIn(el.id,ds)*10)/10} = ${Math.round(nv*10)/10} t. The forecast itself stays editable in the Forecast Builder (double-click).">${nv?Math.round(nv*10)/10:''}</div>`
+                  : isActual
                   ? `<div style="width:50px;font-family:var(--mono);font-size:9px;text-align:right;padding:3px 4px;color:${cellColor};background:${cellBg}" title="${v?'Actual shipment data':'No shipments in the imported file — forecast overwritten with 0'} — double-click for Forecast Builder">${Math.round(v*10)/10}</div>`
                   : `<input class="dem-cell" data-el="${el.id}" data-date="${ds}"${isNwd?' data-nwd="1"':''} value="${v||''}" onchange="saveDemandCell(this)"
                       ${isNwd?'title="Non-working day — 0 by default; type a value to force a manual override"':''}
@@ -9599,8 +9609,8 @@ function renderDemandView(){
           //    minus what's moved to the destination point. Destination side: own
           //    demand plus what's swapped in from the source point(s). ──
           (()=>{
-            const outFn=ds=>{ const t=getVal(el.id,ds); const sw=_resolveDemandSwap(el.id,t,ds); return sw?Math.min(sw.qty,t):0; };
-            const inFn=ds=>_resolveDemandSwapIn(el.id,ds,(id)=>getVal(id,ds));
+            const outFn=ds=>swOut(el.id,ds);
+            const inFn=ds=>swIn(el.id,ds);
             const hasOut=allDates.some(ds=>outFn(ds)>0);
             const hasIn=allDates.some(ds=>inFn(ds)>0);
             if(!hasOut&&!hasIn) return;
@@ -9621,7 +9631,6 @@ function renderDemandView(){
             h+=childRow('↳ '+myName+' · own','var(--green)','rgba(76,175,80,.03)',ds=>getVal(el.id,ds)-outFn(ds));
             if(hasOut) h+=childRow('↳ ⇄ moved to '+(outDest||'destination'),'var(--amber)','rgba(var(--amber-rgb),.05)',outFn);
             if(hasIn)  h+=childRow('↳ ⇄ swapped in ← '+(inSrc||'source'),'var(--cyan)','rgba(var(--cyan-rgb),.06)',inFn);
-            h+=childRow('↳ = demand here (own ± swap)','var(--total)','rgba(var(--hi-rgb),.04)',ds=>getVal(el.id,ds)-outFn(ds)+inFn(ds));
           })();
         });
       }
