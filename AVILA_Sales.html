@@ -298,7 +298,7 @@ select.sp-fi option{background:var(--surface2);color:var(--text);}
 .sp-apply:hover{box-shadow:0 0 10px var(--green);}
 .sp-upload-btn{padding:4px 12px;background:transparent;color:var(--blue);border:1px solid var(--blue);font-family:var(--mono);font-size:9px;cursor:pointer;transition:all .15s;}
 .sp-upload-btn:hover{background:rgba(var(--blue-rgb),.08);}
-.sp-kpi-strip{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;}
+.sp-kpi-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;}
 /* Table text-size control — one zoom factor scales the performance table and the
    forecasting-progress grid proportionally (keeps the header/data hierarchy). */
 .sp-tbl{zoom:var(--tbl-zoom,1);}
@@ -550,20 +550,18 @@ html[data-theme="daylight"] #logo:not([data-logo]) .logo-dark{display:none}
     <div id="salesperf-view" class="view-panel" style="display:block">
       <div class="sp-inner">
         <div class="sp-page-title">
-          Sales Forecast &amp; Performance Analysis
-          <span id="sp-meta-lbl">No actuals loaded</span>
-        </div>
-
-        <!-- TOP TABS: External Sales · Internal Sales · Rep Forecasting Progress -->
-        <div id="sp-tabs" style="display:flex;gap:2px;border-bottom:1px solid var(--border2);margin-bottom:10px;align-items:flex-end">
-          <div class="sp-tab active" id="sp-tab-EXT" onclick="spSetTab('EXT')">External Sales</div>
-          <div class="sp-tab"        id="sp-tab-INT" onclick="spSetTab('INT')">Internal Sales</div>
-          <div class="sp-tab"        id="sp-tab-REP" onclick="spSetTab('REP')">Forecasting Progress</div>
-          <div class="tblfs-ctl" style="margin-left:auto;margin-bottom:5px" title="Table text size — scales the data grids">
+          <span style="display:flex;align-items:center;gap:14px;font-size:11px;letter-spacing:3px;color:var(--text)">Sales Forecast &amp; Performance Analysis
+            <button type="button" class="tb-btn sec" id="sp-rep-toggle" onclick="spToggleProgress()" style="font-size:9px;padding:3px 10px;letter-spacing:1px" title="Rep forecasting progress">◧ Forecasting Progress</button></span>
+          <span style="display:flex;align-items:center;gap:14px"><span id="sp-meta-lbl">No actuals loaded</span>
+          <span class="tblfs-ctl" title="Table text size — scales the data grids">
             <span class="tblfs-btn" onclick="_setTblZoom(-1)">A−</span>
             <span class="tblfs-val" id="tblfs-val" onclick="_setTblZoom(0)" title="Click to reset to 100%">100%</span>
             <span class="tblfs-btn" onclick="_setTblZoom(1)">A+</span>
-          </div>
+          </span></span>
+        </div>
+        <!-- External / Internal is the Type filter chip; the old tabs stay hidden (other code toggles them) -->
+        <div id="sp-tabs" style="display:none">
+          <div class="sp-tab active" id="sp-tab-EXT"></div><div class="sp-tab" id="sp-tab-INT"></div><div class="sp-tab" id="sp-tab-REP"></div>
         </div>
 
         <!-- FILTER BAR — Cascading: Origin → Rep → Customer -->
@@ -612,11 +610,15 @@ html[data-theme="daylight"] #logo:not([data-logo]) .logo-dark{display:none}
 
           <!-- KPI STRIP -->
           <div class="sp-kpi-strip">
-            <div class="sp-kpi"><div class="sp-kpi-lbl">Avg Daily Volume</div><div class="sp-kpi-val sp-cell-g" id="sp-kpi-avg">—</div><div class="sp-kpi-sub">selected scope</div></div>
+            <div class="sp-kpi"><div class="sp-kpi-lbl">Avg Daily Volume</div><div class="sp-kpi-val sp-cell-g" id="sp-kpi-avg">—</div><div class="sp-kpi-sub" id="sp-kpi-scope">selected scope</div></div>
             <div class="sp-kpi"><div class="sp-kpi-lbl">Peak Day</div><div class="sp-kpi-val sp-cell-a" id="sp-kpi-peak">—</div><div class="sp-kpi-sub" id="sp-kpi-peak-dt">—</div></div>
             <div class="sp-kpi"><div class="sp-kpi-lbl">Total Volume</div><div class="sp-kpi-val" id="sp-kpi-total">—</div><div class="sp-kpi-sub" id="sp-kpi-period">—</div></div>
             <div class="sp-kpi"><div class="sp-kpi-lbl">Active Customers</div><div class="sp-kpi-val" id="sp-kpi-custs">—</div><div class="sp-kpi-sub">in scope</div></div>
             <div class="sp-kpi"><div class="sp-kpi-lbl">Open Commitments</div><div class="sp-kpi-val sp-cell-a" id="sp-kpi-commits">—</div><div class="sp-kpi-sub">pending approval</div></div>
+            <div class="sp-kpi" title="Average of the last 5 working days with data (weekends and Roll non-working days left out)"><div class="sp-kpi-lbl">5WD Average</div><div class="sp-kpi-val" id="sp-kpi-wd5">—</div><div class="sp-kpi-sub">t/day · last 5 working days</div></div>
+            <div class="sp-kpi" title="Average of the last 10 working days (weekends and Roll non-working days left out)"><div class="sp-kpi-lbl">10WD Average</div><div class="sp-kpi-val" id="sp-kpi-wd10">—</div><div class="sp-kpi-sub">t/day · last 10 working days</div></div>
+            <div class="sp-kpi" title="Average of the last 15 working days (weekends and Roll non-working days left out)"><div class="sp-kpi-lbl">15WD Average</div><div class="sp-kpi-val" id="sp-kpi-wd15">—</div><div class="sp-kpi-sub">t/day · last 15 working days</div></div>
+            <div class="sp-kpi" title="Average of the last 30 working days (weekends and Roll non-working days left out)"><div class="sp-kpi-lbl">30WD Average</div><div class="sp-kpi-val" id="sp-kpi-wd30">—</div><div class="sp-kpi-sub">t/day · last 30 working days</div></div>
           </div>
 
           <!-- CHART CARD -->
@@ -1550,7 +1552,17 @@ function _spRenderPickDock(w,opts,cur,allLbl,fn,title){
   const q=pan.querySelector('input[type=search]'); if(q&&q.value) _spDockSearch(q);
 }
 function _spDockSearch(inp){ const q=inp.value.trim().toUpperCase(); inp.parentElement.querySelectorAll('.sup-cb').forEach(b=>{ b.style.display=!q||b.classList.contains('all')||b.textContent.toUpperCase().includes(q)?'':'none'; }); }
+function spRenderTypeDock(){
+  const pan=document.getElementById('flt-sp-pan-type'); if(!pan) return;
+  const cur=SP.tab==='INT'?'INT':'EXT';
+  _spDockBtn('type', cur==='INT'?'Internal':'External', cur==='INT');
+  pan.innerHTML=`<div class="sup-pan-hd"><span>Sales type · one at a time</span></div><div class="sup-grp"><div class="sup-chips">`+
+    fltPill('External',cur==='EXT',`fltCloseDock();spSetTab('EXT')`)+fltPill('Internal',cur==='INT',`fltCloseDock();spSetTab('INT')`)+`</div></div>`;
+}
+// Forecasting Progress ↔ back to the sales view of the last type
+function spToggleProgress(){ spSetTab(SP.tab==='REP'?(SP.f.custType==='INT'?'INT':'EXT'):'REP'); }
 function spRenderRepDropdown(){
+  spRenderTypeDock();
   _spRenderPickDock('rep',SP._repOptions||['ALL'],SP.f.rep,'All reps','spPickRep','Sales rep · narrows the Customer list');
   const sel = document.getElementById('sp-rep-sel'); if(!sel) return;
   sel.innerHTML = SP._repOptions.map(r=>{
@@ -1811,7 +1823,7 @@ function fltMount(p){
     `<div class="sup-panel" id="flt-${p}-pan-${w}"${panSty?` style="${panSty}"`:''} onclick="event.stopPropagation()"></div></div>`;
   host.innerHTML=dock('tf','Time frame','min-width:0')+`<div class="tb-div"></div>`+
     dock('sub','Sub-region')+dock('fac','Facility')+dock('prod','Product','min-width:540px')+
-    (p==='sp'?`<div class="tb-div"></div>`+dock('rep','Rep')+dock('cust','Customer','min-width:340px'):'')+
+    (p==='sp'?`<div class="tb-div"></div>`+dock('type','Type')+dock('rep','Rep')+dock('cust','Customer','min-width:340px'):'')+
     `<button type="button" class="tb-btn sec" style="font-size:9px;padding:3px 10px" onclick="fltClearAll('${p}')">✕ Clear all</button>`;
 }
 function fltRender(p){ fltMount(p); fltNormalize(); _fltRenderTfPanel(p); _fltRenderSubPanel(p); _fltRenderFacPanel(p); _fltRenderProdPanel(p); _fltRenderSummary(p); }
@@ -2049,7 +2061,11 @@ function spSetRange(r, el){
 // KPIs
 // ══════════════════════════════════════════════════════
 function spRenderKPIs(){
-  const rows = SP.scopedRows;
+  // The clicked table row narrows the cards exactly like it narrows the chart.
+  const cs=SP.chartScope, pred=cs?cs.pred:null;
+  const rows = pred ? SP.scopedRows.filter(r=>pred(r)) : SP.scopedRows;
+  const sc=document.getElementById('sp-kpi-scope'); if(sc){ sc.textContent=cs&&cs.label?cs.label:'selected scope'; sc.title=sc.textContent; }
+  spRenderWdKPIs(pred);
   if(!rows.length){
     ['sp-kpi-avg','sp-kpi-peak','sp-kpi-total','sp-kpi-custs','sp-kpi-commits'].forEach(id=>{
       const el=document.getElementById(id); if(el) el.textContent='—';
@@ -2074,6 +2090,26 @@ function spRenderKPIs(){
   document.getElementById('sp-kpi-period').textContent = `${dates.length} days`;
   document.getElementById('sp-kpi-custs').textContent = uniqueCusts;
   document.getElementById('sp-kpi-commits').textContent = pendingCommits;
+}
+// Last 5 / 10 / 15 / 30 working-day averages (Mon–Fri, Roll non-working days left out) of the
+// page filters + the clicked row, ending at the last day with data — same days as the chart lines.
+function spRenderWdKPIs(pred){
+  const today=new Date().toISOString().split('T')[0], meta=DB.real_shipments_meta||{};
+  const ref=meta.date_max&&meta.date_max<today?meta.date_max:today;
+  const days=[]; { const d=new Date(ref+'T12:00:00'); for(let g=0; days.length<30&&g<90; g++){ const ds=_fltD(d), dw=d.getDay(); if(dw>=1&&dw<=5&&!spIsNwd(ds)) days.push(ds); d.setDate(d.getDate()-1); } }
+  const cut=days[days.length-1]||ref, byDay={};
+  (DB.real_shipments_daily||[]).forEach(r=>{
+    if(!r.date||r.date<cut||r.date>ref) return;
+    if(!spPassesBaseFilters(r)||(pred&&!pred(r))) return;
+    byDay[r.date]=(byDay[r.date]||0)+(r.volume||0);
+  });
+  [5,10,15,30].forEach(n=>{
+    const el=document.getElementById('sp-kpi-wd'+n); if(!el) return;
+    const ds=days.slice(0,n); if(!ds.length){ el.textContent='—'; return; }
+    const avg=ds.reduce((a,d)=>a+(byDay[d]||0),0)/ds.length;
+    el.textContent=Math.round(avg).toLocaleString()+' t';
+    el.parentElement.title=`Last ${ds.length} working days: ${ds[ds.length-1]} → ${ds[0]} (weekends and Roll non-working days left out)`;
+  });
 }
 function spFmtT(v){ return v>=1000000?(v/1000000).toFixed(2)+'M t':v>=1000?Math.round(v/100)/10+'k t':v+' t'; }
 
@@ -2255,7 +2291,7 @@ function spCurrentScope(){
   spEnsureTree();
   return { label:null, pred:()=>true, leaves:Object.values(SP._tree.leaves||{}) };
 }
-function spClearChartScope(){ SP.chartScope=null; spRenderChart(); spRenderSidePanels(); }
+function spClearChartScope(){ SP.chartScope=null; spRenderChart(); spRenderKPIs(); spRenderSidePanels(); }
 
 // ── Budget interface (no-op until a Budget file is loaded) ──
 // Intended shape: monthly budget per demand point, spread evenly across the month
@@ -3004,6 +3040,8 @@ function spFcInfo(){
 function spSetTab(tab){
   SP.tab=tab;
   ['EXT','INT','REP'].forEach(t=>{ const el=document.getElementById('sp-tab-'+t); if(el) el.classList.toggle('active', t===tab); });
+  const pt=document.getElementById('sp-rep-toggle'); if(pt){ pt.textContent=tab==='REP'?'← Back to sales':'◧ Forecasting Progress'; pt.classList.toggle('amber',tab==='REP'); }
+  spRenderTypeDock();
   const content=document.getElementById('sp-content');
   const repv=document.getElementById('sp-rep-view');
   const fbar=document.querySelector('.sp-filter-bar');
@@ -4386,6 +4424,7 @@ function spRowClick(key){
   if(node){ SP.chartScope={ label:node.name, pred:spScopeMatch(node.path), leaves:node.leaves }; }
   spRenderTable(true);
   spRenderChart();
+  spRenderKPIs();
   spRenderSidePanels();
 }
 
