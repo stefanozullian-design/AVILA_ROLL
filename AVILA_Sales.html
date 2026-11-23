@@ -3337,15 +3337,19 @@ function spToggleMonth(ym){
   spRenderTable();
 }
 
-// Sort table rows by a month's Σ total. Cycles desc → asc → off (back to name order).
+// Sort table rows by any header: 'n' name, 'd:<date>' a day, 'p:<period id>' a forecast rate,
+// 'm:<ym>' a month Σ, 'y:<yyyy>' a year Σ. Cycles desc → asc → off (back to name order).
 // Uses the cached tree (no re-collapse), and rebuilds the header so the arrow updates.
-function spSortByMonth(ym){
-  if(SP.sortMonth===ym){
+function spSortBy(key){
+  if(SP.sortKey===key){
     if(SP.sortDir==='desc') SP.sortDir='asc';
-    else { SP.sortMonth=null; SP.sortDir='desc'; }
-  } else { SP.sortMonth=ym; SP.sortDir='desc'; }
+    else { SP.sortKey=null; SP.sortDir='desc'; }
+  } else { SP.sortKey=key; SP.sortDir='desc'; }
   spRenderTable(false);
 }
+function spSortByMonth(ym){ spSortBy('m:'+ym); }
+// header helpers: arrow + active highlight
+function spSortArrow(key){ return SP.sortKey===key?(SP.sortDir==='asc'?' ▲':' ▼'):''; }
 
 // ── Build date spine from current filter range ────────
 function spBuildDateSpine(){
@@ -3622,18 +3626,23 @@ function spRenderTable(skipThead=false){
   // Σ total = actuals (past dates) + forecast (future dates) within that month.
   {
     const monthDates={}; months.forEach(mo=>{ monthDates[mo.ym]=mo.dates; });
-    const sortYm=(SP.sortMonth && monthDates[SP.sortMonth])?SP.sortMonth:null;
+    const sk=SP.sortKey||'', st=sk.slice(0,1), sv=sk.slice(2);
+    const dayVal=(node,d)=>d<=lastReal?(node.actMap[d]||0):spFcAddNet(0,node.leaves,d);
     const nodeMonthTot=(node,ym)=>{
       let t=0; const ds=monthDates[ym]||[];
-      for(let i=0;i<ds.length;i++){ const d=ds[i];
-        if(d<=lastReal) t+=node.actMap[d]||0;
-        else t=spFcAddNet(t,node.leaves,d);
-      }
+      for(let i=0;i<ds.length;i++) t+=dayVal(node,ds[i]);
       return t;
     };
+    const yms=st==='y'?months.filter(mo=>mo.ym.slice(0,4)===sv).map(mo=>mo.ym):[];
+    const metric= st==='m'&&monthDates[sv] ? n=>nodeMonthTot(n,sv)
+      : st==='y'&&yms.length ? n=>yms.reduce((a,ym)=>a+nodeMonthTot(n,ym),0)
+      : st==='d'&&sv ? n=>dayVal(n,sv)
+      : st==='p'&&sv ? n=>spNodeFcRateNet(n,sv)||0
+      : null;
     const dir=SP.sortDir==='asc'?1:-1;
     const sortLevel=nodes=>{
-      if(sortYm) nodes.sort((a,b)=>dir*(nodeMonthTot(a,sortYm)-nodeMonthTot(b,sortYm)));
+      if(metric){ const mv=new Map(nodes.map(n=>[n,metric(n)])); nodes.sort((a,b)=>dir*(mv.get(a)-mv.get(b))||(a.name||'').localeCompare(b.name||'')); }
+      else if(st==='n') nodes.sort((a,b)=>dir*(a.name||'').localeCompare(b.name||''));
       else nodes.sort((a,b)=>(a.name||'').localeCompare(b.name||''));
       if(nodes.some(n=>n._pin)){ const pin=nodes.filter(n=>n._pin), rest=nodes.filter(n=>!n._pin); nodes.splice(0,nodes.length,...pin,...rest); }
       nodes.forEach(n=>{ if(n.childList.length) sortLevel(n.childList); });
@@ -3648,14 +3657,15 @@ function spRenderTable(skipThead=false){
     const yrTh=(yr)=>{
       const color=yr<lastYear?'var(--green)':yr>lastYear?FCC:'var(--amber)';
       const bg=yr<lastYear?_tc('rgba(0,255,157,.10)'):yr>lastYear?_tc('rgba(255,77,210,.10)'):_tc('rgba(255,184,48,.10)');
-      return `<th rowspan="2" title="Full-year ${yr} total (actuals + forecast)" style="background:${bg};color:${color};font-size:7px;font-weight:700;text-align:center;letter-spacing:.5px;border-left:3px double var(--border2);padding:3px 5px;white-space:nowrap">Σ ${yr}</th>`;
+      const on=SP.sortKey==='y:'+yr;
+      return `<th rowspan="2" onclick="spSortBy('y:${yr}')" title="Full-year ${yr} total (actuals + forecast) — click to sort rows" style="background:${on?'rgba(var(--blue-rgb),.14)':bg};color:${on?'var(--blue)':color};font-size:7px;font-weight:700;text-align:center;letter-spacing:.5px;border-left:3px double var(--border2);padding:3px 5px;white-space:nowrap;cursor:pointer">Σ ${yr}${spSortArrow('y:'+yr)}</th>`;
     };
     months.forEach((mo,mi)=>{
       const col=SP.collapsedMonths.has(mo.ym);
       const bg=mo.isPast?_tc('rgba(0,255,157,.06)'):mo.isCurrent?_tc('rgba(77,166,255,.06)'):_tc('rgba(255,184,48,.04)');
       const tc=mo.isPast?'var(--green)':mo.isCurrent?'var(--blue)':'var(--amber)';
-      const sortArrow=SP.sortMonth===mo.ym?(SP.sortDir==='asc'?' ▲':' ▼'):'';
-      const sortActive=SP.sortMonth===mo.ym;
+      const sortArrow=spSortArrow('m:'+mo.ym);
+      const sortActive=SP.sortKey==='m:'+mo.ym;
       const sumTh=(lbl,heavy)=>`<th onclick="spSortByMonth('${mo.ym}')" title="Sort rows by ${mo.label} total" style="background:${sortActive?'rgba(var(--blue-rgb),.14)':bg};color:${sortActive?'var(--blue)':'inherit'};font-size:6px;text-align:center;${heavy?'font-weight:700;':''}border-left:${heavy?'2px solid':'1px solid'} var(--border2);padding:2px 4px;cursor:pointer;white-space:nowrap">${lbl}${sortArrow}</th>`;
       const dayTh=ds=>{
         const isToday=ds===today;
@@ -3663,7 +3673,8 @@ function spRenderTable(skipThead=false){
         const bg2=lk.thBg||(ds<=lastReal?_tc('rgba(0,255,157,.03)'):isToday?_tc('rgba(255,61,90,.06)'):'');
         const bd=isToday?'border-left:2px solid rgba(var(--red-rgb),.4);'+(lk.edge.startsWith('border-right')?lk.edge:''):(lk.edge||'border-left:1px solid var(--border);');
         const dow=['S','M','T','W','T','F','S'][spDow(ds)];
-        return `<th style="${bg2?'background:'+bg2+';':''}${bd}${lk.nwd?'color:var(--red);':''}font-size:5px;padding:2px 1px;text-align:center;min-width:20px" title="${ds}${lk.nwd?' — non-working day: '+spEsc(lk.nwd):''}">${ds.slice(8)}<br><span style="opacity:.5">${lk.nwd?'⊘':dow}</span></th>`;
+        const on=SP.sortKey==='d:'+ds;
+        return `<th onclick="spSortBy('d:${ds}')" style="${on?'background:rgba(var(--blue-rgb),.14);color:var(--blue);':bg2?'background:'+bg2+';':''}${bd}${lk.nwd&&!on?'color:var(--red);':''}font-size:5px;padding:2px 1px;text-align:center;min-width:20px;cursor:pointer" title="${ds}${lk.nwd?' — non-working day: '+spEsc(lk.nwd):''} — click to sort rows">${ds.slice(8)}<br><span style="opacity:.5">${on?(SP.sortDir==='asc'?'▲':'▼'):lk.nwd?'⊘':dow}</span></th>`;
       };
       const monTh=(lbl,tcol,span)=>`<th colspan="${span}" style="background:${bg};color:${tcol};font-size:7px;text-align:center;cursor:pointer;letter-spacing:.5px;border-left:1px solid var(--border2);padding:3px 4px" onclick="spToggleMonth('${mo.ym}')">${col?'▸':'▾'} ${lbl}</th>`;
       if(mo.ym===lastYm){
@@ -3675,7 +3686,8 @@ function spRenderTable(skipThead=false){
         h2+=sumTh('Σ MTD',!col);
         h1+=`<th colspan="${fcPeriods.length}" style="${fcBL};${fcBR};background:rgba(var(--fuchsia-rgb),.10);color:${FCC};font-size:7px;text-align:center;letter-spacing:.5px;padding:3px 4px">‖ FORECAST — AVG t/DAY ‖</th>`;
         fcPeriods.forEach((p,i)=>{
-          h2+=`<th title="${p.from} → ${p.to} — click a cell below to apply a rule" style="${i===0?fcBL+';':''}${i===fcPeriods.length-1?fcBR+';':''}background:rgba(var(--fuchsia-rgb),.07);color:${FCC};font-size:6px;text-align:right;padding:2px 5px;min-width:40px">${p.label}</th>`;
+          const on=SP.sortKey==='p:'+p.id;
+          h2+=`<th onclick="spSortBy('p:${p.id}')" title="${p.from} → ${p.to} — click to sort rows by this rate; click a cell below to apply a rule" style="${i===0?fcBL+';':''}${i===fcPeriods.length-1?fcBR+';':''}background:${on?'rgba(var(--blue-rgb),.14)':'rgba(var(--fuchsia-rgb),.07)'};color:${on?'var(--blue)':FCC};font-size:6px;text-align:right;padding:2px 5px;min-width:40px;cursor:pointer">${p.label}${spSortArrow('p:'+p.id)}</th>`;
         });
         if(futD.length){
           h1+=monTh(mo.label+' — REST',FCC,col?1:futD.length+1);
@@ -3694,7 +3706,7 @@ function spRenderTable(skipThead=false){
     });
     const hdrLbl=groupBy.map(d=>SP_DIMS[d]?.label).filter(Boolean).join(' / ')||'Group';
     thead.innerHTML=`<tr>
-      <th class="th-lbl" style="vertical-align:bottom;padding-bottom:8px;border-right:2px solid var(--border2);font-size:8px" rowspan="2">${hdrLbl}</th>
+      <th class="th-lbl" onclick="spSortBy('n')" title="Click to sort rows by name (Z→A, A→Z, default)" style="vertical-align:bottom;padding-bottom:8px;border-right:2px solid var(--border2);font-size:8px;cursor:pointer${SP.sortKey==='n'?';color:var(--blue)':''}" rowspan="2">${hdrLbl}${spSortArrow('n')}</th>
       ${h1}
     </tr><tr>${h2}</tr>`;
   }
