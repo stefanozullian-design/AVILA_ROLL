@@ -544,7 +544,7 @@ html[data-theme="daylight"] #logo:not([data-logo]) .logo-dark{display:none}
   </div>
   <div class="sp-link" id="sp-link" title="The Avila Roll scenario this sales detail belongs to"><span class="k">SCENARIO</span><select id="sp-link-sel" onchange="spSetLink(this.value)"></select><span class="i" id="sp-link-info"></span></div>
   <button class="tb-btn sec" id="btn-pickup-moves" onclick="pmOpen()" style="margin-left:8px" title="Pickup moves — send a customer to pick up at another origin for a while (pushed to Roll as demand swaps)"><svg class="pm-ico" viewBox="0 0 24 24" width="1.1em" height="1.1em" style="vertical-align:-0.18em" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="3.4"><path d="M4.2 14A8.2 8.2 0 0 1 15.6 4.4"/><path d="M19.8 10A8.2 8.2 0 0 1 8.4 19.6"/></g><g fill="currentColor"><polygon points="13.2,0.6 21.6,5.2 14.6,10.4"/><polygon points="10.8,23.4 2.4,18.8 9.4,13.6"/></g></svg> Pickup Moves</button>
-  <button class="tb-btn amber" id="btn-push-forecast" onclick="pushForecastToMain()" style="margin-left:8px" title="Send this forecast (demand points in view) to the linked Avila Roll scenario — Roll asks you to confirm">↑ Push Forecast to Roll</button>
+  <button class="tb-btn amber" id="btn-push-forecast" onclick="pushForecastToMain()" style="margin-left:8px" title="Send this forecast (demand points in view) to the linked Avila Roll scenario — Roll asks you to confirm">↑ Push Forecast to Roll</button><span id="sp-push-warn" onclick="pushForecastToMain()" style="display:none;margin-left:6px;padding:3px 8px;border:1px solid var(--red);border-radius:3px;color:var(--red);background:rgba(var(--red-rgb,255,80,80),.08);font-family:var(--mono);font-size:9px;font-weight:700;cursor:pointer;white-space:nowrap">⚠ Roll out of date</span>
   <div id="stat-msg"></div>
   <button class="tb-btn sec" id="sc-save-btn" onclick="scManualSave()" title="Save this scenario to its file now" style="padding:5px 9px">💾 Save</button>
   <div class="sc-pill" id="sc-switcher" onclick="scToggleDropdown(event)" title="No scenario — click to create or open one">
@@ -1648,7 +1648,7 @@ function spApplyCatalog(){
       id:d.element_id, name:d.name, type:'demand_point', props:{dp_code:d.dp_code||''}, assigned_facility_id:d.facility_id })));
   }
   SP._tree=null; SP._spine=null; SP._auto=null; SP._demIdx=null;
-  spRenderLinkSel();
+  spRenderLinkSel(); if(typeof spSyncPushWarn==='function') spSyncPushWarn();
 }
 // A sales row → its demand point in the linked scenario (facility + products), or null.
 function spRowInfo(r){
@@ -2026,7 +2026,7 @@ function pushForecastToMain(){
   pushedEls.forEach(el=>dates.forEach(ds=>values.push({element_id:el, date:ds, value_t:Math.round((sums.get(el+'|'+ds)||0)*10)/10})));
   const nDp=pushedEls.size;
   const mv=pmHandoffSwaps(cat), nMv=mv.swaps.length;
-  if(!values.length&&!nMv&&!(DB.pickup_moves||[]).length){ statMsg('Nothing to push — no forecast days for matched demand points in view'); return; }
+  if(!values.length&&!nMv&&!pmRollDiff()){ statMsg('Nothing to push — no forecast days for matched demand points in view'); return; }
   const msg=`Push the forecast of ${nDp} demand point${nDp===1?'':'s'} (as filtered on screen) into Avila Roll scenario "${cat.name}"?\n\n`+
     `${fltFmt(dates[0])} → ${fltFmt(dates[dates.length-1])} · ${values.length} day values`+
     (skipped?`\n${skipped} row group${skipped===1?'':'s'} not matched to a demand point of this scenario will be left out.`:'')+
@@ -5515,7 +5515,7 @@ function scApplyPayload(p){
   SC._suspend=true;
   try{
     if(p.DB){ Object.keys(p.DB).forEach(t=>{ DB[t]=p.DB[t]; }); }
-    DB.pickup_moves=Array.isArray(p.DB?.pickup_moves)?p.DB.pickup_moves:[]; SP._mvIdx=null;
+    DB.pickup_moves=Array.isArray(p.DB?.pickup_moves)?p.DB.pickup_moves:[]; SP._mvIdx=null; setTimeout(spSyncPushWarn,0);
     try{ localStorage.setItem('avila_sales_pickup_moves', JSON.stringify(DB.pickup_moves)); }catch(e){}
     if(p.SP){
       if(Array.isArray(p.SP.fcRules)) SP.fcRules=p.SP.fcRules;
@@ -6019,7 +6019,7 @@ async function scInit(){
 //                       to_element_id, pct, start_date, end_date, reason, created_at }]
 const PM_LS_KEY='avila_sales_pickup_moves';
 function pmLoad(){ if(Array.isArray(DB.pickup_moves)) return; try{ const a=JSON.parse(localStorage.getItem(PM_LS_KEY)||'[]'); DB.pickup_moves=Array.isArray(a)?a:[]; }catch(e){ DB.pickup_moves=[]; } }
-function pmSave(){ try{ localStorage.setItem(PM_LS_KEY, JSON.stringify(DB.pickup_moves||[])); }catch(e){} SP._mvIdx=null; if(typeof scScheduleWrite==='function') scScheduleWrite(); }
+function pmSave(){ try{ localStorage.setItem(PM_LS_KEY, JSON.stringify(DB.pickup_moves||[])); }catch(e){} SP._mvIdx=null; if(typeof scScheduleWrite==='function') scScheduleWrite(); spSyncPushWarn(); }
 pmLoad();
 
 // Forecast leaves over ALL shipments (not the on-screen filters), with the forecast rules applied —
@@ -6290,6 +6290,48 @@ function pmDelete(id){
   if(!confirm(`Delete the pickup move for ${pmCustLabel(m)} (${pmDpName(m.from_element_id)} → ${pmDpName(m.to_element_id)})?\n\nIt leaves Roll on the next forecast push.`)) return;
   DB.pickup_moves=DB.pickup_moves.filter(x=>x.id!==id);
   pmSave(); pmOpen(); renderSalesPerfView();
+  if(pmRollDiff()) statMsg('Move deleted here — Roll still has it until you push the forecast (⚠ Roll out of date)','var(--amber)');
+}
+// One move's signature: Roll keeps it on the swap and publishes it back in its catalog, so this page
+// can tell when Roll holds a different set of moves (deleted / edited / new since the last push).
+function pmSig(m){ return [m.id,m.sold_to,m.ship_to_name||'',m.from_element_id,m.to_element_id,+m.pct||0,m.start_date,m.end_date].join('~'); }
+// The customer's real shipments for Roll's reference cells: hist = their daily tonnes at FROM + TO
+// (a year before the move → last actual day, shown grey); real = their tonnes at TO inside the window.
+function pmCustReal(m){
+  const els=new Map((DB.elements||[]).filter(e=>e.type==='demand_point').map(e=>[e.id,e]));
+  const keysOf=id=>{ const e=els.get(id); const k=new Set(); const n=(pmDpName(id)||'').trim().toUpperCase(); if(n) k.add(n); const c=(e?.props?.dp_code||'').trim().toUpperCase(); if(c) k.add(c); return k; };
+  const fk=keysOf(m.from_element_id), tk=keysOf(m.to_element_id);
+  const d0=new Date(m.start_date+'T12:00:00'); d0.setFullYear(d0.getFullYear()-1); const from0=_fltD(d0);
+  const hist={}, real={};
+  (DB.real_shipments_daily||[]).forEach(r=>{
+    if(r.__hist||!r.date||r.date<from0) return;
+    if(spSoldToKey(r)!==String(m.sold_to)||(m.ship_to_name&&r.ship_to_name!==m.ship_to_name)) return;
+    const p=(r.product||'').trim().toUpperCase(), atT=tk.has(p); if(!atT&&!fk.has(p)) return;
+    const v=+r.volume||0; if(!v) return;
+    hist[r.date]=(hist[r.date]||0)+v;
+    if(atT&&r.date>=m.start_date&&r.date<=m.end_date) real[r.date]=(real[r.date]||0)+v;
+  });
+  const r1=o=>{ Object.keys(o).forEach(k=>{ o[k]=Math.round(o[k]*10)/10; if(!(o[k]>0)) delete o[k]; }); return o; };
+  return {hist:r1(hist), real:r1(real)};
+}
+// Roll out of date: the moves Roll holds (catalog sales_moves, published by Roll) ≠ this page's moves.
+function pmRollDiff(){
+  const cat=RC.cat; if(!cat||!Array.isArray(cat.sales_moves)) return null;
+  const known=new Set((cat.dps||[]).map(d=>d.element_id));
+  const mine=new Map((DB.pickup_moves||[]).filter(m=>known.has(m.from_element_id)&&known.has(m.to_element_id)).map(m=>[m.id,pmSig(m)]));
+  const roll=new Map(cat.sales_moves.map(x=>[x.id,x.sig||'']));
+  const add=[],del=[],chg=[];
+  mine.forEach((sg,id)=>{ if(!roll.has(id)) add.push(id); else if(roll.get(id)!==sg) chg.push(id); });
+  roll.forEach((sg,id)=>{ if(!mine.has(id)) del.push(id); });
+  return (add.length||del.length||chg.length)?{add,del,chg}:null;
+}
+function spSyncPushWarn(){
+  const el=document.getElementById('sp-push-warn'); if(!el) return;
+  const d=pmRollDiff(); el.style.display=d?'':'none'; if(!d) return;
+  const nm=id=>{ const m=(DB.pickup_moves||[]).find(x=>x.id===id); return m?pmCustLabel(m):(RC.cat.sales_moves.find(x=>x.id===id)?.label||id); };
+  el.title=['Avila Roll ("'+RC.cat.name+'") holds different pickup moves than this page:']
+    .concat(d.add.map(id=>'  + new here: '+nm(id)), d.chg.map(id=>'  ✎ edited here: '+nm(id)), d.del.map(id=>'  ✕ deleted here, still in Roll: '+nm(id)))
+    .concat(['','Click to push the forecast, then accept it in Roll.']).join('\n');
 }
 // Swaps for the forecast handoff: EVERY move (whatever the screen is filtered to), so Roll can
 // replace its whole set of Sales swaps. Moves with nothing left to move are left out.
@@ -6298,10 +6340,10 @@ function pmHandoffSwaps(cat){
   const swaps=[]; let skipped=0;
   (DB.pickup_moves||[]).forEach(m=>{
     if(!known.has(m.from_element_id)||!known.has(m.to_element_id)){ skipped++; return; }
-    const s=pmMoveStats(m,M); if(!s.days) return;
-    const ds=Object.keys(s.daily).sort();
-    swaps.push({id:'swap_sales_'+m.id, source:'sales', sales_move_id:m.id, from_element_id:m.from_element_id, to_element_id:m.to_element_id,
-      mode:'daily', daily:s.daily, amount:Math.round(s.avg), start_date:ds[0], end_date:ds[ds.length-1],
+    const s=pmMoveStats(m,M), cr=pmCustReal(m);
+    swaps.push({id:'swap_sales_'+m.id, source:'sales', sales_move_id:m.id, sales_sig:pmSig(m), from_element_id:m.from_element_id, to_element_id:m.to_element_id,
+      mode:'daily', daily:s.daily, amount:Math.round(s.avg), start_date:m.start_date, end_date:m.end_date,
+      cust_key:String(m.sold_to)+'|'+(m.ship_to_name||'*'), hist:cr.hist, real:cr.real,
       notes:`Sales: ${pmCustLabel(m)}${m.reason?' — '+m.reason:''}`});
   });
   return {swaps, skipped};

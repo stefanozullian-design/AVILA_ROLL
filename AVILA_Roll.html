@@ -2938,6 +2938,7 @@ function _rollPublishCatalog(){
       famOf:PRODUCT_FAMILY_OF, famLabels:PRODUCT_FAMILY_LABELS, catLabels:SUP_CAT_LABELS,
       facilities:DB.facilities.map(f=>({id:f.id,name:f.name,type:f.type||'plant',sub_region_id:f.sub_region_id||null})),
       sub_regions:(DB.sub_regions||[]).map(x=>({id:x.id,name:x.name})),
+      sales_moves:(DB.demand_substitutions||[]).filter(x=>x.source==='sales'&&x.sales_move_id).map(x=>({id:x.sales_move_id,sig:x.sales_sig||'',label:String(x.notes||'').replace(/^Sales: /,'')})),
       nwd:(DB.non_working_days||[]).filter(n=>n&&n.date).map(n=>({date:n.date,reason:n.reason||''})),
       products:(DB.products||[]).map(p=>({id:p.id,name:p.name,category:p.category||'',facility_id:p.facility_id||null})),
       dps:DB.elements.filter(e=>e.type==='demand_point').map(e=>({element_id:e.id,name:e.name||'',
@@ -3000,16 +3001,21 @@ function _rollApplyHandoff(){
     h.swaps.forEach(w=>{
       if(!w||!known.has(w.from_element_id)||!known.has(w.to_element_id)||w.from_element_id===w.to_element_id
          ||!isD(w.start_date)||!isD(w.end_date)||w.start_date>w.end_date){ nBad++; return; }
-      const daily={}; Object.entries(w.daily||{}).forEach(([d,t])=>{ const v=Math.round((+t||0)*10)/10; if(isD(d)&&v>0) daily[d]=v; });
-      if(!Object.keys(daily).length){ nBad++; return; }
+      const clean=o=>{ const r={}; Object.entries(o||{}).forEach(([d,t])=>{ const v=Math.round((+t||0)*10)/10; if(isD(d)&&v>0) r[d]=v; }); return r; };
+      const daily=clean(w.daily);
+      // A move with no forecast day left still comes over: its customer history / real loadings
+      // are the grey / real reference cells of DEMAND MOVED OUT / IN (it moves nothing in the sim).
       DB.demand_substitutions.push({ id:String(w.id||('swap_sales_'+Date.now()+'_'+nSw)), source:'sales', sales_move_id:w.sales_move_id||null,
+        sales_sig:String(w.sales_sig||''), cust_key:String(w.cust_key||''),
         from_element_id:w.from_element_id, to_element_id:w.to_element_id, to_product_id:_dpPrimaryProduct(w.to_element_id)||'',
-        mode:'daily', daily, amount:Math.round(+w.amount||0), start_date:w.start_date, end_date:w.end_date, notes:String(w.notes||'') });
+        mode:'daily', daily, amount:Math.round(+w.amount||0), start_date:w.start_date, end_date:w.end_date, notes:String(w.notes||''),
+        hist:clean(w.hist), real:clean(w.real) });
       nSw++;
     });
   }
   try{ localStorage.removeItem(FC_HANDOFF_KEY); }catch(e){}
   document.getElementById('fc-handoff-banner')?.remove();
+  _rollPublishCatalog();   // the Sales page compares its moves with the ones Roll now holds
   _demandChanged(); autoSave();
   statMsg(`Sales forecast applied — ${n} day values on ${new Set(vals.map(v=>v.element_id)).size} demand points${Array.isArray(h.swaps)?` · ${nSw} pickup move${nSw===1?'':'s'}${nBad?` (${nBad} skipped: unknown demand point or bad dates)`:''}`:''}`);
 }
@@ -6497,6 +6503,7 @@ function _deleteDemandSwap(id){
   DB.demand_substitutions=(DB.demand_substitutions||[]).filter(s=>s.id!==id);
   autoSave();
   _demandChanged();   // it used to leave the projections stale until the next run
+  _rollPublishCatalogSoon();
   openDemandSwapManager(); // refresh the list
   statMsg('Demand swap removed — running simulation…');
 }
@@ -10529,6 +10536,11 @@ function _supDpnRows(dpts, months, collapsedMonths, tdSty, depth, base, stickyLe
 // requirement title, show the volume each way — a total, then one line per swap:
 //   DEMAND MOVED OUT  (this facility's points → destination point)
 //   DEMAND MOVED IN   (this facility's points ← source point)
+// One line per demand-point pair (user 11/23: four Sales customers PEV → two MIA points = two lines).
+// Sales pickup moves also carry the customer's shipments: on days with nothing to move (actuals /
+// before the window) the cell shows their history grey as a reference, or — once they really load
+// at the destination inside the window — that real tonnage in the real look. Reference only: the
+// simulation never reads hist/real.
 // Values come from the same _demandSwapAlloc the simulation uses (forecast days only; several
 // swaps on one point share its demand). Each title has its own fold key (<sec>MoveOut /
 // <sec>MoveIn); data-swapof lets the Process filter hide them with the requirement section.
@@ -10547,55 +10559,76 @@ function _supSwapSection(dpts, allDates, months, collapsedMonths, tdSty, depth, 
   const block=(dir)=>{
     const out=dir==='out';
     const swaps=(DB.demand_substitutions||[]).filter(s=>ids.has(out?s.from_element_id:s.to_element_id));
-    const lines=swaps.map(s=>{ const v=new Map(); allDates.forEach(ds=>v.set(ds,qOf(s,ds))); return {s,v}; })
-      .filter(l=>[...l.v.values()].some(x=>x>0));
-    if(!lines.length) return '';
-    const val=(l,ds)=>l.v.has(ds)?l.v.get(ds):qOf(l.s,ds);
-    const tot=ds=>lines.reduce((a,l)=>a+val(l,ds),0);
+    if(!swaps.length) return '';
+    // one line per pair (this point ↔ other end)
+    const gmap=new Map();
+    swaps.forEach(s=>{
+      const here=nm(out?s.from_element_id:s.to_element_id);
+      const other=out?(s.to_element_id?nm(s.to_element_id):pnm(s.to_product_id)):nm(s.from_element_id);
+      const k=here+'\u0001'+other; let g=gmap.get(k);
+      if(!g){ g={here,other,ch:_supDpChannel(here),swaps:[],v:new Map(),hist:{},real:{},custs:new Set()}; gmap.set(k,g); }
+      g.swaps.push(s);
+      // a customer's history counts once per line even when it has several moves
+      const ck=s.cust_key||''; if(ck&&!g.custs.has(ck)){ g.custs.add(ck); Object.entries(s.hist||{}).forEach(([d,t])=>{ g.hist[d]=(g.hist[d]||0)+(+t||0); }); }
+      Object.entries(s.real||{}).forEach(([d,t])=>{ g.real[d]=(g.real[d]||0)+(+t||0); });
+    });
+    const lines=[...gmap.values()];
+    lines.forEach(l=>allDates.forEach(ds=>l.v.set(ds,l.swaps.reduce((a,s)=>a+qOf(s,ds),0))));
+    const hasAny=l=>allDates.some(ds=>l.v.get(ds)>0||l.real[ds]>0||l.hist[ds]>0);
+    const shown=lines.filter(hasAny);
+    if(!shown.length) return '';
+    const val=(l,ds)=>l.v.has(ds)?l.v.get(ds):l.swaps.reduce((a,s)=>a+qOf(s,ds),0);
+    const refOf=ls=>ds=>{ let r=0,h=0; ls.forEach(l=>{ r+=l.real[ds]||0; h+=l.hist[ds]||0; }); return [r,h]; };
+    const tot=ds=>shown.reduce((a,l)=>a+val(l,ds),0);
     const col=out?'var(--amber)':'var(--cyan)', rgb=out?'var(--amber-rgb)':'var(--cyan-rgb)';
     const key=sec+(out?'MoveOut':'MoveIn'), cls=`supsec-${key} sup-dpn-row`;
-    const row=(label,tip,fn,bold,d,sub,grp)=>{
+    const greySty='color:var(--text-dim)!important;opacity:.55;font-style:italic;font-weight:400!important;';
+    const row=(label,tip,fn,bold,d,sub,grp,ref)=>{
       let rr=sub
         ? `<tr class="${cls} sup-sec-hdr" data-seckey="${sub}" data-swapof="${sec}" onclick="_supToggleSec('${sub}')" style="cursor:pointer;background:rgba(${rgb},.08)"><td title="${esc(tip)}" style="${stickyLeft('var(--surface)',d,'border-bottom:1px solid var(--border),')}color:${col};font-size:9px;font-weight:800;letter-spacing:.4px"><span class="sup-arrow">${_supSecArrow(sub)}</span> ${label}</td>`
         : bold
         ? `<tr class="sup-sec-hdr" data-seckey="${key}" data-swapof="${sec}" onclick="_supToggleSec('${key}')" style="cursor:pointer;background:rgba(${rgb},.05);border-top:2px solid rgba(${rgb},.3)"><td title="${esc(tip)}" style="${stickyLeft('var(--surface)',d,'border-bottom:1px solid var(--border),')}color:${col};font-size:8px;letter-spacing:.5px;font-weight:700;text-transform:uppercase"><span class="sup-arrow">${_supSecArrow(key)}</span> ${label}</td>`
         : `<tr class="${cls}${grp?' supsec-'+grp:''}" data-swapof="${sec}" style="background:rgba(${rgb},.03)"><td title="${esc(tip)}" style="${stickyLeft('var(--surface)',d,'border-bottom:1px solid var(--border),')}color:${col};font-size:8px;font-style:italic">${label}</td>`;
+      const fs=bold||sub?9:8, fw=bold?'font-weight:700;':sub?'font-weight:800;':'';
+      // a day's cell: moved forecast; else the customer's real loading at the destination (real look);
+      // else their history, grey, as a reference
+      const cell=ds=>{ const v=fn(ds); if(v>0) return {v,c:'',t:''};
+        const [r,h]=ref?ref(ds):[0,0];
+        if(r>0) return {v:r,c:'cell-real',t:'Real: the moved customers loaded this at the destination'};
+        if(h>0) return {v:h,c:'',t:'Reference: the moved customers\' shipments that day (history, not moved)',g:1};
+        return {v:0,c:'',t:''}; };
       months.forEach(mon=>{
-        const mt=mon.dates.reduce((a,ds)=>a+fn(ds),0);
-        rr+=`<td style="border-left:2px solid rgba(${rgb},.15);font-size:${bold||sub?9:8}px;${bold?'font-weight:700;':sub?'font-weight:800;':''}color:${col};text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)">${mt>0?_fmtInt(Math.round(mt)):''}</td>`;
-        if(!collapsedMonths.has(mon.ym)) mon.dates.forEach(ds=>{ const v=fn(ds);
-          rr+=`<td class="sup-day-${mon.ym}" style="font-size:${bold||sub?9:8}px;${bold?'font-weight:700;':sub?'font-weight:800;':''}color:${col};text-align:right;padding:3px 4px;border-bottom:1px solid var(--border);${tdSty(ds)}">${v>0?_fmtInt(Math.round(v)):''}</td>`; });
+        let mf=0, mr=0, mh=0; mon.dates.forEach(ds=>{ const v=fn(ds); mf+=v; if(ref){ const [r,h]=ref(ds); if(!(v>0)){ mr+=r; } mh+=h; } });
+        const mt=mf+mr, g=!(mt>0)&&mh>0;
+        rr+=`<td style="border-left:2px solid rgba(${rgb},.15);font-size:${fs}px;${fw}color:${col};text-align:right;padding:3px 6px;border-bottom:1px solid var(--border);${g?greySty:''}"${g?' title="Reference: the moved customers\' history that month"':''}>${mt>0?_fmtInt(Math.round(mt)):g?_fmtInt(Math.round(mh)):''}</td>`;
+        if(!collapsedMonths.has(mon.ym)) mon.dates.forEach(ds=>{ const c=cell(ds);
+          rr+=`<td class="sup-day-${mon.ym}${c.c?' '+c.c:''}" style="font-size:${fs}px;${fw}color:${col};text-align:right;padding:3px 4px;border-bottom:1px solid var(--border);${tdSty(ds)}${c.g?greySty:''}"${c.t?` title="${c.t}"`:''}>${c.v>0?_fmtInt(Math.round(c.v)):''}</td>`; });
       });
       return rr+`</tr>`;
     };
     let hh=row(out?'⇄ DEMAND MOVED OUT':'⇄ DEMAND MOVED IN',
       out?'Demand at this facility now served at another demand point (demand swap) — already taken off the product lines above'
          :'Demand from another demand point now served here (demand swap) — already included in the product lines above',
-      tot,true,depth);
-    // Full demand-point names at both ends (user 11/10: "MIA_IL(11)/BLK/EXT → EXT/TIT_MIA/BLK/EXT"),
-    // grouped by the channel of THIS facility's point (last name segment: EXT / INT / IND / POURS)
-    // with a subtotal each, so external and internal demand moving out / in read apart.
-    // OUT lines: this point → destination. IN lines: this point ← source.
-    lines.forEach(l=>{
-      const s=l.s;
-      l.here=nm(out?s.from_element_id:s.to_element_id);
-      l.other=out?(s.to_element_id?nm(s.to_element_id):pnm(s.to_product_id)):nm(s.from_element_id);
-      l.ch=_supDpChannel(l.here);
-    });
+      tot,true,depth,null,null,refOf(shown));
+    // Full demand-point names at both ends, one line per pair, grouped by the channel of THIS
+    // facility's point (EXT / INT / IND / POURS) with a subtotal each.
     const order=['EXT','INT','IND','POURS',''];
     const chLbl={EXT:'EXT — external',INT:'INT — internal',IND:'IND — industrial',POURS:'POURS',' ':'other'};
-    lines.sort((a,b)=>order.indexOf(a.ch)-order.indexOf(b.ch)||String(a.here).localeCompare(String(b.here))||String(a.other).localeCompare(String(b.other)));
+    shown.sort((a,b)=>order.indexOf(a.ch)-order.indexOf(b.ch)||String(a.here).localeCompare(String(b.here))||String(a.other).localeCompare(String(b.other)));
     for(const ch of order){
-      const grp=lines.filter(l=>l.ch===ch); if(!grp.length) continue;
-      const gkey=key+'_'+(ch||'OTH');   // fold key of this group
-      hh+=row(`${out?'→':'←'} ${esc(chLbl[ch||' '])} · ${grp.length} swap${grp.length>1?'s':''}`,
+      const grp=shown.filter(l=>l.ch===ch); if(!grp.length) continue;
+      const gkey=key+'_'+(ch||'OTH');
+      const nSw=grp.reduce((a,l)=>a+l.swaps.length,0);
+      hh+=row(`${out?'→':'←'} ${esc(chLbl[ch||' '])} · ${nSw} swap${nSw>1?'s':''}`,
         `${chLbl[ch||' ']} demand points of this facility — demand ${out?'moved out of':'moved into'} them`,
-        ds=>grp.reduce((a,l)=>a+val(l,ds),0),false,depth+1,gkey);
+        ds=>grp.reduce((a,l)=>a+val(l,ds),0),false,depth+1,gkey,null,refOf(grp));
       grp.forEach(l=>{
-        const s=l.s;
-        const amt=s.mode==='daily'?`Sales forecast · avg ${_fmtInt(parseFloat(s.amount)||0)} t/d${s.notes?' · '+s.notes:''}`:s.mode==='percent'?`${parseFloat(s.amount)||0}%`:`${_fmtInt(parseFloat(s.amount)||0)} t/d`;
-        const lbl=`↳ ${esc(l.here)} ${out?'→':'←'} ${esc(l.other)}`;
-        hh+=row(lbl,`${out?l.here:l.other} → ${out?l.other:l.here} · ${pnm(_dpPrimaryProduct(s.from_element_id))} · ${amt} · ${s.start_date} – ${s.end_date}`,ds=>val(l,ds),false,depth+2,null,gkey);
+        const det=l.swaps.map(s=>{
+          const amt=s.mode==='daily'?`Sales forecast · avg ${_fmtInt(parseFloat(s.amount)||0)} t/d${s.notes?' · '+s.notes:''}`:s.mode==='percent'?`${parseFloat(s.amount)||0}%`:`${_fmtInt(parseFloat(s.amount)||0)} t/d`;
+          return `• ${pnm(_dpPrimaryProduct(s.from_element_id))} · ${amt} · ${s.start_date} – ${s.end_date}`; }).join('\n');
+        const lbl=`↳ ${esc(l.here)} ${out?'→':'←'} ${esc(l.other)}${l.swaps.length>1?` <span style="font-style:normal;opacity:.7">· ${l.swaps.length}</span>`:''}`;
+        hh+=row(lbl,`${out?l.here:l.other} → ${out?l.other:l.here} · ${l.swaps.length} swap${l.swaps.length>1?'s':''}\n${det}${Object.keys(l.hist).length?'\nGrey = the moved customers\' history (reference); real look = their real loadings at the destination':''}`,
+          ds=>val(l,ds),false,depth+2,null,gkey,refOf([l]));
       });
     }
     return hh;
