@@ -2010,10 +2010,14 @@ function pushForecastToMain(){
   const leaves=Object.values(SP._tree?.leaves||{});
   const sums=new Map(); let skipped=0;
   const dates=[]; for(let d=new Date(lastReal+'T12:00:00'); ; ){ d.setDate(d.getDate()+1); const ds=_fltD(d); if(ds>to) break; dates.push(ds); }
+  const swBy=(DB.pickup_moves||[]).length?pmSwapBySrcLeaf():new Map();
   leaves.forEach(lf=>{
-    if(lf._mvVirtual) return;   // pickup-move destination row: the move goes to Roll as a swap
+    if(lf._mvDest) return;   // pickup-move destination: the customer reaches Roll as a swap from the source
     const el=lf.dpKey; if(!known.has(el)){ skipped++; return; }
-    dates.forEach(ds=>{ const v=spLeafFcDay(lf,ds)||0; if(v>0){ const k=el+'|'+ds; sums.set(k,(sums.get(k)||0)+v); } });
+    const sw=swBy.get(lf.id);
+    dates.forEach(ds=>{ let v=spLeafFcDay(lf,ds)||0;
+      if(lf._mvOut){ let p=0; for(const x of lf._mvOut) if(x.dates.has(ds)) p+=x.pct; if(p) v=v*Math.max(0,1-p/100)+(sw?.[ds]||0); }
+      if(v>0){ const k=el+'|'+ds; sums.set(k,(sums.get(k)||0)+v); } });
   });
   // A pushed point gets EVERY day of the window, its no-sale days as 0: Roll replaces exactly the
   // days it is sent, so a day left out kept Roll's old forecast (e.g. Saturdays) beside this one.
@@ -2901,8 +2905,8 @@ function spLastReal(){
 // Build the tree (+ forecast caches) if missing; true if it was rebuilt.
 function spEnsureTree(){
   if(SP._tree) return false;
-  const pseudo=(typeof pmPseudoRows==='function')?pmPseudoRows():[];
-  SP._tree=spBuildTree(pseudo.length?SP.filteredRows.concat(pseudo):SP.filteredRows, spGetGroupBy());
+  const hist=(typeof pmHistRows==='function')?pmHistRows(true):[];
+  SP._tree=spBuildTree(hist.length?SP.filteredRows.concat(hist):SP.filteredRows, spGetGroupBy());
   spFcRecompute();
   if(typeof pmMarkTree==='function') pmMarkTree(SP._tree);
   return true;
@@ -2915,7 +2919,6 @@ function spFcCloseEdit(){
 }
 function spFcEdit(nodeKey,pid,el){
   const node=SP._tree?.index?.[nodeKey]; if(!node) return;
-  if(node.leaves.length&&node.leaves.every(lf=>lf._mvVirtual)){ statMsg('This row is a pickup move into this origin — change it in ⟳ Pickup Moves','var(--amber)'); return; }
   spFcCloseEdit();
   const cur=spNodeFcRate(node,pid);
   const own=spFcRuleAt(node.path,pid);
@@ -3445,13 +3448,13 @@ function spBuildTree(rows, groupBy){
   rows.forEach(r=>{
     const dpEl=getDpEl(r.product);
     const dpKey=dpEl?dpEl.id:`__nodp_${(r.product||'').replace(/\W/g,'_')}`;
-    dpGlobalHistVol[dpKey]=(dpGlobalHistVol[dpKey]||0)+(r.volume||0);
+    if(!r.__hist) dpGlobalHistVol[dpKey]=(dpGlobalHistVol[dpKey]||0)+(r.volume||0);
     r.__dpName=dpEl?dpEl.name:(r.product||'Unknown DP'); r.__dpElId=dpEl?.id||null;
     const shipTo=r.ship_to_name||'—';
     const leafId=dpKey+'|'+shipTo; r.__leafId=leafId;
     let lf=leaves[leafId];
-    if(!lf) lf=leaves[leafId]={id:leafId, dpKey, dpElId:dpEl?.id||null, shipTo, histVol:0, recentVol:0, dayMap:{}};
-    lf.histVol+=(r.volume||0);
+    if(!lf) lf=leaves[leafId]={id:leafId, dpKey, dpElId:dpEl?.id||null, shipTo, histVol:0, realVol:0, recentVol:0, dayMap:{}};
+    lf.histVol+=(r.volume||0); if(!r.__hist) lf.realVol+=(r.volume||0);
     if(r.date&&r.date>=cutoffStr) lf.recentVol+=(r.volume||0);
     if(r.date&&r.date>=rateCut) lf.dayMap[r.date]=(lf.dayMap[r.date]||0)+(r.volume||0);
     if(r.date&&(!lf._ad||r.date>=lf._ad)){
@@ -3499,6 +3502,10 @@ function spBuildTree(rows, groupBy){
 
   // Pass 2: walk each row through the chosen dimensions, building nodes.
   const upd=(node,r)=>{
+    if(r.__hist){   // pickup-move history copy: reference only (grey), never an actual
+      if(r.date) node.ghostMap[r.date]=(node.ghostMap[r.date]||0)+(r.volume||0);
+      node._leafSet.add(r.__leafId); if(r.__dpElId) node._dpSet.add(r.__dpElId); return;
+    }
     if(r.date) node.actMap[r.date]=(node.actMap[r.date]||0)+(r.volume||0);
     node.histVol+=(r.volume||0);
     if(r.date&&r.date>=cutoffStr) node.recentVol+=(r.volume||0);
@@ -3508,7 +3515,7 @@ function spBuildTree(rows, groupBy){
   // `name` defaults to the grouping key itself (unchanged behaviour for every
   // dimension except Sold-To, which supplies a `display(r)` so the node shows
   // the real Sold-To Name while still being keyed/matched by the stable number.
-  const mkNode=(id,depth,name)=>({id,name:name!==undefined?name:id,depth,actMap:{},histVol:0,recentVol:0,_leafSet:new Set(),_dpSet:new Set(),children:{}});
+  const mkNode=(id,depth,name)=>({id,name:name!==undefined?name:id,depth,actMap:{},ghostMap:{},histVol:0,recentVol:0,_leafSet:new Set(),_dpSet:new Set(),children:{}});
   const root=mkNode('__root',-1);
   rows.forEach(r=>{
     let node=root;
@@ -3729,6 +3736,8 @@ function spRenderTable(skipThead=false){
       const lk=spDayLook(ds);
       const bd=isToday?'border-left:2px solid rgba(var(--red-rgb),.4);'+(lk.edge.startsWith('border-right')?lk.edge:''):(lk.edge||'border-left:1px solid var(--border);');
       const bgc=lk.nwd?lk.tdBg:isAct?'rgba(var(--green-rgb),.04)':lk.tdBg;
+      const gh=isAct&&!val?(node.ghostMap?.[ds]||0):0;
+      if(gh) return {val, html:`<td class="cell-real cell-z${lk.nwd?' sp-nwd':''}" title="History from the customer's other origin (pickup move) — reference only, not counted" style="${bgc?'background:'+bgc+';':''}${bd}text-align:right;padding:1px 2px;font-size:7px"><span style="color:var(--text-dim);font-style:italic;opacity:.75">${Math.round(gh).toLocaleString()}</span></td>`};
       return {val, html:`<td class="${isAct?'cell-real':'cell-fc'}${val?'':' cell-z'}${lk.nwd?' sp-nwd':''}" style="${bgc?'background:'+bgc+';':''}${isAct?'':FUT+';'}${bd}text-align:right;padding:1px 2px;font-size:7px">${val?Math.round(val).toLocaleString():''}</td>`};
     };
     const sumTd=(v,heavy,fut,bgBase)=>`<td class="${fut?'cell-fc':'cell-real'}${v?'':' cell-z'}" style="text-align:right;padding:1px 4px;font-size:7px;${heavy?'font-weight:700;':''}${fut?FUT+';':''}${bgBase?'background:'+bgBase+';':''}border-left:${heavy?'2px solid':'1px solid'} var(--border2)">${v?Math.round(v).toLocaleString():'—'}</td>`;
@@ -6017,17 +6026,19 @@ pmLoad();
 // a move must not change size because of what the table happens to be filtered to. Built by
 // temporarily swapping SP._tree and re-running spFcRecompute, then restoring the screen's state.
 function pmFullModel(){
-  const ver=(SP._fcVer||0)+'|'+(DB.real_shipments_meta?.loaded_at||'')+'|'+(DB.real_shipments_daily||[]).length+'|'+(DB.elements||[]).length+'|'+spLastReal();
+  const ver=(SP._fcVer||0)+'|'+(DB.real_shipments_meta?.loaded_at||'')+'|'+(DB.real_shipments_daily||[]).length+'|'+(DB.elements||[]).length+'|'+spLastReal()+'|'+pmMovesKey();
   if(SP._mvModel&&SP._mvModel.ver===ver) return SP._mvModel;
   const keep={t:SP._tree,r:SP._leafRule,p:SP._leafPeriodRate,o:SP._leafPeriodTot,c:SP._perCounts,d:SP._dayPeriod};
   let model;
   try{
-    SP._tree=spBuildTree(DB.real_shipments_daily||[], ['soldTo','shipTo','demandPoint']);
+    const hist=pmHistRows(false);
+    SP._tree=spBuildTree(hist.length?(DB.real_shipments_daily||[]).concat(hist):(DB.real_shipments_daily||[]), ['soldTo','shipTo','demandPoint']);
     spFcRecompute();
     model={ver, leaves:Object.values(SP._tree.leaves||{}), lpr:SP._leafPeriodRate||{}, dayPer:SP._dayPeriod||{}};
   } finally {
     SP._tree=keep.t; SP._leafRule=keep.r; SP._leafPeriodRate=keep.p; SP._leafPeriodTot=keep.o; SP._perCounts=keep.c; SP._dayPeriod=keep.d;
   }
+  model.byId=new Map(model.leaves.map(l=>[l.id,l]));
   SP._mvModel=model; SP._mvIdx=null;
   return model;
 }
@@ -6052,63 +6063,88 @@ function pmMoveDates(m){
 }
 // {date: tonnes} the move takes off FROM and puts on TO.
 function pmMoveDaily(m, M){
-  M=M||pmFullModel(); const lvs=pmMoveLeaves(M,m), k=(+m.pct||0)/100, daily={};
-  pmMoveDates(m).forEach(ds=>{ let t=0; lvs.forEach(lf=>{ t+=pmLeafFcDay(M,lf,ds)||0; }); t=Math.round(t*k*10)/10; if(t>0) daily[ds]=t; });
+  M=M||pmFullModel(); const k=(+m.pct||0)/100, daily={};
+  const dst=pmMoveLeaves(M,m).map(lf=>M.byId.get(m.to_element_id+'|'+lf.shipTo)).filter(Boolean);
+  pmMoveDates(m).forEach(ds=>{ let t=0; dst.forEach(lf=>{ t+=pmLeafFcDay(M,lf,ds)||0; }); t=Math.round(t*k*10)/10; if(t>0) daily[ds]=t; });
   return daily;
+}
+// srcLeafId → {date: t} the push adds back on the source (Roll then swaps it to the destination).
+function pmSwapBySrcLeaf(){
+  const M=pmFullModel(), out=new Map();
+  (DB.pickup_moves||[]).forEach(m=>{ const k=(+m.pct||0)/100; if(!(k>0)) return; const dates=pmMoveDates(m);
+    pmMoveLeaves(M,m).forEach(lf=>{ const d=M.byId.get(m.to_element_id+'|'+lf.shipTo); if(!d) return;
+      const mp=out.get(lf.id)||{}; dates.forEach(ds=>{ const t=(pmLeafFcDay(M,d,ds)||0)*k; if(t>0) mp[ds]=(mp[ds]||0)+t; }); out.set(lf.id,mp); }); });
+  return out;
 }
 function pmMoveStats(m, M){
   const daily=pmMoveDaily(m,M), v=Object.values(daily), tot=v.reduce((a,x)=>a+x,0);
   return {daily, total:tot, days:v.length, avg:v.length?tot/v.length:0};
 }
 // ── Net view of the moves on the Sales page ──
-// SP._mv = { out: leafId → [{m,pct,dates:Set,toName}], inDaily: destLeafId → {date:t}, inMoves: destLeafId → Set(m) }.
-// Destination customers enter the tree as pseudo rows (date 0000-00-00, 0 t) so they group like any row.
-function pmPseudoRows(){
-  const moves=DB.pickup_moves||[]; SP._mv=null; if(!moves.length||!(DB.real_shipments_daily||[]).length) return [];
-  const M=pmFullModel(), out=new Map(), inDaily=new Map(), inMoves=new Map(), rows=[], seen=new Set();
+function pmMovesKey(){ return (DB.pickup_moves||[]).map(m=>[m.id,m.sold_to,m.ship_to_name,m.from_element_id,m.to_element_id,m.pct,m.start_date,m.end_date].join('~')).join('^'); }
+// History copies: the customer's shipments at FROM go onto TO and their real shipments at TO onto FROM
+// (flag __hist). display=true → same dates + base filters as the screen. Also sets SP._mv for the display.
+function pmHistRows(display){
+  const moves=DB.pickup_moves||[]; if(display) SP._mv=null;
+  const all=DB.real_shipments_daily||[]; if(!moves.length||!all.length) return [];
+  const els=new Map((DB.elements||[]).filter(e=>e.type==='demand_point').map(e=>[e.id,e]));
+  const keysOf=id=>{ const e=els.get(id); const k=new Set(); const n=(pmDpName(id)||'').trim().toUpperCase(); if(n) k.add(n); const c=(e?.props?.dp_code||'').trim().toUpperCase(); if(c) k.add(c); return k; };
+  const df=SP.f.dateFrom, dt=SP.f.dateTo, out=[], done=new Set();
   moves.forEach(m=>{
-    const dates=pmMoveDates(m), dset=new Set(dates), k=(+m.pct||0)/100, toName=pmDpName(m.to_element_id);
-    if(!dates.length||!(k>0)) return;
-    pmMoveLeaves(M,m).forEach(lf=>{
-      (out.get(lf.id)||out.set(lf.id,[]).get(lf.id)).push({m, pct:+m.pct||0, dates:dset, toName});
-      const vid=m.to_element_id+'|'+lf.shipTo, dm=inDaily.get(vid)||{};
-      dates.forEach(ds=>{ const t=(pmLeafFcDay(M,lf,ds)||0)*k; if(t>0) dm[ds]=(dm[ds]||0)+t; });
-      inDaily.set(vid,dm); (inMoves.get(vid)||inMoves.set(vid,new Set()).get(vid)).add(m);
-      if(seen.has(vid)) return; seen.add(vid);
-      const a=lf.attrs||{};
-      const r={date:'0000-00-00', origin:(toName.split('/')[0]||'—'), product:toName, customer_type:a.custType||'—', ship_to:null,
-        ship_to_name:lf.shipTo, sales_manager:a.rep||'—', volume:0, loads:0, sold_to:m.sold_to, sold_to_name:m.sold_to_name, __pm:true};
-      if(spPassesBaseFilters(r)) rows.push(r);
+    if(!(+m.pct>0)) return;
+    const pair=[m.sold_to,m.ship_to_name||'*',m.from_element_id,m.to_element_id].join('~'); if(done.has(pair)) return; done.add(pair);
+    const fk=keysOf(m.from_element_id), tk=keysOf(m.to_element_id), fN=pmDpName(m.from_element_id), tN=pmDpName(m.to_element_id);
+    const mine=r=>spSoldToKey(r)===String(m.sold_to)&&(!m.ship_to_name||r.ship_to_name===m.ship_to_name);
+    all.forEach(r=>{
+      if(r.__hist||!mine(r)) return; const p=(r.product||'').trim().toUpperCase();
+      let c=null;
+      if(fk.has(p)) c={...r, product:tN, origin:(tN.split('/')[0]||r.origin), __hist:true};
+      else if(tk.has(p)) c={...r, product:fN, origin:(fN.split('/')[0]||r.origin), __hist:true};
+      if(!c) return;
+      if(display){ if(df&&c.date<df) return; if(dt&&c.date>dt) return; if(!spPassesBaseFilters(c)) return; }
+      out.push(c);
     });
   });
-  SP._mv={out,inDaily,inMoves};
-  return rows;
+  if(display){
+    // move windows per leaf (forecast days only): source keeps (1−pct), destination forecasts pct of its own value
+    const outM=new Map(), dest=new Map();
+    moves.forEach(m=>{ const pct=+m.pct||0; if(!(pct>0)) return; const dates=new Set(pmMoveDates(m)); if(!dates.size) return;
+      const toName=pmDpName(m.to_element_id);
+      (SP.filteredRows||[]).concat(out).forEach(r=>{ if(spSoldToKey(r)!==String(m.sold_to)||(m.ship_to_name&&r.ship_to_name!==m.ship_to_name)) return;
+        const st=r.ship_to_name||'—', sid=m.from_element_id+'|'+st, did=m.to_element_id+'|'+st;
+        if(!outM.has(sid+'~'+m.id)){ outM.set(sid+'~'+m.id,1); (outM.get(sid)||outM.set(sid,[]).get(sid)).push({m,pct,dates,toName}); }
+        if(!dest.has(did+'~'+m.id)){ dest.set(did+'~'+m.id,1); (dest.get(did)||dest.set(did,[]).get(did)).push({m,pct,dates}); }
+      }); });
+    SP._mv={out:outM, dest};
+  }
+  return out;
 }
 function pmMarkTree(tree){
   const mv=SP._mv; if(!mv||!tree) return;
   Object.values(tree.leaves||{}).forEach(lf=>{
-    if(mv.out.has(lf.id)) lf._mvOut=mv.out.get(lf.id);
-    if(mv.inDaily.has(lf.id)){ lf._mvIn=true; lf._mvMoves=[...mv.inMoves.get(lf.id)]; if(!lf.histVol) lf._mvVirtual=true; }
+    const o=mv.out.get(lf.id); if(Array.isArray(o)) lf._mvOut=o;
+    const d=mv.dest.get(lf.id); if(Array.isArray(d)){ lf._mvDest=d; lf._mvMoves=d.map(x=>x.m); }
   });
-  const walk=n=>{ n._pin=n.path.some(p=>p.dim==='soldTo'||p.dim==='shipTo')&&n.leaves.some(lf=>lf._mvIn);
+  const walk=n=>{ n._pin=n.path.some(p=>p.dim==='soldTo'||p.dim==='shipTo')&&n.leaves.some(lf=>lf._mvDest);
     n._mvBar=n.leaves.length>0&&n.leaves.every(lf=>lf._mvOut); n.childList.forEach(walk); };
   (tree.roots||[]).forEach(walk);
 }
-// Σ net forecast of leaves on a day: own forecast minus the moved share, plus what was moved in.
+// Σ net forecast of leaves on a day: a source keeps (1−pct) in the move window; a destination forecasts
+// pct of its own (combined-history) value in the window and nothing outside it.
 function spFcAddNet(acc, leaves, ds){
   const mv=SP._mv; if(!mv) return _spFcAdd(acc,leaves,ds);
   const n=leaves.length; if(!n) return acc;
   const dw=spDow(ds), off=dw===0||spIsNwd(ds), per=off?null:spPeriodOf(ds);
   for(let i=0;i<n;i++){ const lf=leaves[i]; let v=off?0:_spLeafFcAt(lf,ds,dw,per);
-    if(lf._mvOut){ let p=0; for(const x of lf._mvOut) if(x.dates.has(ds)) p+=x.pct; if(p) v*=Math.max(0,1-p/100); }
-    if(lf._mvIn) v+=mv.inDaily.get(lf.id)?.[ds]||0;
+    if(lf._mvDest){ let p=0; for(const x of lf._mvDest) if(x.dates.has(ds)) p+=x.pct; v*=Math.min(100,p)/100; }
+    else if(lf._mvOut){ let p=0; for(const x of lf._mvOut) if(x.dates.has(ds)) p+=x.pct; if(p) v*=Math.max(0,1-p/100); }
     acc+=v; }
   return acc;
 }
 // Row's weekday rate for a period, net of the moves (moved weekdays averaged over the period's weekdays).
 function spNodeFcRateNet(node,pid){
   if(!SP._mv) return spNodeFcRate(node,pid);
-  const mvl=node.leaves.filter(lf=>lf._mvOut||lf._mvIn); if(!mvl.length) return spNodeFcRate(node,pid);
+  const mvl=node.leaves.filter(lf=>lf._mvOut||lf._mvDest); if(!mvl.length) return spNodeFcRate(node,pid);
   const lpr=SP._leafPeriodRate||{}; let raw=0;
   for(let i=0;i<node.leaves.length;i++){ const rr=lpr[node.leaves[i].id]?.[pid]; raw+=rr?rr.wk:(node.leaves[i].wkRate||0); }
   const per=spFcPeriods().find(p=>p.id===pid); if(!per) return spQ25(raw);
