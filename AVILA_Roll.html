@@ -23793,19 +23793,35 @@ function exportDirName(slot){
 // Returns the slot's folder handle with write permission, or null.
 //   prompt=true  — may open the picker / ask to re-grant; call it inside a user gesture
 //   prompt=false — silent: only a handle already granted this session
-async function exportDir(slot, prompt){
+//   fresh=true   — skip the stored folder and go straight to the picker (CHANGE…)
+// A stored folder link can be frozen (see _scFileHang: after a Chrome update it never answers).
+// The checks get 1.2 s each — instant when healthy — so the click's user activation (about 5 s)
+// is still alive to open the picker: the export then just asks for the folder again.
+async function exportDir(slot, prompt, fresh){
   const cfg=exportSlot(slot);
   try{
+    let frozen=false;
     const cached=_exportDirHandles[slot];
-    if(cached&&await _dsEnsureWritePermission(cached)) return cached;
-    let h=await scLoadHistoryDirHandle(cfg.dirKey);
+    if(cached && !fresh){
+      try{ if(await _fsaWithin(_dsEnsureWritePermission(cached), 1200)) return cached; }
+      catch(e){ if(e.message!=='FSA_HANG') throw e; frozen=true; delete _exportDirHandles[slot]; }
+    }
+    let h=fresh||frozen ? null : await scLoadHistoryDirHandle(cfg.dirKey);
     if(h){
       // A stored handle needs its permission re-granted each new session, and that
       // request only succeeds inside a user gesture.
-      const perm=await h.queryPermission({mode:'readwrite'});
-      if(perm==='granted'){ _exportDirHandles[slot]=h; return h; }
-      if(prompt&&await _dsEnsureWritePermission(h)){ _exportDirHandles[slot]=h; return h; }
-      return null;
+      let perm;
+      try{ perm=await _fsaWithin(h.queryPermission({mode:'readwrite'}), 1200); }
+      catch(e){ if(e.message!=='FSA_HANG') throw e; frozen=true; }
+      if(!frozen){
+        if(perm==='granted'){ _exportDirHandles[slot]=h; return h; }
+        if(prompt&&await _dsEnsureWritePermission(h)){ _exportDirHandles[slot]=h; return h; }
+        return null;
+      }
+    }
+    if(frozen){
+      console.warn('export folder link frozen — '+slot);
+      statMsg('The '+cfg.label+' link froze after a Chrome update — '+(prompt?'pick the folder again':'set it again in Configuration → Data Sources (CHANGE…)'));
     }
     if(!prompt||!window.showDirectoryPicker) return null;
     h=await window.showDirectoryPicker({id:cfg.pickerId,mode:'readwrite'});
@@ -23843,7 +23859,7 @@ async function chooseExportDir(slot){
     alert('This browser cannot pick a folder — use Chrome or Edge.\n\nExports will download to your usual Downloads folder as "'+cfg.file+'".');
     return;
   }
-  const h=await exportDir(slot,true);
+  const h=await exportDir(slot,true,true);   // CHANGE… always asks — never reuses (or waits on) the stored folder
   if(h) statMsg(cfg.label+' set — '+h.name);
   _renderExportDirRow(slot);
 }
@@ -28991,8 +29007,10 @@ async function dsRefreshSlot(id, showErrors=true){
   try{
     if(!handle) throw new Error('No file configured');
 
-    // Re-request permission if needed
-    let perm = await handle.queryPermission({mode:'read'});
+    // Re-request permission if needed (a frozen link never answers — say so instead of spinning)
+    let perm;
+    try{ perm = await _fsaWithin(handle.queryPermission({mode:'read'}), 5000); }
+    catch(e){ if(e.message==='FSA_HANG') throw new Error('file link froze after a Chrome update — click CHANGE and pick '+(handle.name||'the file')+' again'); throw e; }
     if(perm !== 'granted'){
       perm = await handle.requestPermission({mode:'read'});
     }
@@ -29070,7 +29088,8 @@ async function dsPickFile(id){
           'application/vnd.ms-excel':['.xls'],'text/csv':['.csv']} }];
     const [handle] = await window.showOpenFilePicker({
       id: ('avila-'+id).slice(0,32),      // browser remembers a directory per id
-      startIn: DS.handles[id] || undefined, // …or reopen beside the file bound now
+      // No startIn from the bound file: after a Chrome update that link can be frozen (see
+      // _scFileHang) and the picker would wait on it — the id above already reopens that folder.
       types, multiple:false });
     DS.handles[id] = handle;
     await dsSaveHandle(id, handle);
