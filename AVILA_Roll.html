@@ -9678,7 +9678,7 @@ function renderDemandView(){
   const topInner=document.getElementById('dem-top-inner');
   if(topScroll&&topInner){
     requestAnimationFrame(()=>{
-      topInner.style.width=wrap.scrollWidth+'px';
+      _sizeTopInner(topInner,wrap);
       // Set sticky top on Total ALL row cells to sit just below the thead
       const theadTr=wrap.querySelector('thead tr');
       const totalRow=document.getElementById('dem-total-all-row');
@@ -9687,8 +9687,7 @@ function renderDemandView(){
         totalRow.querySelectorAll('td').forEach(td=>td.style.top=thH+'px');
       }
     });
-    topScroll.onscroll=()=>{ wrap.scrollLeft=topScroll.scrollLeft; };
-    wrap.onscroll=()=>{ topScroll.scrollLeft=wrap.scrollLeft; };
+    _linkTopScroll(topScroll,wrap);
   }
 
   renderDemandChart(); // daily chart above the grid — same filters as the table
@@ -9947,17 +9946,47 @@ function _demToggleYear(y){ _foldMonths(window._demColapsed,(window._demMonths||
 // Toolbar button: every month in view folded (month + year totals only) ⇄ every month open.
 function _demToggleAllMonths(){ _foldMonths(window._demColapsed,window._demMonths||[]); renderDemandView(); }
 
-// Shared by the Today buttons (Demand + Supply): put today's column exactly 7 day-columns
+// Shared by the Today buttons (Demand + Supply): put today's column exactly 7 DAY columns
 // to the right of the sticky row-header column, so the user sees the week before today.
+// Aligns the left edge of the 7th day column before today with the sticky column's right
+// edge, measured on screen, so Σ month / Σ year columns in between and the table zoom
+// don't throw it off. Returns false when today has no column (outside the frame / folded).
 function _scrollTodayInWrap(wrap){
-  const th=wrap.querySelector('th[style*="border-left:2px solid var(--green)"]');
+  const table=wrap.querySelector(':scope>table'); if(!table) return false;
+  const hdr=table.querySelector('thead>tr'); if(!hdr) return false;
+  const th=[...hdr.children].find(c=>(c.getAttribute('style')||'').includes('border-left:2px solid var(--green)'));
   if(!th) return false;
-  const first=wrap.querySelector('thead th, tr th');           // sticky row-title header
-  const stickyW=first?first.getBoundingClientRect().width:0;
-  const wr=wrap.getBoundingClientRect(), tr=th.getBoundingClientRect();
-  const delta=tr.left-(wr.left+stickyW+7*tr.width);
+  const sticky=hdr.firstElementChild;                           // row-title header
+  const isDay=c=>/(^|\s)(sup|dem)-day-/.test(c.className||'');
+  let anchor=th, n=0;
+  for(let c=th.previousElementSibling; c&&c!==sticky&&n<7; c=c.previousElementSibling)
+    if(isDay(c)){ anchor=c; n++; }
+  // When the frame starts less than 7 days before today, the first day column is the anchor
+  // and the scroll ends at 0; when it ends soon after today, the browser stops at the far edge.
+  const delta=anchor.getBoundingClientRect().left-sticky.getBoundingClientRect().right;
   wrap.scrollTo({left:Math.max(0,wrap.scrollLeft+delta),behavior:'smooth'});
   return true;
+}
+// Mirrored top scrollbar ⇄ table. Each copies its position to the other, but a scroll event
+// that is only the echo of our own copy is ignored. Two plain onscroll handlers wrote every
+// echo back to the side that started it, which cancelled smooth scrolls (the Today button
+// stopped a frame or two in) and dragged the table back to the mirror's shorter range.
+function _linkTopScroll(top,wrap){
+  const echo=new Map();
+  const follow=(src,dst)=>()=>{
+    const e=echo.get(src); echo.delete(src);
+    if(e!=null&&Math.abs(src.scrollLeft-e)<1.5) return;          // our own copy arriving
+    if(Math.abs(dst.scrollLeft-src.scrollLeft)<1) return;
+    dst.scrollLeft=src.scrollLeft; echo.set(dst,dst.scrollLeft);  // read back: may be clamped
+  };
+  top.onscroll=follow(top,wrap);
+  wrap.onscroll=follow(wrap,top);
+}
+// Size a mirror's inner div so the mirror scrolls exactly as far as the table: the table's
+// vertical scrollbar makes its viewport narrower than the mirror's.
+function _sizeTopInner(inner,wrap){
+  const top=inner.parentElement;
+  inner.style.width=(wrap.scrollWidth-wrap.clientWidth+(top?top.clientWidth:wrap.clientWidth))+'px';
 }
 function demandScrollToday(){
   const todayStr=new Date()._ymd();
@@ -13145,9 +13174,8 @@ function _renderSupplyViewInner(wrap){
   const topScroll=document.getElementById('sup-top-scroll');
   const topInner=document.getElementById('sup-top-inner');
   if(topScroll&&topInner){
-    requestAnimationFrame(()=>{ topInner.style.width=wrap.scrollWidth+'px'; });
-    topScroll.onscroll=()=>{ wrap.scrollLeft=topScroll.scrollLeft; };
-    wrap.onscroll=()=>{ topScroll.scrollLeft=wrap.scrollLeft; };
+    requestAnimationFrame(()=>{ _sizeTopInner(topInner,wrap); });
+    _linkTopScroll(topScroll,wrap);
   }
 } // end _renderSupplyViewInner
 
@@ -14599,7 +14627,7 @@ function _applyTblZoom(z){
     [['sup-top-inner','supply-table-wrap'],['dem-top-inner','demand-table-wrap'],
      ['results-top-scroll-inner','results-table-wrap']].forEach(([innerId,wrapId])=>{
       const inner=document.getElementById(innerId), wrap=document.getElementById(wrapId);
-      if(inner&&wrap) inner.style.width=wrap.scrollWidth+'px';
+      if(inner&&wrap) _sizeTopInner(inner,wrap);
     });
   });
   return zc;
@@ -14668,7 +14696,7 @@ function _c0SyncMirrors(){ // the mirrored top scrollbars follow the table's new
   requestAnimationFrame(()=>{
     [['sup-top-inner','supply-table-wrap'],['dem-top-inner','demand-table-wrap']].forEach(([i,w])=>{
       const inner=document.getElementById(i), wrap=document.getElementById(w);
-      if(inner&&wrap) inner.style.width=wrap.scrollWidth+'px';
+      if(inner&&wrap) _sizeTopInner(inner,wrap);
     });
   });
 }
