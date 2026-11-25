@@ -34762,7 +34762,7 @@ const SC_FILE_HANG_MS=60000;
 // (permission checks, isSameEntry, reads — never answering, even after a full restart) while a file
 // picked again worked at once. So the remedy offered is to pick the file again, which replaces the link.
 function _scFileHang(id, fileName){
-  scSetSaveStatus('error');
+  if(id===SC.activeId) scSetSaveStatus('error');   // switching TO a frozen scenario: the open one is fine
   _dsWriteBlockedBanner('scenario:'+id, fileName,
     'Chrome is not answering for this file link (it froze after a Chrome update; the file itself is fine). Click "Pick the file again" and choose '+(fileName||'the scenario file')+' — your edits are kept in this browser and go to the file');
   const b=document.querySelector('#ds-write-blocked-banner button');
@@ -34787,6 +34787,8 @@ async function scRelinkFile(id){
   _dsHideWriteBlockedBanner();
   SC._writeBusy=false;                                            // the frozen write never comes back
   if(window._scLoadedId!==id){
+    // Leaving another, working scenario: save it first, exactly as scSwitch does.
+    if(window._scLoadedId && window._scLoadedId===SC.activeId && SC.handles[SC.activeId]) await scWriteActive();
     SC.activeId=id;
     if(await scLoadScenario(id, {guard:true})){ try{ localStorage.setItem('avila_sc_autoopen', id); }catch(e){} statMsg('Linked ✓ — '+h.name); }
   } else {
@@ -34954,7 +34956,11 @@ function scAfterLoad(){
 async function scLoadScenario(id, opts){
   opts=opts||{}; const handle=SC.handles[id], m=SC.meta[id];
   if(!handle||!m){ statMsg('Scenario file not found'); return false; }
-  let perm=await handle.queryPermission({mode:'read'});
+  // A frozen link (see _scFileHang) never answers: after 8 s offer "Pick the file again" instead of
+  // leaving the switch / startup hanging with no word. (queryPermission is instant when healthy.)
+  let perm;
+  try{ perm=await _fsaWithin(handle.queryPermission({mode:'read'}), 8000); }
+  catch(e){ if(e.message==='FSA_HANG'){ _scFileHang(id, m.fileName); return false; } throw e; }
   if(perm!=='granted') perm=await handle.requestPermission({mode:'read'});
   if(perm!=='granted'){ statMsg('Cannot read "'+m.name+'" — file access denied'); return false; }
   let saved, text, fileMod=null;
