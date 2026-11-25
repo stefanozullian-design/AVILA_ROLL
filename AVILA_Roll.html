@@ -34685,6 +34685,10 @@ async function scWriteActive(id, opts){
   if(!m||!handle){ scSetSaveStatus('none'); return true; }
   if(SC._writeBusy){ SC._writeQueued=true; return true; }  // a sync is already running — coalesce
   SC._writeBusy=true;
+  // Watchdog: Chrome's local-file access can hang outright (every file-handle call, even a
+  // permission check, never answers until Chrome is fully restarted). Without this the dot just
+  // stays amber forever and nobody knows the file is no longer being written.
+  const hangTimer=setTimeout(()=>_scFileHang(id, m.fileName), SC_FILE_HANG_MS);
   try{
     const granted=await _dsEnsureWritePermission(handle);
     if(!granted){ scSetSaveStatus('error'); _dsWriteBlockedBanner('scenario:'+id, m.fileName, 'file-edit permission was declined'); return false; }
@@ -34748,8 +34752,17 @@ async function scWriteActive(id, opts){
   }catch(err){
     scSetSaveStatus('error'); _dsWriteBlockedBanner('scenario:'+id, m.fileName, 'write failed — '+err.message); console.warn('SC write',err);
     return false;
-  }finally{ SC._writeBusy=false; if(SC._writeQueued){ SC._writeQueued=false; scScheduleWrite(); } }
+  }finally{ clearTimeout(hangTimer); SC._writeBusy=false; if(SC._writeQueued){ SC._writeQueued=false; scScheduleWrite(); } }
   return false;
+}
+// A file call that has not answered for this long is not slow, it is stuck (an 11 MB save,
+// merge included, takes a few seconds).
+const SC_FILE_HANG_MS=60000;
+function _scFileHang(id, fileName){
+  scSetSaveStatus('error');
+  _dsWriteBlockedBanner('scenario:'+id, fileName,
+    'Chrome is not answering file requests (its file access is stuck, not this file). Close EVERY Chrome window, wait a few seconds, then open the app again — your edits are kept in this browser and go to the file on reopen');
+  console.warn('SC: file call has not answered for '+(SC_FILE_HANG_MS/1000)+' s — Chrome file access stuck');
 }
 function scScheduleWrite(){
   if(!scActive()||!SC.handles[SC.activeId]) return; // no active scenario → localStorage only
@@ -38191,6 +38204,8 @@ async function scRestoreSnapshot(id, name){
 }
 
 // ── Startup picker ──
+// "Always open" is ticked unless the person un-ticked it themselves.
+function scAutoOpenWanted(){ try{ return localStorage.getItem('avila_sc_autoopen_off')!=='1'; }catch(e){ return true; } }
 function scOpenStartup(firstRun){
   scCloseStartup();
   const ov=document.createElement('div'); ov.className='sc-overlay'; ov.id='sc-startup';
@@ -38205,7 +38220,7 @@ function scOpenStartup(firstRun){
   ov.innerHTML=`<div class="sc-modal">
     <div class="sc-modal-hdr"><div class="sc-h">Choose a scenario</div><div class="sc-sub">${firstRun?'No scenarios yet — create one to start saving your work to a file.':'Pick a model to work on, or start a new one.'}</div></div>
     <div class="sc-modal-list">${rows||'<div style="padding:14px;color:var(--text-dim);font-size:11px;text-align:center">No saved scenarios</div>'}</div>
-    ${lastId?`<div style="display:flex;align-items:center;gap:7px;padding:4px 16px"><input type="checkbox" id="sc-autoopen-chk" style="accent-color:var(--green)"><label for="sc-autoopen-chk" style="color:var(--text-dim);font-size:9px;cursor:pointer">Always open ${_scEsc(SC.meta[lastId].name)} and skip this</label></div>`:''}
+    ${lastId?`<div style="display:flex;align-items:center;gap:7px;padding:4px 16px"><input type="checkbox" id="sc-autoopen-chk" ${scAutoOpenWanted()?'checked':''} style="accent-color:var(--green)"><label for="sc-autoopen-chk" style="color:var(--text-dim);font-size:9px;cursor:pointer">Always open the scenario I pick and skip this</label></div>`:''}
     <div class="sc-modal-foot">
       ${lastId?`<div class="sc-btn pri" onclick="scStartupOpen('${lastId}')">Open</div>`:''}
       <div class="sc-btn" onclick="scNew()">＋ New</div>
@@ -38219,6 +38234,9 @@ function scOpenStartup(firstRun){
 function scCloseStartup(){ const ov=document.getElementById('sc-startup'); if(ov) ov.remove(); }
 async function scStartupOpen(id){
   const chk=document.getElementById('sc-autoopen-chk');
+  // The box remembers itself (avila_sc_autoopen_off is set only by un-ticking it), so a picker
+  // shown once because a file could not be read no longer wipes "always open" for good.
+  if(chk){ try{ if(chk.checked) localStorage.removeItem('avila_sc_autoopen_off'); else localStorage.setItem('avila_sc_autoopen_off','1'); }catch(e){} }
   if(chk&&chk.checked) localStorage.setItem('avila_sc_autoopen',id); else if(chk) localStorage.removeItem('avila_sc_autoopen');
   scCloseStartup();
   // force: the picked scenario is usually ALREADY SC.activeId (scInit restores it
@@ -38256,7 +38274,14 @@ async function scInit(){
   if(typeof acWelcome==='function' && acWelcome()) return;
   if(!ids.length){ scOpenStartup(true); return; }              // first run, nothing to open
   const pref=localStorage.getItem('avila_sc_autoopen');
-  if(pref && SC.meta[pref]){ SC.activeId=pref; if(await scLoadScenario(pref,{guard:true})) return; }
+  if(pref && SC.meta[pref]){
+    SC.activeId=pref;
+    // Same watchdog as scWriteActive: a stuck Chrome file layer would otherwise leave a blank
+    // screen with no word of why.
+    const hangTimer=setTimeout(()=>_scFileHang(pref, SC.meta[pref].fileName), SC_FILE_HANG_MS);
+    let ok=false; try{ ok=await scLoadScenario(pref,{guard:true}); }finally{ clearTimeout(hangTimer); }
+    if(ok) return;
+  }
   scOpenStartup(false);                                          // ask which scenario
 }
 </script>
