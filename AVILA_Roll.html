@@ -34758,11 +34758,41 @@ async function scWriteActive(id, opts){
 // A file call that has not answered for this long is not slow, it is stuck (an 11 MB save,
 // merge included, takes a few seconds).
 const SC_FILE_HANG_MS=60000;
+// Seen 11/25 after Chrome updated itself to 158: every file link saved by the older version froze
+// (permission checks, isSameEntry, reads — never answering, even after a full restart) while a file
+// picked again worked at once. So the remedy offered is to pick the file again, which replaces the link.
 function _scFileHang(id, fileName){
   scSetSaveStatus('error');
   _dsWriteBlockedBanner('scenario:'+id, fileName,
-    'Chrome is not answering file requests (its file access is stuck, not this file). Close EVERY Chrome window, wait a few seconds, then open the app again — your edits are kept in this browser and go to the file on reopen');
-  console.warn('SC: file call has not answered for '+(SC_FILE_HANG_MS/1000)+' s — Chrome file access stuck');
+    'Chrome is not answering for this file link (it froze after a Chrome update; the file itself is fine). Click "Pick the file again" and choose '+(fileName||'the scenario file')+' — your edits are kept in this browser and go to the file');
+  const b=document.querySelector('#ds-write-blocked-banner button');
+  if(b){ b.textContent='Pick the file again'; b.setAttribute('onclick', "scRelinkFile('"+id+"')"); }
+  console.warn('SC: file call has not answered for '+(SC_FILE_HANG_MS/1000)+' s — file link frozen');
+}
+// Resolve with the promise's value, or reject with FSA_HANG once `ms` pass without an answer.
+function _fsaWithin(p, ms){
+  return Promise.race([p, new Promise((_,rej)=>setTimeout(()=>rej(new Error('FSA_HANG')), ms))]);
+}
+// Replace a scenario's frozen file link with a freshly picked one (same scenario id, so sign-in,
+// baseline and change log all carry on), then finish whatever was stuck: the first load, or the save.
+async function scRelinkFile(id){
+  const m=SC.meta[id]; if(!m) return;
+  let h;
+  try{ [h]=await window.showOpenFilePicker({id:'avila-scenario', types:[{description:'Scenario JSON', accept:{'application/json':['.json']}}]}); }
+  catch(e){ return; }                                             // cancelled
+  if(m.fileName && h.name!==m.fileName &&
+     !confirm('You picked "'+h.name+'", but this scenario\'s file is "'+m.fileName+'".\n\nOK = use the picked file for "'+m.name+'" anyway.\nCancel = pick again.')) return;
+  SC.handles[id]=h; await scSaveHandle(id, h);
+  SC.historyDirs && delete SC.historyDirs[id];                    // re-read (and re-check) on next snapshot
+  _dsHideWriteBlockedBanner();
+  SC._writeBusy=false;                                            // the frozen write never comes back
+  if(window._scLoadedId!==id){
+    SC.activeId=id;
+    if(await scLoadScenario(id, {guard:true})){ try{ localStorage.setItem('avila_sc_autoopen', id); }catch(e){} statMsg('Linked ✓ — '+h.name); }
+  } else {
+    const ok=await scWriteActive(id, {forceSnapshot:true});
+    statMsg(ok?('Linked and saved ✓ — '+h.name):'⚠ Linked, but the save failed — see the banner');
+  }
 }
 function scScheduleWrite(){
   if(!scActive()||!SC.handles[SC.activeId]) return; // no active scenario → localStorage only
@@ -34841,7 +34871,11 @@ async function scEnsureHistoryDir(id, promptIfMissing){
     if(SC.historyDirs[id]) return SC.historyDirs[id];
     let h=await scLoadHistoryDirHandle(id);
     if(h){
-      const ok=await _dsEnsureWritePermission(h);
+      // A frozen folder link (see _scFileHang) must not hold up the save or load that asked for a
+      // snapshot: treat it as "history not set up" and say so in the console.
+      let ok=false;
+      try{ ok=await _fsaWithin(_dsEnsureWritePermission(h), 8000); }
+      catch(e){ if(e.message==='FSA_HANG'){ console.warn('SC history: folder link frozen — snapshots off until the folder is chosen again'); return null; } throw e; }
       if(ok){ SC.historyDirs[id]=h; return h; }
       if(!promptIfMissing) return null;
     }
@@ -35103,7 +35137,9 @@ async function scFindOwner(handle, exceptId){
   for(const k of Object.keys(SC.meta)){
     if(k===exceptId) continue;
     const h=SC.handles[k];
-    if(h){ try{ if(await h.isSameEntry?.(handle)) return {id:k, certain:true}; }catch(e){} }
+    // A frozen old link never answers isSameEntry: fall back to the file name, as for a lost link.
+    if(h){ try{ if(await _fsaWithin(Promise.resolve(h.isSameEntry?.(handle)), 4000)) return {id:k, certain:true}; }
+           catch(e){ if(e.message==='FSA_HANG' && SC.meta[k].fileName===handle.name) return {id:k, certain:false}; } }
     else if(SC.meta[k].fileName && SC.meta[k].fileName===handle.name) return {id:k, certain:false};
   }
   return null;
