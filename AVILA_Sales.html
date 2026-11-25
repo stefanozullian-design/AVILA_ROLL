@@ -6039,7 +6039,11 @@ function scOpenStartup(firstRun){
 function scCloseStartup(){ const ov=document.getElementById('sc-startup'); if(ov) ov.remove(); }
 // Skip = work without a file. The file restored as active from last time was never read in, so it
 // must not stay "active" (the pill would show it while nothing could be saved into it).
+// Skip is remembered (user 11/25: works without a Sales file, the box every open was noise). The
+// file menu in the top bar still creates/opens one; opening one sets avila_sales_sc_autoopen,
+// which scInit tries first.
 function scStartupSkip(){
+  try{ localStorage.setItem('avila_sales_sc_skip','1'); }catch(e){}
   scCloseStartup();
   if(SC.activeId && SC._loadedId!==SC.activeId){ SC.activeId=null; scSaveMeta(); scUpdatePill(); scRenderDropdown(); }
 }
@@ -6074,10 +6078,11 @@ async function scInit(){
     if(dd&&dd.style.display!=='none'&&!dd.contains(e.target)&&sw&&!sw.contains(e.target)) scCloseDropdown();
   });
   const ids=Object.keys(SC.meta);
-  if(!ids.length){ scOpenStartup(true); return; }
   const pref=localStorage.getItem('avila_sales_sc_autoopen');
   if(pref && SC.meta[pref]){ SC.activeId=pref; if(await scLoadScenario(pref,{guard:true})) return; }
-  scOpenStartup(false);
+  let skip=false; try{ skip=localStorage.getItem('avila_sales_sc_skip')==='1'; }catch(e){}
+  if(skip && !(pref && SC.meta[pref])) return;                    // Skip remembered — no box
+  scOpenStartup(!ids.length);
 }
 </script>
 <script>
