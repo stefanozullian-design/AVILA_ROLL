@@ -13809,11 +13809,17 @@ function fbpDailyRows(c){
     return {date:ds,value:val};
   });
 }
+// Days that carry actual (real) tonnes, as "element|date". Forecast builders never write over them:
+// their horizon starts TODAY and today's partial actuals were being replaced by the forecast
+// (11/25: BRS IL(12) INT/EXT lost 2,458 t of real shipments that way).
+function _dvActualDays(){ const s=new Set(); (DB.demand_values||[]).forEach(v=>{ if(v.source==='actual') s.add(v.element_id+'|'+v.date); }); return s; }
 function fbpApply(){
   const c=fbpCompute(); if(!c.ok){ fbpMsg(c.msg||'Nothing to apply'); return; }
   if(!DB.demand_values) DB.demand_values=[];
   const elId=FBP.elId, rows=fbpDailyRows(c); let days=0,tot=0;
+  const act=_dvActualDays();
   rows.forEach(r=>{
+    if(act.has(elId+'|'+r.date)) return;   // real day — keep the actuals
     DB.demand_values=DB.demand_values.filter(x=>!(x.element_id===elId&&x.date===r.date&&!x.ship_to));
     if(r.value>0){ DB.demand_values.push({element_id:elId,date:r.date,value_t:r.value}); days++; tot+=r.value; }
   });
@@ -14117,6 +14123,7 @@ function _fbPreview(){
 
 function _fbApply(){
   if(!DB.demand_values) DB.demand_values=[];
+  const act=_dvActualDays();   // real days are never written over (see _dvActualDays)
   const elId=document.getElementById('fb-el-id')?.value||null;
   const shipTo=document.getElementById('fb-f-shipto')?.value||null;
   const soldTo=document.getElementById('fb-f-soldto')?.value||null;
@@ -14131,6 +14138,7 @@ function _fbApply(){
     // Allocate each day across ship-tos in whole truck loads, so the parts still
     // sum to the day's value instead of each one rounding independently.
     rows.forEach(r=>{
+      if(act.has(elId+'|'+r.date)) return;
       const parts=_fbAlloc25(split.map(s=>s.proportion), r.value);
       split.forEach(({ship_to:st},k)=>{
         DB.demand_values=DB.demand_values.filter(x=>!(x.element_id===elId&&x.date===r.date&&x.ship_to===st));
@@ -14161,6 +14169,7 @@ function _fbApply(){
     rows.forEach(r=>{
       const parts=_fbAlloc25(split.map(s=>s.proportion), r.value);
       split.forEach(({elId:eid},k)=>{
+        if(act.has(eid+'|'+r.date)) return;
         DB.demand_values=DB.demand_values.filter(x=>!(x.element_id===eid&&x.date===r.date&&x.ship_to===shipTo));
         DB.demand_values=DB.demand_values.filter(x=>!(x.element_id===eid&&x.date===r.date&&!x.ship_to));
         if(parts[k]>0){ DB.demand_values.push({element_id:eid,date:r.date,value_t:parts[k],ship_to:shipTo}); totalDays++; totalT+=parts[k]; }
@@ -14177,6 +14186,7 @@ function _fbApply(){
   const result=_fbBuildRows(); if(!result) return;
   const {rows,msgs,elId:eid,shipTo:st}=result;
   rows.forEach(r=>{
+    if(act.has(eid+'|'+r.date)) return;
     if(st){
       DB.demand_values=DB.demand_values.filter(x=>!(x.element_id===eid&&x.date===r.date&&x.ship_to===st));
       DB.demand_values=DB.demand_values.filter(x=>!(x.element_id===eid&&x.date===r.date&&!x.ship_to));
@@ -14339,9 +14349,10 @@ function _fbBulkProcess(rawRows){
     Object.values(months).forEach(({y,m,total})=>{
       const rows=_fbDistributeMonthRows(y, m, total, {shipsSat, satPct});
       const mPrefix=`${y}-${String(m).padStart(2,'0')}`;
-      // Replace existing DP-level (no ship_to) values for that month, then write fresh
-      DB.demand_values=DB.demand_values.filter(x=>!(x.element_id===elId&&!x.ship_to&&String(x.date).startsWith(mPrefix)));
-      rows.forEach(rw=>{ DB.demand_values.push({element_id:elId, date:rw.date, value_t:rw.value}); cells++; totalT+=rw.value; });
+      // Replace existing DP-level (no ship_to) values for that month, then write fresh — real days excepted
+      const act=_dvActualDays();
+      DB.demand_values=DB.demand_values.filter(x=>!(x.element_id===elId&&!x.ship_to&&String(x.date).startsWith(mPrefix)&&x.source!=='actual'));
+      rows.forEach(rw=>{ if(act.has(elId+'|'+rw.date)) return; DB.demand_values.push({element_id:elId, date:rw.date, value_t:rw.value}); cells++; totalT+=rw.value; });
       monthsTouched.add(mPrefix);
     });
   });
@@ -28624,12 +28635,14 @@ function _spFbApplyMulti(dpElIds){
   const selEl=document.getElementById('fb-el-id');
   if(!DB.demand_values) DB.demand_values=[];
   let totalDays=0, totalT=0;
+  const act=_dvActualDays();   // real days are never written over (see _dvActualDays)
   targets.forEach(elId=>{
     if(selEl) selEl.value=elId;
     const result=_fbBuildRows(); if(!result) return;
     const {rows,elId:eid}=result;
     const shipTo=result.shipTo||null;
     rows.forEach(r=>{
+      if(act.has(eid+'|'+r.date)) return;
       if(shipTo){
         DB.demand_values=DB.demand_values.filter(x=>!(x.element_id===eid&&x.date===r.date&&x.ship_to===shipTo));
         DB.demand_values=DB.demand_values.filter(x=>!(x.element_id===eid&&x.date===r.date&&!x.ship_to));
@@ -28994,6 +29007,9 @@ async function dsApplyPendingUpdates(){
 
 // ── Refresh a single slot ─────────────────────────────
 // Returns { changed: bool, slot: id } if file changed, else null
+// Local wall-clock stamp "YYYY-MM-DD HH:MM" for 'last loaded / written' labels — they used to be UTC
+// (toISOString), so a 4:19 PM load in Florida read 21:19 (user 11/25).
+function _localStamp(d){ d=d||new Date(); const p=n=>String(n).padStart(2,'0'); return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes()); }
 async function dsRefreshSlot(id, showErrors=true){
   if(DS.refreshing[id]) return null;
   if(scIsPlanning() && !PLAN_SLOT_IDS.has(id)){   // keeps Real Sales from zeroing budget days
@@ -29044,7 +29060,7 @@ async function dsRefreshSlot(id, showErrors=true){
       fileName:  file.name,
       fileSize:  file.size,
       lastFileModified: fileModTime,
-      lastLoaded:new Date().toISOString().slice(0,16).replace('T',' '),
+      lastLoaded:_localStamp(),
       rowCount:  result.rowCount || 0,
       matched:   result.matched  ?? null,
       dateMin:   result.dateMin  ?? null,
@@ -29202,7 +29218,7 @@ async function dsWriteSlot(id){
     }
     DS.meta[id] = {
       ...(DS.meta[id]||{}),
-      lastWritten: new Date().toISOString().slice(0,16).replace('T',' '),
+      lastWritten: _localStamp(),
       _writeDenied: false,
       writeError: null,
     };
@@ -29370,7 +29386,7 @@ async function spIngestFile(buf, fileName){
 
   DB.real_shipments_daily = Object.values(aggMap).map(r=>({...r,volume:Math.round(r.volume)}));
   DB.real_shipments_meta  = {
-    loaded_at: new Date().toISOString().slice(0,16).replace('T',' '),
+    loaded_at: _localStamp(),
     row_count: raw.length, agg_count: DB.real_shipments_daily.length,
     date_min: dateMin, date_max: dateMax,
     origins: [...origins].sort(), products: [...products].sort()
@@ -29432,7 +29448,7 @@ async function dsIngestTransfers(buf, fileName){
   const rows=Object.values(agg).map(x=>({...x,volume_t:Math.round(x.volume_t*100)/100}));
   if(!rows.length) throw new Error('No transfer rows (INV_ROLL_NAME with "/TRF/") found');
   DB.real_transfers_file_daily=rows;
-  DB.real_transfers_file_meta={loaded_at:new Date().toISOString().slice(0,16).replace('T',' '),file:fileName,
+  DB.real_transfers_file_meta={loaded_at:_localStamp(),file:fileName,
     row_count:raw.length, agg_count:rows.length, date_min:dateMin, date_max:dateMax, lanes:[...lanes].sort()};
   const warnings=[];
   if(skipped) warnings.push(`${skipped} row(s) skipped (no date, zero qty or not a TRF name)`);
@@ -37765,7 +37781,7 @@ function _plMasterWorkbook(vid){
     ...(v.source_files||[]).map(f=>({Item:'File', Value:`${f.name} (sheet ${f.sheet}, ${f.rows} rows, ${_plFmt(f.fy_t)} ST)`})),
     {Item:'Total loaded (ST)', Value:Math.round(st.fy)}, ...Object.keys(st.fam).map(f=>({Item:'  '+f+' (ST)', Value:Math.round(st.fam[f])})),
     {Item:'Spread on the days (ST)', Value:r.spread_t??''},{Item:'Unallocated (ST)', Value:r.unallocated_t??''},{Item:'Left out (ST)', Value:Math.round((v.left_out||[]).reduce((a,x)=>a+x.fy,0))},
-    {Item:'Units', Value:'short tons'},{Item:'Saved', Value:new Date().toISOString().slice(0,16).replace('T',' ')+' · '+_plWho()}]);
+    {Item:'Units', Value:'short tons'},{Item:'Saved', Value:_localStamp()+' · '+_plWho()}]);
   return wb;
 }
 // Saves the master file into the budget folder (Budget folder slot: pick …\_New_Roll\Budget once; files go into its "_Budget <year>" folder,
