@@ -29213,8 +29213,11 @@ function _dsWriteBlockedBanner(id, name, reason){
     <button onclick="_dsRetryWrite('${id}')" style="background:var(--red);color:var(--on-red);border:none;padding:6px 13px;font-family:inherit;font-size:10px;font-weight:700;cursor:pointer;border-radius:3px;white-space:nowrap">Re-grant access &amp; save</button>
     <button onclick="_dsHideWriteBlockedBanner()" style="background:transparent;color:var(--bn-err-fg);border:1px solid var(--red);padding:6px 11px;font-family:inherit;font-size:10px;cursor:pointer;border-radius:3px">Dismiss</button>`;
 }
-function _dsHideWriteBlockedBanner(){
-  document.getElementById('ds-write-blocked-banner')?.remove();
+// `onlySlot`: hide only a banner about that slot — a good save of one scenario must not clear a
+// warning about another (it hid the "Pick the file again" banner of a frozen scenario on 11/25).
+function _dsHideWriteBlockedBanner(onlySlot){
+  const b=document.getElementById('ds-write-blocked-banner');
+  if(b && (!onlySlot || b.dataset.slot===onlySlot)) b.remove();
 }
 function _showDataUpdateBanner(msg){
   let b=document.getElementById('data-update-banner');
@@ -34708,7 +34711,7 @@ async function scWriteActive(id, opts){
           // Nothing new on either side (e.g. a simulation re-run) — the file already has it all.
           if(prep.mergeInfo) window._scLog=prep.mergeInfo.payload.changeLog;
           if(prep.fileMod!=null){ const bl=SC.baselines[id]; if(bl && bl.fileMod!==prep.fileMod) scSaveBaseline(id, bl.text, bl.savedAt, prep.fileMod); }
-          scSetSaveStatus('saved'); _dsHideWriteBlockedBanner();
+          scSetSaveStatus('saved'); _dsHideWriteBlockedBanner('scenario:'+id);
           if(opts.forceSnapshot) scMaybeSnapshot(id, JSON.stringify(scBuildPayload()), {forced:true});
           return true;
         }
@@ -34716,7 +34719,7 @@ async function scWriteActive(id, opts){
           // Teammate updated the file and we have nothing new — adopt their copy, skip the write.
           _mgApplyPayloadToApp(prep.theirs);
           scSaveBaseline(id, prep.diskText, prep.theirs.savedAt||null, prep.fileMod);
-          scSetSaveStatus('saved'); _dsHideWriteBlockedBanner(); scRenderDropdown();
+          scSetSaveStatus('saved'); _dsHideWriteBlockedBanner('scenario:'+id); scRenderDropdown();
           if(prep.mergeInfo.remoteApplied) _mgShowMergeBanner(m.fileName, prep.mergeInfo);
           scMaybeSnapshot(id, prep.diskText, {forced:opts.forceSnapshot});
           return true;
@@ -34736,7 +34739,7 @@ async function scWriteActive(id, opts){
         let mod=null; try{ mod=(await handle.getFile()).lastModified; }catch(e){}
         scSaveBaseline(id, outText, out.savedAt||null, mod);
         m.lastSaved=new Date().toISOString(); scSaveMeta();
-        scSetSaveStatus('saved'); _dsHideWriteBlockedBanner(); scRenderDropdown();
+        scSetSaveStatus('saved'); _dsHideWriteBlockedBanner('scenario:'+id); scRenderDropdown();
         if(prep.mode==='merge' && (prep.mergeInfo.remoteApplied>0 || prep.mergeInfo.conflicts.length || prep.mergeInfo.healed)) _mgShowMergeBanner(m.fileName, prep.mergeInfo);
         else if(prep.foreign) _mgShowForeignBanner(m.fileName, prep.foreign, 'restored');
         scMaybeSnapshot(id, outText, {forced:opts.forceSnapshot, conflict:prep.mode==='merge'&&prep.mergeInfo.conflicts.length>0});
