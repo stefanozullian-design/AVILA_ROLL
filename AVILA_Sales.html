@@ -5275,6 +5275,8 @@ function sdsRenderStatus(state, extra){
   sdsSetStatus(`✓ ${SDS.fileName}${extra?(' · '+extra):''}`, 'var(--green)');
 }
 
+// A saved file link that never answers (froze after a Chrome update — see _scFileHang).
+const SDS_FROZEN_MSG='link froze after a Chrome update — click ⚙ Data Source and pick the file again';
 // ── Pick file (requires a user gesture) ──
 async function sdsPickFile(){
   if(!sdsSupported()){ statMsg('Data Source pinning needs Chrome or Edge — use ↑ Load Actuals instead'); return; }
@@ -5300,7 +5302,9 @@ async function sdsRefresh(force){
   if(!SDS.handle){ if(force) statMsg('No data source set — click ⚙ Data Source first'); return; }
   SDS.refreshing = true;
   try{
-    let perm = await SDS.handle.queryPermission({mode:'read'});
+    let perm;
+    try{ perm = await _fsaWithin(SDS.handle.queryPermission({mode:'read'}), 8000); }
+    catch(e){ if(e.message==='FSA_HANG'){ sdsRenderStatus('error', SDS_FROZEN_MSG); if(force) statMsg('Data source link froze after a Chrome update — click ⚙ Data Source and pick '+(SDS.fileName||'the file')+' again', 'red'); return; } throw e; }
     if(perm!=='granted'){
       if(force) perm = await SDS.handle.requestPermission({mode:'read'});
       if(perm!=='granted'){ sdsRenderStatus('needs-permission'); return; }
@@ -5337,7 +5341,9 @@ async function sdsInit(){
   if(!sdsSupported()){ if(SDS.fileName) sdsRenderStatus('error','needs Chrome/Edge for auto-refresh'); else sdsRenderStatus(); return; }
   SDS.handle = await sdsLoadHandle();
   if(!SDS.handle){ sdsRenderStatus(); return; }
-  const perm = await SDS.handle.queryPermission({mode:'read'});
+  let perm;
+  try{ perm = await _fsaWithin(SDS.handle.queryPermission({mode:'read'}), 8000); }
+  catch(e){ sdsRenderStatus('error', e.message==='FSA_HANG' ? SDS_FROZEN_MSG : (e.message||'error')); return; }
   if(perm==='granted'){ await sdsRefresh(false); sdsStartAutoCheck(); }
   else sdsRenderStatus('needs-permission');
 }
@@ -5458,10 +5464,51 @@ async function _scRollOwnerOf(handle, rollHandles){
   if(!handle||typeof handle.isSameEntry!=='function') return null;
   const hs=rollHandles||await _scRollHandles();
   let meta={}; try{ meta=(JSON.parse(localStorage.getItem('avila_scenarios')||'{}')||{}).meta||{}; }catch(e){}
-  for(const id of Object.keys(hs)){
-    try{ if(hs[id] && await handle.isSameEntry(hs[id])) return {rollId:id, rollName:meta[id]?.name||String(hs[id].name||'').replace(/\.json$/i,'')}; }catch(e){}
+  // All compared at once, each given 3 s: a frozen file link (see _scFileHang) never answers, and one
+  // by one they held up the whole page start. A frozen compare counts as "not the same file" — the
+  // payload check in scLoadScenario still turns a Roll file away.
+  const ids=Object.keys(hs).filter(id=>hs[id]);
+  const same=await Promise.all(ids.map(id=>_fsaWithin(Promise.resolve(handle.isSameEntry(hs[id])), 3000).catch(()=>false)));
+  const i=same.findIndex(Boolean);
+  return i<0 ? null : {rollId:ids[i], rollName:meta[ids[i]]?.name||String(hs[ids[i]].name||'').replace(/\.json$/i,'')};
+}
+// ── Frozen file links ──
+// Seen 11/25 after Chrome updated itself to 158: every file link saved by the older version froze
+// (permission checks, isSameEntry, reads never answer, even after a full restart) while a file
+// picked again worked at once. Calls are given a time limit and the remedy offered is to pick the
+// file again, which replaces the link (same Sales file entry, same id).
+const SC_FILE_HANG_MS=60000;
+function _fsaWithin(p, ms){
+  return Promise.race([p, new Promise((_,rej)=>setTimeout(()=>rej(new Error('FSA_HANG')), ms))]);
+}
+function _scFileHang(id, fileName){
+  if(id===SC.activeId) scSetSaveStatus('error');
+  _dsWriteBlockedBanner(id, fileName, 'Chrome is not answering for this file link (it froze after a Chrome update; the file itself is fine). Click "Pick the file again" and choose '+(fileName||'the Sales file'));
+  const b=document.querySelector('#ds-write-blocked-banner button');
+  if(b){ b.textContent='Pick the file again'; b.setAttribute('onclick', "scRelinkFile('"+id+"')"); }
+  console.warn('SC: file link frozen — '+fileName);
+}
+async function scRelinkFile(id){
+  const m=SC.meta[id]; if(!m) return;
+  let h;
+  try{ [h]=await window.showOpenFilePicker({types:[{description:'AVILA Sales file',accept:{'application/json':['.json']}}]}); }
+  catch(e){ return; }
+  const roll=await _scRollFileCheck(h);
+  if(roll){ _scRollFileNotice(h.name, roll, 'it was not linked as this page\'s Sales file'); return; }
+  if(m.fileName && h.name!==m.fileName &&
+     !confirm('You picked "'+h.name+'", but this Sales file is "'+m.fileName+'".\n\nOK = use the picked file for "'+m.name+'" anyway.\nCancel = pick again.')) return;
+  SC.handles[id]=h; await scSaveHandle(id, h);
+  if(SC.historyDirs) delete SC.historyDirs[id];
+  _dsHideWriteBlockedBanner();
+  SC._writeBusy=false;                                            // the frozen write never comes back
+  if(SC._loadedId!==id){
+    if(SC._loadedId && SC._loadedId===SC.activeId && SC.handles[SC.activeId]) await scWriteActive();
+    SC.activeId=id;
+    if(await scLoadScenario(id, {guard:true})){ try{ localStorage.setItem('avila_sales_sc_autoopen', id); }catch(e){} statMsg('Linked ✓ — '+h.name, 'green'); }
+  } else {
+    SC._forceSnap=true; await scWriteActive(id);
+    statMsg('Linked and saved ✓ — '+h.name, 'green');
   }
-  return null;
 }
 // A scenario payload this page did not write — an Avila Roll scenario, or a Roll export.
 function _scIsForeignPayload(p){ return !!(p && typeof p==='object' && p.DB && typeof p.DB==='object' && p.app!=='AVILA_Sales'); }
@@ -5560,6 +5607,7 @@ async function scWriteActive(id){
   if(SC._writeBusy){ SC._writeQueued=true; return; }
   SC._writeBusy=true;
   const forced=SC._forceSnap; SC._forceSnap=false;
+  const hangTimer=setTimeout(()=>_scFileHang(id, m.fileName), SC_FILE_HANG_MS);   // dot never stuck amber
   try{
     const granted=await _dsEnsureWritePermission(handle);
     if(!granted){ scSetSaveStatus('error'); _dsWriteBlockedBanner(id, m.fileName, 'file-edit permission was declined'); return; }
@@ -5574,10 +5622,10 @@ async function scWriteActive(id){
     const w=await handle.createWritable(); await w.write(new Blob([outText],{type:'application/json'})); await w.close();
     m.lastSaved=new Date().toISOString(); scSaveMeta();
     window._lsSavedAt=payload.savedAt; try{ localStorage.setItem('avila_sales_sc_ls', payload.savedAt); }catch(e){}
-    scSetSaveStatus('saved'); _dsHideWriteBlockedBanner(); scRenderDropdown();
+    scSetSaveStatus('saved'); _dsHideWriteBlockedBanner(id); scRenderDropdown();
     scMaybeSnapshot(id, outText, {forced});
   }catch(err){ scSetSaveStatus('error'); _dsWriteBlockedBanner(id, m.fileName, 'write failed — '+err.message); console.warn('SC write',err); }
-  finally{ SC._writeBusy=false; if(SC._writeQueued){ SC._writeQueued=false; scScheduleWrite(); } }
+  finally{ clearTimeout(hangTimer); SC._writeBusy=false; if(SC._writeQueued){ SC._writeQueued=false; scScheduleWrite(); } }
 }
 function scScheduleWrite(){
   if(SC._suspend) return;
@@ -5625,9 +5673,11 @@ function _dsWriteBlockedBanner(id, name, reason){
   b.innerHTML=`<span>⚠ Couldn't save ${_scEsc(name||'scenario')} — ${_scEsc(reason||'write blocked')}.</span>
     <button onclick="scRetryWrite('${id}')">Retry save</button>
     <span style="cursor:pointer;opacity:.7" onclick="_dsHideWriteBlockedBanner()">✕</span>`;
+  b.dataset.slot=id;
   b.style.display='flex';
 }
-function _dsHideWriteBlockedBanner(){ const b=document.getElementById('ds-write-blocked-banner'); if(b) b.style.display='none'; }
+// `onlySlot`: hide only a banner about that file — a good save of one must not clear another's warning.
+function _dsHideWriteBlockedBanner(onlySlot){ const b=document.getElementById('ds-write-blocked-banner'); if(b && (!onlySlot || b.dataset.slot===onlySlot)) b.style.display='none'; }
 
 // ═══════════════════════════════════════════════════════════════════════
 // VERSION HISTORY — dated, immutable snapshots in a folder the user picks once.
@@ -5655,7 +5705,10 @@ async function scEnsureHistoryDir(id, promptIfMissing){
     if(SC.historyDirs[id]) return SC.historyDirs[id];
     let h=await scLoadHistoryDirHandle(id);
     if(h){
-      const ok=await _dsEnsureWritePermission(h);
+      // A frozen folder link must not hold up the save that asked for a snapshot: "not set up".
+      let ok=false;
+      try{ ok=await _fsaWithin(_dsEnsureWritePermission(h), 8000); }
+      catch(e){ if(e.message==='FSA_HANG'){ console.warn('SC history: folder link frozen — snapshots off until the folder is chosen again'); return null; } throw e; }
       if(ok){ SC.historyDirs[id]=h; return h; }
       if(!promptIfMissing) return null;
     }
@@ -5708,7 +5761,9 @@ async function scLoadScenario(id, opts){
   // An Avila Roll scenario file is never this page's file: not read in, and the entry is dropped.
   const owner=await _scRollOwnerOf(handle);
   if(owner){ await _scDetach(id); _scRollFileNotice(m.fileName, owner, 'it was not opened here, and nothing was written to it'); return false; }
-  let perm=await handle.queryPermission({mode:'read'});
+  let perm;
+  try{ perm=await _fsaWithin(handle.queryPermission({mode:'read'}), 8000); }
+  catch(e){ if(e.message==='FSA_HANG'){ _scFileHang(id, m.fileName); return false; } throw e; }
   if(perm!=='granted') perm=await handle.requestPermission({mode:'read'});
   if(perm!=='granted'){ statMsg('Cannot read "'+m.name+'" — file access denied'); return false; }
   let saved, text;
@@ -5736,7 +5791,7 @@ async function scLoadScenario(id, opts){
   scApplyPayload(saved);
   SC.activeId=id; SC._loadedId=id; m.lastOpened=new Date().toISOString();
   window._lsSavedAt=saved.savedAt||null; try{ localStorage.setItem('avila_sales_sc_ls', saved.savedAt||''); }catch(e){}
-  scSaveMeta(); scSetSaveStatus('saved'); _dsHideWriteBlockedBanner(); scAfterLoad();
+  scSaveMeta(); scSetSaveStatus('saved'); _dsHideWriteBlockedBanner(id); scAfterLoad();
   return true;
 }
 
@@ -5770,7 +5825,11 @@ async function scOpenFile(){
   const roll=await _scRollFileCheck(handle);
   if(roll){ scCloseDropdown(); _scRollFileNotice(handle.name, roll, 'it was not opened as a Sales file'); return; }
   let id=null;
-  for(const k of Object.keys(SC.handles)){ try{ if(await SC.handles[k].isSameEntry?.(handle)){ id=k; break; } }catch(e){} }
+  // A frozen old link never answers isSameEntry: then the file name decides (and the link is replaced).
+  for(const k of Object.keys(SC.handles)){
+    try{ if(await _fsaWithin(Promise.resolve(SC.handles[k].isSameEntry?.(handle)), 4000)){ id=k; break; } }
+    catch(e){ if(e.message==='FSA_HANG' && SC.meta[k]?.fileName===handle.name){ id=k; SC.handles[k]=handle; await scSaveHandle(k,handle); break; } }
+  }
   if(!id){ id='sc_'+Date.now().toString(36); SC.meta[id]={ id, name:handle.name.replace(/\.json$/i,''), color:scPickColor(), fileName:handle.name, lastSaved:null, lastOpened:new Date().toISOString() }; SC.handles[id]=handle; await scSaveHandle(id,handle); }
   scSaveMeta();
   if(await scLoadScenario(id)) localStorage.setItem('avila_sales_sc_autoopen',id);
@@ -5966,7 +6025,7 @@ function scOpenStartup(firstRun){
     <div class="sc-modal-hdr"><div class="sc-h">Choose a Sales file</div><div class="sc-sub">${firstRun?'No Sales files yet — create one to start saving your sales work to a file.':'Pick the Sales file to work on, or start a new one.'}<br>`+
       `This page's own file, separate from Avila Roll's scenario .json (never pick that one here) — the Roll scenario is chosen under <b>SCENARIO</b> in the top bar.</div></div>
     <div class="sc-modal-list">${rows||'<div style="padding:14px;color:var(--text-dim);font-size:11px;text-align:center">No saved Sales files</div>'}</div>
-    ${lastId?`<div style="display:flex;align-items:center;gap:7px;padding:4px 16px"><input type="checkbox" id="sc-autoopen-chk" style="accent-color:var(--green)"><label for="sc-autoopen-chk" style="color:var(--text-dim);font-size:9px;cursor:pointer">Always open ${_scEsc(SC.meta[lastId].name)} and skip this</label></div>`:''}
+    ${lastId?`<div style="display:flex;align-items:center;gap:7px;padding:4px 16px"><input type="checkbox" id="sc-autoopen-chk" ${scAutoOpenWanted()?'checked':''} style="accent-color:var(--green)"><label for="sc-autoopen-chk" style="color:var(--text-dim);font-size:9px;cursor:pointer">Always open the Sales file I pick and skip this</label></div>`:''}
     <div class="sc-modal-foot">
       ${lastId?`<div class="sc-btn pri" onclick="scStartupOpen('${lastId}')">Open</div>`:''}
       <div class="sc-btn" onclick="scNew()">＋ New</div>
@@ -5984,8 +6043,12 @@ function scStartupSkip(){
   scCloseStartup();
   if(SC.activeId && SC._loadedId!==SC.activeId){ SC.activeId=null; scSaveMeta(); scUpdatePill(); scRenderDropdown(); }
 }
+// "Always open" is ticked unless the person un-ticked it themselves — a picker shown once because a
+// file could not be read no longer wipes the preference for good (Roll had the same trap).
+function scAutoOpenWanted(){ try{ return localStorage.getItem('avila_sales_sc_autoopen_off')!=='1'; }catch(e){ return true; } }
 async function scStartupOpen(id){
   const chk=document.getElementById('sc-autoopen-chk');
+  if(chk){ try{ if(chk.checked) localStorage.removeItem('avila_sales_sc_autoopen_off'); else localStorage.setItem('avila_sales_sc_autoopen_off','1'); }catch(e){} }
   if(chk&&chk.checked) localStorage.setItem('avila_sales_sc_autoopen',id); else if(chk) localStorage.removeItem('avila_sales_sc_autoopen');
   scCloseStartup();
   // force: the picked file is usually ALREADY SC.activeId (restored by scInit before this picker
