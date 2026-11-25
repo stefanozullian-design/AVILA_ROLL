@@ -9946,25 +9946,37 @@ function _demToggleYear(y){ _foldMonths(window._demColapsed,(window._demMonths||
 // Toolbar button: every month in view folded (month + year totals only) ⇄ every month open.
 function _demToggleAllMonths(){ _foldMonths(window._demColapsed,window._demMonths||[]); renderDemandView(); }
 
-// Shared by the Today buttons (Demand + Supply): put today's column exactly 7 DAY columns
-// to the right of the sticky row-header column, so the user sees the week before today.
-// Aligns the left edge of the 7th day column before today with the sticky column's right
-// edge, measured on screen, so Σ month / Σ year columns in between and the table zoom
-// don't throw it off. Returns false when today has no column (outside the frame / folded).
-function _scrollTodayInWrap(wrap){
+// Shared by the Today buttons (Demand + Supply): put today's column as the 7th DAY column
+// to the right of the sticky row-header column: the 6 days before today, then today in the
+// 7th column. Aligns the left edge of the 6th day column before today with the sticky
+// column's right edge, measured on screen, so Σ month / Σ year columns in between and the
+// table zoom don't throw it off. When the time frame ends too soon after today to scroll
+// that far, a blank spacer is added after the last column (gone on the next re-render).
+// innerId: the mirrored top scrollbar's inner div, resized to match.
+// Returns false when today has no column (outside the frame / month folded).
+const TODAY_DAYS_BEFORE=6;
+function _scrollTodayInWrap(wrap,innerId){
   const table=wrap.querySelector(':scope>table'); if(!table) return false;
   const hdr=table.querySelector('thead>tr'); if(!hdr) return false;
   const th=[...hdr.children].find(c=>(c.getAttribute('style')||'').includes('border-left:2px solid var(--green)'));
   if(!th) return false;
+  wrap.querySelector(':scope>.today-pad')?.remove();            // last press's spacer
   const sticky=hdr.firstElementChild;                           // row-title header
   const isDay=c=>/(^|\s)(sup|dem)-day-/.test(c.className||'');
   let anchor=th, n=0;
-  for(let c=th.previousElementSibling; c&&c!==sticky&&n<7; c=c.previousElementSibling)
+  for(let c=th.previousElementSibling; c&&c!==sticky&&n<TODAY_DAYS_BEFORE; c=c.previousElementSibling)
     if(isDay(c)){ anchor=c; n++; }
-  // When the frame starts less than 7 days before today, the first day column is the anchor
-  // and the scroll ends at 0; when it ends soon after today, the browser stops at the far edge.
+  // Frame starts fewer days before today: the first day column is the anchor, scroll ends at 0.
   const delta=anchor.getBoundingClientRect().left-sticky.getBoundingClientRect().right;
-  wrap.scrollTo({left:Math.max(0,wrap.scrollLeft+delta),behavior:'smooth'});
+  const want=Math.max(0,Math.round(wrap.scrollLeft+delta));
+  const max=wrap.scrollWidth-wrap.clientWidth;
+  if(want>max){
+    const pad=document.createElement('div'); pad.className='today-pad';
+    pad.style.cssText=`width:${wrap.scrollWidth+(want-max)}px;height:1px;margin-top:-1px;pointer-events:none`;
+    wrap.appendChild(pad);
+  }
+  const inner=innerId&&document.getElementById(innerId); if(inner) _sizeTopInner(inner,wrap);
+  wrap.scrollTo({left:want,behavior:'smooth'});
   return true;
 }
 // Mirrored top scrollbar ⇄ table. Each copies its position to the other, but a scroll event
@@ -9991,7 +10003,7 @@ function _sizeTopInner(inner,wrap){
 function demandScrollToday(){
   const todayStr=new Date()._ymd();
   const wrap=document.getElementById('demand-table-wrap'); if(!wrap) return;
-  if(!_scrollTodayInWrap(wrap)) statMsg('Today is outside the selected time frame (or its month is collapsed)');
+  if(!_scrollTodayInWrap(wrap,'dem-top-inner')) statMsg('Today is outside the selected time frame (or its month is collapsed)');
 }
 
 // Every demand-writing path should end here. Demand values are shown on THREE pages —
@@ -13237,7 +13249,7 @@ function _supToggleGrp(id){
 function supplyScrollToday(){
   const wrap=document.getElementById('supply-table-wrap'); if(!wrap) return;
   const todayStr=new Date()._ymd();
-  if(!_scrollTodayInWrap(wrap)) statMsg('Today is outside the selected time frame');
+  if(!_scrollTodayInWrap(wrap,'sup-top-inner')) statMsg('Today is outside the selected time frame');
 }
 
 // ── Demand Builder modal ─────────────────────────────────
